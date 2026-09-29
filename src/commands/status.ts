@@ -1,4 +1,4 @@
-import { orderQueue, plainStatus, scanIntents } from "../intents";
+import { effectivePriority, orderQueue, plainStatus, scanIntents } from "../intents";
 import { Trace } from "../trace";
 
 function pad(s: string, n: number): string { return s.length >= n ? s : s + " ".repeat(n - s.length); }
@@ -12,7 +12,7 @@ export async function renderStatus(root: string): Promise<string> {
       const s = trace.intentSummary(i.slug);
       const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus})` : "-";
       const cost = `$${(s?.costUsd ?? 0).toFixed(2)}`;
-      return [i.slug, i.file.frontmatter.priority, plainStatus(i.file.frontmatter.status), phase, cost, i.file.frontmatter.note];
+      return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, i.file.frontmatter.note];
     });
     const headers = ["Change", "Priority", "Where it is", "Last phase", "Cost", "Note"];
     const widths = headers.map((h, c) => Math.max(h.length, ...rows.map((r) => (r[c] ?? "").length)));

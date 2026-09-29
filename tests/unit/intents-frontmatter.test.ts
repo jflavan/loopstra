@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseIntentFile, serializeIntentFile, STATUSES } from "../../src/intents";
+import { effectivePriority, parseIntentFile, serializeIntentFile, STATUSES } from "../../src/intents";
 
 const SAMPLE = `---
 status: draft
@@ -42,10 +42,13 @@ describe("intent frontmatter", () => {
     expect(again.body).toBe(f.body);
   });
 
-  test("defaults missing frontmatter fields", () => {
+  test("defaults missing frontmatter fields; priority stays absent (not stated) and counts as normal", () => {
     const f = parseIntentFile("# Intent: x\n\n## Problem\np\n");
     expect(f.frontmatter.status).toBe("draft");
-    expect(f.frontmatter.priority).toBe("normal");
+    expect(f.frontmatter.priority).toBeUndefined();
+    expect(effectivePriority(f.frontmatter)).toBe("normal");
+    expect(serializeIntentFile(f)).not.toContain("priority");
+    expect(parseIntentFile("---\npriority:\n---\n# Intent: x\n").frontmatter.priority).toBeUndefined();
     expect(f.frontmatter.note).toBe("");
   });
 

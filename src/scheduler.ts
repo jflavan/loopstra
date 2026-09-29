@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { loadConfig, type Config } from "./config";
 import { StepContext, block, type StepResult } from "./context";
 import { Git } from "./git";
-import { checkConsistency, isRunnable, orderQueue, renderQueue, scanIntents } from "./intents";
+import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanIntents } from "./intents";
 import { runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
@@ -36,7 +36,7 @@ export async function tick(root: string): Promise<TickResult> {
     // Scan, check, render queue.
     const intents = await scanIntents(root);
     for (const i of intents) {
-      trace.upsertIntent(i.slug, i.file.frontmatter.status, i.file.frontmatter.priority);
+      trace.upsertIntent(i.slug, i.file.frontmatter.status, effectivePriority(i.file.frontmatter));
       const problem = checkConsistency(i);
       if (problem && i.file.frontmatter.status !== "blocked") {
         const ctx = new StepContext(root, cfg, trace, i);

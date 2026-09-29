@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { Git } from "./git";
-import { readIntent, writeIntent, type Intent, type Status } from "./intents";
+import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
 import type { Trace } from "./trace";
 
 export class StepContext {
@@ -42,7 +42,7 @@ export async function setStatus(ctx: StepContext, status: Status, note = ""): Pr
   if (APPROVED.has(status)) patch.resume_from = status;
   else if (APPROVED.has(from)) patch.resume_from = from;
   await writeIntent(ctx.intent, patch);
-  ctx.trace.upsertIntent(ctx.slug, status, ctx.intent.file.frontmatter.priority);
+  ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
   ctx.trace.statusChange(ctx.slug, from, status, note);
   await commitArtifacts(ctx, `${from} → ${status}`);
 }
@@ -88,8 +88,9 @@ export function clearSession(ctx: StepContext, key: string): void {
   writeFileSync(join(ctx.runDir, "sessions.json"), JSON.stringify(all, null, 2));
 }
 
-export async function writeIntentPriority(ctx: StepContext, priority: Intent["file"]["frontmatter"]["priority"]): Promise<void> {
-  if (ctx.intent.file.frontmatter.priority === priority) return;
+/** Records a priority only when the owner stated none; an owner's own priority is never overwritten. */
+export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
+  if (ctx.intent.file.frontmatter.priority !== undefined) return;
   await writeIntent(ctx.intent, { priority });
   ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
 }

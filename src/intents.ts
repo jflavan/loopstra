@@ -21,7 +21,8 @@ const blankableString = z.string().nullable().transform((v) => v ?? "").default(
 
 export const Frontmatter = z.object({
   status: z.enum(STATUSES).default("draft"),
-  priority: z.enum(PRIORITIES).default("normal"),
+  /** Optional: absent means the owner did not state one; the queue treats that as normal. Blank reads as absent. */
+  priority: z.enum(PRIORITIES).nullish().transform((v) => v ?? undefined),
   author: blankableString,
   opened: blankableString,
   note: blankableString,
@@ -29,6 +30,11 @@ export const Frontmatter = z.object({
   resume_from: z.enum(STATUSES).optional(),
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
+
+/** The priority used for ordering and display: the stated one, or normal when none is stated. */
+export function effectivePriority(fm: { priority?: Priority }): Priority {
+  return fm.priority ?? "normal";
+}
 
 export interface IntentFile {
   frontmatter: Frontmatter;
@@ -179,7 +185,7 @@ export function orderQueue(intents: Intent[]): Intent[] {
     const fa = a.file.frontmatter, fb = b.file.frontmatter;
     const c = STATUS_CLASS[fa.status] - STATUS_CLASS[fb.status];
     if (c !== 0) return c;
-    const p = PRIORITIES.indexOf(fa.priority) - PRIORITIES.indexOf(fb.priority);
+    const p = PRIORITIES.indexOf(effectivePriority(fa)) - PRIORITIES.indexOf(effectivePriority(fb));
     if (p !== 0) return p;
     const o = (fa.opened || "9999").localeCompare(fb.opened || "9999");
     if (o !== 0) return o;
@@ -204,7 +210,7 @@ export function renderQueue(ordered: Intent[]): string {
   const blocked = ordered.filter((i) => i.file.frontmatter.status === "blocked");
   const drafts = ordered.filter((i) => i.file.frontmatter.status === "draft");
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const row = (i: Intent) => `| ${i.slug} | ${i.file.frontmatter.priority} | ${plainStatus(i.file.frontmatter.status)} | ${i.file.frontmatter.note.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/")} |`;
+  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${i.file.frontmatter.note.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/")} |`;
   const table = (rows: Intent[]) => rows.length
     ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows.map(row)].join("\n")
     : "_Nothing here._";

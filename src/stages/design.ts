@@ -17,7 +17,10 @@ async function design(ctx: StepContext): Promise<StepResult> {
   if (!before.ok) return before;
 
   const a = await artifacts(ctx);
-  const intake = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent: a.intent } });
+  const intake = await agentPhase(ctx, {
+    name: "intake", model: "cheap", permissionMode: "default", tools: "read",
+    vars: { intent: a.intent, priority: ctx.intent.file.frontmatter.priority ?? "not stated" },
+  });
   if (!intake.ok) return block(ctx, intake.note);
   if (intake.envelope.question || intake.envelope.missing_sections.length) {
     const missing = intake.envelope.missing_sections.length ? ` Missing sections: ${intake.envelope.missing_sections.join(", ")}.` : "";
