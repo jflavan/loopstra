@@ -31,6 +31,19 @@ describe("Trace", () => {
     t.cleanup();
   });
 
+  test("lastGate returns the newest row for one gate check only", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    expect(trace.lastGate("x", "review", "findings")).toBeNull();
+    trace.gate("x", "review", "findings", "fail", "round 1");
+    trace.gate("x", "review", "findings", "pass", "round 2");
+    trace.gate("x", "merge", "findings", "fail", "other gate");
+    trace.gate("y", "review", "findings", "fail", "other intent");
+    expect(trace.lastGate("x", "review", "findings")).toMatchObject({ result: "pass", evidence: "round 2" });
+    trace.close();
+    t.cleanup();
+  });
+
   test("phase sequence increments per intent and survives reopen", () => {
     const t = tempDir();
     let trace = Trace.open(t.path);

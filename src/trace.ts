@@ -111,6 +111,12 @@ export class Trace {
       'SELECT gate, "check", result, evidence, ts FROM gates WHERE slug = ? ORDER BY id').all(slug);
   }
 
+  /** The newest recorded result of one gate check, or null when it never ran. */
+  lastGate(slug: string, gate: string, check: string): { result: string; evidence: string; ts: string } | null {
+    return this.db.query<{ result: string; evidence: string; ts: string }, [string, string, string]>(
+      'SELECT result, evidence, ts FROM gates WHERE slug = ? AND gate = ? AND "check" = ? ORDER BY id DESC LIMIT 1').get(slug, gate, check) ?? null;
+  }
+
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {
     return this.db.query<{ name: string; ts: string; result: string; output: string }, [number]>(
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);

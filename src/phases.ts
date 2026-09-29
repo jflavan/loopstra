@@ -6,7 +6,11 @@ import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
 
-export type ToolSet = "read" | "read+commands" | "build";
+/**
+ * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
+ * configured project commands except install, and read-only git (verify, done-check). build: config.
+ */
+export type ToolSet = "read" | "read+git" | "read+commands" | "build";
 
 export interface AgentPhaseSpec {
   name: PhaseName;
@@ -31,17 +35,20 @@ export type AgentPhaseResult<N extends PhaseName> =
   | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
+/** Git commands that only read, so a judge can see the change it is judging. */
+const GIT_READ = ["git diff", "git log", "git show", "git status"].map((c) => `Bash(${c} *)`);
 /** Removed from read-only sessions outright (a bare name in --disallowedTools removes the tool). */
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
 /** Tools a session may use without asking. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
+  if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
   if (set === "build") return [...ctx.cfg.claude.allowed_tools];
   // The install command is not for judges. `Bash(<cmd> *)` matches the command alone and with arguments.
   const { test, lint, build, run } = ctx.cfg.commands;
   const cmds = [test, lint, build, run].filter((c): c is string => !!c);
-  return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c} *)`)];
+  return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c} *)`), ...GIT_READ];
 }
 
 /** Tools a session must not have. Read-only sessions lose every file-writing tool. */

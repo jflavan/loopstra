@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, blockWith, blockWithDetail, saveSession, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
-import { artifacts, bullets, buildSession, runHookCommands, saveWork } from "./shared";
+import { artifacts, bullets, buildSession, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
 
 const RETRY = "To try again, set status to plan-approved.";
 
@@ -96,6 +96,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   const after = await runHookCommands(ctx, "after", "build", ctx.worktreeDir);
   if (!after.ok) return after;
+  clearMarker(ctx, REVIEW_ROUND); // a new build gets fresh review rounds
   await setStatus(ctx, "reviewing");
   return { ok: true };
 }
@@ -105,7 +106,7 @@ function branchPlanPath(ctx: StepContext): string {
 }
 
 /** The plan as the intent branch has it (reconciled on an earlier run), or null when the branch has none. */
-function branchPlan(ctx: StepContext): string | null {
+export function branchPlan(ctx: StepContext): string | null {
   const p = branchPlanPath(ctx);
   return existsSync(p) ? readFileSync(p, "utf8") : null;
 }

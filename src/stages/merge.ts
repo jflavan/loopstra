@@ -3,7 +3,7 @@ import { block, setStatus, type StepContext, type StepResult } from "../context"
 import { evaluateGate, type Check } from "../gates";
 import { Git } from "../git";
 import { codePhase } from "../phases";
-import { runChecks } from "./build";
+import { testLoop } from "./build";
 
 /** Merge gate and merge. Called for merge-review. Local path only; GitHub path is added in Plan 3. */
 export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
@@ -22,16 +22,17 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
     {
       name: "tests",
       run: async () => {
-        const failure = await runChecks(ctx, "merge-tests");
-        return failure ? { result: "fail", evidence: failure.lastLine } : { result: "pass", evidence: "all commands exit 0" };
+        // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
+        const tested = await testLoop(ctx, "merge-test");
+        return tested.ok ? { result: "pass", evidence: "all commands exit 0" } : { result: "fail", evidence: tested.detail };
       },
     },
     {
       name: "findings",
       run: async () => {
-        const last = [...ctx.trace.events(ctx.slug)].reverse().find((e) => e.type === "gate_check" && JSON.parse(e.payload).gate === "review");
-        const approved = last ? (JSON.parse(last.payload) as { approved: boolean }).approved : false;
-        return approved ? { result: "pass", evidence: "review approved" } : { result: "fail", evidence: "last review did not approve" };
+        // The review step records its verdict as a gate row; only the newest one counts.
+        const last = ctx.trace.lastGate(ctx.slug, "review", "findings");
+        return last?.result === "pass" ? { result: "pass", evidence: "the last review had no important findings" } : { result: "fail", evidence: last ? last.evidence : "no review recorded" };
       },
     },
   ];

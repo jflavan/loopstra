@@ -143,6 +143,9 @@ export async function buildSession<N extends Continuation>(ctx: StepContext, spe
   return r;
 }
 
+/** Run-folder file holding the review round in progress. */
+export const REVIEW_ROUND = "review-round";
+
 /** Markdown bullets, one per item. */
 export function bullets(items: string[]): string {
   return items.map((i) => `- ${i}`).join("\n");

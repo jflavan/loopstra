@@ -1,11 +1,13 @@
 import { block, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
-import { artifacts, humanNote } from "./shared";
+import { artifacts, humanNote, runHookCommands } from "./shared";
 
 /** Stage 6 for one intent. Called for merged and verifying. Ends at done or blocked. */
 export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "verifying") await setStatus(ctx, "verifying");
+  const before = await runHookCommands(ctx, "before", "verify");
+  if (!before.ok) return before;
   const a = await artifacts(ctx);
   const doneWhen = ctx.intent.file.sections["Done when"] ?? "";
 
@@ -44,6 +46,8 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
     ? `\n\n## Lessons\n${lessons.envelope.lessons.map((l) => `- ${l}`).join("\n") || "- None recorded."}\n\n## Proposed CLAUDE.md additions\n${lessons.envelope.claude_md_additions.trim() || "None."}\n`
     : `\n\n## Lessons\n- The lessons step did not finish: ${lessons.note}\n`;
   await writeArtifact(ctx, "outcome.md", body + lessonsMd);
+  const after = await runHookCommands(ctx, "after", "verify");
+  if (!after.ok) return after;
   await setStatus(ctx, "done");
   return { ok: true };
 }

@@ -77,8 +77,11 @@ describe("agentPhase tools and prompt", () => {
     ctx.cfg.commands.run = "bun run start";
     ctx.cfg.commands.install = "bun install";
     expect(toolsFor(ctx, "read")).toEqual(["Read", "Glob", "Grep"]);
-    expect(toolsFor(ctx, "read+commands")).toEqual(["Read", "Glob", "Grep", "Bash(echo ok *)", "Bash(bun run start *)"]);
+    const gitRead = ["Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"];
+    expect(toolsFor(ctx, "read+commands")).toEqual(["Read", "Glob", "Grep", "Bash(echo ok *)", "Bash(bun run start *)", ...gitRead]);
+    expect(toolsFor(ctx, "read+git")).toEqual(["Read", "Glob", "Grep", ...gitRead]);
     expect(disallowedFor("read")).toEqual(["Edit", "Write", "NotebookEdit"]);
+    expect(disallowedFor("read+git")).toEqual(["Edit", "Write", "NotebookEdit"]);
     expect(disallowedFor("read+commands")).toEqual(["Edit", "Write", "NotebookEdit"]);
     expect(disallowedFor("build")).toEqual([]);
     const build = toolsFor(ctx, "build");
