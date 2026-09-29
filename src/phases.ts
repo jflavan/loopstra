@@ -100,16 +100,16 @@ export function disallowedFor(set: ToolSet): string[] {
   return set === "build" ? [...NO_POWERSHELL] : [...WRITE_TOOLS, ...NO_POWERSHELL];
 }
 
+/** Failures that block the change; an unavailable assistant pauses the loop instead (see unavailable). */
+type BlockingReason = Exclude<FailureReason, "environment" | "not-started">;
+
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
-export function ownerNote(reason: FailureReason): string {
+export function ownerNote(reason: BlockingReason): string {
   switch (reason) {
     case "timeout": return TIMEOUT_NOTE;
     case "budget": return "This step hit its spending limit. An engineer may need to raise the limit.";
     case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
-    case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";
-    // Never an owner note in practice: an unavailable assistant pauses the loop instead of blocking.
-    case "environment": return "The assistant is unavailable (sign-in, usage limit, or network).";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
     // The agent's own summary is not written for the owner; it goes to the trace.
@@ -143,7 +143,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];
-  const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
+  const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
     const refused = denied.length ? `; not allowed: ${denied.join(", ")}` : "";
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}${refused}`, denied });
     return { ok: false, reason, note: ownerNote(reason), sessionId };
@@ -175,12 +175,14 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     });
 
     denied = r.denied;
-    if (!r.ok && unavailable(r.reason)) {
-      // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
-      throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
+    if (!r.ok) {
+      if (unavailable(r.reason)) {
+        // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
+        throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
+      }
+      return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     }
-    if (!r.ok) return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
     if (!parsed.success) {

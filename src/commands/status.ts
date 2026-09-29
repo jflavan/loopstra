@@ -3,6 +3,7 @@ import { loadConfig, type Config } from "../config";
 import { loopStatusLine } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo } from "../intents";
 import { Trace } from "../trace";
+import { errorText } from "../shell";
 
 function pad(s: string, n: number): string { return s.length >= n ? s : s + " ".repeat(n - s.length); }
 
@@ -15,7 +16,7 @@ const MIN_NOTE_WIDTH = 24;
  */
 export async function renderStatus(root: string, width = process.stdout.columns || 100): Promise<string> {
   let config: Config | { problem: string };
-  try { config = await loadConfig(root); } catch (e) { config = { problem: e instanceof Error ? e.message : String(e) }; }
+  try { config = await loadConfig(root); } catch (e) { config = { problem: errorText(e) }; }
   const trace = Trace.open(root);
   try {
     const items = await attention(root, config, trace);

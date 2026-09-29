@@ -107,7 +107,7 @@ function environmentLine(text: string): string | null {
 }
 
 /** Failures that mean the assistant was unavailable (outage, sign-in, limits, not installed): the loop pauses instead of blocking. */
-export function unavailable(reason: FailureReason): boolean {
+export function unavailable(reason: FailureReason): reason is "environment" | "not-started" {
   return reason === "environment" || reason === "not-started";
 }
 

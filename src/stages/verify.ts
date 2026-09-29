@@ -4,6 +4,7 @@ import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
 import { agentPhase, projectCommand } from "../phases";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
+import { errorText } from "../shell";
 
 const JUDGE_FAILED = "The final check could not be completed; an engineer should look.";
 export const NEEDS_PERSON_DONE_NOTE = "Done. A few results need a person to confirm; see outcome.md.";
@@ -90,7 +91,7 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
     });
   } catch (e) {
     passOn(e);
-    return { ok: false, note: JUDGE_FAILED, detail: `could not prepare a clean copy of main: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, note: JUDGE_FAILED, detail: `could not prepare a clean copy of main: ${errorText(e)}` };
   }
   if (!r.ok) {
     ctx.trace.gate(ctx.slug, "done", "done-check", "fail", `the judge failed: ${r.reason}`);

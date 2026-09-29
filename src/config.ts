@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { errorText } from "./shell";
 
 export class ConfigError extends Error {}
 
@@ -80,7 +81,7 @@ export async function loadConfig(root: string): Promise<Config> {
   try {
     raw = parse(await Bun.file(path).text()) ?? {};
   } catch (e) {
-    throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${(e as Error).message}`);
+    throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${errorText(e)}`);
   }
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {

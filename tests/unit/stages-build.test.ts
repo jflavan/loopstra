@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { Git, GIT_TIMEOUT_NOTE, samePath } from "../../src/git";
+import { Git, GIT_TIMEOUT_NOTE } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
@@ -56,7 +56,7 @@ describe("build stage", () => {
     const mainBefore = await new Git(repo.path).headSha();
     await runBuildStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
-    expect(samePath(await new Git(wt).toplevel(), wt)).toBe(true);
+    expect(await new Git(wt).isWorktreeRoot()).toBe(true);
     expect(existsSync(join(wt, "leftover.txt"))).toBe(false);
     const mainLog = (await new Git(repo.path).run(["log", "--name-only", "--format=", `${mainBefore}..main`])).out;
     expect(mainLog).not.toContain("src/add.ts");

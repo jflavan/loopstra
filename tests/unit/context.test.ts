@@ -9,7 +9,7 @@ import {
   StepContext, block, blockNote, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
   readArtifact, setStatus, writeArtifact, loadSessions, saveSession,
 } from "../../src/context";
-import { tempGitRepo } from "../helpers";
+import { lastCommit, tempGitRepo } from "../helpers";
 
 async function setup() {
   const repo = await tempGitRepo();
@@ -38,8 +38,7 @@ describe("StepContext", () => {
     i = await readIntent(repo.path, "x");
     expect(i.file.frontmatter.resume_from).toBe("spec-approved");
     expect(i.file.frontmatter.note).toBe("");
-    const log = await new Git(repo.path).log(1);
-    expect(log[0]).toContain("loopstra(x)");
+    expect(await lastCommit(repo.path)).toContain("loopstra(x)");
     expect(trace.events("x").some((e) => e.type === "status_change")).toBe(true);
     trace.close(); repo.cleanup();
   });

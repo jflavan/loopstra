@@ -4,6 +4,7 @@ import type { Config } from "./config";
 import { bookkeeping, Git } from "./git";
 import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
 import type { Trace } from "./trace";
+import { errorText } from "./shell";
 
 export class StepContext {
   readonly git: Git;
@@ -63,7 +64,7 @@ export async function assertRootOnMain(ctx: StepContext): Promise<void> {
   try {
     await ctx.git.assertBranch(ctx.cfg.main_branch);
   } catch (e) {
-    throw new MainCheckoutMoved(e instanceof Error ? e.message : String(e));
+    throw new MainCheckoutMoved(errorText(e));
   }
 }
 

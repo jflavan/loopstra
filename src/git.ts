@@ -147,13 +147,20 @@ export class Git {
     return this.run([...RUNTIME_COMMIT_CONFIG, sub, ...noVerify, ...rest], opts);
   }
 
-  async currentBranch(): Promise<string> { return (await this.run(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim(); }
+  /** The checked-out branch (`HEAD` when detached), or "" when it cannot be read. */
+  async currentBranch(): Promise<string> {
+    const r = await this.run(["rev-parse", "--abbrev-ref", "HEAD"], true);
+    return r.code === 0 ? r.out.trim() : "";
+  }
+  /** True when this path is the top of a checkout (a real worktree), not a plain folder inside another one. */
+  async isWorktreeRoot(): Promise<boolean> {
+    const top = await this.run(["rev-parse", "--show-toplevel"], true);
+    return top.code === 0 && samePath(top.out.trim(), this.cwd);
+  }
   async headSha(): Promise<string> { return (await this.run(["rev-parse", "HEAD"])).out.trim(); }
-  async hasRemote(): Promise<boolean> { return (await this.run(["remote"])).out.trim().length > 0; }
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
-  async toplevel(): Promise<string> { return (await this.run(["rev-parse", "--show-toplevel"])).out.trim(); }
   async worktreePrune(): Promise<void> { await this.run(["worktree", "prune"]); }
 
   /** Always prunes first, so a worktree whose directory was deleted by hand does not block the add. */
@@ -170,9 +177,7 @@ export class Git {
   async ensureWorktree(dir: string, branch: string): Promise<void> {
     if (existsSync(dir)) {
       const there = new Git(dir);
-      const top = await there.run(["rev-parse", "--show-toplevel"], true);
-      const head = await there.run(["rev-parse", "--abbrev-ref", "HEAD"], true);
-      if (top.code === 0 && samePath(top.out.trim(), dir) && head.code === 0 && head.out.trim() === branch) return;
+      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
       await this.run(["worktree", "remove", "--force", dir], true);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -181,8 +186,7 @@ export class Git {
 
   /** Throws unless the checkout at this path is on `expected`. Call before committing. */
   async assertBranch(expected: string): Promise<void> {
-    const r = await this.run(["rev-parse", "--abbrev-ref", "HEAD"], true);
-    const actual = r.code === 0 ? r.out.trim() : "(unknown)";
+    const actual = (await this.currentBranch()) || "(unknown)";
     if (actual !== expected) throw new WrongBranchError(this.cwd, expected, actual);
   }
 
@@ -197,12 +201,6 @@ export class Git {
   }
 
   async isDirty(): Promise<boolean> { return (await this.run(["status", "--porcelain"])).out.trim().length > 0; }
-  /** Staged or unstaged changes to tracked files (untracked files do not count). */
-  async hasTrackedChanges(): Promise<boolean> { return (await this.run(["status", "--porcelain", "--untracked-files=no"])).out.trim().length > 0; }
-  /** True when the given paths have the same content in both commits (all paths when none are given). */
-  async sameContent(a: string, b: string, paths: string[] = []): Promise<boolean> {
-    return (await this.run(["diff", "--quiet", a, b, "--", ...paths], true)).code === 0;
-  }
   async isAncestor(ancestor: string, descendant: string): Promise<boolean> { return (await this.run(["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0; }
 
   /**
@@ -224,7 +222,6 @@ export class Git {
     const r = await this.run(["rev-list", "--count", `${b}..${a}`], true);
     return r.code === 0 ? Number.parseInt(r.out.trim(), 10) || 0 : 0;
   }
-  async log(n: number): Promise<string[]> { return (await this.run(["log", `-${n}`, "--format=%h %s"])).out.trim().split("\n").filter(Boolean); }
 
   /** Commits everything in the checkout, as the runtime. False when there was nothing to commit. */
   async commitAll(message: string): Promise<boolean> {

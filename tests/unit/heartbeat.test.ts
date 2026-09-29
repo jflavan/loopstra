@@ -26,10 +26,10 @@ describe("heartbeatState", () => {
   });
 
   test("names the change being worked on", () => {
-    const s = heartbeatState(hb({ current: { slug: "add-numbers", phase: null } }), 60, NOW);
+    const s = heartbeatState(hb({ current: { slug: "add-numbers" } }), 60, NOW);
     expect(s.state).toBe("running");
     expect(s.text).toBe("Running — working on add-numbers, last check 20s ago");
-    expect(s.current).toEqual({ slug: "add-numbers", phase: null });
+    expect(s.current).toEqual({ slug: "add-numbers" });
   });
 
   test("no heartbeat, or a clean stop, is stopped", () => {
@@ -46,7 +46,7 @@ describe("heartbeatState", () => {
   });
 
   test("a long step keeps the loop running as long as the process keeps beating", () => {
-    const s = heartbeatState(hb({ lastTickAt: ago(25 * 60), lastBeatAt: ago(3), current: { slug: "big", phase: null } }), 60, NOW);
+    const s = heartbeatState(hb({ lastTickAt: ago(25 * 60), lastBeatAt: ago(3), current: { slug: "big" } }), 60, NOW);
     expect(s.state).toBe("running");
     expect(s.text).toBe("Running — working on big, last check 25 min ago");
   });
@@ -164,7 +164,7 @@ describe("heartbeat file", () => {
       beat.tickStarted();
       expect(readHeartbeat(t.path)!.lastTickAt).not.toBeNull();
       beat.workingOn("add-numbers");
-      expect(readHeartbeat(t.path)!.current).toEqual({ slug: "add-numbers", phase: null });
+      expect(readHeartbeat(t.path)!.current).toEqual({ slug: "add-numbers" });
       requestStop();
       expect(readHeartbeat(t.path)).toMatchObject({ stopping: true, stopped: false });
       beat.tickEnded();

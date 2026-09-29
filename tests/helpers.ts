@@ -70,6 +70,11 @@ export async function setupRepo(status: string, opts: SetupOptions = {}) {
   return { repo, ctx, trace };
 }
 
+/** The newest commit in a checkout, as "<short sha> <subject>". */
+export async function lastCommit(cwd: string): Promise<string> {
+  return (await new Git(cwd).run(["log", "-1", "--format=%h %s"])).out.trim();
+}
+
 /** Sets environment variables and returns a function that puts back what was there before. */
 export function setEnv(vars: Record<string, string>): () => void {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));

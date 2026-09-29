@@ -2,6 +2,7 @@ import { block, clearSession, loadSessions, readArtifact, readMarker, saveSessio
 import { Git, passOn } from "../git";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Status } from "../intents";
+import { errorText } from "../shell";
 
 /** Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the command and its output go to the trace. */
 export async function runHookCommands(ctx: StepContext, which: "before" | "after", stage: keyof StepContext["cfg"]["stages"], cwd = ctx.root): Promise<StepResult> {
@@ -59,7 +60,7 @@ export async function saveWork(ctx: StepContext, wt: Git, message: string): Prom
     return {
       ok: false,
       note: "The work could not be saved to this change's own branch. An engineer needs to look at it.",
-      detail: `commit in ${wt.cwd}: ${e instanceof Error ? e.message : String(e)}`,
+      detail: `commit in ${wt.cwd}: ${errorText(e)}`,
     };
   }
 }
@@ -150,7 +151,7 @@ export async function openBranchWorktree(ctx: StepContext): Promise<{ ok: true }
     await new Git(ctx.worktreeDir).assertBranch(ctx.branch);
   } catch (e) {
     passOn(e);
-    return { ok: false, note: "The workspace for this change could not be prepared. An engineer needs to look at it.", detail: e instanceof Error ? e.message : String(e) };
+    return { ok: false, note: "The workspace for this change could not be prepared. An engineer needs to look at it.", detail: errorText(e) };
   }
   return { ok: true };
 }

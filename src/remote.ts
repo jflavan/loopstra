@@ -1,11 +1,8 @@
 import type { Config } from "./config";
 import { Git, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL } from "./git";
+import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
-
-function lastLine(s: string): string {
-  return s.trim().split(/\r?\n/).pop() ?? "";
-}
 
 /** The generated queue, left uncommitted between runtime commits. */
 const QUEUE = "intent/queue.md";
@@ -58,7 +55,7 @@ export async function syncMain(root: string, cfg: Config, trace: Trace): Promise
     outcome = await sync(git, main, trace);
   } catch (e) {
     if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: e instanceof Error ? e.message : String(e) } };
+    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
   }
   recordSync(trace, outcome);
   return outcome?.result ?? null;
@@ -67,7 +64,7 @@ export async function syncMain(root: string, cfg: Config, trace: Trace): Promise
 async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome | null> {
   const remote = await git.remoteName();
   if (!remote) return null;
-  const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
+  const branch = await git.currentBranch();
   if (branch !== main) return { result: "waiting", text: SYNC_TEXT.offMain, detail: { what: "skipped: the root checkout is not on main", branch } };
   const status = await git.run(["status", "--porcelain", "--untracked-files=no"], true);
   if (status.code !== 0) return { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "skipped: git status failed", error: lastLine(status.err) || `exit ${status.code}` } };
@@ -111,7 +108,7 @@ export async function shareMain(root: string, cfg: Config, trace: Trace): Promis
     outcome = await push(git, remote, cfg.main_branch, trace);
   } catch (e) {
     if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: e instanceof Error ? e.message : String(e) } };
+    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
   }
   recordSync(trace, outcome);
 }

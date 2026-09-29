@@ -7,7 +7,7 @@ import { runBuildStep } from "../../src/stages/build";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { setupRepo, withEnv } from "../helpers";
+import { lastCommit, setupRepo, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 const PERSON_MERGES = "gates:\n  merge:\n    human: status\n";
@@ -134,7 +134,7 @@ describe("review", () => {
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("NaN"))).toBe(true);
     expect(phaseNames(trace).slice(-4)).toEqual(["review-1", "revise-1", "retest-1", "review-2"]);
     expect(gateRows(trace, "review")).toEqual(["findings:fail", "findings:fail"]);
-    expect(await new Git(ctx.worktreeDir).log(1)).toEqual([expect.stringContaining("fix: handle NaN")]);
+    expect(await lastCommit(ctx.worktreeDir)).toContain("fix: handle NaN");
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
     trace.close(); repo.cleanup();
   });

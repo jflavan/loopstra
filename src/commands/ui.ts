@@ -5,6 +5,7 @@ import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } from "../heartbeat";
 import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, SLUG, type Intent, type Unreadable } from "../intents";
 import { Trace } from "../trace";
+import { errorText } from "../shell";
 
 export type { AttentionItem } from "../attention";
 
@@ -46,7 +47,7 @@ export interface UiState {
 /** Everything the dashboard shows, read from the intent files, the trace, and the heartbeat. */
 export async function buildState(root: string, afterEventId: number, now: Date = new Date()): Promise<UiState> {
   let config: Config | { problem: string };
-  try { config = await loadConfig(root); } catch (e) { config = { problem: e instanceof Error ? e.message : String(e) }; }
+  try { config = await loadConfig(root); } catch (e) { config = { problem: errorText(e) }; }
   const scan = await scanRepo(root);
   const ordered = orderQueue(scan.intents);
   const trace = Trace.open(root);
@@ -54,7 +55,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
     const intents = ordered.map((i) => intentView(root, trace, i, now));
     const hb = heartbeatState(readHeartbeat(root), "problem" in config ? 60 : config.poll_seconds, now, { pause: readPause(root) });
     const loop: LoopStatus = hb.current
-      ? { ...hb, current: { slug: hb.current.slug, phase: hb.current.phase ?? runningPhase(intents, hb.current.slug) } }
+      ? { ...hb, current: { slug: hb.current.slug, phase: runningPhase(intents, hb.current.slug) } }
       : hb;
     const health = healthView(trace, now);
     const events = trace.recentEvents(afterEventId, 200).map((e) => ({ ...e, payload: parsePayload(e.payload) }));

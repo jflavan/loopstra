@@ -18,10 +18,10 @@ const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and co
 const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
-export const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
-export const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
-export const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
-export const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
+const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
+const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
+const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
+const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
@@ -330,7 +330,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
     } catch (e) {
       passOn(e);
       // Nothing landed: main, the index, and the files are as they were. The detail goes to the trace.
-      ctx.trace.event(ctx.slug, "error", { where: "merge", error: (e as Error).message });
+      ctx.trace.event(ctx.slug, "error", { where: "merge", error: errorText(e) });
       return { ok: true as const, landed: false };
     }
     return { ok: true as const, landed: true };
@@ -348,7 +348,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
  * that would overwrite one.
  */
 async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const branch = (await ctx.git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
+  const branch = await ctx.git.currentBranch();
   if (branch !== ctx.cfg.main_branch) return { ok: false, detail: `root checkout is on ${branch || "(unknown)"}, not ${ctx.cfg.main_branch}` };
   const staged = (await ctx.git.run(["diff", "--cached", "--name-only"])).out.trim();
   if (staged) return { ok: false, detail: `root checkout has staged changes: ${staged.split(/\r?\n/).join(", ")}` };
@@ -405,13 +405,13 @@ export async function cleanupChange(ctx: StepContext): Promise<boolean> {
     if (existsSync(ctx.worktreeDir)) await ctx.git.worktreeRemove(ctx.worktreeDir);
   } catch (e) {
     clean = false;
-    ctx.trace.event(ctx.slug, "error", { where: "cleanup", what: "worktree", error: e instanceof Error ? e.message : String(e) });
+    ctx.trace.event(ctx.slug, "error", { where: "cleanup", what: "worktree", error: errorText(e) });
   }
   try {
     if (await ctx.git.branchExists(ctx.branch)) await ctx.git.deleteBranch(ctx.branch);
   } catch (e) {
     clean = false;
-    ctx.trace.event(ctx.slug, "error", { where: "cleanup", what: "branch", error: e instanceof Error ? e.message : String(e) });
+    ctx.trace.event(ctx.slug, "error", { where: "cleanup", what: "branch", error: errorText(e) });
   }
   return clean;
 }

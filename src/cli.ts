@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { renderStatus } from "./commands/status";
 import { configPath, NOT_SET_UP } from "./config";
+import { errorText } from "./shell";
 
 const [command = "help", ...rest] = Bun.argv.slice(2);
 const root = process.cwd();
@@ -72,7 +73,7 @@ async function main(): Promise<number> {
         const r = await applyLessons(root, rest[0]);
         console.log(r.added.length ? `Added to CLAUDE.md:\n${r.added.join("\n")}` : "Nothing new to add.");
         return 0;
-      } catch (e) { console.error((e as Error).message); return 1; }
+      } catch (e) { console.error(errorText(e)); return 1; }
     }
     default:
       console.error(`Unknown command: ${command}`);

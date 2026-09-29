@@ -3,11 +3,12 @@ import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
-import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, samePath, STALE_LOCK_MS } from "./git";
+import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant } from "./phases";
 import { shareMain, syncMain } from "./remote";
+import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type HumanGates, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
@@ -59,9 +60,9 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).
-    const branch = await new Git(root).run(["rev-parse", "--abbrev-ref", "HEAD"], true);
-    if (branch.code !== 0 || branch.out.trim() !== cfg.main_branch) {
-      trace.event("_loop", "error", { where: "tick", expected: cfg.main_branch, actual: branch.out.trim() || branch.err.trim() });
+    const branch = await new Git(root).currentBranch();
+    if (branch !== cfg.main_branch) {
+      trace.event("_loop", "error", { where: "tick", expected: cfg.main_branch, actual: branch || "(unknown)" });
       out.paused = OFF_MAIN_NOTE;
       return out;
     }
@@ -144,10 +145,6 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
   } catch (e) {
     if (!(e instanceof StopRequested)) trace.event("_loop", "error", { where: "end of tick", error: errorText(e) });
   }
-}
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 /** Which gates have a person on them, for the queue and for what is runnable. */
@@ -291,9 +288,8 @@ const WORKTREE_KEPT = "worktree-kept";
 async function removeClosedWorktree(ctx: StepContext): Promise<void> {
   if (!existsSync(ctx.worktreeDir)) return;
   const wt = new Git(ctx.worktreeDir);
-  const top = await wt.run(["rev-parse", "--show-toplevel"], true);
   // A plain folder would resolve to the main checkout: never judge (or remove) that.
-  if (top.code !== 0 || !samePath(top.out.trim(), ctx.worktreeDir)) return;
+  if (!(await wt.isWorktreeRoot())) return;
   if (await wt.isDirty()) {
     if (onceMarker(ctx, WORKTREE_KEPT)) ctx.trace.event(ctx.slug, "command", { command: "clean up closed change", kept: ctx.worktreeDir, reason: "the worktree has uncommitted work" });
     return;
@@ -335,7 +331,7 @@ export async function preflight(root: string, env: Record<string, string | undef
   let cfg: Config;
   try { cfg = await loadConfig(root); } catch { return null; }
   const git = new Git(root);
-  const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
+  const branch = await git.currentBranch();
   if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
   const uncommitted = await uncommittedSetup(root, cfg.main_branch);
   if (uncommitted.length) {

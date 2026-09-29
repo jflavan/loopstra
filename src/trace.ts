@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
+import { errorText } from "./shell";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
@@ -52,7 +53,7 @@ function connect(path: string): Database {
 
 /** True for errors that mean the file is not a usable database (as opposed to, say, a lock). */
 function damaged(e: unknown): boolean {
-  const text = `${(e as { code?: string })?.code ?? ""} ${e instanceof Error ? e.message : String(e)}`;
+  const text = `${(e as { code?: string })?.code ?? ""} ${errorText(e)}`;
   return /SQLITE_(CORRUPT|NOTADB)|not a database|malformed/i.test(text);
 }
 
@@ -77,7 +78,7 @@ export class Trace {
       for (const side of ["-wal", "-shm"]) if (existsSync(path + side)) renameSync(path + side, moved + side);
       say(`The trace database could not be read, so it was moved to .loopstra/${basename(moved)} and a new one was started.`);
       const trace = new Trace(root, connect(path));
-      trace.event("_loop", "error", { where: "trace", what: "trace.db could not be read; it was moved aside and a new one started", movedTo: moved, error: e instanceof Error ? e.message : String(e) });
+      trace.event("_loop", "error", { where: "trace", what: "trace.db could not be read; it was moved aside and a new one started", movedTo: moved, error: errorText(e) });
       return trace;
     }
   }

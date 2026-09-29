@@ -17,7 +17,7 @@ export interface Heartbeat {
   /** Refreshed every few seconds while the process runs. Staleness is judged from this. */
   lastBeatAt: string;
   /** The change the current tick is working on, if any. */
-  current: { slug: string; phase: string | null } | null;
+  current: { slug: string } | null;
   stopping: boolean;
   stopped: boolean;
   /** While the loop waits because the assistant was unavailable: until when, and why in plain words. */
@@ -31,7 +31,8 @@ export interface LoopStatus {
   state: LoopState;
   /** Plain words for the owner, e.g. "Running — last check 20s ago". */
   text: string;
-  current: { slug: string; phase: string | null } | null;
+  /** The change being worked on; the dashboard adds its running phase. */
+  current: { slug: string; phase?: string | null } | null;
 }
 
 /** How often a live loop refreshes `lastBeatAt`. */
@@ -239,7 +240,7 @@ export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   const beat: LoopBeat = {
     tickStarted: () => { hb.lastTickAt = at(); hb.current = null; write(); },
     tickEnded: () => { hb.lastTickAt = at(); hb.current = null; write(); },
-    workingOn: (slug) => { hb.current = { slug, phase: null }; write(); },
+    workingOn: (slug) => { hb.current = { slug }; write(); },
     stopped: () => {
       clearInterval(timer);
       unsubscribe();

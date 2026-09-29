@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
+import { errorText } from "./shell";
 
 export const STATUSES = [
   "draft", "accepted",
@@ -136,7 +137,7 @@ export async function scanRepo(root: string): Promise<Scan> {
       }
       scan.intents.push(await readIntent(root, name));
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
+      const detail = errorText(e);
       scan.unreadable.push({ slug: name, problem: unreadableProblem(e), detail });
     }
   }

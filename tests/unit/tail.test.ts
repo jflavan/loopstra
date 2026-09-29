@@ -20,7 +20,7 @@ describe("tail", () => {
       expect(tailLines(t.path, trace, all, { pollSeconds: 60 })).toEqual([]);
 
       const now = new Date();
-      writeHeartbeat(t.path, { pid: 1, startedAt: now.toISOString(), lastTickAt: now.toISOString(), lastBeatAt: now.toISOString(), current: { slug: "one", phase: null }, stopping: false, stopped: false });
+      writeHeartbeat(t.path, { pid: 1, startedAt: now.toISOString(), lastTickAt: now.toISOString(), lastBeatAt: now.toISOString(), current: { slug: "one" }, stopping: false, stopped: false });
       trace.event("one", "tick", {});
       const next = tailLines(t.path, trace, all, { pollSeconds: 60, now });
       expect(next).toHaveLength(2);

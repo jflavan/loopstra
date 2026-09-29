@@ -94,7 +94,7 @@ describe("ui state", () => {
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "stopped", text: "Stopped" });
-      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one", phase: null }, stopping: false, stopped: false });
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
       const s = await buildState(t.path, 0, now);
       expect(s.loop).toMatchObject({ state: "running", text: "Running — working on one, last check 20s ago", current: { slug: "one", phase: "build" } });
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });

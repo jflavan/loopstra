@@ -1,23 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git, GitError, GitTimeout, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
-import { run, setEnv, tempGitRepo } from "../helpers";
+import { lastCommit, run, setEnv, tempGitRepo } from "../helpers";
 
 afterEach(() => resetStop());
-
-const sameDir = (a: string, b: string) => {
-  const n = (p: string) => realpathSync.native(p).replace(/[\\/]+/g, "/").toLowerCase();
-  return n(a) === n(b);
-};
 
 describe("Git", () => {
   test("branch, worktree, commit, changed files, merge, cleanup", async () => {
     const repo = await tempGitRepo();
     const git = new Git(repo.path);
     expect(await git.currentBranch()).toBe("main");
-    expect(await git.hasRemote()).toBe(false);
+    expect(await git.remoteName()).toBeNull();
 
     await git.createBranch("intent/x", "main");
     expect(await git.branchExists("intent/x")).toBe(true);
@@ -36,7 +31,7 @@ describe("Git", () => {
     expect(await git.isAncestor("main", "intent/x")).toBe(true);
     await git.merge("intent/x", "squash", "merge x");
     expect(existsSync(join(repo.path, "src", "new.ts"))).toBe(true);
-    expect((await git.log(1))[0]).toContain("merge x");
+    expect(await lastCommit(repo.path)).toContain("merge x");
 
     await git.worktreeRemove(wt);
     expect(existsSync(wt)).toBe(false);
@@ -56,12 +51,12 @@ describe("Git", () => {
 
     // A plain directory inside the repo resolves to the main checkout: committing through it would hit main.
     await expect(new Git(wt).assertBranch("intent/x")).rejects.toThrow(/intent\/x/);
+    expect(await new Git(wt).isWorktreeRoot()).toBe(false);
 
     await git.ensureWorktree(wt, "intent/x");
     expect(existsSync(join(wt, "leftover.txt"))).toBe(false);
     const wtGit = new Git(wt);
-    expect(sameDir(await wtGit.toplevel(), wt)).toBe(true);
-    expect(sameDir(await git.toplevel(), wt)).toBe(false);
+    expect(await wtGit.isWorktreeRoot()).toBe(true);
     await wtGit.assertBranch("intent/x");
     await Bun.write(join(wt, "src", "add.ts"), "export const add = 1;\n");
     await wtGit.commitAll("add");
@@ -249,7 +244,7 @@ describe("Git", () => {
     expect((await git.run(["rev-parse", "main^"])).out.trim()).toBe(before);
     expect((await git.run(["rev-parse", "main^{tree}"])).out.trim()).toBe((await git.run(["rev-parse", "intent/x^{tree}"])).out.trim());
     expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("");
-    expect((await git.log(1))[0]).toContain("x: merge");
+    expect(await lastCommit(repo.path)).toContain("x: merge");
 
     // A branch that does not contain main is refused before anything is written.
     await Bun.write(join(repo.path, "later.md"), "later\n");
