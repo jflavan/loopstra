@@ -1,0 +1,77 @@
+import { killTree, within } from "./shell";
+
+export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
+const DEFAULT_TIMEOUT_MS = 2 * 60_000;
+
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; url: string }
+export type ChecksState = "pass" | "fail" | "pending";
+
+export class GitHub {
+  private readonly exe: string | null;
+  private readonly env: Record<string, string>;
+  private readonly timeoutMs: number;
+  constructor(private readonly cwd: string, opts: { executable?: string; env?: Record<string, string>; timeoutMs?: number } = {}) {
+    this.exe = opts.executable ?? process.env[GH_ENV] ?? Bun.which("gh");
+    this.env = opts.env ?? {};
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  /** Runs gh once. Past the timeout the process tree is killed and the call reports code 124. */
+  private async run(args: string[]): Promise<{ code: number; out: string; err: string }> {
+    if (!this.exe) return { code: 127, out: "", err: "gh not found" };
+    const cmd = this.exe.endsWith(".ts") ? [process.execPath, this.exe, ...args] : [this.exe, ...args];
+    let proc: ReturnType<typeof Bun.spawn>;
+    try { proc = Bun.spawn({ cmd, cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...this.env } }); }
+    catch (e) { return { code: 127, out: "", err: (e as Error).message }; }
+    const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
+    const outP = read(proc.stdout as ReadableStream<Uint8Array>);
+    const errP = read(proc.stderr as ReadableStream<Uint8Array>);
+    const code = await within(proc.exited, this.timeoutMs, null);
+    if (code === null) {
+      await killTree(proc);
+      const out = await within(outP, 250, "");
+      const err = await within(errP, 250, "");
+      return { code: 124, out, err: `${err}\ngh did not finish within ${Math.round(this.timeoutMs / 1000)}s and was stopped.`.trim() };
+    }
+    const [out, err] = await Promise.all([within(outP, 2_000, ""), within(errP, 2_000, "")]);
+    return { code, out, err };
+  }
+
+  async available(): Promise<boolean> { return (await this.run(["--version"])).code === 0; }
+
+  async prForBranch(branch: string): Promise<PrInfo | null> {
+    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,url"]);
+    if (r.code !== 0) return null;
+    try {
+      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; url: string };
+      return { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url };
+    } catch { return null; }
+  }
+
+  async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {
+    const r = await this.run(["pr", "create", "--head", p.head, "--base", p.base, "--title", p.title, "--body", p.body]);
+    if (r.code !== 0) throw new Error(`gh pr create failed: ${r.err.trim().split("\n").pop()}`);
+    const url = r.out.trim().split("\n").pop() ?? "";
+    const pr = await this.prForBranch(p.head);
+    return { number: pr?.number ?? Number(url.split("/").pop()), url };
+  }
+
+  async comment(number: number, body: string): Promise<void> {
+    const r = await this.run(["pr", "comment", String(number), "--body", body]);
+    if (r.code !== 0) throw new Error(`gh pr comment failed: ${r.err.trim().split("\n").pop()}`);
+  }
+
+  /** gh pr checks exits 0 when all pass, 1 when any fail, 8 when pending. A timed-out call counts as fail. */
+  async checks(number: number): Promise<ChecksState> {
+    const r = await this.run(["pr", "checks", String(number), "--json", "name,state"]);
+    if (r.code === 0) return "pass";
+    if (r.code === 8) return "pending";
+    if (/no checks reported/i.test(r.err)) return "pass";
+    return "fail";
+  }
+
+  async merge(number: number, method: "squash" | "merge"): Promise<void> {
+    const r = await this.run(["pr", "merge", String(number), method === "squash" ? "--squash" : "--merge", "--delete-branch"]);
+    if (r.code !== 0) throw new Error(`gh pr merge failed: ${r.err.trim().split("\n").pop()}`);
+  }
+}
