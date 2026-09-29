@@ -5,7 +5,8 @@
   "type": "module",
   "bin": { "loopstra": "./src/cli.ts" },
   "scripts": {
-    "test": "bun test",
+    "test": "bun scripts/test.ts",
+    "test:serial": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
