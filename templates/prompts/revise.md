@@ -6,6 +6,6 @@ Findings:
 
 Make the changes, run the test command (`{{test_command}}`), and report every file you changed in `changed_files` with a one-line `commit_message`.
 
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
 
 Respond only through the structured output.

@@ -22,6 +22,6 @@ Do not mark a criterion unmet just because you cannot check it; use `needs-perso
 
 Write `outcome_markdown` as a short document with an Outcome heading and an Evidence heading, in plain language a product owner can read. Do not list the needs-person items; the runtime adds them.
 
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
 
 Respond only through the structured output.

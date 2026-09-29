@@ -251,15 +251,15 @@ small set of `{{variables}}`: `{{slug}}`, `{{intent}}`, `{{spec}}`,
 `{{failure_output}}`, `{{skills}}`, and `{{done_when}}`. Missing variables
 render as `(none)`. Prompts are stamped by init and edited like code.
 
-Phases and their envelopes (all include `status: "success" | "fail"`,
-`summary`, and `notes_for_next_phase`):
+Phases and their envelopes (all include `status: "success" | "fail"` and
+`summary`):
 
 | Phase | Session | Tools | Envelope adds |
 |---|---|---|---|
 | intake | fresh, cheap | read-only | `priority`, `missing_sections[]`, `question` |
-| design | fresh, strong | read-only | `spec_markdown`, `concerns[]` |
+| design | fresh, strong | read-only | `spec_markdown` (concerns are its "Areas of concern" heading) |
 | spec-check | fresh, strong | read-only | `approved`, `findings[{requirement, met, evidence}]` |
-| plan | fresh, strong, plan mode | read-only | `plan_markdown`, `files[{path, new}]` |
+| plan | fresh, strong, plan mode | read-only | `plan_markdown` (its "Files that change" list is the file list) |
 | plan-challenge | fresh, strong | read-only | `approved`, `concerns[{concern, blocking}]` |
 | build | B, default | build tools | `changed_files[]`, `commit_message` |
 | fix | resume B | build tools, test edits blocked | same as build |
@@ -285,8 +285,8 @@ the full error in the trace.
 2. `before` commands for design.
 3. **intake**: fills missing `priority`; if required sections are missing or
    `question` is set, block with that question as the note.
-4. **design**: runtime writes `spec.md` from `spec_markdown`. Concerns go
-   under an "Areas of concern" heading in the spec.
+4. **design**: runtime writes `spec.md` from `spec_markdown`. Concerns are
+   the spec's own "Areas of concern" heading.
 5. `after` commands. Commit `spec.md` on main.
 6. Spec gate, in the same step: code check that required headings exist;
    **spec-check** if `gates.spec.agent`. Pass with no person on the gate →

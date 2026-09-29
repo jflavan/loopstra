@@ -1,2 +1,2 @@
 {"type":"system","subtype":"init","session_id":"fake-lessons","cwd":"/","tools":[],"model":"fake"}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-lessons","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"success","summary":"one lesson","notes_for_next_phase":"","lessons":["Add doc comments to exported functions."],"claude_md_additions":"- Exported functions get a one-line doc comment."},"result":"ok"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-lessons","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"success","summary":"one lesson","lessons":["Add doc comments to exported functions."],"claude_md_additions":"- Exported functions get a one-line doc comment."},"result":"ok"}

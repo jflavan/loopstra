@@ -1,3 +1,3 @@
 {"type":"system","subtype":"init","session_id":"fake-done","cwd":"/","tools":[],"model":"fake"}
 {"type":"fake_action","write":{"path":"built-by-done-check.txt","content":"build output\n"}}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-done","total_cost_usd":0.03,"usage":{},"structured_output":{"status":"success","summary":"criteria met","notes_for_next_phase":"","evidence":[{"criterion":"add(1, 2) returns 3.","result":"met","evidence":"checked"}],"outcome_markdown":"# Outcome\n\n## Outcome\nWorks.\n\n## Evidence\n- checked.\n"},"result":"ok"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-done","total_cost_usd":0.03,"usage":{},"structured_output":{"status":"success","summary":"criteria met","evidence":[{"criterion":"add(1, 2) returns 3.","result":"met","evidence":"checked"}],"outcome_markdown":"# Outcome\n\n## Outcome\nWorks.\n\n## Evidence\n- checked.\n"},"result":"ok"}

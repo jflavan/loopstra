@@ -181,7 +181,8 @@ function summarize(e: Record<string, unknown>): Record<string, unknown> {
   return { type: e.type, subtype: e.subtype };
 }
 
-export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; note: string };
+/** `detail`: what went wrong, for the trace (the caller words the owner's note). */
+export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
 /** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: () => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
@@ -199,6 +200,6 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     // A hung git command is reported the same way wherever it happens (see the scheduler).
     if (e instanceof GitTimeout) throw e;
-    return { ok: false, note: `The ${name} step failed: ${msg.split("\n")[0]}` };
+    return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0]}` };
   }
 }

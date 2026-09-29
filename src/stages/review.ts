@@ -2,17 +2,17 @@ import { block, blockWith, blockWithDetail, clearMarker, writeArtifact, type Ste
 import { Git } from "../git";
 import { agentPhase } from "../phases";
 import { testLoop } from "./build";
-import { alreadyMerged, checkMerge, finishMerge, mayReviewAgain, passMergeGate, REVIEWS_USED_UP } from "./merge";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
+/** The review rounds ended with a review that had no important findings (and the after commands ran). */
+export const REVIEW_PASSED = "review-passed";
+
 /**
- * Stage 5 review rounds, then the merge gate's automated checks in the same step (the gate timing
- * rule). Called for reviewing. Ends at merged (no person on the merge gate), merge-review (a person
- * decides), or blocked. Fixes the merge checks commit after an approval get one more review round.
+ * Stage 5 review rounds, run by the merge step for reviewing (see runMergeStep): review, and on
+ * important findings revise and test again, until a review passes or the rounds run out (block).
+ * The round in progress is kept in the run folder, so a restart continues it.
  */
-export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
-  // Stopped part-way through a merge that did land: finish recording it.
-  if (await alreadyMerged(ctx)) return finishMerge(ctx);
+export async function runReviewRounds(ctx: StepContext): Promise<StepResult | typeof REVIEW_PASSED> {
   const stage = ctx.cfg.stages.review;
   const wt = new Git(ctx.worktreeDir);
 
@@ -36,12 +36,11 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
   }
 
   const a = await artifacts(ctx);
-  const plan = a.currentPlan;
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
     const review = await agentPhase(ctx, {
       name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-      vars: { spec: a.spec, plan }, skills: stage.skills,
+      vars: { spec: a.spec, plan: a.currentPlan }, skills: stage.skills,
     });
     if (!review.ok) return block(ctx, review.note);
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
@@ -55,16 +54,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
 
     if (pass) {
       const after = await runHookCommands(ctx, "after", "review", ctx.worktreeDir);
-      if (!after.ok) return after;
-      const verdict = await checkMerge(ctx);
-      if (verdict.result === "fail") return blockWith(ctx, verdict);
-      if (verdict.result === "pass") return passMergeGate(ctx);
-      // The merge checks committed fixes: no code reaches main that a review did not see.
-      if (!mayReviewAgain(ctx, round)) {
-        clearMarker(ctx, REVIEW_ROUND);
-        return blockWithDetail(ctx, REVIEWS_USED_UP, { rounds: round, reason: "fixes were committed after the last review" });
-      }
-      continue;
+      return after.ok ? REVIEW_PASSED : after;
     }
 
     if (round > stage.max_rounds) {

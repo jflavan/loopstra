@@ -231,7 +231,7 @@ describe("codePhase", () => {
     expect(phases[1]?.error).toContain("kaboom");
     const odd = await codePhase(ctx, "odd", async () => { throw null; });
     expect(odd.ok).toBe(false);
-    if (!odd.ok) expect(odd.note).toContain("null");
+    if (!odd.ok) expect(odd.detail).toContain("null");
     trace.close(); repo.cleanup();
   });
 });

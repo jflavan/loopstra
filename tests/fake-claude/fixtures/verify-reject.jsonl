@@ -1,2 +1,2 @@
 {"type":"system","subtype":"init","session_id":"fake-verify-reject","cwd":"/","tools":[],"model":"fake"}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-verify-reject","total_cost_usd":0.02,"usage":{},"structured_output":{"status":"success","summary":"broken","notes_for_next_phase":"","passed":false,"observations":["add(1, 2) printed 12 instead of 3"]},"result":"ok"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-verify-reject","total_cost_usd":0.02,"usage":{},"structured_output":{"status":"success","summary":"broken","passed":false,"observations":["add(1, 2) printed 12 instead of 3"]},"result":"ok"}

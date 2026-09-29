@@ -13,7 +13,6 @@ import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
-import { runReviewStep } from "./stages/review";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
@@ -223,8 +222,7 @@ async function runStep(ctx: StepContext): Promise<StepResult> {
     case "accepted": case "designing": case "spec-review": return runDesignStep(ctx);
     case "spec-approved": case "planning": case "plan-review": return runPlanStep(ctx);
     case "plan-approved": case "building": return runBuildStep(ctx);
-    case "reviewing": return runReviewStep(ctx);
-    case "merge-review": case "merge-approved": return runMergeStep(ctx);
+    case "reviewing": case "merge-review": case "merge-approved": return runMergeStep(ctx);
     case "merged": case "verifying": return runVerifyStep(ctx);
     default: return { ok: true };
   }

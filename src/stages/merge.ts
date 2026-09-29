@@ -9,13 +9,13 @@ import { codePhase } from "../phases";
 import { pushBranch, syncMain } from "../remote";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
+import { REVIEW_PASSED, runReviewRounds } from "./review";
 import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
-
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
 const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
-export const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
+const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
 export const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
@@ -33,14 +33,14 @@ function mergeRetry(ctx: StepContext): Status {
 }
 
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
-export type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fail" } & Failure);
+type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fail" } & Failure);
 
 /**
  * The merge gate's automated checks, run in the worktree: the branch is brought up to date with
  * main (rebase), the test loop passes (it may commit fixes), and the newest review had no
  * important findings. Each check is recorded as a gate row.
  */
-export async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
+async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
   let failure: Failure | null = null;
@@ -95,7 +95,7 @@ export async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
  * unless a person decides on the status line). Without one: no person → merge now; a person →
  * merge-review with a note; a pull request → block plainly (there is nowhere to open one).
  */
-export async function passMergeGate(ctx: StepContext): Promise<StepResult> {
+async function passMergeGate(ctx: StepContext): Promise<StepResult> {
   const human = ctx.cfg.gates.merge.human;
   if ((await ctx.git.remoteName()) !== null) {
     const opened = await openPullRequest(ctx, true);
@@ -153,7 +153,7 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
   return {
     ok: false,
     note: "The pull request for this change could not be opened on GitHub. An engineer should check that GitHub can be reached.",
-    detail: r.note,
+    detail: r.detail,
     retryFrom: mergeRetry(ctx),
   };
 }
@@ -211,7 +211,7 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     // gh can report a problem after the merge went through (for example tidying up a local branch).
     const again = await gh.prForBranch(ctx.branch);
     if (!again?.merged) {
-      return blockWithDetail(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { pr: pr.number, error: merged.note }, mergeRetry(ctx));
+      return blockWithDetail(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { pr: pr.number, error: merged.detail }, mergeRetry(ctx));
     }
   }
   return finishRemoteMerge(ctx);
@@ -223,34 +223,58 @@ async function finishRemoteMerge(ctx: StepContext): Promise<StepResult> {
   return finishMerge(ctx);
 }
 
-/** True when the review round that just passed may be followed by one more (fixes were made after it). */
-export function mayReviewAgain(ctx: StepContext, round: number): boolean {
-  return round <= ctx.cfg.stages.review.max_rounds;
+/** The merge gate sent the change back for one more review round (the round marker names it). */
+const REVIEW_AGAIN = "review-again";
+
+/**
+ * The merge gate, one entry point for the review step (a review just passed; `onPass` is
+ * passMergeGate) and the merge step (merge-approved, or merge-review with no person; `onPass`
+ * merges): its automated checks run, and then `onPass`. Fixes the checks committed go back for one
+ * more review round (see anotherRound), so nothing reaches main that a review did not see.
+ */
+async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult | typeof REVIEW_AGAIN> {
+  const verdict = await checkMerge(ctx);
+  if (verdict.result === "fail") return blockWith(ctx, verdict);
+  if (verdict.result === "pass") return onPass();
+  return anotherRound(ctx);
 }
 
-/** Fixes were committed after the review: back to reviewing for one more round, if rounds are left. */
-async function reviewAgain(ctx: StepContext): Promise<StepResult> {
+/**
+ * Changes no review has seen are on the branch: one more review round while rounds are left (the
+ * round marker moves on to it), else block. The one place the review rounds run out after a pass.
+ */
+async function anotherRound(ctx: StepContext): Promise<StepResult | typeof REVIEW_AGAIN> {
   const round = readRound(ctx) ?? 1;
-  if (!mayReviewAgain(ctx, round)) {
+  if (round > ctx.cfg.stages.review.max_rounds) {
     clearMarker(ctx, REVIEW_ROUND);
     return blockWithDetail(ctx, REVIEWS_USED_UP, { rounds: round, reason: "fixes were committed after the last review" });
   }
   writeRound(ctx, round + 1);
-  await setStatus(ctx, "reviewing");
-  return { ok: true };
+  return REVIEW_AGAIN;
 }
 
 /**
- * The merge step. With a remote, it watches the pull request (see runRemoteMerge). Without one:
- * merge-review with a person on the gate waits (it is not runnable); merge-approved (a person
- * approved), or merge-review with no person on the gate: check again and merge.
+ * Stage 5, one entry for reviewing, merge-review, and merge-approved. A merge that landed before a
+ * stop is recorded first, never merged twice. reviewing: review rounds, then the merge gate in the
+ * same step (the gate timing rule), ending at merged (no person), merge-review (a person or a pull
+ * request decides), or blocked. With a remote, merge-review and merge-approved watch the pull request
+ * (see runRemoteMerge). Without one: merge-review with a person on the gate waits (it is not
+ * runnable); merge-approved, or merge-review with no person on the gate: check again and merge.
  */
 export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
+  // Stopped part-way through a merge that did land: finish recording it.
   if (await alreadyMerged(ctx)) return finishMerge(ctx);
   const status = ctx.intent.file.frontmatter.status;
-  const human = ctx.cfg.gates.merge.human;
+  if (status === "reviewing") {
+    for (;;) {
+      const reviewed = await runReviewRounds(ctx);
+      if (reviewed !== REVIEW_PASSED) return reviewed;
+      const gate = await mergeGate(ctx, () => passMergeGate(ctx));
+      if (gate !== REVIEW_AGAIN) return gate;
+    }
+  }
   if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
-  if (status === "merge-review" && human !== "none") return { ok: true };
+  if (status === "merge-review" && ctx.cfg.gates.merge.human !== "none") return { ok: true };
 
   // A person may have set merge-approved (or edited the change's other files) without committing:
   // record the change's own folder first, so their edit is part of main before the checks run.
@@ -258,16 +282,18 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return blockWith(ctx, open);
   const wt = new Git(ctx.worktreeDir);
+  let next: StepResult | typeof REVIEW_AGAIN;
   if (await wt.isDirty()) {
     // Edits nobody reviewed: keep them on the branch and review again rather than merge them unseen.
     const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
     if (!kept.ok) return blockWith(ctx, kept);
-    return reviewAgain(ctx);
+    next = await anotherRound(ctx);
+  } else {
+    next = await mergeGate(ctx, () => mergeNow(ctx));
   }
-  const verdict = await checkMerge(ctx);
-  if (verdict.result === "fail") return blockWith(ctx, verdict);
-  if (verdict.result === "changed") return reviewAgain(ctx);
-  return mergeNow(ctx);
+  if (next !== REVIEW_AGAIN) return next;
+  await setStatus(ctx, "reviewing");
+  return { ok: true };
 }
 
 /** Commits the change's own folder on main (a person's uncommitted edits to it). Nothing else is touched. */
@@ -311,7 +337,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
     return blockWithDetail(
       ctx,
       "The change could not be merged; main was left untouched. An engineer needs to look at it.",
-      merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.note,
+      merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.detail,
     );
   }
   return finishMerge(ctx);
@@ -337,7 +363,7 @@ async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; 
  * is gone, or main moved past the commit it was on before the merge and has the branch's version of
  * every file the branch changed. A marker whose merge never landed is removed.
  */
-export async function alreadyMerged(ctx: StepContext): Promise<boolean> {
+async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   const marker = join(ctx.runDir, MERGING);
   if (!existsSync(marker)) return false;
   if (!(await ctx.git.branchExists(ctx.branch))) return true;
@@ -350,7 +376,7 @@ export async function alreadyMerged(ctx: StepContext): Promise<boolean> {
 }
 
 /** The change is on main: tidy up (best effort) and record it as merged. */
-export async function finishMerge(ctx: StepContext): Promise<StepResult> {
+async function finishMerge(ctx: StepContext): Promise<StepResult> {
   await cleanupChange(ctx);
   markHealthPending(ctx.root, ctx.slug);
   await setStatus(ctx, "merged");

@@ -143,11 +143,6 @@ export async function scanRepo(root: string): Promise<Scan> {
   return scan;
 }
 
-/** The readable intents only. Never throws for one bad file; see scanRepo for the others. */
-export async function scanIntents(root: string): Promise<Intent[]> {
-  return (await scanRepo(root)).intents;
-}
-
 function unreadableProblem(e: unknown): string {
   if (e instanceof FrontmatterProblem && e.unknownKey) {
     return `intent.md has a line Loopstra does not recognise: '${e.field.split(", ").join("', '")}'. Remove it or fix the spelling.`;

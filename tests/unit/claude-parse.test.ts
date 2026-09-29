@@ -12,7 +12,6 @@ describe("StreamCollector", () => {
     expect(r.subtype).toBe("success");
     expect(r.structuredOutput).toMatchObject({ status: "fail", priority: "normal" });
     expect(r.costUsd).toBeCloseTo(0.0717593, 5);
-    expect(r.toolUses.map((t) => t.name)).toEqual(["Read", "StructuredOutput"]);
     expect(r.events.length).toBe(18);
   });
 

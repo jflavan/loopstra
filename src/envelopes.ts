@@ -3,7 +3,6 @@ import { z } from "zod";
 const base = z.object({
   status: z.enum(["success", "fail"]),
   summary: z.string(),
-  notes_for_next_phase: z.string(),
 });
 
 const finding = z.object({
@@ -30,17 +29,17 @@ export const Envelopes = {
     missing_sections: z.array(z.string()),
     question: z.string(),
   }),
+  /** Concerns are a heading inside spec_markdown, where the owner reads them. */
   design: base.extend({
     spec_markdown: z.string(),
-    concerns: z.array(z.string()),
   }),
   "spec-check": base.extend({
     approved: z.boolean(),
     findings: z.array(requirement),
   }),
+  /** The files the plan touches are read from its "Files that change" list, the one source. */
   plan: base.extend({
     plan_markdown: z.string(),
-    files: z.array(z.object({ path: z.string(), new: z.boolean() })),
   }),
   "plan-challenge": base.extend({
     approved: z.boolean(),

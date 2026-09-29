@@ -10,6 +10,6 @@ Plan:
 
 Ask: what would break, what is missing, which listed files do not exist or are wrong, which alternative was not considered, and whether the Proof section would actually prove the change works. Record each as a concern with `blocking` true only when the plan cannot be executed as written or would break existing behavior. Set `approved` to true when there are no blocking concerns.
 
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
 
 Respond only through the structured output.

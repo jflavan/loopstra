@@ -8,15 +8,13 @@ export interface StreamEvent {
   [key: string]: unknown;
 }
 
-export interface ToolUse { name: string; input: unknown }
-
 export interface Collected {
   sessionId: string | null;
   subtype: string;
   structuredOutput: unknown;
   costUsd: number;
   usage: unknown;
-  toolUses: ToolUse[];
+  /** The result event's text; an error result says there why the session failed. */
   resultText: string;
   events: StreamEvent[];
   isError: boolean;
@@ -35,7 +33,6 @@ function deniedText(d: { tool_name?: string; tool_input?: Record<string, unknown
 export class StreamCollector {
   private sessionId: string | null = null;
   private result: StreamEvent | null = null;
-  private toolUses: ToolUse[] = [];
   readonly events: StreamEvent[] = [];
 
   push(line: string): StreamEvent | null {
@@ -45,10 +42,6 @@ export class StreamCollector {
     try { e = JSON.parse(trimmed) as StreamEvent; } catch { return null; }
     this.events.push(e);
     if (e.session_id && !this.sessionId) this.sessionId = e.session_id;
-    if (e.type === "assistant") {
-      const content = (e as { message?: { content?: Array<{ type: string; name?: string; input?: unknown }> } }).message?.content ?? [];
-      for (const c of content) if (c.type === "tool_use" && c.name) this.toolUses.push({ name: c.name, input: c.input });
-    }
     if (e.type === "result") this.result = e;
     return e;
   }
@@ -64,7 +57,6 @@ export class StreamCollector {
       structuredOutput: r?.structured_output,
       costUsd: r?.total_cost_usd ?? 0,
       usage: r?.usage,
-      toolUses: this.toolUses,
       resultText: r?.result ?? "",
       events: this.events,
       isError: r?.is_error ?? r === null,

@@ -5,7 +5,6 @@ import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
-import { runReviewStep } from "../../src/stages/review";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { setupRepo, withEnv } from "../helpers";
@@ -65,7 +64,7 @@ describe("review", () => {
   test("reviewing → merge-review with a person on the merge gate: the reviewer reads git but cannot write, and nothing reaches main", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     const argsFile = join(repo.path, "args.json");
-    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runReviewStep(ctx));
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("merge-review");
     expect(i.file.frontmatter.note).toBe(MERGE_WAIT_NOTE);
@@ -87,7 +86,7 @@ describe("review", () => {
     await Bun.write(join(ctx.worktreeDir, "intent", "add-numbers", "plan.md"), "# Plan: from the branch\n");
     await new Git(ctx.worktreeDir).commitAll("a plan edited on the branch");
     const argsFile = join(repo.path, "args.json");
-    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runReviewStep(ctx));
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
     let prompt = (await Bun.file(argsFile).json()).prompt as string;
     expect(prompt).toContain("## Files that change\n- src/add.ts (new)");
     expect(prompt).not.toContain("from the branch");
@@ -96,7 +95,7 @@ describe("review", () => {
     await new Git(repo.path).commitAll("review again");
     await ctx.reload();
     await Bun.write(join(ctx.runDir, "plan.reconciled.md"), "# Plan: reconciled for this build\n");
-    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runReviewStep(ctx));
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
     prompt = (await Bun.file(argsFile).json()).prompt as string;
     expect(prompt).toContain("reconciled for this build");
     trace.close(); repo.cleanup();
@@ -105,7 +104,7 @@ describe("review", () => {
   test("the verdict comes from the findings: no important findings passes even if the reviewer did not approve", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     await usePrompt(repo.path, "review", "{{spec}} FIXTURE:review-nits-unapproved");
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(await status(repo.path)).toBe("merge-review");
     expect(gateRows(trace, "review")).toEqual(["findings:pass"]);
     expect(trace.gates("add-numbers").find((g) => g.gate === "review")?.evidence).toContain("approved: false");
@@ -115,7 +114,7 @@ describe("review", () => {
   test("important findings trigger revise and the test loop, then review again; exhausted rounds block in plain words", async () => {
     const { repo, ctx, trace } = await built("stages:\n  review:\n    max_rounds: 1\n");
     await usePrompt(repo.path, "review", "{{spec}} FIXTURE:review-reject");
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(i.file.frontmatter.note).toBe("The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change. When that is sorted out, set status to plan-approved to try again.");
@@ -133,7 +132,7 @@ describe("review", () => {
     mkdirSync(ctx.runDir, { recursive: true });
     await Bun.write(join(ctx.runDir, "review-round"), "2");
     const before = phaseNames(trace).length;
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(phaseNames(trace).slice(before)).toEqual(["review-2"]);
     expect(await status(repo.path)).toBe("blocked");
     trace.close(); repo.cleanup();
@@ -143,7 +142,7 @@ describe("review", () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     await Bun.write(join(ctx.worktreeDir, "src", "add.ts"), "export const add = (a: number, b: number) => a + b;\n");
     const mainBefore = await new Git(repo.path).headSha();
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const wt = new Git(ctx.worktreeDir);
     expect(await wt.isDirty()).toBe(false);
     expect((await wt.run(["log", "--format=%s", "main..HEAD"])).out).toContain("chore: keep unfinished changes");
@@ -155,7 +154,7 @@ describe("review", () => {
   test("review before and after commands run around the rounds, before the merge checks", async () => {
     const { repo, ctx, trace } = await built(`${PERSON_MERGES}stages:\n  review:\n    before:\n      - echo before\n    after:\n      - echo after\n`);
     const before = phaseNames(trace).length;
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(phaseNames(trace).slice(before)).toEqual(["review-before", "review-1", "review-after", "merge-test-1"]);
     trace.close(); repo.cleanup();
   });
@@ -165,7 +164,7 @@ describe("review", () => {
     const git = new Git(repo.path);
     await git.worktreeRemove(ctx.worktreeDir);
     await git.deleteBranch(ctx.branch);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(i.file.frontmatter.note).toContain("plan-approved");
@@ -178,7 +177,7 @@ describe("merge", () => {
   test("with no person on the merge gate, the review step merges in the same step and cleans up", async () => {
     const { repo, ctx, trace } = await built();
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(await status(repo.path)).toBe("merged");
     expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     expect(existsSync(ctx.worktreeDir)).toBe(false);
@@ -194,7 +193,7 @@ describe("merge", () => {
 
   test("approval through a pull request without a remote blocks plainly; merge-approved merges here instead", async () => {
     const { repo, ctx, trace } = await built("gates:\n  merge:\n    human: pr\n");
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(i.file.frontmatter.note).toBe(NO_REMOTE_PR_NOTE);
@@ -208,7 +207,7 @@ describe("merge", () => {
 
   test("with a person on the gate: merge-review waits, and merge-approved re-checks and merges", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await ctx.reload();
     expect(ctx.intent.file.frontmatter.status).toBe("merge-review");
     // Stepping the waiting status never advances and never merges.
@@ -228,7 +227,7 @@ describe("merge", () => {
 
   test("a person sets merge-approved without committing: the merge proceeds, and main gets one commit with the branch's tree", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const git = new Git(repo.path);
     // The owner edits the status line and saves, but never commits.
     const path = join(repo.path, "intent", "add-numbers", "intent.md");
@@ -259,7 +258,7 @@ describe("merge", () => {
 
   test("an unsaved edit to a tracked source file outside intent/ still blocks the merge, and stays as it was", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await personSets(ctx, "merge-approved");
     await Bun.write(join(repo.path, "README.md"), "# test repo\n\nunsaved\n");
     const head = await new Git(repo.path).headSha();
@@ -276,7 +275,7 @@ describe("merge", () => {
 
   test("merge-approved reads the newest review verdict", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await personSets(ctx, "merge-approved");
     trace.gate("add-numbers", "review", "findings", "fail", "a later review found an important problem");
     await runMergeStep(ctx);
@@ -290,7 +289,7 @@ describe("merge", () => {
 
   test("a rebase conflict blocks in plain words and leaves main clean", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await Bun.write(join(repo.path, "src", "add.ts"), "// main version\n");
     await new Git(repo.path).commitAll("conflicting change on main");
     await personSets(ctx, "merge-approved");
@@ -304,7 +303,7 @@ describe("merge", () => {
 
   test("a merge that git refuses blocks in plain words with detail in the trace", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await personSets(ctx, "merge-approved");
     // An untracked file on main that the merge would overwrite makes git refuse the merge itself.
     await Bun.write(join(repo.path, "src", "add.ts"), "// someone's scratch file\n");
@@ -329,7 +328,7 @@ describe("merge", () => {
     await Bun.write(join(repo.path, "README.md"), "# test repo\n\nwork in progress\n");
     const git = new Git(repo.path);
     await git.run(["add", "README.md"]);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(i.file.frontmatter.note).toBe(DIRTY_ROOT_NOTE);
@@ -344,7 +343,7 @@ describe("merge", () => {
     const git = new Git(repo.path);
     // A locked worktree cannot be removed with a single --force.
     await git.run(["worktree", "lock", ctx.worktreeDir]);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(await status(repo.path)).toBe("merged");
     expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("cleanup"))).toBe(true);
@@ -358,7 +357,7 @@ describe("merge", () => {
 
   test("resuming merge-approved after the merge landed records it as merged without merging twice", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await personSets(ctx, "merge-approved");
     // Stopped right after the merge commit, before the status was recorded.
     const git = new Git(repo.path);
@@ -381,7 +380,7 @@ describe("merge", () => {
     writeFileSync(join(ctx.runDir, "merging"), await git.headSha());
     await landSquash(git, ctx.branch, "add-numbers: add numbers");
     const before = phaseNames(trace).length;
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     expect(await status(repo.path)).toBe("merged");
     expect(phaseNames(trace).slice(before)).toEqual([]);
     expect(await git.branchExists(ctx.branch)).toBe(false);
@@ -390,7 +389,7 @@ describe("merge", () => {
 
   test("a merge marker whose merge never landed is ignored", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await personSets(ctx, "merge-approved");
     mkdirSync(ctx.runDir, { recursive: true });
     writeFileSync(join(ctx.runDir, "merging"), "stale");
@@ -402,7 +401,7 @@ describe("merge", () => {
 
   test("fixes the merge checks commit after approval go back to review before anything merges", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     // main moves on with a test the change does not satisfy yet; the fix makes it pass.
     await Bun.write(join(repo.path, "tests", "main.test.ts"), 'import { existsSync } from "node:fs";\nimport { expect, test } from "bun:test";\ntest("fixed", () => { expect(existsSync("FIXED")).toBe(true); });\n');
     await new Git(repo.path).commitAll("a new test on main");
@@ -417,7 +416,7 @@ describe("merge", () => {
 
     await ctx.reload();
     const before = phaseNames(trace).length;
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("merge-review");
     expect(phaseNames(trace).slice(before)).toEqual(["review-2", "merge-test-1"]);
@@ -427,7 +426,7 @@ describe("merge", () => {
 
   test("fixes after the last allowed review round block in plain words", async () => {
     const { repo, ctx, trace } = await built(`${PERSON_MERGES}stages:\n  review:\n    max_rounds: 1\n`);
-    await runReviewStep(ctx);
+    await runMergeStep(ctx);
     await Bun.write(join(ctx.runDir, "review-round"), "2");
     await Bun.write(join(repo.path, "tests", "main.test.ts"), 'import { existsSync } from "node:fs";\nimport { expect, test } from "bun:test";\ntest("fixed", () => { expect(existsSync("FIXED")).toBe(true); });\n');
     await new Git(repo.path).commitAll("a new test on main");

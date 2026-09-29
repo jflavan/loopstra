@@ -26,7 +26,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
   });
   if (r.ok) return { ok: true };
   const what = timedOut ? "did not finish in time" : "failed";
-  return blockWithDetail(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, r.note);
+  return blockWithDetail(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, r.detail);
 }
 
 export function headingsCheck(name: string, text: string, headings: string[]): Check {

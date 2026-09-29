@@ -23,7 +23,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     }
     return { ok: true as const };
   });
-  if (!branch.ok) return blockWithDetail(ctx, "The workspace for building this change could not be prepared. An engineer needs to look at it.", branch.note);
+  if (!branch.ok) return blockWithDetail(ctx, "The workspace for building this change could not be prepared. An engineer needs to look at it.", branch.detail);
 
   const before = await runHookCommands(ctx, "before", "build", ctx.worktreeDir);
   if (!before.ok) return before;
@@ -56,7 +56,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     ctx.trace.event(ctx.slug, "command", { command: "drift", changed, extra });
     return { ok: true as const, extra };
   });
-  if (!drift.ok) return blockWithDetail(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", drift.note);
+  if (!drift.ok) return blockWithDetail(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", drift.detail);
   if (drift.extra.length) {
     const rec = await buildSession(ctx, {
       name: "reconcile", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
