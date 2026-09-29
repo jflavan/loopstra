@@ -1,0 +1,149 @@
+# Loopstra design decisions
+
+Running log of settled design decisions. One line per decision. Newer entries
+at the bottom. The design spec is derived from this file, not from memory.
+
+Sources of truth, in order of precedence when they conflict:
+1. Anthropic, *The AI-Native SDLC Playbook* (academy.claude.com)
+2. disler, *super-simple-software-factory*
+
+## Settled (2026-09-11)
+
+- **Purpose.** Unattended, continuously running, Claude Code based SDLC loop
+  that iterates a change through the six course stages (Plan, Design, Build,
+  Test, Deploy, Maintain) with injection points at every stage.
+- **Three pillars.** A Claude Code skill (operator console), a TypeScript
+  runtime on Bun (owns the loop), and Claude Code CLI sessions (do the work
+  inside bounded phases). "Code owns sequencing, retries, and acceptance; the
+  agent owns only the work inside one bounded phase."
+- **Skill role.** Operator console only: install, onboard, write config, help
+  draft intents, inspect traces, unblock gates, tune config. It never runs the
+  loop. The runtime is a standalone `bun` process.
+- **Invocation.** Runtime spawns `claude -p --output-format stream-json`
+  (plus `--resume`, `--json-schema`, `--allowedTools`, `--permission-mode`,
+  `--max-budget-usd`, `--worktree`) behind a small adapter interface. Not the
+  Agent SDK, because the SDK requires an API key and the CLI uses the user's
+  Claude subscription. Subscription auth is a hard requirement for adoption.
+- **Work source.** The target repo is the queue. Each change is a folder
+  `intent/<slug>/` where `<slug>` is a plain human-readable name chosen by the
+  product owner. Artifacts: `intent.md`, `spec.md`, `plan.md`, `review.md`,
+  `outcome.md`. Runtime noise (transcripts, envelopes, trace db) lives in a
+  gitignored `.loopstra/` folder, never in `intent/`.
+- **Queue ordering.** Computed by the runtime from a simple priority the
+  owner states in `intent.md`, with an agent filling gaps. `queue.md` is a
+  generated view, never a file the owner maintains.
+- **State.** Status lives in `intent.md` frontmatter, written only by the
+  runtime except at human gates. States: draft, accepted, specified, planned,
+  building, reviewed, merged, done, closed; any state may also be blocked
+  with a reason. Before advancing, the runtime verifies the artifacts on disk
+  match the claimed status.
+- **Definition of done.** Every intent states its done-when criteria in the
+  owner's terms. Proving them may combine deterministic checks, agent review,
+  and human confirmation, per gate config.
+- **Gates.** Every stage boundary is a gate: a list of checks that must all
+  pass. Check kinds: `code` (deterministic, runs in the runtime), `agent`
+  (fresh-context adversarial reviewer returning a structured verdict with
+  evidence), `human` (runtime waits for a person). Defaults lean
+  deterministic; human only where configured. Stages 2 through 5 must be
+  runnable with no human in the path when configured that way.
+- **Human gate surfaces.** Per gate, `status` (owner edits the status line in
+  `intent.md` and commits) or `pr` (GitHub PR approval read via API).
+  Defaults: status for intent, spec, and plan gates; pr for the merge gate.
+  (Pending explicit confirmation.)
+- **Git model.** Every change is built on its own branch `intent/<slug>`.
+  Agents commit freely on that branch. Merge is a gate and is never done by
+  the agent that wrote the code. Nothing lands on main without passing the
+  merge gate. With a GitHub remote the merge gate is a PR; without one the
+  runtime merges locally under the same checks.
+- **Artifacts.** Markdown files in git are the durable record, readable by
+  humans and agents alike. JSON envelopes from structured output are the
+  machine-readable per-phase report the runtime uses to decide.
+- **Injection points.** (A) gate checks, (B) per-stage prompt files and named
+  skills, (C) deterministic before/after commands per stage. All set during
+  onboarding, all editable later. No custom stages or stage graphs; the six
+  stages are fixed. Teams needing more fork the runtime.
+- **Config.** A file in the target repo, re-read every loop iteration so edits
+  take effect without a restart.
+- **Concurrency.** One intent in flight at a time. Each intent still gets its
+  own branch and worktree so parallel intents later are a config change.
+  Within an intent, stages 3 through 5 lean on fresh-context subagents
+  (verifier, reviewer, researcher) and on code phases for known commands.
+- **Toolchain verified locally.** Bun 1.4.2, Claude Code 2.1.269, gh 2.93.0,
+  git 2.54, node 22.20. Agent SDK 0.3.269 usable as a dev-only dependency for
+  its message types.
+
+- **Two audiences, two surfaces.** Engineers configure machinery once at
+  onboarding: commands, gates, prompts, and any thresholds. Product owners
+  only ever read and write plain-language markdown (intent, spec, plan,
+  outcome) and a status line. No technical term, command, or number the
+  owner must interpret may appear on the owner surface. Onboarding detects
+  the test/build/lint commands from the repo and an engineer confirms them;
+  they are written to the runtime config and to the Commands section of
+  CLAUDE.md.
+- **Stage 6 for v1.** No statistics. After every merge, and on a schedule,
+  the runtime runs the test command on main. Green before and red after is
+  a breach. A breach opens a new `intent/<slug>/intent.md` in plain
+  language (what merged, what broke, proposed outcome) with status draft,
+  which the owner handles like any other intent. After a merge the runtime
+  also verifies the intent's done-when criteria via the configured checks,
+  writes `outcome.md` with evidence, and marks the intent done. Repeated
+  reviewer findings are proposed as edits to CLAUDE.md. Continuous metrics
+  (error rates, bands, sigma tiers) are a documented extension point, added
+  later as one-line commands in config by an engineer, never by the owner.
+
+- **Distribution.** One global install (`bun install -g loopstra`). In a
+  repo, `loopstra init` runs onboarding and writes only config, stage
+  prompts, the operator skill, and hooks into that repo. Runtime code
+  stays in the global install; upgrades are one command.
+- **Config format.** YAML, one file `loopstra/config.yaml` in a tracked `loopstra/` folder that also holds `prompts/<stage>.md`; `.loopstra/` is the gitignored runtime folder. Config is
+  schema-validated on load with plain error messages.
+- **Trigger cadence.** Polling, 60s default. Each pass scans `intent/`,
+  git, and GitHub. No file watchers or webhooks in v1.
+- **Observability.** Append-only JSONL event log per run plus a SQLite
+  database in `.loopstra/`, written as events happen. The skill reads
+  these. No web viewer in v1.
+
+- **States (refined).** One field. Every gate has a waiting status and an
+  approved status: draft → accepted → designing → spec-review →
+  spec-approved → planning → plan-review → plan-approved → building →
+  reviewing → merge-review → merged → verifying → done; any state →
+  blocked (with plain-language note) or closed. Waiting statuses tell the
+  reader what to do. Automated gates pass through review statuses.
+- **Gate defaults.** Only intent acceptance is human by default. Spec,
+  plan, merge, and done gates run deterministic checks plus a
+  fresh-context agent reviewer. Onboarding asks which gates get a person.
+- **Agents propose, the runtime writes artifacts.** Design and plan
+  sessions are read-only and return content via structured output
+  (`--json-schema`); the runtime writes spec.md, plan.md, review.md,
+  outcome.md. Only the build session (and its fix/revise/reconcile
+  continuations) edits code, inside the intent worktree.
+- **Sessions.** Build, fix, revise, reconcile share one resumed session.
+  Intake, design, plan, plan-challenge, verify, review, done-check, and
+  lessons each get a fresh session. Judges never share context with the
+  worker.
+- **Bounded loops.** Test→fix max 3; review→revise max 2; plan challenge
+  max 1 resend. Exhausted → blocked with a plain note. A person retries by
+  setting status back to the last approved state, or closes.
+- **Observability tooling.** `loopstra status` (table of intents and
+  current step), `loopstra tail` (live events), and `loopstra ui` (a
+  single-page local dashboard served by Bun over the SQLite trace,
+  polling). No external services.
+- **Testability.** A fake `claude` executable (Bun script emitting
+  stream-json from fixtures) lets the whole loop run end-to-end in a
+  temp git repo without calling Claude. Every stage has unit tests; the
+  scheduler has an integration test.
+- **Onboarding.** `loopstra init` is deterministic: detects test/lint/build
+  commands, writes loopstra/config.yaml, loopstra/prompts/*.md,
+  .claude/skills/loopstra/, .claude/agents/{verifier,reviewer}.md, a
+  Bun-based test-protection hook wired into .claude/settings.json,
+  REVIEW.md, intent/README.md (owner guide), and a .gitignore entry.
+  The skill then walks an engineer through confirming commands and gates.
+- **Decision authority (2026-09-28).** User directed: make all remaining
+  decisions autonomously, optimizing for simple, unattended, human
+  readable, with observability tooling on top, and build the full
+  factory.
+
+## Open
+
+- None. Remaining details are settled in the design spec.
+
