@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"fake-build","cwd":"/","tools":[],"model":"fake"}
+{"type":"fake_action","write":{"path":"src/add.ts","content":"export function add(a: number, b: number): number {\n  if (Number.isNaN(a) || Number.isNaN(b)) throw new Error(\"NaN\");\n  return a + b;\n}\n"}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-build","total_cost_usd":0.1,"usage":{},"structured_output":{"status":"success","summary":"handled NaN","notes_for_next_phase":"","changed_files":["src/add.ts"],"commit_message":"fix: handle NaN"},"result":"ok"}
