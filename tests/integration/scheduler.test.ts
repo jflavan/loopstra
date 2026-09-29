@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { configPath } from "../../src/config";
-import { Git } from "../../src/git";
+import { Git, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
 import { readPause } from "../../src/heartbeat";
@@ -132,6 +132,27 @@ describe("scheduler resilience", () => {
     expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   }, 60_000);
+
+  test("a git index lock older than ten minutes is removed at the start of a tick and traced; a fresh one is left", async () => {
+    const { repo, ctx, trace } = await setupRepo("draft");
+    const git = new Git(repo.path);
+    await git.createBranch(ctx.branch, "main");
+    await git.worktreeAdd(ctx.worktreeDir, ctx.branch);
+    const rootLock = join(repo.path, ".git", "index.lock");
+    const wtLock = join(repo.path, ".git", "worktrees", SLUG, "index.lock");
+    const old = new Date(Date.now() - 11 * 60_000);
+    for (const p of [rootLock, wtLock]) { writeFileSync(p, ""); utimesSync(p, old, old); }
+    await tick(repo.path);
+    expect(existsSync(rootLock)).toBe(false);
+    expect(existsSync(wtLock)).toBe(false);
+    const removed = trace.events("_loop").filter((e) => e.type === "stale-lock-removed").map((e) => JSON.parse(e.payload).path as string);
+    expect(removed.map((p) => resolve(p)).sort()).toEqual([rootLock, wtLock].map((p) => resolve(p)).sort());
+    // A lock a running git command might hold is left alone.
+    writeFileSync(wtLock, "");
+    expect(await removeStaleLocks(repo.path)).toEqual([]);
+    expect(existsSync(wtLock)).toBe(true);
+    trace.close(); repo.cleanup();
+  });
 
   test("start keeps going after a problem and a stop cuts its sleep short", async () => {
     const { repo, trace } = await setupRepo("draft");

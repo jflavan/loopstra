@@ -519,7 +519,7 @@ line and an event in the new one; the loop and the dashboard keep working.
 
 Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
 `status_change`, `phase_end`, `error`, `signal`, `stop`,
-`person-changed-status`, `pause`.
+`person-changed-status`, `pause`, `stale-lock-removed`.
 
 CLI on top:
 
@@ -589,7 +589,8 @@ signed in. Run gh auth login, then start again."), then loops: tick, sleep `poll
 runs one tick and exits, for tests and cron. A tick:
 
 1. Load config. On validation failure, log and sleep; never crash on a bad
-   edit.
+   edit. Remove any git `index.lock` (repository or worktree) older than 10
+   minutes, left by a git process that died; traced as `stale-lock-removed`.
 2. With a remote, sync main (§10).
 3. Run due signals.
 4. Scan intents, consistency-check, regenerate `queue.md`.

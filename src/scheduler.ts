@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
-import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeWorktree, samePath } from "./git";
+import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, samePath, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { activePause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { syncMain } from "./remote";
@@ -43,6 +43,10 @@ export async function tick(root: string): Promise<TickResult> {
   const out: TickResult = { picked: null };
   try {
     trace.event("_loop", "tick", {});
+
+    // A git process that died (killed, or the machine went down) leaves its index lock behind, and
+    // every git write after it would fail. The loop is the only automated git user: an old lock is its own.
+    for (const path of await removeStaleLocks(root)) trace.event("_loop", "stale-lock-removed", { path, olderThanMinutes: STALE_LOCK_MS / 60_000 });
 
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).

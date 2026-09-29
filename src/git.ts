@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DETACHED, killTree, within } from "./shell";
 import { AssistantUnavailable, onStop, StopRequested, throwIfStopping } from "./stop";
@@ -338,6 +338,32 @@ export class Git {
     if (!names.length) return null;
     return names.includes("origin") ? "origin" : names[0]!;
   }
+}
+
+/** An index lock older than this is left over from a git process that died: the loop's own calls end within GIT_TIMEOUT_MS. */
+export const STALE_LOCK_MS = 10 * 60_000;
+
+/**
+ * Removes `index.lock` files older than `maxAgeMs` from the repository and each of its worktrees,
+ * and returns their paths. A killed git leaves its lock behind, and every later git write then fails;
+ * the loop is the only automated git user, and a person's git command does not hold a lock that long.
+ */
+export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, now = Date.now()): Promise<string[]> {
+  const common = await new Git(root).run(["rev-parse", "--git-common-dir"], true);
+  if (common.code !== 0) return [];
+  const gitDir = resolve(root, common.out.trim());
+  const worktrees = join(gitDir, "worktrees");
+  const candidates = [join(gitDir, "index.lock")];
+  if (existsSync(worktrees)) for (const name of readdirSync(worktrees)) candidates.push(join(worktrees, name, "index.lock"));
+  const removed: string[] = [];
+  for (const lock of candidates) {
+    try {
+      if (now - statSync(lock).mtimeMs < maxAgeMs) continue;
+      rmSync(lock, { force: true });
+      removed.push(lock);
+    } catch { /* no lock there, or it went away meanwhile */ }
+  }
+  return removed;
 }
 
 /** Removes a worktree directory however it can: git first, then the file system, then prunes git's record of it. */
