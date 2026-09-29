@@ -24,9 +24,9 @@ const codeChange = base.extend({
 });
 
 export const Envelopes = {
+  /** Missing sections never reach intake: the consistency check blocks on them first. */
   intake: base.extend({
     priority: z.enum(["low", "normal", "high", "urgent"]),
-    missing_sections: z.array(z.string()),
     question: z.string(),
   }),
   /** Concerns are a heading inside spec_markdown, where the owner reads them. */

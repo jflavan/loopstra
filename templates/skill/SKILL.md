@@ -35,12 +35,14 @@ draft -> accepted -> designing -> spec-review -> spec-approved -> planning -> pl
 Interview the person in plain language: what is wrong today and for whom, what should be true when it is done, how they would check it is done, who and what it touches, any constraints, and open questions. Write `intent/<slug>/intent.md` from the template in `intent/README.md` with a short hyphenated slug they agree to. Leave `status: draft`. Tell them to set `accepted` when they are ready. Do not design or plan anything.
 
 ## Status
-Run `loopstra status`. Explain each row in one sentence: what the change is, where it is, and whether anyone needs to do anything. For a blocked change, read its note aloud and offer the options below.
+Run `loopstra status`. Start with its "Needs attention" block (the same list as the dashboard's): each line is something a person should do or know. Then explain each row in one sentence: what the change is, where it is, and whether anyone needs to do anything. For a blocked change, read its note aloud and offer the options below.
 
-If the loop line says "Paused", the assistant could not be used (signed out, a usage limit, or the network). Nothing is blocked; the loop retries by itself at the time shown, waiting longer after each failure (up to 30 minutes). If it keeps pausing, check that `claude` works in a terminal (sign in again, or wait for the limit to reset). The detail is in the `pause` events (`loopstra tail`).
+If the loop line says "Paused", the assistant could not be used (signed out, a usage limit, or the network). Nothing is blocked; the loop retries by itself at the time shown, waiting longer after each failure (up to 30 minutes). If it keeps pausing, check that `claude` works in a terminal (sign in again, or wait for the limit to reset). The detail is in the `pause` events (`loopstra tail`). When the same step keeps pausing with the same message, the loop sends one tiny test request; if that gets through, the step's own failure blocks the change like any other.
+
+"Stopped — it did not shut down cleanly" means the loop process was killed or crashed; start it again. "Not responding" means the process is still there but has not checked in; it may be hung or the machine was asleep.
 
 ## Unblock
-Read the `note` in the change's `intent.md`. Explain the choices: retry from the last approved state (set `status` to the value in `resume_from`), fix something first and then retry, or `closed`. Make the edit only when the person says which. For details, read `.loopstra/runs/<slug>/events.jsonl` or the phase folders under `.loopstra/runs/<slug>/phases/`.
+Read the `note` in the change's `intent.md`. Explain the choices: follow the status the note names (it says which status to set to try again, or the two ways on); `resume_from`, the last approved state, is the fallback when the note names none; fix something first and then retry; or `closed`. Make the edit only when the person says which. For details, read `.loopstra/runs/<slug>/events.jsonl` or the phase folders under `.loopstra/runs/<slug>/phases/`.
 
 ## Tune
 Edit `loopstra/prompts/<phase>.md` or `loopstra/config.yaml`. Changes take effect on the next pass. Keep prompts short and explicit; keep gate defaults deterministic.

@@ -134,14 +134,12 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("intake naming missing sections blocks with the section names and how to continue", async () => {
+  test("intake's question is the note, with how to continue; nothing else runs", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
-    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-missing");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-question");
     await runDesignStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
-    expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toContain("Done when");
-    expect(i.file.frontmatter.note).toContain("set status to accepted");
+    expect(i.file.frontmatter.note).toBe("Which portal page should show the status? Update intent.md, then set status to accepted.");
     expect(phaseNames(trace)).toEqual(["intake"]);
     trace.close(); repo.cleanup();
   });

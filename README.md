@@ -42,7 +42,7 @@ cd your-repo
 loopstra init
 ```
 
-`init` is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands and writes:
+`init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands and writes:
 
 - `loopstra/config.yaml` and `loopstra/prompts/*.md`
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
@@ -66,7 +66,7 @@ Make `intent/<slug>/`, where the slug is lowercase words joined by dashes, like 
 ```markdown
 ---
 status: draft
-priority: normal      # low, normal, high, urgent; optional
+# priority: low, normal, high or urgent. Leave it out and Loopstra fills it in.
 author: Your name
 opened: 2026-01-01
 note: ""
@@ -83,6 +83,8 @@ note: ""
 
 Write it in your own words. "Done when" is a list someone could check. When it is ready, change `status: draft` to `status: accepted`. That is the only step a person must always take. Saving the file is enough; you do not need to commit it.
 
+Problem, Proposed outcome and Done when are required. An accepted request without them is blocked at once with a note like "This request is missing a Proposed outcome and a Done when section. Add them to intent.md, then set status to accepted."
+
 ## Run
 
 ```
@@ -90,31 +92,36 @@ loopstra start          # the loop; one step per tick, sleeps poll_seconds betwe
 loopstra start --once   # one tick, then exit (for cron or a scheduler)
 ```
 
-`start` checks that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true.
+`start` checks that the folder is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail` and `ui` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time.
 
 **Stopping.** Press Ctrl-C once to stop gracefully: nothing new starts, a running session is killed, and the change keeps its in-progress status and resumes on the next start. Press Ctrl-C a second time to exit at once.
 
-**When the assistant is unavailable** (signed out, usage limit, overload, network), nothing is blocked. The loop pauses and retries after 1, 2, 4, 8, 16, then 30 minutes, resetting after the next success. The pause survives a restart (`.loopstra/paused.json`) and shows as "The assistant is unavailable ... Retrying at 14:32." in `status`, `tail` and the dashboard. If it keeps pausing, check that `claude` works in a terminal.
+**When the assistant is unavailable** (signed out, usage limit, overload, network), nothing is blocked. The loop pauses and retries after 1, 2, 4, 8, 16, then 30 minutes, resetting after the next success. The pause survives a restart (`.loopstra/paused.json`) and shows as "The assistant is unavailable ... Retrying at 14:32." in `status`, `tail` and the dashboard; a stopped loop adds "the next start waits until 14:32". If it keeps pausing, check that `claude` works in a terminal. When the same step pauses three times in a row with the same message, the loop sends one tiny test request ($0.05 at most): if that gets through, the step's own failure blocks the change like a crash, so a step that only looks like an outage cannot pause the loop forever.
 
 ## Watch
 
 ```
-loopstra status         # loop state, then every change: priority, where it is, last phase, cost, note
+loopstra status         # loop state, what needs a person, then every change: priority, where it is, last phase, cost, note
 loopstra tail           # live events; `loopstra tail <slug>` for one change
 loopstra ui             # dashboard at http://127.0.0.1:4646 (--port <n>)
 ```
 
-The dashboard is one local page, polling every couple of seconds. It shows the loop's heartbeat (running, paused, stopped, not responding), a "needs attention" list, costs for today, this week and all time, the queue, and per-change drill-down: each phase with duration, cost and any commands the session was refused, gate results with evidence, and the event log. `queue.md` in `intent/` is a generated view of the same queue.
+The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not shut down cleanly" (the loop process is gone: killed or crashed; start it again), or "Not responding" (the process is there but has not checked in: hung, or the machine slept).
+
+Under it, `status` prints a "Needs attention" block, or "Nothing needs you right now.": a pause, failing tests on main, main out of step with GitHub, a settings problem, blocked changes, unreadable intents, and changes waiting for a person (drafts, and reviews with a person on the gate). The dashboard shows the same list, labelled "Blocked" or "Waiting for you". Long notes wrap to the terminal's width.
+
+The dashboard is one local page, polling every couple of seconds. It shows the loop's heartbeat, the needs-attention list, costs for today, this week and all time, the queue, and per-change drill-down: the change's own documents (intent.md, spec.md, plan.md, review.md, outcome.md, lessons.md, read-only), each phase with duration, cost and any commands the session was refused, gate results with evidence, and the event log. `queue.md` in `intent/` is a generated view of the same queue; its "Needs a person" list matches.
 
 ## When something needs a person
 
 The `status` and `note` lines at the top of `intent.md` say what to do; `intent/README.md` has the full table for owners.
 
-- `blocked`: read the `note`. It says in plain words what went wrong and which status to set to try again (for example back to `plan-approved`), or you can set `closed`. Loops are bounded (test-fix 3, review-revise 2), and an exhausted budget blocks; an engineer may need to raise the limit.
+- `blocked`: read the `note`. It says in plain words what went wrong and which status to set to try again (for example back to `plan-approved`), or you can set `closed`. A passing hiccup (the assistant crashed or took too long) says "To try again, set status to ..."; anything else says "When that is sorted out, ...". Loops are bounded (test-fix 3, review-revise 2), and an exhausted budget blocks; an engineer may need to raise the limit.
 - `spec-review`, `plan-review`: the automatic checks passed and a gate is set to wait for a person. Read `spec.md` or `plan.md`, then set `spec-approved` or `plan-approved`, or say what is wrong in the note and set the earlier status. Stepping a review status never advances it.
-- `merge-review`: checks passed; with a GitHub pull request, approve it there; when the note says so, set `merge-approved`.
+- `merge-review`: checks passed and the change is waiting to go into the main code. Follow the note: with nobody on the merge gate it waits for the checks on GitHub (nothing to do); with `pr`, approve the pull request on GitHub; with `status`, read `review.md` and set `merge-approved`.
+- `merged`: the change is in the main code.
 - `verifying`: with a person on the done gate, look at the result and set `done`.
 - `outcome.md` may have "For a person to confirm": things the system could not check itself. They never hold a change up.
 
@@ -130,7 +137,9 @@ With a remote, the approving review pushes the change's branch and opens a pull 
 
 Merges go through `gh pr merge`, never twice. A PR that is merged or closed on GitHub is noticed in any mode. Without a remote the same checks run and Loopstra merges locally.
 
-Each tick, Loopstra fetches and rebases local `main` onto the remote's, and pushes `main` only when every unpushed commit is its own (bookkeeping under `intent/`). Your own unpushed commits are never pushed for you; it waits until you push them. In `intent/`, the remote's version wins.
+Each tick, Loopstra fetches and rebases local `main` onto the remote's. It shares `main` once, at the end of the tick (and just before it pushes a change's branch for its pull request), and only when every unpushed commit is its own (bookkeeping under `intent/`). Your own unpushed commits are never pushed for you; it waits until you push them. In `intent/`, the remote's version wins.
+
+Loopstra's bookkeeping commits on `main` (`loopstra(<slug>): ...`) end with `[skip ci]`, so they do not start CI; the change's own merge commit does. `intent/queue.md` is rewritten every tick but committed only along with another of Loopstra's commits, so a quiet tick adds no commit; an unsaved `queue.md` never holds up a merge or the sync.
 
 ## Lessons
 
@@ -154,7 +163,8 @@ draft -> accepted -> designing -> spec-review -> spec-approved
 any status -> blocked | closed
 ```
 
-- **Design and plan** sessions are read-only and return content; the runtime writes `spec.md`, `plan.md`, `review.md`, `outcome.md`. Only the build session edits code, in a worktree on its own branch `intent/<slug>`, and the runtime makes every commit and merge.
+- **Design and plan** sessions are read-only and return content; the runtime writes `spec.md`, `plan.md`, `review.md`, `outcome.md`. Only the build session edits code, in a worktree on its own branch `intent/<slug>`, and the runtime makes every commit and merge. The build session may run the configured commands (test, lint, build, run, install) on top of `claude.allowed_tools`.
+- **Merge checks** bring the branch up to date with `main`, make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), and read the newest review.
 - **Gates** sit at every boundary. Each is a list of checks: deterministic code, a fresh-context agent reviewer, or a person. A gate's checks run in the step that produced the artifact; a pass goes straight to the approved status, or to the review status if a person is set. A failure gets one automatic rewrite with the findings, then blocks.
 - **After a merge**, the done-when criteria are checked, `outcome.md` and `lessons.md` are written, and main's tests are run. If main goes from green to red, a new draft intent describing the breach is opened.
 - **The trace** is in `.loopstra/` (gitignored): `trace.db` (SQLite), and per change `runs/<slug>/events.jsonl` plus a folder per phase holding the prompt, the result envelope and the raw session. `status`, `tail` and `ui` read it; nothing leaves your machine.
@@ -167,7 +177,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`; `d
 
 - `main_branch`, `poll_seconds`
 - `commands`: test (required), install, lint, build, run
-- `claude`: models (default, cheap, strong), timeout, budget per session, allowed tools
+- `claude`: models (default, cheap, strong), timeout, budget per session, and `allowed_tools` for build sessions (the configured commands are always added; anything else a build needs, like `"Bash(make *)"`, goes here)
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, skills, `before`/`after` commands, and loop limits
 - `signals`: how often main's health check runs
@@ -176,7 +186,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`; `d
 
 ```
 bun install
-bun test
+bun run test        # the suite in four parallel shards; bun run test:serial runs it in one process
 bun run typecheck
 ```
 

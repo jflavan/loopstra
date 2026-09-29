@@ -1,2 +1,0 @@
-{"type":"system","subtype":"init","session_id":"fake-intake-missing","cwd":"/","tools":[],"model":"fake"}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-intake-missing","total_cost_usd":0.002,"usage":{},"structured_output":{"status":"success","summary":"sections missing","priority":"normal","missing_sections":["Done when"],"question":""},"result":"ok"}

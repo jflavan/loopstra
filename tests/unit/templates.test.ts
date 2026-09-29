@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Envelopes } from "../../src/envelopes";
+import { parseIntentFile, patchFrontmatter } from "../../src/intents";
 import { PROMPT_VARS } from "../../src/prompts";
 
 const ROOT = fileURLToPath(new URL("../../templates/prompts/", import.meta.url));
@@ -28,6 +29,18 @@ describe("prompt templates", () => {
         expect({ template: name, variable: m[1], known: known.has(m[1]!) }).toEqual({ template: name, variable: m[1], known: true });
       }
     }
+  });
+
+  test("the owner guide's template leaves priority out, parses, and takes the priority Loopstra fills in", async () => {
+    const guide = await Bun.file(join(ROOT, "..", "intent-README.md")).text();
+    const example = /```markdown\n([\s\S]*?)```/.exec(guide)![1]!;
+    expect(example).not.toMatch(/^priority:/m);
+    const file = parseIntentFile(example);
+    expect(file.frontmatter.status).toBe("draft");
+    expect(file.frontmatter.priority).toBeUndefined();
+    const filled = parseIntentFile(patchFrontmatter(example, { priority: "high" }));
+    expect(filled.frontmatter.priority).toBe("high");
+    expect(filled.sections["Done when"]).toContain("A short list");
   });
 
   test("skills reach the prompt only through the prepended line", async () => {

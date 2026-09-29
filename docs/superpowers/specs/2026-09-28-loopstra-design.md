@@ -83,7 +83,7 @@ listed the same way: "intent.md has a line Loopstra does not recognise:
 ```markdown
 ---
 status: draft
-priority: normal          # low | normal | high | urgent, plain words
+priority: normal          # low | normal | high | urgent; optional, intake fills it in
 author: J. Ortiz
 opened: 2026-09-28
 note: ""                  # runtime writes plain-language guidance here
@@ -178,8 +178,10 @@ Computed on every tick, written to `intent/queue.md` as a table. Order:
 3. `opened` date, oldest first.
 4. Slug, alphabetical, as the tie-break.
 
-`queue.md` also lists blocked intents with their notes, and done or closed
-intents in a collapsed section. It is regenerated, never edited.
+`queue.md` also lists, under "Needs a person", every change waiting for
+one (blocked, drafts, and reviews with a person on the gate) with its note,
+and done or closed intents in a section of their own. It is regenerated,
+never edited, and committed only along with another runtime commit (§10).
 
 ## 6. Configuration
 
@@ -204,7 +206,8 @@ claude:
     strong: opus
   timeout_minutes: 30           # per phase; the process is killed past this
   max_budget_usd: 5             # per phase, passed to --max-budget-usd
-  allowed_tools:                # for the build session; judges get read-only
+  allowed_tools:                # for the build session, plus Bash(<cmd> *) for each
+                                # configured command; judges get read-only
     - Read
     - Edit
     - Write
@@ -256,12 +259,12 @@ Phases and their envelopes (all include `status: "success" | "fail"` and
 
 | Phase | Session | Tools | Envelope adds |
 |---|---|---|---|
-| intake | fresh, cheap | read-only | `priority`, `missing_sections[]`, `question` |
+| intake | fresh, cheap | read-only | `priority`, `question` |
 | design | fresh, strong | read-only | `spec_markdown` (concerns are its "Areas of concern" heading) |
 | spec-check | fresh, strong | read-only | `approved`, `findings[{requirement, met, evidence}]` |
 | plan | fresh, strong, plan mode | read-only | `plan_markdown` (its "Files that change" list is the file list) |
 | plan-challenge | fresh, strong | read-only | `approved`, `concerns[{concern, blocking}]` |
-| build | B, default | build tools | `changed_files[]`, `commit_message` |
+| build | B, default | build tools (`claude.allowed_tools` plus the configured commands, install included) | `changed_files[]`, `commit_message` |
 | fix | resume B | build tools, test edits blocked | same as build |
 | reconcile | resume B | build tools | `plan_markdown` |
 | verify | fresh, cheap | read-only plus Bash of configured commands and read-only git | `passed`, `observations[]` |
@@ -283,8 +286,11 @@ the full error in the trace.
 
 1. `accepted` → runtime sets `designing`.
 2. `before` commands for design.
-3. **intake**: fills missing `priority`; if required sections are missing or
-   `question` is set, block with that question as the note.
+3. **intake**: fills missing `priority`; if `question` is set, block with that
+   question as the note. (Missing required sections never reach intake: the
+   scan's consistency check blocks first, "This request is missing a Proposed
+   outcome and a Done when section. Add them to intent.md, then set status to
+   accepted.")
 4. **design**: runtime writes `spec.md` from `spec_markdown`. Concerns are
    the spec's own "Areas of concern" heading.
 5. `after` commands. Commit `spec.md` on main.
@@ -449,6 +455,9 @@ Behavior:
   `--resume` whose session is gone ("No conversation found" on stderr) is
   `no-session`, checked before the result, since the CLI also sends an
   `error_during_execution` result then.
+- A build session (build, fix, reconcile, revise) may use
+  `claude.allowed_tools` plus `Bash(<cmd> *)` for each configured command
+  (test, lint, build, run, install), so it can run the tests it must pass.
 - The read-only tool set is `Read, Glob, Grep` (the write tools are removed
   with `--disallowedTools`) and for verify and done-check additionally
   `Bash(<each configured command>)` and read-only git. Every session also
@@ -546,15 +555,29 @@ Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
 
 CLI on top:
 
-- `loopstra status`: table of intents with status, current phase, last
-  activity, cost so far, and the note if blocked.
-- `loopstra tail [slug]`: streams events as they are written.
+- `loopstra status`: the loop line (running, paused, stopping, stopped,
+  "Stopped — it did not shut down cleanly" when the heartbeat's process is
+  gone, not responding when it is there but silent; a stopped loop with a
+  pause pending adds "The assistant was unavailable; the next start waits
+  until 14:32."), then the "Needs attention" block (the same list as the
+  dashboard's, from `src/attention.ts`; "Nothing needs you right now." when
+  empty), then a table of changes: name, priority, where it is in plain
+  words, last phase and its result, cost so far, and the note. The last
+  column is never padded; notes wrap to the terminal width.
+- `loopstra tail [slug]`: streams events as they are written (the first
+  screen is the newest 50, read with a bounded query).
+- `status`, `tail`, and `ui` in a folder without `loopstra/config.yaml` say
+  "This folder is not set up for Loopstra. Run loopstra init first." and
+  create nothing.
 - `loopstra ui`: serves a single HTML page from `Bun.serve` on
   `127.0.0.1:4646` (local only) with a JSON API over the trace db, polling every two
   seconds. Shows the queue, each intent's phase timeline, gate results with
-  evidence, cost, and the last 200 events, and a "needs attention" list
-  (blocked, waiting for a person, unreadable intents, a red main, and
-  `main_sync` waiting or failing). No build step, no framework.
+  evidence, cost, links to the change's own documents (served read-only as
+  text/plain from `/docs/<slug>/<name>`, slug and name checked, the real path
+  kept inside the change's folder), and the last 200 events, and a "needs
+  attention" list (a pause, a red main, `main_sync` waiting or failing, a
+  config problem, "Blocked" changes, unreadable intents, and changes
+  "Waiting for you"). No build step, no framework.
 
 ## 12. The operator skill
 
@@ -605,7 +628,9 @@ exits 0.
 
 ## 14. Runtime process
 
-`loopstra start [--once]`: checks `claude` and `git` are installed, the
+`loopstra start [--once]`: checks the folder is set up (it has
+`loopstra/config.yaml`; otherwise "This folder is not set up for Loopstra.
+Run loopstra init first."), `claude` and `git` are installed, the
 root checkout is on `main_branch` ("Run loopstra from a checkout of
 <main_branch>; you are on <branch>."), that Loopstra's own files are
 committed there (`loopstra/config.yaml`, `loopstra/prompts/`, and, when
@@ -652,7 +677,14 @@ The pause is kept in `.loopstra/paused.json`, so a restart keeps backing
 off. It is shown with its plain reason ("The assistant is unavailable
 (sign-in, usage limit, or network). Retrying at 14:32.") in the heartbeat
 (`pausedUntil`, `pauseReason`), the dashboard's header and attention list,
-`loopstra status`, and `tail`. `start --once` just returns.
+`loopstra status`, and `tail`. `start --once` just returns. The pause also
+records the change, phase, and matched line; stderr counts only when the
+session never answered (no `assistant` event), the error result's text
+always. On the third pause in a row for the same change, phase, and line,
+one probe session runs (cheap model, $0.05, no tools, a trivial prompt,
+schema `{ok: boolean}`, traced as a `probe` phase): if it gets through, the
+failure is the phase's own, so the pause ends and the change is blocked as
+a crash; if not, the loop keeps backing off.
 
 Resumption: `sessions.json` maps phase names to session IDs. A build
 continuation resumes session B if present. If `--resume` fails (session gone),
@@ -666,7 +698,11 @@ the runtime starts a fresh session and records it.
   installed) never blocks: the loop pauses and backs off (§14). Failures the
   agent causes keep blocking.
 - Command failures in `before`/`after` block immediately.
-- Git or GitHub command failures block with the stderr's last line.
+- Git or GitHub command failures inside a step block with a plain note
+  ("... An engineer needs to look at it."); the command and its stderr go
+  to the trace, never into the note. A hung git command says "A
+  version-control command did not finish in time; an engineer should
+  look."
 - The runtime's own exceptions inside a tick are caught at the tick
   boundary, logged, and the loop continues with the next tick.
 - Cost per intent is summed from result events and shown in `status`.
@@ -674,8 +710,10 @@ the runtime starts a fresh session and records it.
   "When that is sorted out, set status to <x> to try again." (x: the
   approved status the change resumes from, or for a merge retried
   without a rebuild, `merge-approved` / `merge-review`) unless the note
-  already says which status to set. A spending-limit block says an
-  engineer may need to raise the limit.
+  already says which status to set. A passing hiccup (the assistant
+  crashed or took too long) needs nothing sorted out: "To try again, set
+  status to <x>." A spending-limit block says an engineer may need to
+  raise the limit.
 
 ## 16. Repository layout of Loopstra itself
 

@@ -32,10 +32,8 @@ async function design(ctx: StepContext): Promise<StepResult> {
     vars: { intent: a.intent, priority: ctx.intent.file.frontmatter.priority ?? "not stated" },
   });
   if (!intake.ok) return block(ctx, intake.note);
-  if (intake.envelope.question || intake.envelope.missing_sections.length) {
-    const missing = intake.envelope.missing_sections.length ? ` Missing sections: ${intake.envelope.missing_sections.join(", ")}.` : "";
-    return block(ctx, `${intake.envelope.question || "The intent needs more detail before it can be designed."}${missing} Update intent.md, then set status to accepted.`);
-  }
+  // Missing sections never get here: the scan's consistency check blocks on them first.
+  if (intake.envelope.question.trim()) return block(ctx, `${intake.envelope.question.trim()} Update intent.md, then set status to accepted.`);
   await writeIntentPriority(ctx, intake.envelope.priority);
 
   // Restarted during the automatic rewrite: send the same findings again.

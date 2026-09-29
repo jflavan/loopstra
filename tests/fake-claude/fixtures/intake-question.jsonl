@@ -1,2 +1,2 @@
 {"type":"system","subtype":"init","session_id":"q"}
-{"type":"result","subtype":"success","session_id":"q","total_cost_usd":0,"structured_output":{"status":"success","summary":"","priority":"normal","missing_sections":[],"question":"Which portal page should show the status?"}}
+{"type":"result","subtype":"success","session_id":"q","total_cost_usd":0,"structured_output":{"status":"success","summary":"","priority":"normal","question":"Which portal page should show the status?"}}

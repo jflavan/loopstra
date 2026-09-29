@@ -27,12 +27,13 @@ describe("envelopes", () => {
     expect(jsonSchemaFor("plan-challenge").properties).toHaveProperty("concerns");
   });
 
-  test("intake accepts a priority and question", () => {
+  test("intake accepts a priority and question; missing sections are the consistency check's, before intake", () => {
     const r = Envelopes.intake.parse({
       status: "success", summary: "fine",
-      priority: "high", missing_sections: [], question: "",
+      priority: "high", question: "",
     });
     expect(r.priority).toBe("high");
+    expect(jsonSchemaFor("intake").properties).not.toHaveProperty("missing_sections");
   });
 
   test("review requires severity on findings", () => {

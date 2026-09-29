@@ -1,2 +1,2 @@
 {"type":"system","subtype":"init","session_id":"fake-agent-fail","cwd":"/","tools":[],"model":"fake"}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-agent-fail","total_cost_usd":0.001,"usage":{},"structured_output":{"status":"fail","summary":"The intent folder could not be read","priority":"normal","missing_sections":[],"question":""},"result":"ok"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-agent-fail","total_cost_usd":0.001,"usage":{},"structured_output":{"status":"fail","summary":"The intent folder could not be read","priority":"normal","question":""},"result":"ok"}
