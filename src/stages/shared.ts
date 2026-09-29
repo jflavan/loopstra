@@ -1,4 +1,4 @@
-import { runCommand } from "../shell";
+import { commandTimeoutMs, runCommand } from "../shell";
 import { block, readArtifact, setStatus, type StepContext, type StepResult } from "../context";
 import { codePhase } from "../phases";
 import type { Check } from "../gates";
@@ -11,7 +11,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
   if (!cmds.length) return { ok: true };
   const r = await codePhase(ctx, `${stage}-${which}`, async () => {
     for (const cmd of cmds) {
-      const res = await runCommand(cmd, cwd, { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage });
+      const res = await runCommand(cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage }, timeoutMs: commandTimeoutMs(ctx.cfg) });
       ctx.trace.event(ctx.slug, "command", { command: cmd, code: res.code, lastLine: res.lastLine, durationMs: res.durationMs });
       if (res.code !== 0) throw new Error(`\`${cmd}\` failed: ${res.lastLine || `exit ${res.code}`}`);
     }

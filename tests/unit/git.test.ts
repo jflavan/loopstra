@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { tempGitRepo } from "../helpers";
+
+const sameDir = (a: string, b: string) => {
+  const n = (p: string) => realpathSync.native(p).replace(/[\\/]+/g, "/").toLowerCase();
+  return n(a) === n(b);
+};
 
 describe("Git", () => {
   test("branch, worktree, commit, changed files, merge, cleanup", async () => {
@@ -34,6 +39,46 @@ describe("Git", () => {
     expect(existsSync(wt)).toBe(false);
     await git.deleteBranch("intent/x");
     expect(await git.branchExists("intent/x")).toBe(false);
+    repo.cleanup();
+  });
+
+  test("ensureWorktree replaces a plain leftover directory, and commits through it land on the intent branch, not main", async () => {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    await git.createBranch("intent/x", "main");
+    const wt = join(repo.path, ".loopstra", "worktrees", "x");
+    mkdirSync(wt, { recursive: true });
+    await Bun.write(join(wt, "leftover.txt"), "stale");
+    const mainBefore = await git.headSha();
+
+    // A plain directory inside the repo resolves to the main checkout: committing through it would hit main.
+    await expect(new Git(wt).assertBranch("intent/x")).rejects.toThrow(/intent\/x/);
+
+    await git.ensureWorktree(wt, "intent/x");
+    expect(existsSync(join(wt, "leftover.txt"))).toBe(false);
+    const wtGit = new Git(wt);
+    expect(sameDir(await wtGit.toplevel(), wt)).toBe(true);
+    expect(sameDir(await git.toplevel(), wt)).toBe(false);
+    await wtGit.assertBranch("intent/x");
+    await Bun.write(join(wt, "src", "add.ts"), "export const add = 1;\n");
+    await wtGit.commitAll("add");
+    expect(await git.headSha()).toBe(mainBefore);
+    expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
+    expect((await git.run(["cat-file", "-e", "intent/x:src/add.ts"], true)).code).toBe(0);
+
+    // A healthy worktree on the right branch is reused as is.
+    await Bun.write(join(wt, "scratch.txt"), "keep");
+    await git.ensureWorktree(wt, "intent/x");
+    expect(existsSync(join(wt, "scratch.txt"))).toBe(true);
+
+    // A worktree on the wrong branch is replaced.
+    await git.createBranch("intent/y", "main");
+    await git.worktreeRemove(wt);
+    await git.worktreeAdd(wt, "intent/y");
+    await git.ensureWorktree(wt, "intent/x");
+    expect(await new Git(wt).currentBranch()).toBe("intent/x");
+
+    await git.worktreeRemove(wt);
     repo.cleanup();
   });
 

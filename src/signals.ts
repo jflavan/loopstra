@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { Git } from "./git";
-import { runCommand } from "./shell";
+import { commandTimeoutMs, runCommand } from "./shell";
 import type { Trace } from "./trace";
 
 /**
@@ -18,8 +18,8 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
     if (existsSync(wt)) { await git.worktreeRemove(wt); }
     mkdirSync(join(root, ".loopstra", "worktrees"), { recursive: true });
     await git.run(["worktree", "add", "--detach", wt, cfg.main_branch]);
-    if (cfg.commands.install) await runCommand(cfg.commands.install, wt);
-    const r = await runCommand(cfg.commands.test, wt);
+    if (cfg.commands.install) await runCommand(cfg.commands.install, wt, { timeoutMs: commandTimeoutMs(cfg) });
+    const r = await runCommand(cfg.commands.test, wt, { timeoutMs: commandTimeoutMs(cfg) });
     result = r.code === 0 ? "pass" : "fail";
     output = r.output.slice(-4000);
   } catch (e) {

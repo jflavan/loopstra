@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 /** The last non-empty line of some git output, or "" when there is none. */
 function lastNonEmptyLine(s: string): string {
@@ -12,6 +12,24 @@ export class GitError extends Error {
     // git prints conflict text to stdout, not stderr, so fall back to stdout when stderr has nothing useful.
     super(`git ${args.join(" ")} failed (${code}): ${lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout)}`);
   }
+}
+
+/** The checkout is on a different branch than the caller is about to commit to. */
+export class WrongBranchError extends Error {
+  constructor(public readonly cwd: string, public readonly expected: string, public readonly actual: string) {
+    super(`expected ${cwd} to be on branch ${expected} but it is on ${actual}`);
+  }
+}
+
+/** True when two paths name the same directory (resolves links, 8.3 names, slashes, and case on Windows). */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    let r: string;
+    try { r = realpathSync.native(p); } catch { r = resolve(p); }
+    r = r.replace(/[\\/]+/g, "/").replace(/\/$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
 }
 
 export class Git {
@@ -30,7 +48,38 @@ export class Git {
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
-  async worktreeAdd(path: string, branch: string): Promise<void> { await this.run(["worktree", "add", path, branch]); }
+  async toplevel(): Promise<string> { return (await this.run(["rev-parse", "--show-toplevel"])).out.trim(); }
+  async worktreePrune(): Promise<void> { await this.run(["worktree", "prune"]); }
+
+  /** Always prunes first, so a worktree whose directory was deleted by hand does not block the add. */
+  async worktreeAdd(path: string, branch: string): Promise<void> {
+    await this.worktreePrune();
+    await this.run(["worktree", "add", path, branch]);
+  }
+
+  /**
+   * Makes `dir` a worktree of this repository checked out on `branch`. An existing directory is
+   * reused only if it is itself a worktree root (not just a folder inside the main checkout) on
+   * `branch`; anything else is removed and the worktree is added again.
+   */
+  async ensureWorktree(dir: string, branch: string): Promise<void> {
+    if (existsSync(dir)) {
+      const there = new Git(dir);
+      const top = await there.run(["rev-parse", "--show-toplevel"], true);
+      const head = await there.run(["rev-parse", "--abbrev-ref", "HEAD"], true);
+      if (top.code === 0 && samePath(top.out.trim(), dir) && head.code === 0 && head.out.trim() === branch) return;
+      await this.run(["worktree", "remove", "--force", dir], true);
+      rmSync(dir, { recursive: true, force: true });
+    }
+    await this.worktreeAdd(dir, branch);
+  }
+
+  /** Throws unless the checkout at this path is on `expected`. Call before committing. */
+  async assertBranch(expected: string): Promise<void> {
+    const r = await this.run(["rev-parse", "--abbrev-ref", "HEAD"], true);
+    const actual = r.code === 0 ? r.out.trim() : "(unknown)";
+    if (actual !== expected) throw new WrongBranchError(this.cwd, expected, actual);
+  }
 
   async worktreeRemove(path: string): Promise<void> {
     const r = await this.run(["worktree", "remove", "--force", path], true);

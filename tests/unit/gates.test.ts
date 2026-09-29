@@ -21,17 +21,48 @@ describe("checks", () => {
     expect(parsePlanFiles(plan)).toEqual([{ path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }, { path: "src/c.ts", new: true }]);
   });
 
-  test("filesExistOrNew reports existing files marked new and missing files not marked new", () => {
+  test("parsePlanFiles tolerates heading case, a trailing colon, descriptions, bold, ./, backslashes, and (new) anywhere", () => {
+    const plan = [
+      "# Plan", "", "## Files That Change:", "",
+      "- **src/a.ts** (new): the adder",
+      "- `./src/b.ts` - existing, gets a call",
+      "* src\\c.ts, updated",
+      "- (new) tests/a.test.ts",
+      "- `src/d.ts`: add export (New)",
+      "", "## Order of work", "1. x", "",
+    ].join("\n");
+    expect(parsePlanFiles(plan)).toEqual([
+      { path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }, { path: "src/c.ts", new: false },
+      { path: "tests/a.test.ts", new: true }, { path: "src/d.ts", new: true },
+    ]);
+  });
+
+  test("parsePlanFiles returns null when there is no Files that change section", () => {
+    expect(parsePlanFiles("# Plan\n\n## Order of work\n1. x\n")).toBeNull();
+    expect(parsePlanFiles("# Plan\n\n## Files that change\n\n## Order of work\n")).toEqual([]);
+  });
+
+  test("filesExistOrNew reports missing files not marked new; an existing file marked new is harmless", async () => {
     const t = tempDir();
     mkdirSync(join(t.path, "src"), { recursive: true });
-    Bun.write(join(t.path, "src", "b.ts"), "");
-    expect(filesExistOrNew(t.path, [{ path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }])).toEqual({ ok: true });
+    await Bun.write(join(t.path, "src", "b.ts"), "");
+    expect(filesExistOrNew(t.path, [{ path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }, { path: "src/b.ts", new: true }])).toEqual({ ok: true });
     expect(filesExistOrNew(t.path, [{ path: "src/zzz.ts", new: false }])).toEqual({ ok: false, problems: ["src/zzz.ts is listed as an existing file but does not exist"] });
     t.cleanup();
   });
 
-  test("diffWithinPlan lists files changed outside the plan, ignoring plan.md itself and lockfiles", () => {
-    expect(diffWithinPlan(["src/a.ts", "src/x.ts", "bun.lock"], [{ path: "src/a.ts", new: false }])).toEqual(["src/x.ts"]);
+  test("diffWithinPlan exempts only the intent's own folder and lockfiles anywhere", () => {
+    const changed = [
+      "src/a.ts", "src/x.ts", "bun.lock", "web/package-lock.json", "crates/x/Cargo.lock", "go.sum",
+      "intent/add/plan.md", "intent/other/plan.md", "loopstra/config.yaml", ".claude/settings.json", "CLAUDE.md",
+    ];
+    expect(diffWithinPlan(changed, [{ path: "./src/a.ts", new: false }], "add")).toEqual([
+      "src/x.ts", "intent/other/plan.md", "loopstra/config.yaml", ".claude/settings.json", "CLAUDE.md",
+    ]);
+  });
+
+  test("diffWithinPlan normalizes backslashes and ./ on both sides", () => {
+    expect(diffWithinPlan(["./src/a.ts", "src\\b.ts"], [{ path: "src\\a.ts", new: false }, { path: "./src/b.ts", new: false }], "x")).toEqual([]);
   });
 });
 

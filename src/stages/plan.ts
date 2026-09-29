@@ -38,7 +38,7 @@ async function plan(ctx: StepContext, concerns: string): Promise<StepResult> {
 
 async function planGate(ctx: StepContext): Promise<StepResult> {
   const a = await artifacts(ctx);
-  const files = parsePlanFiles(a.plan);
+  const files = parsePlanFiles(a.plan) ?? []; // no Files section: the headings check reports it
   const checks: Check[] = [
     headingsCheck("headings", a.plan, PLAN_HEADINGS),
     { name: "files", run: async () => { const r = filesExistOrNew(ctx.root, files); return r.ok ? { result: "pass", evidence: `${files.length} files listed` } : { result: "fail", evidence: r.problems.join("; ") }; } },

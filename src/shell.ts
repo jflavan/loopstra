@@ -1,5 +1,3 @@
-import { $ } from "bun";
-
 /** Resolves to the promise's value, or to `fallback` once `ms` pass. Never waits longer than `ms`. */
 export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -26,16 +24,64 @@ export interface CommandResult {
   output: string;
   lastLine: string;
   durationMs: number;
+  /** True when the command was killed for running past its timeout. */
+  timedOut: boolean;
+}
+
+export interface RunCommandOptions {
+  env?: Record<string, string>;
+  /** Kill the command (and anything it started) after this long. Callers pass `claude.timeout_minutes`. */
+  timeoutMs?: number;
+}
+
+/** Used only when a caller passes no timeout; matches the config default of 30 minutes. */
+const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+export const COMMAND_TIMEOUT_NOTE = "A project command did not finish in time.";
+
+/** The timeout callers pass: the per-phase limit from config. */
+export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): number {
+  return cfg.claude.timeout_minutes * 60_000;
 }
 
 /**
- * Runs one configured command string through Bun's cross-platform shell.
- * Never throws on non-zero exit; the exit code is the result.
+ * Runs one configured command string through Bun's cross-platform shell (`bun exec`).
+ * Never throws on non-zero exit; the exit code is the result. Past the timeout the
+ * process tree is killed and the result says so.
  */
-export async function runCommand(command: string, cwd: string, env: Record<string, string> = {}): Promise<CommandResult> {
+export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
-  const r = await $`${{ raw: command }}`.cwd(cwd).env({ ...process.env, ...env }).nothrow().quiet();
-  const output = r.stdout.toString() + r.stderr.toString();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const proc = Bun.spawn({
+    cmd: [process.execPath, "exec", command],
+    cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, ...(opts.env ?? {}) },
+  });
+  let stdout = "";
+  let stderr = "";
+  const drain = async (stream: ReadableStream<Uint8Array>, add: (s: string) => void) => {
+    const dec = new TextDecoder();
+    try { for await (const chunk of stream) add(dec.decode(chunk, { stream: true })); } catch { /* closed */ }
+  };
+  const drained = Promise.all([drain(proc.stdout, (s) => { stdout += s; }), drain(proc.stderr, (s) => { stderr += s; })]);
+
+  let code = await within(proc.exited, timeoutMs, null);
+  const timedOut = code === null;
+  if (timedOut) {
+    await killTree(proc);
+    code = await within(proc.exited, 2_000, null);
+  }
+  // Output pipes may be held by a leftover grandchild; take what arrived.
+  await within(drained, timedOut ? 250 : 2_000, undefined);
+
+  let output = stdout + stderr;
+  if (timedOut) output += `\nThe command \`${command}\` did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped.\n`;
   const lines = output.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.trim());
-  return { command, code: r.exitCode, output, lastLine: lines[lines.length - 1] ?? "", durationMs: Date.now() - started };
+  return {
+    command,
+    code: timedOut ? (code || 124) : (code ?? 1),
+    output,
+    lastLine: timedOut ? COMMAND_TIMEOUT_NOTE : lines[lines.length - 1] ?? "",
+    durationMs: Date.now() - started,
+    timedOut,
+  };
 }
