@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"fake-build","cwd":"/","tools":[],"model":"fake"}
+{"type":"fake_action","write":{"path":"FIXED","content":"fixed\n"}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-build","total_cost_usd":0.1,"usage":{},"structured_output":{"status":"success","summary":"made the main test pass","notes_for_next_phase":"","changed_files":["FIXED"],"commit_message":"fix: satisfy the new test on main"},"result":"ok"}

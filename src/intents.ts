@@ -7,7 +7,7 @@ export const STATUSES = [
   "draft", "accepted",
   "designing", "spec-review", "spec-approved",
   "planning", "plan-review", "plan-approved",
-  "building", "reviewing", "merge-review", "merged",
+  "building", "reviewing", "merge-review", "merge-approved", "merged",
   "verifying", "done",
   "blocked", "closed",
 ] as const;
@@ -132,7 +132,7 @@ const IMPLIES: Partial<Record<Status, readonly string[]>> = {
   "spec-review": ["spec.md"], "spec-approved": ["spec.md"],
   planning: ["spec.md"], "plan-review": ["spec.md", "plan.md"], "plan-approved": ["spec.md", "plan.md"],
   building: ["spec.md", "plan.md"], reviewing: ["spec.md", "plan.md"],
-  "merge-review": ["spec.md", "plan.md"], merged: ["spec.md", "plan.md"],
+  "merge-review": ["spec.md", "plan.md"], "merge-approved": ["spec.md", "plan.md"], merged: ["spec.md", "plan.md"],
   verifying: ["spec.md", "plan.md"], done: ["spec.md", "plan.md", "outcome.md"],
 };
 
@@ -159,9 +159,9 @@ const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
 
 /**
  * Runnable: the runtime has something to do for this intent right now.
- * A review status whose gate is human is not runnable; the scan picks up the
- * person's status change. (PR-gated merge waits are polled by the merge stage
- * itself, so "merge-review" with pr is also not runnable here.)
+ * A review status whose gate has a person on it is not runnable: it means the automated checks
+ * passed and a person is deciding; the scan picks up their status change (for example
+ * merge-review → merge-approved, which is runnable).
  */
 export function isRunnable(intent: Intent, human: HumanGates): boolean {
   const s = intent.file.frontmatter.status;
@@ -174,7 +174,7 @@ export function isRunnable(intent: Intent, human: HumanGates): boolean {
 const STATUS_CLASS: Record<Status, number> = {
   designing: 0, planning: 0, building: 0, reviewing: 0, verifying: 0,
   "spec-review": 0, "plan-review": 0, "merge-review": 0,
-  "spec-approved": 1, "plan-approved": 1, merged: 1,
+  "spec-approved": 1, "plan-approved": 1, "merge-approved": 1, merged: 1,
   accepted: 2,
   draft: 3, blocked: 3,
   done: 4, closed: 4,
@@ -197,8 +197,9 @@ const PLAIN: Record<Status, string> = {
   draft: "being written", accepted: "waiting to be designed",
   designing: "designing", "spec-review": "spec ready for review", "spec-approved": "spec approved, waiting to plan",
   planning: "planning", "plan-review": "plan ready for review", "plan-approved": "plan approved, waiting to build",
-  building: "building and testing", reviewing: "in review", "merge-review": "ready to merge", merged: "merged",
-  verifying: "checking the result", done: "done", blocked: "needs a person", closed: "closed",
+  building: "building and testing", reviewing: "in review",
+  "merge-review": "ready to merge, waiting for a person", "merge-approved": "approved, waiting to merge", merged: "merged",
+  verifying: "result ready for a person to confirm", done: "done", blocked: "needs a person", closed: "closed",
 };
 
 export function plainStatus(status: Status): string {

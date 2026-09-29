@@ -35,7 +35,6 @@ describe("the loop", () => {
       "add-numbers:spec-approved",
       "add-numbers:plan-approved",
       "add-numbers:reviewing",
-      "add-numbers:merge-review",
       "add-numbers:merged",
       "add-numbers:done",
     ]);

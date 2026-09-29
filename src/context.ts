@@ -24,7 +24,7 @@ export class StepContext {
 
 export type StepResult = { ok: true } | { ok: false; note: string };
 
-const APPROVED: ReadonlySet<Status> = new Set(["accepted", "spec-approved", "plan-approved", "merged"]);
+const APPROVED: ReadonlySet<Status> = new Set(["accepted", "spec-approved", "plan-approved", "merge-approved", "merged"]);
 
 export const OFF_MAIN_NOTE = "The main checkout is on a different branch; an engineer needs to switch it back.";
 

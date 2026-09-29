@@ -92,6 +92,12 @@ export class Git {
   }
 
   async isDirty(): Promise<boolean> { return (await this.run(["status", "--porcelain"])).out.trim().length > 0; }
+  /** Staged or unstaged changes to tracked files (untracked files do not count). */
+  async hasTrackedChanges(): Promise<boolean> { return (await this.run(["status", "--porcelain", "--untracked-files=no"])).out.trim().length > 0; }
+  /** True when the given paths have the same content in both commits (all paths when none are given). */
+  async sameContent(a: string, b: string, paths: string[] = []): Promise<boolean> {
+    return (await this.run(["diff", "--quiet", a, b, "--", ...paths], true)).code === 0;
+  }
   async isAncestor(ancestor: string, descendant: string): Promise<boolean> { return (await this.run(["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0; }
   async log(n: number): Promise<string[]> { return (await this.run(["log", `-${n}`, "--format=%h %s"])).out.trim().split("\n").filter(Boolean); }
 

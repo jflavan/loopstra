@@ -55,6 +55,7 @@ describe("intent frontmatter", () => {
   test("rejects an unknown status", () => {
     expect(() => parseIntentFile("---\nstatus: flying\n---\n# Intent: x\n")).toThrow(/status/);
     expect(STATUSES).toContain("merge-review");
+    expect(STATUSES).toContain("merge-approved");
   });
 
   test("strips a leading BOM before matching the frontmatter fence", () => {

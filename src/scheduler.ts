@@ -87,7 +87,7 @@ async function runStep(ctx: StepContext): Promise<StepResult> {
     case "spec-approved": case "planning": case "plan-review": return runPlanStep(ctx);
     case "plan-approved": case "building": return runBuildStep(ctx);
     case "reviewing": return runReviewStep(ctx);
-    case "merge-review": return runMergeStep(ctx);
+    case "merge-review": case "merge-approved": return runMergeStep(ctx);
     case "merged": case "verifying": return runVerifyStep(ctx);
     default: return { ok: true };
   }

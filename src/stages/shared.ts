@@ -3,7 +3,9 @@ import {
   blockWithDetail, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, saveSession, setStatus,
   type Failure, type StepContext, type StepResult,
 } from "../context";
-import type { Git } from "../git";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { Git } from "../git";
 import { agentPhase, codePhase, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Check } from "../gates";
 import { headingsPresent } from "../checks";
@@ -143,8 +145,44 @@ export async function buildSession<N extends Continuation>(ctx: StepContext, spe
   return r;
 }
 
-/** Run-folder file holding the review round in progress. */
+/**
+ * Run-folder file holding the review round in progress. It stays after a review passes, until the
+ * change merges, so a round added later (fixes made after the review) continues the count.
+ */
 export const REVIEW_ROUND = "review-round";
+
+/** Run-folder marker written just before merging (holds main's commit before the merge). */
+export const MERGING = "merging";
+
+/** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
+export function readRound(ctx: StepContext): number | null {
+  const p = join(ctx.runDir, REVIEW_ROUND);
+  if (!existsSync(p)) return null;
+  const n = Number.parseInt(readFileSync(p, "utf8").trim(), 10);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+export function writeRound(ctx: StepContext, round: number): void {
+  mkdirSync(ctx.runDir, { recursive: true });
+  writeFileSync(join(ctx.runDir, REVIEW_ROUND), String(round));
+}
+
+/**
+ * Makes sure the intent branch exists and has its own worktree checked out on it. Returns a
+ * failure for the caller to record; it never blocks by itself.
+ */
+export async function openBranchWorktree(ctx: StepContext): Promise<{ ok: true } | Failure> {
+  if (!(await ctx.git.branchExists(ctx.branch))) {
+    return { ok: false, note: "The work for this change is missing. To build it again, set status to plan-approved.", detail: `branch ${ctx.branch} does not exist` };
+  }
+  try {
+    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    await new Git(ctx.worktreeDir).assertBranch(ctx.branch);
+  } catch (e) {
+    return { ok: false, note: "The workspace for this change could not be prepared. An engineer needs to look at it.", detail: e instanceof Error ? e.message : String(e) };
+  }
+  return { ok: true };
+}
 
 /** Markdown bullets, one per item. */
 export function bullets(items: string[]): string {

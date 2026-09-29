@@ -1,27 +1,28 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { block, blockWith, blockWithDetail, clearMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, blockWith, blockWithDetail, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase } from "../phases";
 import { branchPlan, testLoop } from "./build";
-import { artifacts, bullets, buildSession, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
+import { alreadyMerged, checkMerge, finishMerge, mayReviewAgain, passMergeGate, REVIEWS_USED_UP } from "./merge";
+import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 const RETRY = "To try again, set status to plan-approved.";
 
-/** Stage 5 review rounds. Called for reviewing. Ends at merge-review or blocked. */
+/**
+ * Stage 5 review rounds, then the merge gate's automated checks in the same step (the gate timing
+ * rule). Called for reviewing. Ends at merged (no person on the merge gate), merge-review (a person
+ * decides), or blocked. Fixes the merge checks commit after an approval get one more review round.
+ */
 export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
+  // Stopped part-way through a merge that did land: finish recording it.
+  if (await alreadyMerged(ctx)) return finishMerge(ctx);
   const stage = ctx.cfg.stages.review;
   const wt = new Git(ctx.worktreeDir);
 
   // The change must be on its branch, in a real worktree, before anyone reviews it.
-  if (!(await ctx.git.branchExists(ctx.branch))) {
+  const open = await openBranchWorktree(ctx);
+  if (!open.ok) {
     clearMarker(ctx, REVIEW_ROUND);
-    return blockWithDetail(ctx, "The work for this change is missing. To build it again, set status to plan-approved.", `branch ${ctx.branch} does not exist`);
-  }
-  try {
-    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
-  } catch (e) {
-    return blockWithDetail(ctx, "The workspace for this change could not be prepared. An engineer needs to look at it.", e instanceof Error ? e.message : String(e));
+    return blockWith(ctx, open);
   }
   // Stopped part-way through a revision: keep those edits on the branch so the review sees them.
   if (await wt.isDirty()) {
@@ -53,7 +54,20 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
     const pass = important.length === 0;
     const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}`;
     ctx.trace.gate(ctx.slug, "review", "findings", pass ? "pass" : "fail", summary);
-    if (pass) break;
+
+    if (pass) {
+      const after = await runHookCommands(ctx, "after", "review", ctx.worktreeDir);
+      if (!after.ok) return after;
+      const verdict = await checkMerge(ctx);
+      if (verdict.result === "fail") return blockWith(ctx, verdict);
+      if (verdict.result === "pass") return passMergeGate(ctx);
+      // The merge checks committed fixes: no code reaches main that a review did not see.
+      if (!mayReviewAgain(ctx, round)) {
+        clearMarker(ctx, REVIEW_ROUND);
+        return blockWithDetail(ctx, REVIEWS_USED_UP, { rounds: round, reason: "fixes were committed after the last review" });
+      }
+      continue;
+    }
 
     if (round > stage.max_rounds) {
       clearMarker(ctx, REVIEW_ROUND);
@@ -71,23 +85,4 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
     const tested = await testLoop(ctx, "retest");
     if (!tested.ok) return blockWith(ctx, tested);
   }
-
-  clearMarker(ctx, REVIEW_ROUND);
-  const after = await runHookCommands(ctx, "after", "review", ctx.worktreeDir);
-  if (!after.ok) return after;
-  await setStatus(ctx, "merge-review");
-  return { ok: true };
-}
-
-/** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
-function readRound(ctx: StepContext): number | null {
-  const p = join(ctx.runDir, REVIEW_ROUND);
-  if (!existsSync(p)) return null;
-  const n = Number.parseInt(readFileSync(p, "utf8").trim(), 10);
-  return Number.isInteger(n) && n >= 1 ? n : null;
-}
-
-function writeRound(ctx: StepContext, round: number): void {
-  mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(join(ctx.runDir, REVIEW_ROUND), String(round));
 }

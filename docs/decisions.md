@@ -154,6 +154,13 @@ Sources of truth, in order of precedence when they conflict:
   plain sentences with retry advice; check ids, commands, branch names,
   counts, and raw output go to the trace. Nothing is written on the root
   checkout unless it is on `main_branch`; otherwise the loop pauses.
+- **Merge gate (2026-09-28 hardening).** New status `merge-approved`,
+  symmetric with spec-approved and plan-approved. The merge checks (up to
+  date, tests, review findings) run in the step of the approving review;
+  fixes they commit go back for one more review round. Merging requires a
+  clean root checkout on `main_branch`; an interrupted merge that landed is
+  finished, never repeated. Worktree and branch cleanup is best effort and
+  retried by the scheduler.
 
 ## Open
 

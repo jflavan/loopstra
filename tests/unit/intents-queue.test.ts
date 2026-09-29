@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, isRunnable, orderQueue, readIntent, renderQueue, scanIntents, writeIntent,
+  checkConsistency, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanIntents, writeIntent,
   type Intent,
 } from "../../src/intents";
 import { tempDir } from "../helpers";
@@ -41,6 +41,16 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("merge-approved is a known status with plain wording and needs the spec and plan", async () => {
+    const t = tempDir();
+    await mk(t.path, "approved", "status: merge-approved", { "spec.md": "s" });
+    const [i] = await scanIntents(t.path);
+    expect(checkConsistency(i!)).toMatch(/plan\.md/);
+    expect(plainStatus("merge-approved")).toBe("approved, waiting to merge");
+    expect(plainStatus("merge-review")).toBe("ready to merge, waiting for a person");
+    t.cleanup();
+  });
+
   test("consistency requires artifacts implied by status", async () => {
     const t = tempDir();
     await mk(t.path, "no-spec", "status: spec-review");
@@ -62,6 +72,10 @@ describe("scan and queue", () => {
     expect(isRunnable(with_("spec-review"), { spec: "status", plan: "none", merge: "none", done: "none" })).toBe(false);
     expect(isRunnable(with_("spec-review"), { spec: "none", plan: "none", merge: "none", done: "none" })).toBe(true);
     expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "pr", done: "none" })).toBe(false);
+    expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "status", done: "none" })).toBe(false);
+    expect(isRunnable(with_("merge-approved"), { spec: "none", plan: "none", merge: "status", done: "none" })).toBe(true);
+    expect(isRunnable(with_("verifying"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(false);
+    expect(isRunnable(with_("merged"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(true);
   });
 
   test("writeIntent updates status and note and readIntent sees it", async () => {

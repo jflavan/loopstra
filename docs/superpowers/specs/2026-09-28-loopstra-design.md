@@ -117,7 +117,7 @@ that a person may set it at a human gate or to retry or close.
 ```
 draft → accepted → designing → spec-review → spec-approved
       → planning → plan-review → plan-approved
-      → building → reviewing → merge-review → merged
+      → building → reviewing → merge-review → merge-approved → merged
       → verifying → done
 any → blocked | closed
 ```
@@ -134,9 +134,10 @@ any → blocked | closed
 | plan-approved | runtime or human | Plan gate passed. |
 | building | runtime | Build, test, fix, verify running on the branch. |
 | reviewing | runtime | Review and revise rounds running. |
-| merge-review | runtime | PR open or local merge pending. Gate pending. |
-| merged | runtime | On main. |
-| verifying | runtime | Done-when checks and lessons running. |
+| merge-review | runtime | Reviewed and its merge checks passed; waiting for a person. |
+| merge-approved | runtime or human | Merge gate passed; the next step re-checks and merges. |
+| merged | runtime | On main. Done-when checks, outcome, and lessons run from here. |
+| verifying | runtime | Outcome written; waiting for a person to confirm. |
 | done | runtime | Terminal. |
 | blocked | runtime | Needs a person. `note` says what and why. |
 | closed | human | Terminal. Dismissed. |
@@ -149,7 +150,7 @@ exist (for example `spec-review` requires `spec.md`). A mismatch sets
 `blocked` with a note. Hand-editing a status cannot skip a stage.
 
 Retry: a person sets status back to the most recent approved state
-(`accepted`, `spec-approved`, `plan-approved`, or `merged`). The runtime
+(`accepted`, `spec-approved`, `plan-approved`, `merge-approved`, or `merged`). The runtime
 resumes from there, reusing artifacts and the branch if present.
 
 ## 5. Queue order
@@ -320,12 +321,21 @@ stepping it never advances.)
 15. `after` commands for build. If a remote exists: push, open PR titled
     `<slug>: <intent title>` with a body linking the artifacts and the review
     summary, and post the findings as a comment. Status `merge-review`.
-16. Merge gate, checked every tick: PR checks green (`gh pr checks`), branch
-    contains `main_branch` tip (otherwise rebase, rerun the test loop, push),
-    no open important findings, and PR approved if `gates.merge.human` is
-    `pr`. With no remote, the same checks minus PR ones, then a local merge.
+16. Merge gate, in the same step as the approving review (gate timing
+    rule): branch contains `main_branch` tip (otherwise rebase), the test
+    loop passes, and the newest review had no important findings. If the
+    test loop committed fixes, the change is reviewed again (the round
+    count continues; exhausted → block), so nothing reaches main that a
+    review did not see. Pass with no person → merge now; with a person →
+    `merge-review` with a plain note, and the person sets `merge-approved`,
+    whose step re-checks and merges. Merging requires the root checkout on
+    `main_branch` with no staged or unstaged changes to tracked files;
+    otherwise block. A `merging` marker in the run folder makes a merge
+    interrupted after it landed finish as merged instead of merging twice.
     Merge with `gates.merge.method`. Status `merged`. Remove the worktree and
-    delete the branch.
+    delete the branch (best effort; the scheduler retries). The PR path
+    (`gates.merge.human: pr`, PR checks, approvals) is wired in Plan 3;
+    until then `pr` blocks plainly.
 
 ### Stage 6: verify and maintain
 

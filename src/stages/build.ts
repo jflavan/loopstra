@@ -5,13 +5,14 @@ import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus,
 import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
-import { artifacts, bullets, buildSession, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
 
 const RETRY = "To try again, set status to plan-approved.";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
+  clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
 
   const branch = await codePhase(ctx, "branch", async () => {
     if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
