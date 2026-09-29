@@ -23,6 +23,10 @@ export async function tempGitRepo(): Promise<{ path: string; cleanup: () => void
   await run(["git", "config", "user.email", "loopstra-test@example.com"], t.path);
   await run(["git", "config", "user.name", "Loopstra Test"], t.path);
   await Bun.write(join(t.path, "README.md"), "# test repo\n");
+  // .loopstra/ holds the trace db and run artifacts the runtime creates as a side effect
+  // of opening a Trace or StepContext; ignoring it keeps `isDirty()` meaningful for tests
+  // that check the repo is clean after committing only the paths they intended to commit.
+  await Bun.write(join(t.path, ".gitignore"), ".loopstra/\n");
   await run(["git", "add", "-A"], t.path);
   await run(["git", "commit", "-q", "-m", "init"], t.path);
   return t;

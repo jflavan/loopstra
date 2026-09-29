@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
 export class GitError extends Error {
   constructor(public readonly args: string[], public readonly stderr: string, public readonly code: number) {
     super(`git ${args.join(" ")} failed (${code}): ${stderr.trim().split("\n").pop() ?? ""}`);
@@ -44,10 +47,14 @@ export class Git {
   }
 
   async commitPaths(paths: string[], message: string): Promise<boolean> {
-    await this.run(["add", "-A", "--", ...paths]);
+    // Skip paths that don't exist: `git add -- <missing pathspec>` errors instead of no-op-ing,
+    // and callers (e.g. commitArtifacts) pass paths, like intent/queue.md, that may not exist yet.
+    const existing = paths.filter((p) => existsSync(join(this.cwd, p)));
+    if (!existing.length) return false;
+    await this.run(["add", "-A", "--", ...existing]);
     const staged = (await this.run(["diff", "--cached", "--name-only"])).out.trim();
     if (!staged) return false;
-    await this.run(["commit", "-q", "-m", message, "--", ...paths]);
+    await this.run(["commit", "-q", "-m", message, "--", ...existing]);
     return true;
   }
 

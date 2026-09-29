@@ -27,6 +27,7 @@ export const ConfigSchema = z.object({
     lint: z.string().optional(),
     build: z.string().optional(),
     run: z.string().optional(),
+    install: z.string().optional(),
   }).strict().prefault({} as { test: string }),
   claude: z.object({
     models: z.object({

@@ -45,4 +45,12 @@ describe("loadConfig", () => {
     await expect(loadConfig(t.path)).rejects.toThrow(/loopstra\/config\.yaml/);
     t.cleanup();
   });
+
+  test("accepts an optional install command", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: bun test\n  install: bun install\n");
+    const cfg = await loadConfig(t.path);
+    expect(cfg.commands.install).toBe("bun install");
+    t.cleanup();
+  });
 });
