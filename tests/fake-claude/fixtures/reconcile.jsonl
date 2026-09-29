@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-build","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-build","total_cost_usd":0.02,"usage":{},"structured_output":{"status":"success","summary":"plan updated","notes_for_next_phase":"","plan_markdown":"# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n- src/extra.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n"},"result":"ok"}

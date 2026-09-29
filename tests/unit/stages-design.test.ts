@@ -16,7 +16,7 @@ export async function setupRepo(status: string, configExtra = "") {
   const repo = await tempGitRepo();
   mkdirSync(join(repo.path, "loopstra"), { recursive: true });
   cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
-  await Bun.write(configPath(repo.path), `version: 1\ncommands:\n  test: echo ok\n${configExtra}`);
+  await Bun.write(configPath(repo.path), `version: 1\n${/^commands:/m.test(configExtra) ? "" : "commands:\n  test: echo ok\n"}${configExtra}`);
   mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
   await new Git(repo.path).commitAll("intent");

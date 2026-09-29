@@ -54,7 +54,7 @@ async function planGate(ctx: StepContext): Promise<StepResult> {
   if (outcome.check === "plan-challenge" && !ctx.intent.file.frontmatter.note.startsWith("replanned")) {
     // One resend of the plan with the concerns, then block if it fails again.
     await setStatus(ctx, "planning", "replanned once after review concerns");
-    const again = await plan(ctx, blockingConcerns.join("\n"));
+    const again = await plan(ctx, blockingConcerns.join("\n") || outcome.evidence);
     if (!again.ok) return again;
     await ctx.reload();
     return { ok: true };
