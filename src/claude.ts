@@ -61,7 +61,8 @@ export class StreamCollector {
 
 export const FAKE_CLAUDE_ENV = "LOOPSTRA_CLAUDE_EXECUTABLE";
 
-export type PermissionMode = "default" | "plan" | "acceptEdits" | "dontAsk" | "auto";
+// The CLI accepts "default" as an alias of the documented "manual" permission mode.
+export type PermissionMode = "default" | "manual" | "plan" | "acceptEdits" | "dontAsk" | "auto";
 
 export interface RunPhaseInput {
   cwd: string;
@@ -147,22 +148,22 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     }
   }
   if (buffer.trim()) { const e = collector.push(buffer); if (e && input.onEvent) input.onEvent(e); }
+  clearTimeout(timer);
 
   const exitCode = await proc.exited;
-  clearTimeout(timer);
   const stderr = await stderrPromise;
   const collected = collector.finish();
   const durationMs = Date.now() - started;
 
-  if (timedOut) return { ...collected, ok: false, reason: `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, durationMs, stderr };
+  if (timedOut) return fail(`claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
   if (collected.subtype === "missing_result") {
-    return { ...collected, ok: false, reason: `claude exited ${exitCode} without a result: ${stderr.trim().split("\n").pop() ?? ""}`.trim(), exitCode, durationMs, stderr };
+    return fail(`claude exited ${exitCode} without a result: ${stderr.trim().split("\n").pop() ?? ""}`.trim(), exitCode, stderr);
   }
   if (collected.subtype !== "success" || collected.isError) {
-    return { ...collected, ok: false, reason: `claude ended with ${collected.subtype}`, exitCode, durationMs, stderr };
+    return fail(`claude ended with ${collected.subtype}`, exitCode, stderr);
   }
   if (collected.structuredOutput === undefined) {
-    return { ...collected, ok: false, reason: "claude finished without structured output", exitCode, durationMs, stderr };
+    return fail("claude finished without structured output", exitCode, stderr);
   }
   return { ...collected, ok: true, reason: "", exitCode, durationMs, stderr };
 }
