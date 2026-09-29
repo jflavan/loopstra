@@ -98,6 +98,12 @@ export class Trace {
     return this.db.query<EventRow, [string, number, number]>("SELECT * FROM events WHERE slug = ? AND id > ? ORDER BY id LIMIT ?").all(slug, afterId, limit);
   }
 
+  /** The newest event of a type for a slug whose payload contains `contains` (any, when omitted). */
+  lastEvent(slug: string, type: EventType, contains = ""): EventRow | null {
+    return this.db.query<EventRow, [string, string, string]>(
+      "SELECT * FROM events WHERE slug = ? AND type = ? AND instr(payload, ?) > 0 ORDER BY id DESC LIMIT 1").get(slug, type, contains) ?? null;
+  }
+
   recentEvents(afterId = 0, limit = 200): EventRow[] {
     return this.db.query<EventRow, [number, number]>("SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?").all(afterId, limit).reverse();
   }

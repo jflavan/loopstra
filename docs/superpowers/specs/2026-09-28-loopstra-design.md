@@ -354,7 +354,9 @@ stepping it never advances.)
       recorded, never merged again.
     After either merge: sync main (with a remote), status `merged`, write
     `.loopstra/health-pending`, remove the worktree and delete the branch
-    (best effort; the scheduler retries).
+    (best effort; the scheduler retries). Cleanup happens only when main
+    already has the branch's changes; otherwise (for example `merged` set by
+    hand) the branch and worktree stay, and the reason is traced once.
 
 ### Stage 6: verify and maintain
 

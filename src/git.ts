@@ -107,12 +107,13 @@ export class Git {
   /**
    * True when `target` already has `branch`'s changes: the branch is part of its history, or it has
    * the branch's version of every file the branch changed since the two diverged (a squash merge).
+   * Paths under an `ignore` prefix are left out of the comparison.
    */
-  async containsChanges(target: string, branch: string): Promise<boolean> {
+  async containsChanges(target: string, branch: string, ignore: string[] = []): Promise<boolean> {
     if ((await this.runBounded(["merge-base", "--is-ancestor", branch, target])).code === 0) return true;
     const changed = await this.runBounded(["diff", "--name-only", `${target}...${branch}`]);
     if (changed.code !== 0) return false;
-    const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
     return (await this.runBounded(["diff", "--quiet", target, branch, "--", ...files])).code === 0;
   }

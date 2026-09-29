@@ -7,7 +7,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, codePhase, disallowedFor, toolsFor } from "../../src/phases";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE as FAKE, tempGitRepo } from "../helpers";
+import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
 
 async function setup() {
@@ -18,11 +18,11 @@ async function setup() {
   mkdirSync(join(repo.path, "intent", "x"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "x", "intent.md"), "---\nstatus: accepted\n---\n# Intent: x\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
   await new Git(repo.path).commitAll("intent");
-  process.env.LOOPSTRA_CLAUDE_EXECUTABLE = FAKE;
+  const restoreEnv = setEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: FAKE });
   const cfg = await loadConfig(repo.path);
   const trace = Trace.open(repo.path);
   const ctx = new StepContext(repo.path, cfg, trace, await readIntent(repo.path, "x"));
-  return { repo, ctx, trace };
+  return { repo: { path: repo.path, cleanup: () => { restoreEnv(); repo.cleanup(); } }, ctx, trace };
 }
 
 describe("agentPhase", () => {

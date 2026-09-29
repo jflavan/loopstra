@@ -58,7 +58,14 @@ describe("scheduler resilience", () => {
     expect(needs).toContain("| broken |");
     expect(needs).toContain("The status line at the top of intent.md has a value Loopstra does not understand.");
     expect(needs).not.toMatch(/Invalid|enum|zod/i);
-    expect(trace.events("broken").some((e) => e.type === "error")).toBe(true);
+    const scanErrors = () => trace.events("broken").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"scan\""));
+    expect(scanErrors()).toHaveLength(1);
+    // The same problem is traced once, not on every tick; a different problem is traced again.
+    await tick(repo.path);
+    expect(scanErrors()).toHaveLength(1);
+    await Bun.write(join(repo.path, "intent", "broken", "intent.md"), "---\nstatus: [unclosed\n---\n# Intent: broken\n");
+    await tick(repo.path);
+    expect(scanErrors()).toHaveLength(2);
     trace.close(); repo.cleanup();
   });
 
@@ -102,6 +109,30 @@ describe("scheduler resilience", () => {
     await tick(repo.path);
     expect(existsSync(ctx.worktreeDir)).toBe(false);
     expect(await git.branchExists(ctx.branch)).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a change set to merged by hand whose branch never merged keeps its branch and worktree, traced once", async () => {
+    const { repo, ctx, trace } = await setupRepo("merged");
+    const git = new Git(repo.path);
+    await Bun.write(join(repo.path, "intent", SLUG, "spec.md"), "# Spec\n\n## Summary\ns\n");
+    await Bun.write(join(repo.path, "intent", SLUG, "plan.md"), "# Plan\n\n## Proof\nbun test.\n");
+    await git.commitAll("artifacts");
+    await git.createBranch(ctx.branch, "main");
+    await git.worktreeAdd(ctx.worktreeDir, ctx.branch);
+    await Bun.write(join(ctx.worktreeDir, "work.ts"), "export const work = 1;\n");
+    await new Git(ctx.worktreeDir).commitAll("work that never reached main");
+    await tick(repo.path);
+    await tick(repo.path);
+    expect(await git.branchExists(ctx.branch)).toBe(true);
+    expect(existsSync(join(ctx.worktreeDir, "work.ts"))).toBe(true);
+    const kept = trace.events(SLUG).filter((e) => e.type === "command" && e.payload.includes("\"kept\""));
+    expect(kept).toHaveLength(1);
+    // Once main has the change (merged by hand), the next tick tidies up.
+    await git.merge(ctx.branch, "squash", "merged by hand");
+    await tick(repo.path);
+    expect(await git.branchExists(ctx.branch)).toBe(false);
+    expect(existsSync(ctx.worktreeDir)).toBe(false);
     trace.close(); repo.cleanup();
   });
 

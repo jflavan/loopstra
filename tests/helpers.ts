@@ -2,6 +2,7 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { FAKE_CLAUDE_ENV } from "../src/claude";
 import { configPath, loadConfig } from "../src/config";
 import { StepContext } from "../src/context";
 import { Git } from "../src/git";
@@ -49,9 +50,14 @@ export interface SetupOptions {
   config?: string;
 }
 
-/** A temp repo with prompts, config, and one intent `add-numbers` at `status`, plus a StepContext on it. */
+/**
+ * A temp repo with prompts, config, and one intent `add-numbers` at `status`, plus a StepContext on
+ * it. The fake claude is set in the environment until `repo.cleanup()`, which restores what was there.
+ */
 export async function setupRepo(status: string, opts: SetupOptions = {}) {
-  const repo = await tempGitRepo();
+  const temp = await tempGitRepo();
+  const restoreEnv = setEnv({ [FAKE_CLAUDE_ENV]: FAKE_CLAUDE });
+  const repo = { path: temp.path, cleanup: () => { restoreEnv(); temp.cleanup(); } };
   mkdirSync(join(repo.path, "loopstra"), { recursive: true });
   cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
   const commands = Object.entries(opts.commands ?? { test: "echo ok" }).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}\n`).join("");
@@ -59,22 +65,29 @@ export async function setupRepo(status: string, opts: SetupOptions = {}) {
   mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
   await new Git(repo.path).commitAll("intent");
-  process.env.LOOPSTRA_CLAUDE_EXECUTABLE = FAKE_CLAUDE;
   const trace = Trace.open(repo.path);
   const ctx = new StepContext(repo.path, await loadConfig(repo.path), trace, await readIntent(repo.path, "add-numbers"));
   return { repo, ctx, trace };
 }
 
-/** Runs `fn` with environment overrides, restoring the previous values afterwards even if it throws. */
-export async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+/** Sets environment variables and returns a function that puts back what was there before. */
+export function setEnv(vars: Record<string, string>): () => void {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
   Object.assign(process.env, vars);
-  try {
-    return await fn();
-  } finally {
+  return () => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+  };
+}
+
+/** Runs `fn` with environment overrides, restoring the previous values afterwards even if it throws. */
+export async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const restore = setEnv(vars);
+  try {
+    return await fn();
+  } finally {
+    restore();
   }
 }

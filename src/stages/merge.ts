@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { blockWith, blockWithDetail, clearMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { blockWith, blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git } from "../git";
 import { GitHub, type PrInfo } from "../github";
@@ -21,6 +21,9 @@ export const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to 
 export const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
 export const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
+
+/** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
+const BRANCH_KEPT = "branch-kept";
 
 /** How a person asks the merge step to look again: the status that is runnable for this gate. */
 function mergeRetry(ctx: StepContext): string {
@@ -328,8 +331,20 @@ export async function finishMerge(ctx: StepContext): Promise<StepResult> {
 /**
  * Removes a merged change's worktree and branch. Best effort: a failure is traced and the
  * scheduler tries again on a later tick. Returns true when nothing is left.
+ * The branch is deleted only when main already has its changes. Otherwise (a person set merged by
+ * hand, or main is not synced yet) the worktree and branch are left as they are, and the reason is
+ * traced once. Files under intent/ are not compared: main's own record of the change moves on after
+ * the merge (status, outcome), and the branch only holds an older copy of it.
  */
 export async function cleanupChange(ctx: StepContext): Promise<boolean> {
+  const main = ctx.cfg.main_branch;
+  if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) {
+    if (onceMarker(ctx, BRANCH_KEPT)) {
+      ctx.trace.event(ctx.slug, "command", { command: "clean up after merge", kept: ctx.branch, reason: `${main} does not have this branch's changes, so the branch and its worktree were left in place` });
+    }
+    return false;
+  }
+  clearMarker(ctx, BRANCH_KEPT);
   let clean = true;
   try {
     if (existsSync(ctx.worktreeDir)) await ctx.git.worktreeRemove(ctx.worktreeDir);

@@ -60,7 +60,12 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
-    for (const u of first.unreadable) trace.event(u.slug, "error", { where: "scan", problem: u.problem, detail: u.detail });
+    for (const u of first.unreadable) {
+      // Traced when the problem is new or has changed, not on every tick.
+      const last = trace.lastEvent(u.slug, "error", '"where":"scan"');
+      const lastProblem = last ? (JSON.parse(last.payload) as { problem?: string }).problem : undefined;
+      if (lastProblem !== u.problem) trace.event(u.slug, "error", { where: "scan", problem: u.problem, detail: u.detail });
+    }
     for (const i of first.intents) {
       trace.upsertIntent(i.slug, i.file.frontmatter.status, effectivePriority(i.file.frontmatter));
       const problem = checkConsistency(i);
@@ -143,8 +148,9 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
   for (const i of merged) {
     const ctx = new StepContext(root, cfg, trace, i);
     if (!existsSync(ctx.worktreeDir) && !branches.has(ctx.branch)) continue;
-    const clean = await cleanupChange(ctx);
-    trace.event(ctx.slug, "command", { command: "clean up after merge (retry)", clean });
+    // Only a cleanup that finished is traced here; cleanupChange traces its own problems (and a
+    // branch it keeps, once), so a change waiting for a person does not add a line every tick.
+    if (await cleanupChange(ctx)) trace.event(ctx.slug, "command", { command: "clean up after merge (retry)", clean: true });
   }
 }
 
