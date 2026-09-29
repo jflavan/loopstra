@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { buildState, resolveRunFile, serveUi } from "../../src/commands/ui";
 import { configPath } from "../../src/config";
 import { writeHeartbeat } from "../../src/heartbeat";
+import { SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -137,6 +138,27 @@ describe("needs attention", () => {
       const t2 = Trace.open(t.path);
       t2.signal("main_health", "pass", "");
       t2.close();
+      expect((await buildState(t.path, 0)).attention).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("main out of step with GitHub (waiting on a person, or failing) needs a person; back in step it does not", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      const trace = Trace.open(t.path);
+      trace.signal("main_sync", "waiting", SYNC_TEXT.ownCommits);
+      trace.close();
+      expect((await buildState(t.path, 0)).attention).toEqual([{ kind: "sync", slug: null, title: "Main and GitHub", what: SYNC_TEXT.ownCommits }]);
+      const t2 = Trace.open(t.path);
+      t2.signal("main_sync", "fail", SYNC_TEXT.pushFailed);
+      t2.close();
+      expect((await buildState(t.path, 0)).attention.map((a) => a.what)).toEqual([SYNC_TEXT.pushFailed]);
+      const t3 = Trace.open(t.path);
+      t3.signal("main_sync", "pass", SYNC_TEXT.inStep);
+      t3.close();
       expect((await buildState(t.path, 0)).attention).toEqual([]);
     } finally {
       t.cleanup();

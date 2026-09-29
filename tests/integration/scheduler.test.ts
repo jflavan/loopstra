@@ -159,6 +159,9 @@ describe("scheduler resilience", () => {
       await git.run(["remote", "add", "origin", join(repo.path, "nowhere.git")]);
       expect(await preflight(repo.path)).toBe("This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.");
     });
+    await withEnv({ LOOPSTRA_GH_EXECUTABLE: FAKE_GH, LOOPSTRA_FAKE_GH_SIGNED_OUT: "1" }, async () => {
+      expect(await preflight(repo.path)).toBe("GitHub CLI is installed but not signed in. Run gh auth login, then start again.");
+    });
     await withEnv({ LOOPSTRA_GH_EXECUTABLE: FAKE_GH }, async () => {
       expect(await preflight(repo.path)).toBeNull();
     });

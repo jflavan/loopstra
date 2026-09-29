@@ -159,8 +159,9 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
 }
 
 /**
- * The merge step with a remote: watch the pull request. Merged (on GitHub, or by an earlier step
- * that stopped before recording it) → sync main and record it. Closed → block. Checks pending, gh
+ * The merge step with a remote, for every merge.human mode: watch the pull request. Merged (on
+ * GitHub, or by an earlier step that stopped before recording it) → sync main and record it.
+ * Closed → block. A person on the status line who has not set merge-approved, checks pending, gh
  * not answering, or (merge.human pr) not approved yet → wait, changing nothing. Checks failed →
  * block. Otherwise merge through gh.
  */
@@ -184,6 +185,9 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
     return { ok: true, waiting: true };
   }
 
+  const status = ctx.intent.file.frontmatter.status;
+  // A person decides on the status line and has not yet: only a merge or close on GitHub counts.
+  if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return { ok: true, waiting: true };
   const checks = await gh.checks(pr.number);
   if (checks === "pending" || checks === "unknown") return { ok: true, waiting: true };
   const where = `pull request #${pr.number} ${pr.url}`;
@@ -191,7 +195,6 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
     ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
     return blockWithDetail(ctx, PR_CHECKS_FAILED_NOTE, { pr: pr.number, url: pr.url }, mergeRetry(ctx));
   }
-  const status = ctx.intent.file.frontmatter.status;
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", where);
@@ -238,15 +241,14 @@ async function reviewAgain(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * The merge step. merge-review with a person on the status line waits (it is not runnable). With a
- * remote, the step watches the pull request (see runRemoteMerge). Without one: merge-approved (a
- * person approved), or merge-review with no person on the gate: check again and merge.
+ * The merge step. With a remote, it watches the pull request (see runRemoteMerge). Without one:
+ * merge-review with a person on the gate waits (it is not runnable); merge-approved (a person
+ * approved), or merge-review with no person on the gate: check again and merge.
  */
 export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   if (await alreadyMerged(ctx)) return finishMerge(ctx);
   const status = ctx.intent.file.frontmatter.status;
   const human = ctx.cfg.gates.merge.human;
-  if (status === "merge-review" && human === "status") return { ok: true };
   if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
   if (status === "merge-review" && human !== "none") return { ok: true };
 

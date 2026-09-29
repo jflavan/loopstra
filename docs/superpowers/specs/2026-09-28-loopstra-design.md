@@ -152,7 +152,8 @@ changed it while the step ran: the runtime writes nothing, records
 the next tick picks up the person's status.
 
 Runnable means: not draft, not blocked, not done, not closed, and not a
-review status whose gate is waiting on a person or on external CI.
+review status whose gate is waiting on a person. With a remote,
+`merge-review` is always runnable: its step watches the pull request.
 
 Consistency check before every step: the artifacts that a status implies must
 exist (for example `spec-review` requires `spec.md`). A mismatch sets
@@ -357,8 +358,10 @@ stepping it never advances.)
       `gates.merge.human`: `none` "Waiting for the automatic checks on
       GitHub."; `pr` "A pull request is open. Approve it on GitHub to
       merge, or close it to stop."; `status` the usual status-line note.
-      With `none` or `pr`, `merge-review` stays runnable and each tick's
-      merge step looks at the PR: checks pending (or `gh` not answering) or,
+      `merge-review` stays runnable in every mode and each tick's merge
+      step looks at the PR: merged on GitHub → recorded; closed → block;
+      with `status`, anything else waits for a person to set
+      `merge-approved`; otherwise checks pending (or `gh` not answering) or,
       for `pr`, not approved yet → wait, changing nothing; checks failed →
       block; PR closed → block ("Set status to closed, or to plan-approved
       to rebuild."); otherwise merge with `gh pr merge` and
@@ -458,26 +461,34 @@ checkout is on `main_branch` with no staged or unstaged changes to tracked
 files: fetch, then rebase local main onto the remote's main (`pull
 --rebase`), so a PR merged on GitHub and an owner's status edit made on
 GitHub or pushed from another clone reach this checkout, and that tick's
-scan sees them. Main is never pushed (that would also push a person's own
-unpushed commits); only intent branches are pushed, for their PRs. A
+scan sees them. Then Loopstra's own records are shared: main is pushed
+when every commit the remote's main lacks is authored by Loopstra (the same
+happens right after every artifact commit). A person's unpushed commits are
+theirs to share, so then nothing is pushed and the `main_sync` signal waits
+("Main has your own unpushed commits; Loopstra will share its records
+after you push yours."). A refused push (a protected branch) is a
+`main_sync` failure and the loop carries on. Intent branches are pushed
+for their PRs; since a branch is created after the artifact commits are
+pushed, its PR shows only the change. A
 rebase conflict only inside `intent/` takes the remote's version (an
 owner's edit on GitHub wins over the local record; a merged PR also
 carries the artifacts committed before its branch was last rebased). Any
 other conflict aborts the rebase, and the loop carries on unsynced until
-an engineer resolves it. Every failure is traced and never stops the tick.
+an engineer resolves it. Nothing here ever stops the tick. Every outcome
+(pass, waiting, fail, in plain words) is the `main_sync` signal, written
+only when it changes, with the technical detail in the trace; the
+dashboard's attention list shows it while it is waiting or failing.
 
 ### Artifact commits
 
 Artifacts under `intent/` (`intent.md` status changes, `spec.md`, `plan.md`,
 `outcome.md`, `queue.md`) are markdown, not code. The runtime commits them
-on `main_branch` directly (never pushed; see Main sync), with the message
+on `main_branch` directly (shared as described in Main sync), with the message
 `loopstra(<slug>): <what changed>`. This is the course's model: the file
 pair is committed alongside the intent, and git history is the audit trail.
 The loop's checkout is the source of truth for status; with a remote,
-artifacts reach GitHub only inside a change's pull request (its branch
-carries main's artifact commits from when it was last rebased), so no push
-to `main_branch` bypass is needed. Code never takes this path; it always
-goes through the merge gate.
+the records reach GitHub's main when only Loopstra's commits are ahead.
+Code never takes this path; it always goes through the merge gate.
 
 ## 11. Trace and observability
 
@@ -501,7 +512,9 @@ CLI on top:
 - `loopstra ui`: serves a single HTML page from `Bun.serve` on
   `localhost:4646` with a JSON API over the trace db, polling every two
   seconds. Shows the queue, each intent's phase timeline, gate results with
-  evidence, cost, and the last 200 events. No build step, no framework.
+  evidence, cost, and the last 200 events, and a "needs attention" list
+  (blocked, waiting for a person, unreadable intents, a red main, and
+  `main_sync` waiting or failing). No build step, no framework.
 
 ## 12. The operator skill
 
@@ -554,7 +567,8 @@ exits 0.
 root checkout is on `main_branch` ("Run loopstra from a checkout of
 <main_branch>; you are on <branch>."), and, if a remote exists, that `gh` is
 available ("This repo has a remote but gh was not found. Install GitHub CLI
-or remove the remote."), then loops: tick, sleep `poll_seconds`. `--once`
+or remove the remote.") and signed in ("GitHub CLI is installed but not
+signed in. Run gh auth login, then start again."), then loops: tick, sleep `poll_seconds`. `--once`
 runs one tick and exits, for tests and cron. A tick:
 
 1. Load config. On validation failure, log and sleep; never crash on a bad

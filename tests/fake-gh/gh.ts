@@ -18,6 +18,11 @@ const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? a
 
 const [group, cmd] = args;
 if (group === "--version") { console.log("gh version 2.93.0 (fake)"); process.exit(0); }
+// Test knob: LOOPSTRA_FAKE_GH_SIGNED_OUT=1 behaves like a gh nobody has signed in to.
+if (group === "auth" && cmd === "status") {
+  if (process.env.LOOPSTRA_FAKE_GH_SIGNED_OUT === "1") { console.error("You are not logged into any GitHub hosts. To log in, run: gh auth login"); process.exit(1); }
+  console.log("github.com: Logged in (fake)"); process.exit(0);
+}
 if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); process.exit(1); }
 
 if (cmd === "view") {

@@ -89,7 +89,7 @@ export class Trace {
     this.event(slug, "gate_check", { gate, check, result, evidence });
   }
 
-  signal(name: string, result: "pass" | "fail" | "error", output: string): void {
+  signal(name: string, result: "pass" | "fail" | "error" | "waiting", output: string): void {
     this.db.run("INSERT INTO signals (name, ts, result, output) VALUES (?, ?, ?, ?)", [name, now(), result, output]);
     this.event("_signals", "signal", { name, result, output });
   }

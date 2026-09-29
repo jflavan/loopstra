@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Config } from "./config";
 import { Git } from "./git";
 import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
+import { shareMain } from "./remote";
 import type { Trace } from "./trace";
 
 export class StepContext {
@@ -67,11 +68,15 @@ export async function assertRootOnMain(ctx: StepContext): Promise<void> {
   }
 }
 
-/** Commit intent-folder changes on the main branch. Refuses when the root is on any other branch. */
+/**
+ * Commit intent-folder changes on the main branch, then share them with the remote when main has
+ * only Loopstra's own commits ahead of it (see shareMain). Refuses when the root is on any other branch.
+ */
 export async function commitArtifacts(ctx: StepContext, what: string): Promise<void> {
   await assertRootOnMain(ctx);
-  // Never pushed: pushing main would also push a person's own unpushed commits.
-  await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`);
+  if (await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`)) {
+    await shareMain(ctx.root, ctx.cfg, ctx.trace);
+  }
 }
 
 /**

@@ -82,10 +82,10 @@ describe("scan and queue", () => {
     expect(isRunnable(with_("spec-review"), { spec: "none", plan: "none", merge: "none", done: "none" })).toBe(true);
     expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "pr", done: "none" })).toBe(false);
     expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "status", done: "none" })).toBe(false);
-    // With a remote, the merge step watches the pull request unless a person decides on the status line.
+    // With a remote, the merge step always watches the pull request (merged or closed on GitHub counts in every mode).
     expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "pr", done: "none" }, true)).toBe(true);
     expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "none", done: "none" }, true)).toBe(true);
-    expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "status", done: "none" }, true)).toBe(false);
+    expect(isRunnable(with_("merge-review"), { spec: "none", plan: "none", merge: "status", done: "none" }, true)).toBe(true);
     expect(isRunnable(with_("merge-approved"), { spec: "none", plan: "none", merge: "status", done: "none" })).toBe(true);
     expect(isRunnable(with_("verifying"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(false);
     expect(isRunnable(with_("merged"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(true);

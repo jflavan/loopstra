@@ -38,6 +38,8 @@ export class GitHub {
   }
 
   async available(): Promise<boolean> { return (await this.run(["--version"])).code === 0; }
+  /** True when gh is signed in to GitHub. */
+  async signedIn(): Promise<boolean> { return (await this.run(["auth", "status"])).code === 0; }
 
   async prForBranch(branch: string): Promise<PrInfo | null> {
     const r = await this.lookupPr(branch);

@@ -50,8 +50,8 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
-    // With a remote: pull what others pushed (an owner's status edits, merges on GitHub). Main is
-    // never pushed. Best effort; problems are traced and never stop the tick.
+    // With a remote: pull what others pushed (an owner's status edits, merges on GitHub), and share
+    // Loopstra's own records when only its commits are ahead. Best effort; never stops the tick.
     const hasRemote = (await new Git(root).remoteName()) !== null;
     if (hasRemote) await syncMain(root, cfg, trace);
 
@@ -197,8 +197,10 @@ export async function preflight(root: string, env: Record<string, string | undef
   const git = new Git(root);
   const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
   if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
-  if ((await git.remoteName()) && !(await new GitHub(root).available())) {
-    return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";
+  if (await git.remoteName()) {
+    const gh = new GitHub(root);
+    if (!(await gh.available())) return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";
+    if (!(await gh.signedIn())) return "GitHub CLI is installed but not signed in. Run gh auth login, then start again.";
   }
   return null;
 }

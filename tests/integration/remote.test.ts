@@ -84,8 +84,9 @@ describe("the loop with a GitHub remote", () => {
       expect(pr.comments).toHaveLength(1);
       expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code).toBe(0);
       expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(false);
-      // Main itself is never pushed: the status changes stay in this checkout.
-      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).toContain("status: plan-approved");
+      // Loopstra's own records on main are shared (only its commits are ahead); the code is not.
+      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).toContain("status: merge-review");
+      expect((await run(["git", "log", "--format=%ae", "main"], s.remote)).out).toContain("loopstra@localhost");
 
       // Checks still running: the loop waits without touching the status or its note.
       const lastEdit = () => new Git(s.repo).run(["log", "-1", "--format=%H", "--", `intent/${SLUG}/intent.md`]).then((x) => x.out.trim());
@@ -114,7 +115,7 @@ describe("the loop with a GitHub remote", () => {
       expect(await git.branchExists(BRANCH)).toBe(false);
       expect(existsSync(join(s.repo, ".loopstra", "worktrees", SLUG))).toBe(false);
       expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
-      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).not.toContain("status: merged");
+      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).toContain("status: merged");
       expect(await git.isDirty()).toBe(false);
       const trace = Trace.open(s.repo);
       try {
@@ -164,7 +165,11 @@ describe("the loop with a GitHub remote", () => {
       await tick(s.repo);
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merge-review");
-      expect((await tick(s.repo)).picked).toBeNull();
+      // The step looks at the pull request but changes nothing until a person decides.
+      const looked = await tick(s.repo);
+      expect(looked.picked).toBe(SLUG);
+      expect(looked.result).toEqual({ ok: true, waiting: true });
+      expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "checks")).toBe(false);
 
       const i = await readIntent(s.repo, SLUG);
       await writeIntent(i, { status: "merge-approved", note: "" });
@@ -179,6 +184,35 @@ describe("the loop with a GitHub remote", () => {
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merged");
       expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a person on the status line who merges or closes the pull request on GitHub instead: the loop sees it", async () => {
+    const s = await remoteSetup("gates:\n  merge:\n    human: status\n");
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      // Closed on GitHub: blocked in plain words, without anyone touching the status line.
+      await s.setPr({ state: "CLOSED" });
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "blocked", note: "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild." });
+
+      // Reopened and merged on GitHub by the person: recorded as merged, never merged again.
+      const j = await readIntent(s.repo, SLUG);
+      await writeIntent(j, { status: "merge-review", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
+      expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
     });
     s.cleanup();
   }, 180_000);

@@ -298,13 +298,13 @@ const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
  * A review status whose gate has a person on it is not runnable: it means the automated checks
  * passed and a person is deciding; the scan picks up their status change (for example
  * merge-review → merge-approved, which is runnable).
- * With a remote, merge-review is runnable unless a person decides on the status line: the merge
- * step watches the pull request (its checks, and its approval when merge.human is pr).
+ * With a remote, merge-review is always runnable: the merge step watches the pull request (merged
+ * or closed on GitHub, its checks, and its approval when merge.human is pr).
  */
 export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false): boolean {
   const s = intent.file.frontmatter.status;
   if (s === "draft" || s === "blocked" || s === "done" || s === "closed") return false;
-  if (s === "merge-review" && hasRemote) return human.merge !== "status";
+  if (s === "merge-review" && hasRemote) return true;
   const gate = REVIEW_GATE[s];
   if (gate && human[gate] !== "none") return false;
   return true;

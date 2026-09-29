@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
-import { syncMain } from "../../src/remote";
+import { shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
@@ -33,23 +33,77 @@ async function pushFromOther(other: string, file: string, text: string): Promise
   await run(["git", "push", "-q", "origin", "main"], other);
 }
 
+/** A commit a person makes in the main checkout with their own identity (not Loopstra's). */
+async function personCommits(repo: string, file: string, text: string): Promise<void> {
+  await Bun.write(join(repo, file), text);
+  await run(["git", "add", "--", file], repo);
+  await run(["git", "commit", "-q", "-m", `person: ${file}`], repo);
+}
+
 function syncErrors(trace: Trace): string[] {
   return trace.events("_loop").filter((e) => e.type === "error" && e.payload.includes("\"sync\"")).map((e) => JSON.parse(e.payload).what as string);
 }
 
 describe("syncMain", () => {
-  test("pulls what was pushed elsewhere and never pushes main", async () => {
+  test("pulls what was pushed elsewhere, and never pushes a person's own unpushed commits", async () => {
     const s = await setup();
     await pushFromOther(s.other, "theirs.md", "theirs\n");
-    await Bun.write(join(s.repo, "ours.md"), "ours\n");
-    await new Git(s.repo).commitAll("ours");
+    await personCommits(s.repo, "ours.md", "ours\n");
+    await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
+    await new Git(s.repo).commitPaths(["intent/x"], "loopstra(x): record");
     await syncMain(s.repo, s.cfg, s.trace);
     expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
     expect(existsSync(join(s.repo, "ours.md"))).toBe(true);
-    // Local commits are replayed on top, never pushed: they may be a person's own.
-    expect((await run(["git", "log", "-1", "--format=%s", "main"], s.repo)).out.trim()).toBe("ours");
+    // Local commits are replayed on top. The person's commit is theirs to share, so nothing is pushed.
+    expect((await run(["git", "log", "-1", "--format=%s", "main"], s.repo)).out.trim()).toBe("loopstra(x): record");
     expect((await run(["git", "cat-file", "-e", "main:ours.md"], s.remote)).code).not.toBe(0);
-    expect(syncErrors(s.trace)).toEqual([]);
+    expect((await run(["git", "cat-file", "-e", "main:intent/x/intent.md"], s.remote)).code).not.toBe(0);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "waiting", output: SYNC_TEXT.ownCommits });
+
+    // Once the person pushes their own, Loopstra shares its records too.
+    await run(["git", "push", "-q", "origin", `${(await run(["git", "rev-parse", "main~1"], s.repo)).out.trim()}:refs/heads/main`], s.repo);
+    await syncMain(s.repo, s.cfg, s.trace);
+    expect((await run(["git", "cat-file", "-e", "main:intent/x/intent.md"], s.remote)).code).toBe(0);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "pass", output: SYNC_TEXT.inStep });
+    s.cleanup();
+  });
+
+  test("only Loopstra's commits ahead: they are pushed right after they are committed", async () => {
+    const s = await setup();
+    await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
+    await new Git(s.repo).commitPaths(["intent/x"], "loopstra(x): record");
+    await shareMain(s.repo, s.cfg, s.trace);
+    expect((await run(["git", "cat-file", "-e", "main:intent/x/intent.md"], s.remote)).code).toBe(0);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)?.result).toBe("pass");
+    s.cleanup();
+  });
+
+  test("a push the remote refuses is a main_sync failure, recorded once, and never throws", async () => {
+    const s = await setup();
+    const hook = join(s.remote, "hooks", "pre-receive");
+    await Bun.write(hook, "#!/bin/sh\necho protected branch >&2\nexit 1\n");
+    chmodSync(hook, 0o755);
+    for (const n of [1, 2]) {
+      await Bun.write(join(s.repo, "intent", "x", "intent.md"), `---\nstatus: draft\n---\n# Intent: x ${n}\n`);
+      await new Git(s.repo).commitPaths(["intent/x"], `loopstra(x): record ${n}`);
+      await shareMain(s.repo, s.cfg, s.trace);
+      await syncMain(s.repo, s.cfg, s.trace);
+    }
+    expect(s.trace.signals().filter((g) => g.name === SYNC_SIGNAL)).toHaveLength(1);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "fail", output: SYNC_TEXT.pushFailed });
+    expect(syncErrors(s.trace)).toEqual(["push of main failed"]);
+    s.cleanup();
+  });
+
+  test("a remote without main is one sync failure in the trace, however many ticks", async () => {
+    const s = await setup();
+    await run(["git", "symbolic-ref", "HEAD", "refs/heads/nothing"], s.remote);
+    await run(["git", "push", "-q", "origin", "--delete", "main"], s.repo);
+    await run(["git", "update-ref", "-d", "refs/remotes/origin/main"], s.repo);
+    await syncMain(s.repo, s.cfg, s.trace);
+    await syncMain(s.repo, s.cfg, s.trace);
+    expect(syncErrors(s.trace)).toEqual(["remote has no main"]);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "fail", output: SYNC_TEXT.noMain });
     s.cleanup();
   });
 
@@ -95,6 +149,9 @@ describe("syncMain", () => {
     await pushFromOther(s.other, "theirs.md", "theirs\n");
     await Bun.write(join(s.repo, "README.md"), "# work in progress\n");
     await syncMain(s.repo, s.cfg, s.trace);
+    // A condition that lasts is recorded once, not on every tick.
+    await syncMain(s.repo, s.cfg, s.trace);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "waiting", output: SYNC_TEXT.unsaved });
     expect(existsSync(join(s.repo, "theirs.md"))).toBe(false);
     expect(await Bun.file(join(s.repo, "README.md")).text()).toBe("# work in progress\n");
     expect(syncErrors(s.trace)).toEqual(["skipped: the root checkout has changes to tracked files"]);
