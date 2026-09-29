@@ -1,9 +1,16 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+/** The last non-empty line of some git output, or "" when there is none. */
+function lastNonEmptyLine(s: string): string {
+  const lines = s.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? "";
+}
+
 export class GitError extends Error {
-  constructor(public readonly args: string[], public readonly stderr: string, public readonly code: number) {
-    super(`git ${args.join(" ")} failed (${code}): ${stderr.trim().split("\n").pop() ?? ""}`);
+  constructor(public readonly args: string[], public readonly stdout: string, public readonly stderr: string, public readonly code: number) {
+    // git prints conflict text to stdout, not stderr, so fall back to stdout when stderr has nothing useful.
+    super(`git ${args.join(" ")} failed (${code}): ${lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout)}`);
   }
 }
 
@@ -13,7 +20,7 @@ export class Git {
   async run(args: string[], allowFail = false): Promise<{ code: number; out: string; err: string }> {
     const proc = Bun.spawn({ cmd: ["git", ...args], cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    if (code !== 0 && !allowFail) throw new GitError(args, err, code);
+    if (code !== 0 && !allowFail) throw new GitError(args, out, err, code);
     return { code, out, err };
   }
 
@@ -69,11 +76,19 @@ export class Git {
   }
 
   async merge(branch: string, method: "squash" | "merge", message: string): Promise<void> {
-    if (method === "squash") {
-      await this.run(["merge", "--squash", branch]);
-      await this.run(["commit", "-q", "-m", message]);
-    } else {
-      await this.run(["merge", "--no-ff", "-m", message, branch]);
+    try {
+      if (method === "squash") {
+        await this.run(["merge", "--squash", branch]);
+        await this.run(["commit", "-q", "-m", message]);
+      } else {
+        await this.run(["merge", "--no-ff", "-m", message, branch]);
+      }
+    } catch (e) {
+      // Never leave the checkout half-merged: a squash conflict doesn't set MERGE_HEAD, so
+      // `merge --abort` alone can fail (harmlessly); `reset --merge` clears the working tree too.
+      await this.run(["merge", "--abort"], true);
+      if (method === "squash") await this.run(["reset", "--merge"], true);
+      throw e;
     }
   }
 

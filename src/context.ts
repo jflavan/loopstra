@@ -37,8 +37,10 @@ export async function commitArtifacts(ctx: StepContext, what: string): Promise<v
 export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
   const from = ctx.intent.file.frontmatter.status;
   const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
+  // resume_from always follows the approved state being left, even if it was already set:
+  // a person may have set an approved status by hand, and the marker must follow.
   if (APPROVED.has(status)) patch.resume_from = status;
-  else if (!ctx.intent.file.frontmatter.resume_from && APPROVED.has(from)) patch.resume_from = from;
+  else if (APPROVED.has(from)) patch.resume_from = from;
   await writeIntent(ctx.intent, patch);
   ctx.trace.upsertIntent(ctx.slug, status, ctx.intent.file.frontmatter.priority);
   ctx.trace.statusChange(ctx.slug, from, status, note);
@@ -63,7 +65,13 @@ export async function writeArtifact(ctx: StepContext, name: string, text: string
 
 export function loadSessions(ctx: StepContext): Record<string, string> {
   const p = join(ctx.runDir, "sessions.json");
-  return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Record<string, string>) : {};
+  if (!existsSync(p)) return {};
+  try {
+    return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>;
+  } catch {
+    // A corrupt or unreadable sessions.json should never crash a step; start fresh.
+    return {};
+  }
 }
 
 export function saveSession(ctx: StepContext, key: string, sessionId: string): void {

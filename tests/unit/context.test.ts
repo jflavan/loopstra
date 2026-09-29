@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git } from "../../src/git";
-import { readIntent } from "../../src/intents";
+import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import { StepContext, block, readArtifact, setStatus, writeArtifact, loadSessions, saveSession } from "../../src/context";
 import { tempGitRepo } from "../helpers";
@@ -41,6 +41,32 @@ describe("StepContext", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("resume_from follows a status a person approved by hand, even with a stale resume_from already set", async () => {
+    const { repo, ctx, trace } = await setup();
+    await setStatus(ctx, "designing");
+    await setStatus(ctx, "spec-review");
+    await setStatus(ctx, "spec-approved");
+    await ctx.reload();
+    // Simulate a person editing the status directly (skipping the runtime), leaving resume_from stale.
+    await writeIntent(ctx.intent, { status: "plan-approved" });
+    await ctx.reload();
+    await setStatus(ctx, "building");
+    const i = await readIntent(repo.path, "x");
+    expect(i.file.frontmatter.resume_from).toBe("plan-approved");
+    trace.close(); repo.cleanup();
+  });
+
+  test("accepted through spec-approved then planning yields resume_from spec-approved", async () => {
+    const { repo, ctx, trace } = await setup();
+    await setStatus(ctx, "designing");
+    await setStatus(ctx, "spec-review");
+    await setStatus(ctx, "spec-approved");
+    await setStatus(ctx, "planning");
+    const i = await readIntent(repo.path, "x");
+    expect(i.file.frontmatter.resume_from).toBe("spec-approved");
+    trace.close(); repo.cleanup();
+  });
+
   test("block sets blocked with a note and keeps resume_from", async () => {
     const { repo, ctx, trace } = await setup();
     await setStatus(ctx, "designing");
@@ -67,6 +93,14 @@ describe("StepContext", () => {
     expect(loadSessions(ctx)).toEqual({});
     saveSession(ctx, "build", "sid-1");
     expect(loadSessions(ctx)).toEqual({ build: "sid-1" });
+    trace.close(); repo.cleanup();
+  });
+
+  test("loadSessions returns {} for a corrupt sessions.json", async () => {
+    const { repo, ctx, trace } = await setup();
+    mkdirSync(ctx.runDir, { recursive: true });
+    await Bun.write(join(ctx.runDir, "sessions.json"), "not json");
+    expect(loadSessions(ctx)).toEqual({});
     trace.close(); repo.cleanup();
   });
 });

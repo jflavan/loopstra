@@ -58,4 +58,31 @@ describe("Git", () => {
     expect(await git.headSha()).toBe(before);
     repo.cleanup();
   });
+
+  test("a conflicting merge aborts cleanly and the error mentions the conflict", async () => {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    await git.createBranch("intent/conflict", "main");
+    const wt = join(repo.path, ".loopstra", "worktrees", "conflict");
+    await git.worktreeAdd(wt, "intent/conflict");
+    const wtGit = new Git(wt);
+    await Bun.write(join(wt, "README.md"), "branch change\n");
+    await wtGit.commitAll("branch change");
+    await Bun.write(join(repo.path, "README.md"), "main change\n");
+    await git.commitAll("main change");
+
+    let error: Error | undefined;
+    try {
+      await git.merge("intent/conflict", "squash", "merge conflict");
+    } catch (e) {
+      error = e as Error;
+    }
+    expect(error).toBeDefined();
+    expect(error!.message).toMatch(/README\.md|conflict/i);
+    expect(await git.isDirty()).toBe(false);
+    expect((await git.run(["status", "--porcelain"])).out.trim()).toBe("");
+
+    await git.worktreeRemove(wt);
+    repo.cleanup();
+  });
 });
