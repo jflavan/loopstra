@@ -1,7 +1,7 @@
 import { headingsPresent } from "../checks";
 import { block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
-import { evaluateGate, type Check, type GateOutcome } from "../gates";
+import { evaluateGate, type Check } from "../gates";
 import type { Status } from "../intents";
 import { agentPhase } from "../phases";
 import type { PromptVars } from "../prompts";
@@ -80,14 +80,6 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
 /** What a failed check hands back through the gate: the judge could not run, or what it found. */
 type JudgePayload = { broken: { note: string; detail: string } } | { findings: string[] };
 
-/** What the gate's automated checks concluded about the artifact. */
-type Verdict =
-  | { result: "pass" }
-  /** The artifact needs work: `findings` go back to the agent that writes it. */
-  | { result: "fail"; findings: string; detail: string }
-  /** The judge could not run at all (its agent failed): no point rewriting; a person decides. */
-  | { result: "error"; note: string; detail: string };
-
 /**
  * The gate timing rule. Pass with no person on the gate → approved; pass with a person → the
  * review status with a note (so a review status always means "checks passed, waiting for a
@@ -96,18 +88,23 @@ type Verdict =
  */
 async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>): Promise<StepResult> {
   for (;;) {
-    const v = verdictOf(await evaluateGate(ctx, s.gate, await checks(ctx, s)));
-    if (v.result === "pass") {
+    const outcome = await evaluateGate(ctx, s.gate, await checks(ctx, s));
+    if (outcome.result === "pass") {
       clearMarker(ctx, s.marker);
       const human = ctx.cfg.gates[s.gate].human;
       if (human === "none") await setStatus(ctx, s.approved);
       else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human));
       return { ok: true };
     }
-    if (v.result === "error") return block(ctx, v.note, { detail: v.detail });
-    if (!onceMarker(ctx, s.marker, v.findings)) return block(ctx, s.failedNote, { detail: v.detail });
+    const p = outcome.payload;
+    // The judge could not run at all (its agent failed): no point rewriting; a person decides.
+    if (p && "broken" in p) return block(ctx, p.broken.note, { detail: p.broken.detail });
+    // The findings go back to the writer: the judge's, else the failing check's evidence.
+    const findings = bullets(p?.findings.length ? p.findings : [outcome.evidence]);
+    const detail = `${outcome.check}: ${outcome.evidence}`;
+    if (!onceMarker(ctx, s.marker, findings)) return block(ctx, s.failedNote, { detail });
     await setStatus(ctx, s.working, s.rewritingNote);
-    const again = await write(ctx, s, v.findings);
+    const again = await write(ctx, s, findings);
     if (!again.ok) return again;
   }
 }
@@ -141,12 +138,4 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     },
   });
   return list;
-}
-
-/** A judge that could not run is an error; else the judge's findings, or the failing check's evidence. */
-function verdictOf(outcome: GateOutcome<JudgePayload>): Verdict {
-  if (outcome.result === "pass") return { result: "pass" };
-  const p = outcome.payload;
-  if (p && "broken" in p) return { result: "error", ...p.broken };
-  return { result: "fail", findings: bullets(p?.findings.length ? p.findings : [outcome.evidence]), detail: `${outcome.check}: ${outcome.evidence}` };
 }
