@@ -1,3 +1,5 @@
+import { onStop, StopRequested, throwIfStopping } from "./stop";
+
 /** Resolves to the promise's value, or to `fallback` once `ms` pass. Never waits longer than `ms`. */
 export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -46,9 +48,11 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 /**
  * Runs one configured command string through Bun's cross-platform shell (`bun exec`).
  * Never throws on non-zero exit; the exit code is the result. Past the timeout the
- * process tree is killed and the result says so.
+ * process tree is killed and the result says so. After a stop request it does not start, or it
+ * kills the running command's tree, and throws StopRequested.
  */
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
+  throwIfStopping();
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const proc = Bun.spawn({
@@ -64,7 +68,19 @@ export async function runCommand(command: string, cwd: string, opts: RunCommandO
   };
   const drained = Promise.all([drain(proc.stdout, (s) => { stdout += s; }), drain(proc.stderr, (s) => { stderr += s; })]);
 
-  let code = await within(proc.exited, timeoutMs, null);
+  // A stop request kills the command's tree; the exit then ends the wait below.
+  let stopped = false;
+  const unsubscribe = onStop(() => { stopped = true; void killTree(proc); });
+  let code: number | null;
+  try {
+    code = await within(proc.exited, timeoutMs, null);
+  } finally {
+    unsubscribe();
+  }
+  if (stopped) {
+    await within(proc.exited, 2_000, null);
+    throw new StopRequested();
+  }
   const timedOut = code === null;
   if (timedOut) {
     await killTree(proc);

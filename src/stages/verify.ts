@@ -4,6 +4,7 @@ import type { Envelope } from "../envelopes";
 import { withDetachedWorktree } from "../git";
 import { agentPhase } from "../phases";
 import { commandTimeoutMs, runCommand } from "../shell";
+import { StopRequested } from "../stop";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 
 const RECHECK = "To check again, set status to merged.";
@@ -93,6 +94,7 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
       });
     });
   } catch (e) {
+    if (e instanceof StopRequested) throw e;
     return { ok: false, note: JUDGE_FAILED, detail: `could not prepare a clean copy of main: ${e instanceof Error ? e.message : String(e)}` };
   }
   if (!r.ok) {

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Config } from "./config";
 import { Git } from "./git";
 import { commandTimeoutMs, runCommand } from "./shell";
+import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
 /**
@@ -23,6 +24,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
     result = r.code === 0 ? "pass" : "fail";
     output = r.output.slice(-4000);
   } catch (e) {
+    if (e instanceof StopRequested) throw e;
     result = "error";
     output = (e as Error).message;
   } finally {

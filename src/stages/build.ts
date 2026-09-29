@@ -5,6 +5,7 @@ import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus,
 import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
+import { StopRequested } from "../stop";
 import { artifacts, bullets, buildSession, MERGING, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
 
 const RETRY = "To try again, set status to plan-approved.";
@@ -171,6 +172,10 @@ export async function runChecks(ctx: StepContext, phaseName: string): Promise<Co
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return null;
   } catch (e) {
+    if (e instanceof StopRequested) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
+      throw e;
+    }
     const msg = e instanceof Error ? e.message : String(e);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     return { command: "checks", code: 1, output: msg, lastLine: msg.split("\n")[0] ?? "", durationMs: 0, timedOut: false };

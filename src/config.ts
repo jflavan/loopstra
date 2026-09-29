@@ -44,7 +44,11 @@ export const ConfigSchema = z.object({
     spec: z.object({ human: humanGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
     plan: z.object({ human: humanGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
     merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash") }).strict().prefault({}),
-    done: z.object({ human: humanGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
+    // A pull request cannot confirm a result after the merge, so the done gate has no pr surface.
+    done: z.object({
+      human: z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" }).default("none"),
+      agent: z.boolean().default(true),
+    }).strict().prefault({}),
   }).strict().prefault({}),
   stages: z.object({
     design: stage.extend({ model: modelRef.default("strong") }).prefault({}),

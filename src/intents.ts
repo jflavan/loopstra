@@ -58,7 +58,8 @@ export function parseIntentFile(rawText: string): IntentFile {
   const fm = Frontmatter.safeParse(raw ?? {});
   if (!fm.success) {
     const issue = fm.error.issues[0];
-    throw new Error(`intent.md frontmatter problem at ${issue?.path.join(".") || "top"}: ${issue?.message}`);
+    const field = issue?.path.join(".") || (issue?.code === "unrecognized_keys" ? issue.keys.join(", ") : "") || "top";
+    throw new FrontmatterProblem(field, `intent.md frontmatter problem at ${field}: ${issue?.message}`);
   }
   const titleMatch = /^#(?!#)\s*(?:Intent:\s*)?(.+)$/m.exec(body);
   const title = titleMatch?.[1]?.trim() ?? "";
@@ -109,17 +110,48 @@ export async function readIntent(root: string, slug: string): Promise<Intent> {
   return { slug, dir, file: parseIntentFile(text), artifacts };
 }
 
-export async function scanIntents(root: string): Promise<Intent[]> {
+/** An intent folder whose intent.md could not be read. `problem` is plain; `detail` is for the trace. */
+export interface Unreadable { slug: string; problem: string; detail: string }
+
+export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
+
+/** Every intent folder: the readable intents, and the ones a person needs to fix. Never throws for one bad file. */
+export async function scanRepo(root: string): Promise<Scan> {
   const base = intentRoot(root);
-  if (!existsSync(base)) return [];
-  const out: Intent[] = [];
+  const scan: Scan = { intents: [], unreadable: [] };
+  if (!existsSync(base)) return scan;
   for (const name of readdirSync(base)) {
     const dir = join(base, name);
-    if (!statSync(dir).isDirectory()) continue;
-    if (!existsSync(join(dir, "intent.md"))) continue;
-    out.push(await readIntent(root, name));
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+      if (!existsSync(join(dir, "intent.md"))) continue;
+      scan.intents.push(await readIntent(root, name));
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      scan.unreadable.push({ slug: name, problem: unreadableProblem(e), detail });
+    }
   }
-  return out;
+  return scan;
+}
+
+/** The readable intents only. Never throws for one bad file; see scanRepo for the others. */
+export async function scanIntents(root: string): Promise<Intent[]> {
+  return (await scanRepo(root)).intents;
+}
+
+function unreadableProblem(e: unknown): string {
+  if (e instanceof FrontmatterProblem) {
+    return `The ${e.field} line at the top of intent.md has a value Loopstra does not understand. Fix it, and the change is picked up again.`;
+  }
+  return "The lines between the --- markers at the top of intent.md could not be read. Fix them, and the change is picked up again.";
+}
+
+/** intent.md frontmatter that parsed as YAML but has an invalid field. */
+export class FrontmatterProblem extends Error {
+  constructor(public readonly field: string, message: string) {
+    super(message);
+    this.name = "FrontmatterProblem";
+  }
 }
 
 export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>): Promise<void> {
@@ -136,18 +168,20 @@ const IMPLIES: Partial<Record<Status, readonly string[]>> = {
   verifying: ["spec.md", "plan.md"], done: ["spec.md", "plan.md", "outcome.md"],
 };
 
-/** Returns a plain-language problem, or null when the folder matches the status. */
+/**
+ * Returns a plain-language problem, or null when the folder matches the status. Drafts are still
+ * being written and done or closed changes are finished, so none of them is checked.
+ */
 export function checkConsistency(intent: Intent): string | null {
   const status = intent.file.frontmatter.status;
+  if (status === "draft" || status === "done" || status === "closed") return null;
   for (const name of IMPLIES[status] ?? []) {
     if (!intent.artifacts.has(name)) {
       return `Status is "${status}" but ${name} is missing. Set status back to an earlier approved state, or to closed.`;
     }
   }
-  if (status !== "draft") {
-    const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
-    if (missing.length) return `intent.md is missing the section(s): ${missing.join(", ")}. Add them, then set status to accepted.`;
-  }
+  const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
+  if (missing.length) return `intent.md is missing the section(s): ${missing.join(", ")}. Add them, then set status to accepted.`;
   return null;
 }
 
@@ -206,14 +240,17 @@ export function plainStatus(status: Status): string {
   return PLAIN[status];
 }
 
-export function renderQueue(ordered: Intent[]): string {
+/** Intents whose intent.md cannot be read are listed under "Needs a person" with their plain problem. */
+export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = []): string {
   const active = ordered.filter((i) => !["done", "closed", "blocked", "draft"].includes(i.file.frontmatter.status));
   const blocked = ordered.filter((i) => i.file.frontmatter.status === "blocked");
   const drafts = ordered.filter((i) => i.file.frontmatter.status === "draft");
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${i.file.frontmatter.note.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/")} |`;
-  const table = (rows: Intent[]) => rows.length
-    ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows.map(row)].join("\n")
+  const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
+  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(i.file.frontmatter.note)} |`;
+  const badRow = (u: Unreadable) => `| ${u.slug} | - | ${plainStatus("blocked")} | ${cell(u.problem)} |`;
+  const table = (rows: string[]) => rows.length
+    ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows].join("\n")
     : "_Nothing here._";
   return [
     "# Queue",
@@ -222,19 +259,19 @@ export function renderQueue(ordered: Intent[]): string {
     "",
     "## In progress, in order",
     "",
-    table(active),
+    table(active.map(row)),
     "",
     "## Needs a person",
     "",
-    table(blocked),
+    table([...blocked.map(row), ...unreadable.map(badRow)]),
     "",
     "## Drafts",
     "",
-    table(drafts),
+    table(drafts.map(row)),
     "",
     "## Finished",
     "",
-    table(finished),
+    table(finished.map(row)),
     "",
   ].join("\n");
 }

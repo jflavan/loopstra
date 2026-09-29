@@ -1,3 +1,4 @@
+import { StopRequested } from "./stop";
 import type { StepContext } from "./context";
 
 export type CheckResult = { result: "pass" | "fail" | "waiting"; evidence: string };
@@ -9,7 +10,12 @@ export type GateOutcome = { result: "pass" } | { result: "fail" | "waiting"; che
 export async function evaluateGate(ctx: StepContext, gate: GateName, checks: Check[]): Promise<GateOutcome> {
   for (const check of checks) {
     let r: CheckResult;
-    try { r = await check.run(); } catch (e) { r = { result: "fail", evidence: `check crashed: ${(e as Error).message}` }; }
+    try {
+      r = await check.run();
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      r = { result: "fail", evidence: `check crashed: ${(e as Error).message}` };
+    }
     ctx.trace.gate(ctx.slug, gate, check.name, r.result, r.evidence);
     if (r.result !== "pass") return { result: r.result, check: check.name, evidence: r.evidence };
   }

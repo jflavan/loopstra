@@ -1,4 +1,5 @@
 import { killTree, within } from "./shell";
+import { onStop, StopRequested, throwIfStopping } from "./stop";
 
 export interface StreamEvent {
   type: string;
@@ -117,6 +118,7 @@ export function resolveClaude(override?: string): string | null {
  * Runs one `claude -p` session. Everything it awaits is bounded by the deadline (`timeoutMs`)
  * plus a short grace: it stops reading stdout at the result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
+ * After a stop request it does not start, or it kills the running session, and throws StopRequested.
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
@@ -142,6 +144,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   // A .ts fake must be run through bun; the real CLI is a native executable.
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
 
+  throwIfStopping();
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
@@ -151,6 +154,10 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   } catch (e) {
     return fail("not-started", `could not start claude: ${e instanceof Error ? e.message : String(e)}`);
   }
+
+  // A stop request kills the session's tree; its stdout then closes and the waits below end.
+  let stopped = false;
+  const unsubscribe = onStop(() => { stopped = true; void killTree(proc); });
 
   try {
     proc.stdin.write(input.prompt);
@@ -203,6 +210,8 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     exitCode = await within(proc.exited, EXIT_GRACE_MS, null);
   }
   await within(stderrDone, 250, undefined);
+  unsubscribe();
+  if (stopped) throw new StopRequested();
 
   const collected = collector.finish();
   if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);

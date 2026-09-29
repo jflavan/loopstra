@@ -25,6 +25,13 @@ describe("loadConfig", () => {
     t.cleanup();
   });
 
+  test("rejects a pull request as the done gate's surface, in plain words", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\ngates:\n  done:\n    human: pr\n");
+    await expect(loadConfig(t.path)).rejects.toThrow("gates.done.human: must be status or none; a pull request cannot be used for this gate");
+    t.cleanup();
+  });
+
   test("rejects unknown keys with a plain message", async () => {
     const t = tempDir();
     await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nbogus: 1\n");

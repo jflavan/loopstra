@@ -497,9 +497,14 @@ a remote exists) `gh` are available, then loops: tick, sleep
 6. Sleep.
 
 One step per tick keeps the loop legible and interruptible. A step is
-bounded by its phase timeouts. Ctrl-C between phases exits cleanly; during a
-phase it kills the child process, marks the phase failed, and leaves the
-intent in its in-progress status, which the next start resumes.
+bounded by its phase timeouts. The loop never dies: a tick's own problem is
+traced and the next tick comes; an unreadable intent.md is listed under
+"Needs a person" and the rest carry on. Ctrl-C (SIGTERM, SIGBREAK) asks for
+a stop: no new session or command starts, one in flight is killed, its
+phase is marked `interrupted`, and the intent keeps its in-progress status
+(it is never blocked for this), which the next start resumes; steps are
+idempotent. The sleep between ticks ends at once. A second Ctrl-C exits
+with 130.
 
 Resumption: `sessions.json` maps phase names to session IDs. A build
 continuation resumes session B if present. If `--resume` fails (session gone),

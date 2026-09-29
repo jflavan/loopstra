@@ -279,6 +279,20 @@ describe("merge", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("resuming reviewing after the merge landed (no person on the gate) records it as merged", async () => {
+    const { repo, ctx, trace } = await built();
+    const git = new Git(repo.path);
+    mkdirSync(ctx.runDir, { recursive: true });
+    writeFileSync(join(ctx.runDir, "merging"), await git.headSha());
+    await git.merge(ctx.branch, "squash", "add-numbers: add numbers");
+    const before = phaseNames(trace).length;
+    await runReviewStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(phaseNames(trace).slice(before)).toEqual([]);
+    expect(await git.branchExists(ctx.branch)).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("a merge marker whose merge never landed is ignored", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     await runReviewStep(ctx);

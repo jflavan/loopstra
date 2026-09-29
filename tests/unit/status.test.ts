@@ -24,6 +24,17 @@ describe("renderStatus", () => {
     t.cleanup();
   });
 
+  test("lists an unreadable intent with what to fix", async () => {
+    const t = tempDir();
+    mkdirSync(join(t.path, "intent", "broken"), { recursive: true });
+    await Bun.write(join(t.path, "intent", "broken", "intent.md"), "---\nstatus: nearly-done\n---\n# Intent: broken\n");
+    const text = await renderStatus(t.path);
+    expect(text).toContain("broken");
+    expect(text).toContain("needs a person");
+    expect(text).toContain("The status line at the top of intent.md");
+    t.cleanup();
+  });
+
   test("says so when there are no intents", async () => {
     const t = tempDir();
     expect(await renderStatus(t.path)).toMatch(/No intents yet/);

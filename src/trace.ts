@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
-  | "status_change" | "phase_end" | "error" | "signal";
+  | "status_change" | "phase_end" | "error" | "signal" | "stop";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -78,7 +78,7 @@ export class Trace {
     return seq;
   }
 
-  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail"; costUsd?: number; sessionId?: string; error?: string }): void {
+  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail" | "interrupted"; costUsd?: number; sessionId?: string; error?: string }): void {
     this.db.run("UPDATE phases SET status = ?, ended = ?, cost_usd = ?, session_id = COALESCE(?, session_id), error = ? WHERE slug = ? AND seq = ?",
       [r.status, now(), r.costUsd ?? 0, r.sessionId ?? null, r.error ?? null, slug, seq]);
     this.event(slug, "phase_end", { status: r.status, cost_usd: r.costUsd ?? 0, error: r.error ?? null }, seq);

@@ -5,6 +5,7 @@ import { modelFor } from "./config";
 import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
+import { StopRequested, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -93,6 +94,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+  throwIfStopping();
   const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
   const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}` });
@@ -136,6 +138,10 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined });
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
+    if (e instanceof StopRequested) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
+      throw e;
+    }
     return failed("crash", `runtime error: ${errorText(e)}`, null);
   } finally {
     if (raw) { try { await raw.end(); } catch { /* already closed */ } }
@@ -157,7 +163,7 @@ function summarize(e: Record<string, unknown>): Record<string, unknown> {
 
 export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; note: string };
 
-/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash. */
+/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: () => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
@@ -165,6 +171,10 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return r;
   } catch (e) {
+    if (e instanceof StopRequested) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
+      throw e;
+    }
     const msg = errorText(e);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     return { ok: false, note: `The ${name} step failed: ${msg.split("\n")[0]}` };

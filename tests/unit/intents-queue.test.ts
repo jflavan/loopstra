@@ -51,6 +51,15 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("consistency skips drafts and finished changes", async () => {
+    const t = tempDir();
+    await mk(t.path, "finished-long-ago", "status: done");
+    await mk(t.path, "dismissed", "status: closed");
+    await Bun.write(join(t.path, "intent", "half-written", "intent.md"), "---\nstatus: draft\n---\n# Intent: half\n");
+    for (const i of await scanIntents(t.path)) expect(checkConsistency(i)).toBeNull();
+    t.cleanup();
+  });
+
   test("consistency requires artifacts implied by status", async () => {
     const t = tempDir();
     await mk(t.path, "no-spec", "status: spec-review");
