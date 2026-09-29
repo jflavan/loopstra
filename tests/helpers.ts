@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,8 +83,15 @@ export async function copyRepo(template: string): Promise<{ path: string; cleanu
   const t = tempDir("loopstra-repo-");
   cpSync(template, t.path, { recursive: true });
   const worktrees = join(t.path, ".loopstra", "worktrees");
-  const moved = existsSync(worktrees) ? readdirSync(worktrees).map((n) => join(worktrees, n)) : [];
-  if (moved.length) await run(["git", "worktree", "repair", ...moved], t.path);
+  // Point each copied worktree and its admin entry at the copy. `git worktree repair` is not used:
+  // older git (2.34) follows the copied link back to the template and rewires the template instead.
+  for (const name of existsSync(worktrees) ? readdirSync(worktrees) : []) {
+    const wt = join(worktrees, name);
+    const admin = join(t.path, ".git", "worktrees", name);
+    if (!existsSync(admin)) continue;
+    writeFileSync(join(wt, ".git"), `gitdir: ${admin.replaceAll("\\", "/")}\n`);
+    writeFileSync(join(admin, "gitdir"), `${join(wt, ".git").replaceAll("\\", "/")}\n`);
+  }
   return t;
 }
 

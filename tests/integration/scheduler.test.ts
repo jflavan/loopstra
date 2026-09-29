@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { configPath } from "../../src/config";
 import { Git, removeStaleLocks } from "../../src/git";
@@ -22,7 +22,8 @@ const SLUG = "add-numbers";
  * `pattern` (a grep pattern). Runtime commits skip the commit hooks, but not this one.
  */
 async function refuseCommits(repo: string, pattern: string): Promise<void> {
-  await Bun.write(join(repo, ".git", "hooks", "reference-transaction"), [
+  const hook = join(repo, ".git", "hooks", "reference-transaction");
+  await Bun.write(hook, [
     "#!/bin/sh",
     '[ "$1" = prepared ] || exit 0',
     "while read old new ref; do",
@@ -31,6 +32,7 @@ async function refuseCommits(repo: string, pattern: string): Promise<void> {
     "exit 0",
     "",
   ].join("\n"));
+  chmodSync(hook, 0o755); // git on macOS and Linux ignores a hook without the executable bit
 }
 
 describe("scheduler resilience", () => {
