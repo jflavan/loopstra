@@ -42,7 +42,7 @@ describe("GitHub", () => {
   test("a gh that hangs is stopped at the timeout and behaves like a failed call", async () => {
     const t = tempDir();
     const gh = new GitHub(t.path, {
-      executable: FAKE, timeoutMs: 500,
+      executable: FAKE, timeoutMs: 200,
       env: { LOOPSTRA_FAKE_GH_STATE: join(t.path, "gh.json"), LOOPSTRA_FAKE_GH_HANG: "1" },
     });
     const started = Date.now();

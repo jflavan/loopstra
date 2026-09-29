@@ -28,7 +28,7 @@ describe("runCommand", () => {
   test("a command that outlives its timeout is killed and reported plainly", async () => {
     const t = tempDir();
     const started = Date.now();
-    const r = await runCommand(`bun -e "await Bun.sleep(5000)"`, t.path, { timeoutMs: 500 });
+    const r = await runCommand(`bun -e "await Bun.sleep(5000)"`, t.path, { timeoutMs: 300 });
     expect(Date.now() - started).toBeLessThan(4_500);
     expect(r.timedOut).toBe(true);
     expect(r.code).not.toBe(0);

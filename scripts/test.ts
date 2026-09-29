@@ -7,17 +7,19 @@ import { Glob } from "bun";
 
 // Rough seconds per file from a serial run; unknown files count as 2. Only balance matters.
 const WEIGHTS: Record<string, number> = {
-  "tests/unit/stages-review-merge.test.ts": 52,
-  "tests/integration/remote.test.ts": 37,
+  "tests/integration/remote.test.ts": 34,
+  "tests/unit/stages-review-merge.test.ts": 29,
   "tests/integration/scheduler.test.ts": 17,
-  "tests/unit/stages-build.test.ts": 13,
-  "tests/integration/loop.test.ts": 12,
-  "tests/unit/remote.test.ts": 11,
+  "tests/unit/remote.test.ts": 13,
+  "tests/unit/stages-build.test.ts": 12,
+  "tests/integration/loop.test.ts": 10,
   "tests/unit/stages-design.test.ts": 8,
-  "tests/unit/git.test.ts": 8,
-  "tests/unit/stages-verify.test.ts": 8,
+  "tests/unit/stages-verify.test.ts": 7,
   "tests/unit/stages-plan.test.ts": 7,
-  "tests/unit/context.test.ts": 6,
+  "tests/unit/git.test.ts": 6,
+  "tests/unit/phases.test.ts": 5,
+  "tests/unit/context.test.ts": 5,
+  "tests/unit/signals.test.ts": 3,
 };
 
 const args = process.argv.slice(2);

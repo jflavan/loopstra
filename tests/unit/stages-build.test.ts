@@ -174,7 +174,7 @@ describe("build stage", () => {
     const hook = join(repo.path, ".git", "hooks", "post-checkout");
     await Bun.write(hook, "#!/bin/sh\nsleep 30\n");
     chmodSync(hook, 0o755);
-    (ctx as { git: Git }).git = new Git(repo.path, { timeoutMs: 3_000 });
+    (ctx as { git: Git }).git = new Git(repo.path, { timeoutMs: 300 });
     const r = await runStepGuarded(ctx);
     expect(r.ok).toBe(false);
     const i = await readIntent(repo.path, "add-numbers");

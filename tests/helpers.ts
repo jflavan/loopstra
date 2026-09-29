@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,9 +65,27 @@ export async function setupRepo(status: string, opts: SetupOptions = {}) {
   mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
   await new Git(repo.path).commitAll("intent");
-  const trace = Trace.open(repo.path);
-  const ctx = new StepContext(repo.path, await loadConfig(repo.path), trace, await readIntent(repo.path, "add-numbers"));
-  return { repo, ctx, trace };
+  return { repo, ...(await openRepo(repo.path)) };
+}
+
+/** A fresh Trace and a StepContext on the `add-numbers` intent of a repository setupRepo made (or a copy of one). */
+export async function openRepo(path: string): Promise<{ ctx: StepContext; trace: Trace }> {
+  const trace = Trace.open(path);
+  return { ctx: new StepContext(path, await loadConfig(path), trace, await readIntent(path, "add-numbers")), trace };
+}
+
+/**
+ * A copy of a prepared repository in a fresh temp directory, with the links between it and its
+ * worktrees under .loopstra/worktrees repaired, so tests that start from the same state build it
+ * once and copy it (a copy takes a fraction of a rebuild). Close the template's trace first.
+ */
+export async function copyRepo(template: string): Promise<{ path: string; cleanup: () => void }> {
+  const t = tempDir("loopstra-repo-");
+  cpSync(template, t.path, { recursive: true });
+  const worktrees = join(t.path, ".loopstra", "worktrees");
+  const moved = existsSync(worktrees) ? readdirSync(worktrees).map((n) => join(worktrees, n)) : [];
+  if (moved.length) await run(["git", "worktree", "repair", ...moved], t.path);
+  return t;
 }
 
 /** The newest commit in a checkout, as "<short sha> <subject>". */

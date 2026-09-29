@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
@@ -7,12 +8,58 @@ import { runBuildStep } from "../../src/stages/build";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { lastCommit, setupRepo, withEnv } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, lastCommit, openRepo, setEnv, setupRepo, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 const PERSON_MERGES = "gates:\n  merge:\n    human: status\n";
 
-async function built(config = "") {
+const ONE_ROUND = "stages:\n  review:\n    max_rounds: 1\n";
+
+/**
+ * The configs the tests start from. Each is built once, all in parallel, and every test gets its own
+ * copy (see copyRepo): a copy takes a fraction of a build.
+ */
+const CONFIGS = ["", PERSON_MERGES, ONE_ROUND, `${PERSON_MERGES}${ONE_ROUND}`, "gates:\n  merge:\n    human: pr\n", `${PERSON_MERGES}stages:\n  review:\n    before:\n      - echo before\n    after:\n      - echo after\n`];
+const templates = new Map<string, { path: string; cleanup: () => void }>();
+/** The configs whose tests start after the first review, at merge-review: that state is copied too. */
+const REVIEWED = [PERSON_MERGES, `${PERSON_MERGES}${ONE_ROUND}`];
+let restoreEnv = () => {};
+
+beforeAll(async () => {
+  restoreEnv = setEnv({ [FAKE_CLAUDE_ENV]: FAKE_CLAUDE });
+  const made = await Promise.all(CONFIGS.map(build));
+  made.forEach((s, i) => { s.trace.close(); templates.set(`built|${CONFIGS[i]}`, s.repo); });
+  await Promise.all(REVIEWED.map(async (config) => {
+    const s = await copy("built", config);
+    await runMergeStep(s.ctx);
+    s.trace.close();
+    templates.set(`reviewed|${config}`, s.repo);
+  }));
+}, 120_000);
+
+afterAll(() => {
+  for (const t of templates.values()) t.cleanup();
+  restoreEnv();
+});
+
+async function copy(state: "built" | "reviewed", config: string) {
+  const template = templates.get(`${state}|${config}`);
+  if (!template) throw new Error(`no ${state} template for this config; add it to CONFIGS or REVIEWED`);
+  const repo = await copyRepo(template.path);
+  return { repo, ...(await openRepo(repo.path)) };
+}
+
+/** A copy of a repository whose change was built (status reviewing), with `config` appended to its config. */
+function built(config = "") {
+  return copy("built", config);
+}
+
+/** The same after its first review with a person on the merge gate (status merge-review). */
+function reviewed(config: string) {
+  return copy("reviewed", config);
+}
+
+async function build(config: string) {
   const s = await setupRepo("plan-approved", { commands: { test: "bun test" }, config });
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "spec.md"), "# Spec\n\n## Summary\ns\n");
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "plan.md"), PLAN);
@@ -241,8 +288,7 @@ describe("merge", () => {
   });
 
   test("a person sets merge-approved without committing: the merge proceeds, and main gets one commit with the branch's tree", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     const git = new Git(repo.path);
     // The owner edits the status line and saves, but never commits.
     const path = join(repo.path, "intent", "add-numbers", "intent.md");
@@ -272,8 +318,7 @@ describe("merge", () => {
   });
 
   test("an unsaved queue.md (the generated queue, committed only along with other records) never holds up a merge", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     const queue = join(repo.path, "intent", "queue.md");
     await Bun.write(queue, "# Queue\n\ncommitted\n");
@@ -286,8 +331,7 @@ describe("merge", () => {
   });
 
   test("an unsaved edit to a tracked source file outside intent/ still blocks the merge, and stays as it was", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     await Bun.write(join(repo.path, "README.md"), "# test repo\n\nunsaved\n");
     const head = await new Git(repo.path).headSha();
@@ -303,8 +347,7 @@ describe("merge", () => {
   });
 
   test("merge-approved reads the newest review verdict", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     trace.gate("add-numbers", "review", "findings", "fail", "a later review found an important problem");
     await runMergeStep(ctx);
@@ -317,8 +360,7 @@ describe("merge", () => {
   });
 
   test("a rebase conflict blocks in plain words and leaves main clean", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await Bun.write(join(repo.path, "src", "add.ts"), "// main version\n");
     await new Git(repo.path).commitAll("conflicting change on main");
     await personSets(ctx, "merge-approved");
@@ -331,8 +373,7 @@ describe("merge", () => {
   });
 
   test("a merge that git refuses blocks in plain words with detail in the trace", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     // An untracked file on main that the merge would overwrite makes git refuse the merge itself.
     await Bun.write(join(repo.path, "src", "add.ts"), "// someone's scratch file\n");
@@ -385,8 +426,7 @@ describe("merge", () => {
   });
 
   test("resuming merge-approved after the merge landed records it as merged without merging twice", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     // Stopped right after the merge commit, before the status was recorded.
     const git = new Git(repo.path);
@@ -417,8 +457,7 @@ describe("merge", () => {
   });
 
   test("a merge marker whose merge never landed is ignored", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
     mkdirSync(ctx.runDir, { recursive: true });
     writeFileSync(join(ctx.runDir, "merging"), "stale");
@@ -429,8 +468,7 @@ describe("merge", () => {
   });
 
   test("fixes the merge checks commit after approval go back to review before anything merges", async () => {
-    const { repo, ctx, trace } = await built(PERSON_MERGES);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     // main moves on with a test the change does not satisfy yet; the fix makes it pass.
     await Bun.write(join(repo.path, "tests", "main.test.ts"), 'import { existsSync } from "node:fs";\nimport { expect, test } from "bun:test";\ntest("fixed", () => { expect(existsSync("FIXED")).toBe(true); });\n');
     await new Git(repo.path).commitAll("a new test on main");
@@ -455,8 +493,7 @@ describe("merge", () => {
   });
 
   test("fixes after the last allowed review round block in plain words", async () => {
-    const { repo, ctx, trace } = await built(`${PERSON_MERGES}stages:\n  review:\n    max_rounds: 1\n`);
-    await runMergeStep(ctx);
+    const { repo, ctx, trace } = await reviewed(`${PERSON_MERGES}stages:\n  review:\n    max_rounds: 1\n`);
     await Bun.write(join(ctx.runDir, "review-round"), "2");
     await Bun.write(join(repo.path, "tests", "main.test.ts"), 'import { existsSync } from "node:fs";\nimport { expect, test } from "bun:test";\ntest("fixed", () => { expect(existsSync("FIXED")).toBe(true); });\n');
     await new Git(repo.path).commitAll("a new test on main");

@@ -46,7 +46,7 @@ describe("runPhase", () => {
     const t = tempDir();
     const started = Date.now();
     const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:hang", schema: {}, model: "haiku", permissionMode: "default",
-      allowedTools: [], timeoutMs: 1_500, maxBudgetUsd: 1, executable: FAKE });
+      allowedTools: [], timeoutMs: 800, maxBudgetUsd: 1, executable: FAKE });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("timeout");
     expect(r.detail).toMatch(/timed out/);
@@ -69,7 +69,7 @@ describe("runPhase", () => {
     const t = tempDir();
     const started = Date.now();
     const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:linger", schema: {}, model: "haiku", permissionMode: "default",
-      allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE });
+      allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE, exitGraceMs: 200 });
     expect(r.ok).toBe(true);
     expect(r.sessionId).toBe("fake-linger");
     expect(r.structuredOutput).toMatchObject({ status: "success" });

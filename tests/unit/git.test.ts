@@ -193,7 +193,7 @@ describe("Git", () => {
   test("a git call past its time limit is stopped and reported as a timeout", async () => {
     const repo = await tempGitRepo();
     const started = Date.now();
-    const p = new Git(repo.path, { timeoutMs: 500 }).run(["-c", "alias.hang=!sleep 20", "hang"], true);
+    const p = new Git(repo.path, { timeoutMs: 300 }).run(["-c", "alias.hang=!sleep 20", "hang"], true);
     await expect(p).rejects.toBeInstanceOf(GitTimeout);
     expect(Date.now() - started).toBeLessThan(10_000);
     repo.cleanup();
@@ -201,7 +201,7 @@ describe("Git", () => {
 
   test("a stop kills a running git call and throws StopRequested; nothing starts after it", async () => {
     const repo = await tempGitRepo();
-    const git = new Git(repo.path);
+    const git = new Git(repo.path, { stopGraceMs: 100 });
     const started = Date.now();
     setTimeout(() => requestStop(), 200);
     await expect(git.run(["-c", "alias.hang=!sleep 20", "hang"], true)).rejects.toBeInstanceOf(StopRequested);
