@@ -19,12 +19,14 @@ export class GitHub {
 
   /**
    * Runs gh once. Past the timeout the process tree is killed and the call reports code 124. It does
-   * not start after a stop request, and a stop kills it; both throw StopRequested.
+   * not start after a stop request, and a stop kills it; both throw StopRequested. `stdin` is written
+   * to its standard input (a body passed with `--body-file -`, never on the command line, which
+   * Windows limits to 32K characters).
    */
-  private async run(args: string[]): Promise<{ code: number; out: string; err: string }> {
+  private async run(args: string[], stdin?: string): Promise<{ code: number; out: string; err: string }> {
     if (!this.exe) return { code: 127, out: "", err: "gh not found" };
     const cmd = this.exe.endsWith(".ts") ? [process.execPath, this.exe, ...args] : [this.exe, ...args];
-    const r = await spawnBounded({ cmd, cwd: this.cwd, env: { ...process.env, ...this.env }, timeoutMs: this.timeoutMs, onStop: "kill" });
+    const r = await spawnBounded({ cmd, cwd: this.cwd, env: { ...process.env, ...this.env }, stdin, timeoutMs: this.timeoutMs, onStop: "kill" });
     if (r.stopped) throw new StopRequested();
     if (r.timedOut) return { code: 124, out: r.out, err: `${r.err}\ngh did not finish within ${Math.round(this.timeoutMs / 1000)}s and was stopped.`.trim() };
     return { code: r.code ?? 1, out: r.out, err: r.err };
@@ -56,7 +58,7 @@ export class GitHub {
   }
 
   async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {
-    const r = await this.run(["pr", "create", "--head", p.head, "--base", p.base, "--title", p.title, "--body", p.body]);
+    const r = await this.run(["pr", "create", "--head", p.head, "--base", p.base, "--title", p.title, "--body-file", "-"], p.body);
     if (r.code !== 0) throw new Error(`gh pr create failed: ${lastLine(r.err)}`);
     const url = lastLine(r.out);
     const pr = await this.prForBranch(p.head);
@@ -64,7 +66,7 @@ export class GitHub {
   }
 
   async comment(number: number, body: string): Promise<void> {
-    const r = await this.run(["pr", "comment", String(number), "--body", body]);
+    const r = await this.run(["pr", "comment", String(number), "--body-file", "-"], body);
     if (r.code !== 0) throw new Error(`gh pr comment failed: ${lastLine(r.err)}`);
   }
 

@@ -87,12 +87,27 @@ function hasOwnSshCommand(cwd: string): boolean {
   return known;
 }
 
-/** The environment of every git call: it never waits for a person to type a password or confirm a key. */
+/**
+ * The environment of every git call: it never waits for a person to type a password or confirm a
+ * key, and it speaks English (the C locale) whatever the machine's language, since some of its
+ * messages are read (conflicts, a missing session, the last line of an error).
+ */
 function gitEnv(cwd: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "" };
+  const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" };
   delete env.SSH_ASKPASS;
+  delete env.LANGUAGE;
   if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !hasOwnSshCommand(cwd)) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
   return env;
+}
+
+/** At most this many paths go on one git command line (Windows limits a command line to 32K characters). */
+export const DIFF_CHUNK = 200;
+
+/** `items` in consecutive slices of at most `size`. */
+export function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 /** The checkout is on a different branch than the caller is about to commit to. */
@@ -214,7 +229,11 @@ export class Git {
     if (changed.code !== 0) return false;
     const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
-    return (await this.run(["diff", "--quiet", target, branch, "--", ...files], true)).code === 0;
+    // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
+    for (const chunk of chunks(files, DIFF_CHUNK)) {
+      if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk], true)).code !== 0) return false;
+    }
+    return true;
   }
 
   /** Commits on `a` that `b` does not have (0 when either cannot be read). */

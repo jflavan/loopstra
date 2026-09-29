@@ -32,6 +32,23 @@ describe("GitHub", () => {
     t.cleanup();
   });
 
+  test("bodies go to gh on standard input, so a long one never reaches the command line", async () => {
+    const t = tempDir();
+    try {
+      const statePath = join(t.path, "gh.json");
+      const log = join(t.path, "gh.log");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath, LOOPSTRA_FAKE_GH_LOG: log } });
+      const long = `${"A finding with some detail. ".repeat(1_500)}end`;
+      await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: long });
+      await gh.comment(1, `${long}!`);
+      const s = JSON.parse(await Bun.file(statePath).text());
+      expect(s.prs["intent/x"].body).toBe(long);
+      expect(s.prs["intent/x"].comments).toEqual([`${long}!`]);
+      const calls = (await Bun.file(log).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+      expect(calls.filter((c) => c[1] === "create" || c[1] === "comment").every((c) => c.includes("--body-file") && !c.some((a) => a.length > 1_000))).toBe(true);
+    } finally { t.cleanup(); }
+  });
+
   test("available is false when gh is missing", async () => {
     const t = tempDir();
     const gh = new GitHub(t.path, { executable: join(t.path, "missing.exe") });

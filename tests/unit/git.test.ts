@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { Git, GitError, GitTimeout, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
+import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import { lastCommit, run, setEnv, tempGitRepo } from "../helpers";
 
@@ -255,5 +255,47 @@ describe("Git", () => {
 
     await git.worktreeRemove(wt);
     repo.cleanup();
+  });
+});
+
+describe("Git across systems", () => {
+  test("git speaks English whatever the machine's language", async () => {
+    const repo = await tempGitRepo();
+    const restore = setEnv({ LANG: "de_DE.UTF-8", LC_ALL: "de_DE.UTF-8", LANGUAGE: "de" });
+    try {
+      // A shell alias prints the environment git itself was given.
+      const env = (await new Git(repo.path).run(["-c", "alias.showenv=!env", "showenv"])).out.split(/\r?\n/);
+      expect(env).toContain("LC_ALL=C");
+      expect(env).toContain("LANG=C");
+      expect(env.some((l) => l.startsWith("LANGUAGE="))).toBe(false);
+      const err = await new Git(repo.path).run(["checkout", "no-such-branch"], true);
+      expect(err.err).toContain("did not match any file(s) known to git");
+    } finally { restore(); repo.cleanup(); }
+  });
+
+  test("chunks splits a list into slices of at most the given size", () => {
+    expect(chunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(chunks([], 2)).toEqual([]);
+  });
+
+  test("containsChanges compares hundreds of long paths without one huge command line", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const dir = join("a-rather-long-folder-name", "with-another-long-folder-inside-it", "and-one-more-level");
+      mkdirSync(join(repo.path, dir), { recursive: true });
+      await run(["git", "checkout", "-q", "-b", "feature"], repo.path);
+      const n = DIFF_CHUNK * 2 + 50;
+      for (let i = 0; i < n; i++) await Bun.write(join(repo.path, dir, `generated-file-number-${String(i).padStart(4, "0")}.txt`), `${i}\n`);
+      await git.commitAll("many files");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      await run(["git", "merge", "-q", "--squash", "feature"], repo.path);
+      await run(["git", "commit", "-q", "-m", "squash"], repo.path);
+      expect(await git.containsChanges("main", "feature")).toBe(true);
+      // A difference in the last chunk is still seen.
+      await Bun.write(join(repo.path, dir, `generated-file-number-${String(n - 1).padStart(4, "0")}.txt`), "changed\n");
+      await git.commitAll("change the last file");
+      expect(await git.containsChanges("main", "feature")).toBe(false);
+    } finally { repo.cleanup(); }
   });
 });
