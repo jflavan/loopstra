@@ -5,8 +5,6 @@ import { branchPlan, testLoop } from "./build";
 import { alreadyMerged, checkMerge, finishMerge, mayReviewAgain, passMergeGate, REVIEWS_USED_UP } from "./merge";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
-const RETRY = "To try again, set status to plan-approved.";
-
 /**
  * Stage 5 review rounds, then the merge gate's automated checks in the same step (the gate timing
  * rule). Called for reviewing. Ends at merged (no person on the merge gate), merge-review (a person
@@ -45,7 +43,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
       name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
       vars: { spec: a.spec, plan }, skills: stage.skills,
     });
-    if (!review.ok) return block(ctx, `${review.note} ${RETRY}`);
+    if (!review.ok) return block(ctx, review.note);
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
 
     // The runtime decides: the change passes when there are no important findings. The
@@ -77,7 +75,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
       name: "revise", traceName: `revise-${round}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { findings: bullets(important), test_command: ctx.cfg.commands.test },
     });
-    if (!revise.ok) return block(ctx, `${revise.note} ${RETRY}`);
+    if (!revise.ok) return block(ctx, revise.note);
     const saved = await saveWork(ctx, wt, revise.envelope.commit_message || `loopstra(${ctx.slug}): revise`);
     if (!saved.ok) return blockWith(ctx, saved);
     // The revision is saved: a restart from here reviews it as the next round.

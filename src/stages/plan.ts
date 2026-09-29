@@ -5,7 +5,6 @@ import { agentPhase } from "../phases";
 import { artifacts, bullets, headingsCheck, PLAN_HEADINGS, runHookCommands, settleGate, type GateFlow, type Verdict } from "./shared";
 
 const REPLANNED = "replanned";
-const RETRY = "Set status to plan-approved to accept the plan as it is, or to spec-approved to write it again.";
 
 /**
  * The plan half of Stage 3. spec-approved/planning: plan and the plan gate's checks in one step.
@@ -40,7 +39,7 @@ async function writePlan(ctx: StepContext, concerns: string): Promise<StepResult
     name: "plan", model: ctx.cfg.stages.plan.model, permissionMode: "plan", tools: "read",
     vars: { intent: a.intent, spec: a.spec, concerns }, skills: ctx.cfg.stages.plan.skills,
   });
-  if (!r.ok) return block(ctx, `${r.note} To try again, set status to spec-approved.`);
+  if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, "plan.md", r.envelope.plan_markdown);
   return runHookCommands(ctx, "after", "plan");
 }
@@ -52,8 +51,8 @@ function planFlow(ctx: StepContext): GateFlow {
     check: () => checkPlan(ctx),
     rewrite: (concerns) => writePlan(ctx, concerns),
     rewritingNote: "The first plan did not pass its automatic check, so it is being written again.",
-    failedNote: "The plan did not pass its automatic check, even after being written a second time.",
-    retry: RETRY,
+    // A decision for a person rather than a retry: two ways on.
+    failedNote: "The plan did not pass its automatic check, even after being written a second time. Set status to plan-approved to accept the plan as it is, or to spec-approved to write it again.",
   };
 }
 

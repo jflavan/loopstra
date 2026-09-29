@@ -62,7 +62,7 @@ export function disallowedFor(set: ToolSet): string[] {
 export function ownerNote(reason: FailureReason): string {
   switch (reason) {
     case "timeout": return "The assistant took too long on this step.";
-    case "budget": return "This step hit its spending limit.";
+    case "budget": return "This step hit its spending limit. An engineer may need to raise the limit.";
     case "crash": return "The assistant stopped unexpectedly.";
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";

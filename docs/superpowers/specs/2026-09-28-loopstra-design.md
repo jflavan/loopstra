@@ -592,6 +592,12 @@ the runtime starts a fresh session and records it.
 - The runtime's own exceptions inside a tick are caught at the tick
   boundary, logged, and the loop continues with the next tick.
 - Cost per intent is summed from result events and shown in `status`.
+- Every block note ends with what a person does next. `block()` adds
+  "When that is sorted out, set status to <x> to try again." (x: the
+  approved status the change resumes from, or for a merge retried
+  without a rebuild, `merge-approved` / `merge-review`) unless the note
+  already says which status to set. A spending-limit block says an
+  engineer may need to raise the limit.
 
 ## 16. Repository layout of Loopstra itself
 

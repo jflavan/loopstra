@@ -39,7 +39,7 @@ describe("scheduler resilience", () => {
     expect(r.picked).toBe(SLUG);
     const i = await readIntent(repo.path, SLUG);
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("Something unexpected went wrong in this step. An engineer can find the details in the trace. To try again, set status to accepted.");
+    expect(i.file.frontmatter.note).toBe("Something unexpected went wrong in this step. An engineer can find the details in the trace. When that is sorted out, set status to accepted to try again.");
     expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes("\"where\":\"step\""))).toBe(true);
     trace.close(); repo.cleanup();
   });

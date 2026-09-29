@@ -4,7 +4,6 @@ import { agentPhase } from "../phases";
 import { artifacts, bullets, headingsCheck, runHookCommands, settleGate, SPEC_HEADINGS, type GateFlow, type Verdict } from "./shared";
 
 const REDESIGNED = "redesigned";
-const RETRY = "Set status to spec-approved to accept the spec as it is, or to accepted to write it again.";
 
 /**
  * Stage 1 and 2. accepted/designing: intake, design, and the spec gate's checks in one step.
@@ -32,7 +31,7 @@ async function design(ctx: StepContext): Promise<StepResult> {
     name: "intake", model: "cheap", permissionMode: "default", tools: "read",
     vars: { intent: a.intent, priority: ctx.intent.file.frontmatter.priority ?? "not stated" },
   });
-  if (!intake.ok) return block(ctx, `${intake.note} To try again, set status to accepted.`);
+  if (!intake.ok) return block(ctx, intake.note);
   if (intake.envelope.question || intake.envelope.missing_sections.length) {
     const missing = intake.envelope.missing_sections.length ? ` Missing sections: ${intake.envelope.missing_sections.join(", ")}.` : "";
     return block(ctx, `${intake.envelope.question || "The intent needs more detail before it can be designed."}${missing} Update intent.md, then set status to accepted.`);
@@ -52,7 +51,7 @@ async function writeSpec(ctx: StepContext, findings: string): Promise<StepResult
     name: "design", model: ctx.cfg.stages.design.model, permissionMode: "default", tools: "read",
     vars: { intent: a.intent, findings }, skills: ctx.cfg.stages.design.skills,
   });
-  if (!r.ok) return block(ctx, `${r.note} To try again, set status to accepted.`);
+  if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, "spec.md", r.envelope.spec_markdown);
   return runHookCommands(ctx, "after", "design");
 }
@@ -64,8 +63,8 @@ function specFlow(ctx: StepContext): GateFlow {
     check: () => checkSpec(ctx),
     rewrite: (findings) => writeSpec(ctx, findings),
     rewritingNote: "The first spec did not pass its automatic check, so it is being written again.",
-    failedNote: "The spec did not pass its automatic check, even after being written a second time.",
-    retry: RETRY,
+    // A decision for a person rather than a retry: two ways on.
+    failedNote: "The spec did not pass its automatic check, even after being written a second time. Set status to spec-approved to accept the spec as it is, or to accepted to write it again.",
   };
 }
 

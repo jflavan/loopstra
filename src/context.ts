@@ -101,7 +101,25 @@ export async function setStatus(ctx: StepContext, status: Status, note = ""): Pr
   await commitArtifacts(ctx, `${from} → ${status}`);
 }
 
-export async function block(ctx: StepContext, note: string): Promise<{ ok: false; note: string }> {
+/** True when a note already tells the person which status to set. */
+function saysWhatToSet(note: string): boolean {
+  return /\b(set|change)\b[^.]*\b(status|to closed|to done)\b/i.test(note);
+}
+
+/**
+ * The note a block writes: the reason, plus how to try again when the reason does not already say
+ * which status to set. The retry status is `retryFrom` when given (a merge retried without a
+ * rebuild), else the approved status the change is resumed from. Only this function words it.
+ */
+export function blockNote(ctx: StepContext, note: string, retryFrom?: Status): string {
+  if (saysWhatToSet(note)) return note;
+  const from = ctx.intent.file.frontmatter.status;
+  const resume = retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from);
+  return resume ? `${note} When that is sorted out, set status to ${resume} to try again.` : note;
+}
+
+export async function block(ctx: StepContext, reason: string, retryFrom?: Status): Promise<{ ok: false; note: string }> {
+  const note = blockNote(ctx, reason, retryFrom);
   try {
     await setStatus(ctx, "blocked", note);
   } catch (e) {
@@ -117,16 +135,19 @@ export async function block(ctx: StepContext, note: string): Promise<{ ok: false
  * Blocks with a plain note for the owner and records the technical detail (check ids,
  * commands, output, branch names) in the trace, where an engineer can find it.
  */
-export async function blockWithDetail(ctx: StepContext, note: string, detail: unknown): Promise<{ ok: false; note: string }> {
+export async function blockWithDetail(ctx: StepContext, note: string, detail: unknown, retryFrom?: Status): Promise<{ ok: false; note: string }> {
   ctx.trace.event(ctx.slug, "error", { note, detail });
-  return block(ctx, note);
+  return block(ctx, note, retryFrom);
 }
 
-/** Something went wrong that the caller has not recorded yet: a plain note for the owner and detail for the trace. */
-export type Failure = { ok: false; note: string; detail: string };
+/**
+ * Something went wrong that the caller has not recorded yet: a plain note for the owner and detail
+ * for the trace. `retryFrom` overrides the status a person sets to try again (see blockNote).
+ */
+export type Failure = { ok: false; note: string; detail: string; retryFrom?: Status };
 
 export function blockWith(ctx: StepContext, f: Failure): Promise<{ ok: false; note: string }> {
-  return blockWithDetail(ctx, f.note, f.detail);
+  return blockWithDetail(ctx, f.note, f.detail, f.retryFrom);
 }
 
 /**

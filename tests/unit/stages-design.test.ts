@@ -128,7 +128,7 @@ describe("design stage", () => {
     expect(r.ok).toBe(false);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("A project command that runs before the design stage failed. An engineer needs to look at it.");
+    expect(i.file.frontmatter.note).toBe("A project command that runs before the design stage failed. An engineer needs to look at it. When that is sorted out, set status to accepted to try again.");
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("lint says no"))).toBe(true);
     expect(phaseNames(trace)).toEqual(["design-before"]);
     trace.close(); repo.cleanup();

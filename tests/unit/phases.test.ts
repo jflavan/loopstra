@@ -153,7 +153,7 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe("budget");
-      expect(r.note).toBe("This step hit its spending limit.");
+      expect(r.note).toBe("This step hit its spending limit. An engineer may need to raise the limit.");
     }
     expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
     trace.close(); repo.cleanup();

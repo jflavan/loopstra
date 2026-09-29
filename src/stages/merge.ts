@@ -4,6 +4,7 @@ import { assertRootOnMain, blockWith, blockWithDetail, clearMarker, onceMarker, 
 import { evaluateGate, type Check } from "../gates";
 import { Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
+import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { pushBranch, syncMain } from "../remote";
 import { markHealthPending } from "../signals";
@@ -26,9 +27,9 @@ export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set t
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
 const BRANCH_KEPT = "branch-kept";
 
-/** How a person asks the merge step to look again: the status that is runnable for this gate. */
-function mergeRetry(ctx: StepContext): string {
-  return `To try again, set status to ${ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review"}.`;
+/** How a person asks the merge step to look again without a rebuild: the status that is runnable for this gate. */
+function mergeRetry(ctx: StepContext): Status {
+  return ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review";
 }
 
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
@@ -151,8 +152,9 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
   if (r.ok) return { ok: true };
   return {
     ok: false,
-    note: `The pull request for this change could not be opened on GitHub. An engineer should check that GitHub can be reached. ${mergeRetry(ctx)}`,
+    note: "The pull request for this change could not be opened on GitHub. An engineer should check that GitHub can be reached.",
     detail: r.note,
+    retryFrom: mergeRetry(ctx),
   };
 }
 
@@ -187,7 +189,7 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const where = `pull request #${pr.number} ${pr.url}`;
   if (checks === "fail") {
     ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
-    return blockWithDetail(ctx, `${PR_CHECKS_FAILED_NOTE} ${mergeRetry(ctx)}`, { pr: pr.number, url: pr.url });
+    return blockWithDetail(ctx, PR_CHECKS_FAILED_NOTE, { pr: pr.number, url: pr.url }, mergeRetry(ctx));
   }
   const status = ctx.intent.file.frontmatter.status;
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
@@ -206,7 +208,7 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     // gh can report a problem after the merge went through (for example tidying up a local branch).
     const again = await gh.prForBranch(ctx.branch);
     if (!again?.merged) {
-      return blockWithDetail(ctx, `The pull request could not be merged on GitHub. An engineer should look at it. ${mergeRetry(ctx)}`, { pr: pr.number, error: merged.note });
+      return blockWithDetail(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { pr: pr.number, error: merged.note }, mergeRetry(ctx));
     }
   }
   return finishRemoteMerge(ctx);

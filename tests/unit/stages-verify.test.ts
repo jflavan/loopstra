@@ -119,7 +119,7 @@ describe("verify stage", () => {
     await runVerifyStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("The final check could not be completed; an engineer should look. To check again, set status to merged.");
+    expect(i.file.frontmatter.note).toBe("The final check could not be completed; an engineer should look. When that is sorted out, set status to merged to try again.");
     expect(i.file.frontmatter.resume_from).toBe("merged");
     expect(i.artifacts.has("outcome.md")).toBe(false);
     trace.close(); repo.cleanup();

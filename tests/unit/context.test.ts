@@ -6,7 +6,7 @@ import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
-  StepContext, block, blockWithDetail, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
+  StepContext, block, blockNote, blockWithDetail, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
   readArtifact, setStatus, writeArtifact, loadSessions, saveSession,
 } from "../../src/context";
 import { tempGitRepo } from "../helpers";
@@ -76,8 +76,22 @@ describe("StepContext", () => {
     await block(ctx, "The intent needs a Done when section.");
     const i = await readIntent(repo.path, "x");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("The intent needs a Done when section.");
+    expect(i.file.frontmatter.note).toBe("The intent needs a Done when section. When that is sorted out, set status to accepted to try again.");
     expect(i.file.frontmatter.resume_from).toBe("accepted");
+    trace.close(); repo.cleanup();
+  });
+
+  test("block owns the retry wording: it adds the status to set, unless the note already says one", async () => {
+    const { repo, ctx, trace } = await setup();
+    // From an approved status, that status is the one to set again.
+    expect(blockNote(ctx, "The assistant stopped unexpectedly.")).toBe("The assistant stopped unexpectedly. When that is sorted out, set status to accepted to try again.");
+    await setStatus(ctx, "designing");
+    expect(blockNote(ctx, "A project command failed.")).toBe("A project command failed. When that is sorted out, set status to accepted to try again.");
+    expect(blockNote(ctx, "The pull request could not be merged.", "merge-approved")).toBe("The pull request could not be merged. When that is sorted out, set status to merge-approved to try again.");
+    // A note that already says what to set is left as it is.
+    for (const n of ["Update intent.md, then set status to accepted.", "Read review.md, then change the status line to merge-approved.", "Decide, then set this one to done or closed."]) {
+      expect(blockNote(ctx, n)).toBe(n);
+    }
     trace.close(); repo.cleanup();
   });
 
@@ -120,7 +134,7 @@ describe("StepContext", () => {
     const { repo, ctx, trace } = await setup();
     await blockWithDetail(ctx, "A project command failed.", "`bun run lint` exited 2");
     const i = await readIntent(repo.path, "x");
-    expect(i.file.frontmatter.note).toBe("A project command failed.");
+    expect(i.file.frontmatter.note).toBe("A project command failed. When that is sorted out, set status to accepted to try again.");
     expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("bun run lint"))).toBe(true);
     trace.close(); repo.cleanup();
   });

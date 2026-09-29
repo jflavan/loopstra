@@ -80,9 +80,8 @@ export interface GateFlow {
   /** Writes the artifact again, told the findings. */
   rewrite: (findings: string) => Promise<StepResult>;
   rewritingNote: string;
+  /** The note when the rewrite did not pass either; it says what a person can set. */
   failedNote: string;
-  /** How a person retries, appended to every block note. */
-  retry: string;
 }
 
 /**
@@ -101,8 +100,8 @@ export async function settleGate(ctx: StepContext, flow: GateFlow): Promise<Step
       else await setStatus(ctx, flow.review, humanNote(flow.artifact, flow.approved, human));
       return { ok: true };
     }
-    if (v.result === "error") return blockWithDetail(ctx, `${v.note} ${flow.retry}`, v.detail);
-    if (!onceMarker(ctx, flow.marker, v.findings)) return blockWithDetail(ctx, `${flow.failedNote} ${flow.retry}`, v.detail);
+    if (v.result === "error") return blockWithDetail(ctx, v.note, v.detail);
+    if (!onceMarker(ctx, flow.marker, v.findings)) return blockWithDetail(ctx, flow.failedNote, v.detail);
     await setStatus(ctx, flow.working, flow.rewritingNote);
     const again = await flow.rewrite(v.findings);
     if (!again.ok) return again;

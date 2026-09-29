@@ -71,7 +71,7 @@ describe("build stage", () => {
     expect(r.ok).toBe(false);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("The tests kept failing after several attempts to fix them. An engineer needs to look at the change.");
+    expect(i.file.frontmatter.note).toBe("The tests kept failing after several attempts to fix them. An engineer needs to look at the change. When that is sorted out, set status to plan-approved to try again.");
     expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "test-1", "fix-1", "test-2", "fix-2", "test-3"]);
     expect(trace.phases("add-numbers").filter((p) => p.name.startsWith("test-")).map((p) => p.status)).toEqual(["fail", "fail", "fail"]);
     const recorded = await Bun.file(argsFile).json();
@@ -135,7 +135,7 @@ describe("build stage", () => {
     await runBuildStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("A project command that runs after the build stage failed. An engineer needs to look at it.");
+    expect(i.file.frontmatter.note).toBe("A project command that runs after the build stage failed. An engineer needs to look at it. When that is sorted out, set status to plan-approved to try again.");
     expect(phaseNames(trace).at(-1)).toBe("build-after");
     trace.close(); repo.cleanup();
   });

@@ -8,8 +8,6 @@ import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
 import { artifacts, bullets, buildSession, MERGING, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
 
-const RETRY = "To try again, set status to plan-approved.";
-
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
@@ -39,7 +37,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     name: "build", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
     vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test }, skills: stage.skills,
   });
-  if (!build.ok) return block(ctx, `${build.note} ${RETRY}`);
+  if (!build.ok) return block(ctx, build.note);
   // The build session is what fix, reconcile, and revise resume.
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);
   const saved = await saveWork(ctx, wt, build.envelope.commit_message || `loopstra(${ctx.slug}): build`);
@@ -66,7 +64,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
       name: "reconcile", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { plan, findings: bullets(drift.extra) },
     });
-    if (!rec.ok) return block(ctx, `${rec.note} ${RETRY}`);
+    if (!rec.ok) return block(ctx, rec.note);
     plan = rec.envelope.plan_markdown;
     await Bun.write(branchPlanPath(ctx), plan);
     const savedPlan = await saveWork(ctx, wt, `loopstra(${ctx.slug}): reconcile plan with implementation`);
@@ -84,7 +82,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
       name: "fix", traceName: "fix-after-verify", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { failure_output: "", observations: verified.observations, test_command: ctx.cfg.commands.test },
     });
-    if (!fix.ok) return block(ctx, `${fix.note} ${RETRY}`);
+    if (!fix.ok) return block(ctx, fix.note);
     const savedFix = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);
     if (!savedFix.ok) return blockWith(ctx, savedFix);
     const retested = await testLoop(ctx, "retest");
@@ -92,7 +90,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     const again = await verifyChange(ctx, a.spec, plan, "verify-2");
     if (!again.ok) return blockWith(ctx, again);
     if (!again.passed) {
-      return blockWithDetail(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it. ${RETRY}`, { observations: again.observations });
+      return blockWithDetail(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.`, { observations: again.observations });
     }
   }
 
@@ -121,7 +119,7 @@ async function verifyChange(ctx: StepContext, spec: string, plan: string, traceN
     name: "verify", traceName, model: ctx.cfg.stages.verify.model, permissionMode: "default", tools: "read+commands", cwd: ctx.worktreeDir,
     vars: { spec, plan, run_command: ctx.cfg.commands.run || "none configured" }, skills: ctx.cfg.stages.verify.skills,
   });
-  if (!r.ok) return { ok: false, note: `The finished change could not be checked. ${r.note} ${RETRY}`, detail: `${traceName} failed: ${r.reason}` };
+  if (!r.ok) return { ok: false, note: `The finished change could not be checked. ${r.note}`, detail: `${traceName} failed: ${r.reason}` };
   return { ok: true, passed: r.envelope.passed, observations: bullets(r.envelope.observations) };
 }
 
@@ -147,7 +145,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       name: "fix", traceName: `fix-${i}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { failure_output: failure.output.slice(-8000), test_command: ctx.cfg.commands.test },
     });
-    if (!fix.ok) return { ok: false, note: `${fix.note} ${RETRY}`, detail: `fix-${i} failed: ${fix.reason}` };
+    if (!fix.ok) return { ok: false, note: fix.note, detail: `fix-${i} failed: ${fix.reason}` };
     const saved = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);
     if (!saved.ok) return saved;
   }

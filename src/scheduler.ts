@@ -117,15 +117,13 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
     if (e instanceof StopRequested) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
-    return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx, e));
+    return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
   }
 }
 
-function unexpectedNote(ctx: StepContext, e: unknown): string {
-  const from = ctx.intent.file.frontmatter.resume_from;
-  const retry = from ? ` To try again, set status to ${from}.` : "";
-  if (e instanceof GitTimeout) return `${GIT_TIMEOUT_NOTE}${retry}`;
-  return `Something unexpected went wrong in this step. An engineer can find the details in the trace.${retry}`;
+function unexpectedNote(e: unknown): string {
+  if (e instanceof GitTimeout) return GIT_TIMEOUT_NOTE;
+  return "Something unexpected went wrong in this step. An engineer can find the details in the trace.";
 }
 
 /** Blocks with a note; if even that fails (for example a commit is refused), traces it instead of throwing. */

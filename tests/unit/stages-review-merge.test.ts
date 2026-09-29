@@ -98,7 +98,7 @@ describe("review", () => {
     await runReviewStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toBe("The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.");
+    expect(i.file.frontmatter.note).toBe("The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change. When that is sorted out, set status to plan-approved to try again.");
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("NaN"))).toBe(true);
     expect(phaseNames(trace).slice(-4)).toEqual(["review-1", "revise-1", "retest-1", "review-2"]);
     expect(gateRows(trace, "review")).toEqual(["findings:fail", "findings:fail"]);
