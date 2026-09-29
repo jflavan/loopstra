@@ -1,13 +1,11 @@
 import { commandTimeoutMs, runCommand } from "../shell";
 import {
-  blockWithDetail, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, readMarker, saveSession, setStatus,
+  block, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, readMarker, saveSession, setStatus, writeMarker,
   type Failure, type StepContext, type StepResult,
 } from "../context";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { Git, passOn } from "../git";
 import { agentPhase, codePhase, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
-import type { Check } from "../gates";
+import type { Check, GateOutcome } from "../gates";
 import { headingsPresent } from "../checks";
 import type { Status } from "../intents";
 
@@ -26,7 +24,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
   });
   if (r.ok) return { ok: true };
   const what = timedOut ? "did not finish in time" : "failed";
-  return blockWithDetail(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, r.detail);
+  return block(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, { detail: r.detail });
 }
 
 export function headingsCheck(name: string, text: string, headings: string[]): Check {
@@ -73,6 +71,17 @@ export type Verdict =
   /** A checker could not run at all (its agent failed): no point rewriting; a person decides. */
   | { result: "error"; note: string; detail: string };
 
+/** What an artifact's agent check hands back through the gate: the checker could not run, or what it found. */
+export type JudgePayload = { broken: { note: string; detail: string } } | { findings: string[] };
+
+/** A gate's outcome as a Verdict: a checker that could not run is an error; else the checker's findings, or the failing check's evidence. */
+export function verdictOf(outcome: GateOutcome<JudgePayload>): Verdict {
+  if (outcome.result === "pass") return { result: "pass" };
+  const p = outcome.payload;
+  if (p && "broken" in p) return { result: "error", ...p.broken };
+  return { result: "fail", findings: bullets(p?.findings.length ? p.findings : [outcome.evidence]), detail: `${outcome.check}: ${outcome.evidence}` };
+}
+
 export interface GateFlow {
   gate: "spec" | "plan";
   artifact: string;
@@ -106,8 +115,8 @@ export async function settleGate(ctx: StepContext, flow: GateFlow): Promise<Step
       else await setStatus(ctx, flow.review, humanNote(flow.artifact, flow.approved, human));
       return { ok: true };
     }
-    if (v.result === "error") return blockWithDetail(ctx, v.note, v.detail);
-    if (!onceMarker(ctx, flow.marker, v.findings)) return blockWithDetail(ctx, flow.failedNote, v.detail);
+    if (v.result === "error") return block(ctx, v.note, { detail: v.detail });
+    if (!onceMarker(ctx, flow.marker, v.findings)) return block(ctx, flow.failedNote, { detail: v.detail });
     await setStatus(ctx, flow.working, flow.rewritingNote);
     const again = await flow.rewrite(v.findings);
     if (!again.ok) return again;
@@ -198,15 +207,12 @@ export const MERGING = "merging";
 
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {
-  const p = join(ctx.runDir, REVIEW_ROUND);
-  if (!existsSync(p)) return null;
-  const n = Number.parseInt(readFileSync(p, "utf8").trim(), 10);
+  const n = Number.parseInt(readMarker(ctx, REVIEW_ROUND) ?? "", 10);
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
 export function writeRound(ctx: StepContext, round: number): void {
-  mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(join(ctx.runDir, REVIEW_ROUND), String(round));
+  writeMarker(ctx, REVIEW_ROUND, String(round));
 }
 
 /**

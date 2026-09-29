@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { assertRootOnMain, blockWith, blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { existsSync } from "node:fs";
+import { assertRootOnMain, block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { bookkeeping, Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
@@ -44,20 +43,17 @@ type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fai
 async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
-  let failure: Failure | null = null;
-  let changed = false;
-  const checks: Check[] = [
+  // A failing check hands back the failure to record; the tests check says whether it committed fixes.
+  const checks: Check<Failure | { ok: true; changed: boolean }>[] = [
     {
       name: "up-to-date",
       run: async () => {
         if (await ctx.git.isAncestor(main, ctx.branch)) return { result: "pass", evidence: "branch contains main" };
         if (await wt.rebaseOnto(main)) return { result: "pass", evidence: "rebased onto main" };
-        failure = {
-          ok: false,
-          note: UPDATE_FAILED_NOTE,
-          detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted`,
+        return {
+          result: "fail", evidence: "rebase onto main hit conflicts",
+          payload: { ok: false, note: UPDATE_FAILED_NOTE, detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted` },
         };
-        return { result: "fail", evidence: "rebase onto main hit conflicts" };
       },
     },
     {
@@ -71,9 +67,9 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         }
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
-        if (!tested.ok) { failure = tested; return { result: "fail", evidence: tested.detail }; }
-        changed = (await wt.headSha()) !== before;
-        return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0" };
+        if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
+        const changed = (await wt.headSha()) !== before;
+        return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
       },
     },
     {
@@ -82,17 +78,17 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // The review step records its verdict as a gate row; only the newest one counts.
         const last = ctx.trace.lastGate(ctx.slug, "review", "findings");
         if (last?.result === "pass") return { result: "pass", evidence: "the last review had no important findings" };
-        failure = { ok: false, note: "The last review found important problems that are still open. An engineer needs to look at the change.", detail: last ? last.evidence : "no review recorded" };
-        return { result: "fail", evidence: failure.detail };
+        const detail = last ? last.evidence : "no review recorded";
+        return { result: "fail", evidence: detail, payload: { ok: false, note: "The last review found important problems that are still open. An engineer needs to look at the change.", detail } };
       },
     },
   ];
   const outcome = await evaluateGate(ctx, "merge", checks);
-  if (outcome.result !== "pass") {
-    const f: Failure = failure ?? { ok: false, note: "The change could not be checked before merging. An engineer needs to look at it.", detail: `${outcome.check}: ${outcome.evidence}` };
-    return { result: "fail", ...f };
-  }
-  return changed ? { result: "changed" } : { result: "pass" };
+  if (outcome.result === "pass") return outcome.payloads.some((p) => p.ok && p.changed) ? { result: "changed" } : { result: "pass" };
+  const f: Failure = outcome.payload?.ok === false
+    ? outcome.payload
+    : { ok: false, note: "The change could not be checked before merging. An engineer needs to look at it.", detail: `${outcome.check}: ${outcome.evidence}` };
+  return { result: "fail", ...f };
 }
 
 /**
@@ -105,7 +101,7 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
   const human = ctx.cfg.gates.merge.human;
   if ((await ctx.git.remoteName()) !== null) {
     const opened = await openPullRequest(ctx, true);
-    if (!opened.ok) return blockWith(ctx, opened);
+    if (!opened.ok) return block(ctx, opened.note, opened);
     await setStatus(ctx, "merge-review", human === "none" ? PR_CHECKS_NOTE : human === "pr" ? PR_APPROVE_NOTE : MERGE_WAIT_NOTE);
     return { ok: true };
   }
@@ -114,7 +110,7 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
     await setStatus(ctx, "merge-review", MERGE_WAIT_NOTE);
     return { ok: true };
   }
-  return blockWithDetail(ctx, NO_REMOTE_PR_NOTE, "gates.merge.human is pr and the repository has no remote");
+  return block(ctx, NO_REMOTE_PR_NOTE, { detail: "gates.merge.human is pr and the repository has no remote" });
 }
 
 /**
@@ -182,14 +178,14 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   }
   const pr = found.pr;
   if (pr?.merged) return finishRemoteMerge(ctx);
-  if (pr?.state === "CLOSED") return blockWithDetail(ctx, PR_CLOSED_NOTE, { pr: pr.number, url: pr.url });
+  if (pr?.state === "CLOSED") return block(ctx, PR_CLOSED_NOTE, { detail: { pr: pr.number, url: pr.url } });
   if (!pr) {
     // No pull request yet (for example GitHub could not be reached when the review passed): open it.
     if (!(await ctx.git.branchExists(ctx.branch))) {
-      return blockWithDetail(ctx, "The work for this change is missing. To build it again, set status to plan-approved.", `branch ${ctx.branch} does not exist`);
+      return block(ctx, "The work for this change is missing. To build it again, set status to plan-approved.", { detail: `branch ${ctx.branch} does not exist` });
     }
     const opened = await openPullRequest(ctx, false);
-    if (!opened.ok) return blockWith(ctx, opened);
+    if (!opened.ok) return block(ctx, opened.note, opened);
     return { ok: true, waiting: true };
   }
 
@@ -201,7 +197,7 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const where = `pull request #${pr.number} ${pr.url}`;
   if (checks === "fail") {
     ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
-    return blockWithDetail(ctx, PR_CHECKS_FAILED_NOTE, { pr: pr.number, url: pr.url }, mergeRetry(ctx));
+    return block(ctx, PR_CHECKS_FAILED_NOTE, { detail: { pr: pr.number, url: pr.url }, retryFrom: mergeRetry(ctx) });
   }
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
@@ -219,7 +215,7 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     // gh can report a problem after the merge went through (for example tidying up a local branch).
     const again = await gh.prForBranch(ctx.branch);
     if (!again?.merged) {
-      return blockWithDetail(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { pr: pr.number, error: merged.detail }, mergeRetry(ctx));
+      return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
     }
   }
   return finishRemoteMerge(ctx);
@@ -242,7 +238,7 @@ const REVIEW_AGAIN = "review-again";
  */
 async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult | typeof REVIEW_AGAIN> {
   const verdict = await checkMerge(ctx);
-  if (verdict.result === "fail") return blockWith(ctx, verdict);
+  if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
   if (verdict.result === "pass") return onPass();
   return anotherRound(ctx);
 }
@@ -255,7 +251,7 @@ async function anotherRound(ctx: StepContext): Promise<StepResult | typeof REVIE
   const round = readRound(ctx) ?? 1;
   if (round > ctx.cfg.stages.review.max_rounds) {
     clearMarker(ctx, REVIEW_ROUND);
-    return blockWithDetail(ctx, REVIEWS_USED_UP, { rounds: round, reason: "fixes were committed after the last review" });
+    return block(ctx, REVIEWS_USED_UP, { detail: { rounds: round, reason: "fixes were committed after the last review" } });
   }
   writeRound(ctx, round + 1);
   return REVIEW_AGAIN;
@@ -288,13 +284,13 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   // record the change's own folder first, so their edit is part of main before the checks run.
   await recordPersonEdits(ctx);
   const open = await openBranchWorktree(ctx);
-  if (!open.ok) return blockWith(ctx, open);
+  if (!open.ok) return block(ctx, open.note, open);
   const wt = new Git(ctx.worktreeDir);
   let next: StepResult | typeof REVIEW_AGAIN;
   if (await wt.isDirty()) {
     // Edits nobody reviewed: keep them on the branch and review again rather than merge them unseen.
     const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
-    if (!kept.ok) return blockWith(ctx, kept);
+    if (!kept.ok) return block(ctx, kept.note, kept);
     next = await anotherRound(ctx);
   } else {
     next = await mergeGate(ctx, () => mergeNow(ctx));
@@ -318,16 +314,15 @@ async function recordPersonEdits(ctx: StepContext): Promise<void> {
  */
 async function mergeNow(ctx: StepContext): Promise<StepResult> {
   const root = await rootReady(ctx);
-  if (!root.ok) return blockWithDetail(ctx, DIRTY_ROOT_NOTE, root.detail);
+  if (!root.ok) return block(ctx, DIRTY_ROOT_NOTE, { detail: root.detail });
 
   // The checks brought the branch up to date; if main moved since (bookkeeping), catch up again.
   const main = ctx.cfg.main_branch;
   if (!(await ctx.git.isAncestor(main, ctx.branch)) && !(await new Git(ctx.worktreeDir).rebaseOnto(main))) {
-    return blockWithDetail(ctx, UPDATE_FAILED_NOTE, `rebase of ${ctx.branch} onto ${main} before the merge hit conflicts and was aborted`);
+    return block(ctx, UPDATE_FAILED_NOTE, { detail: `rebase of ${ctx.branch} onto ${main} before the merge hit conflicts and was aborted` });
   }
 
-  mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(join(ctx.runDir, MERGING), await ctx.git.headSha());
+  writeMarker(ctx, MERGING, await ctx.git.headSha());
   const merged = await codePhase(ctx, "merge", async () => {
     const title = ctx.intent.file.title || ctx.slug;
     try {
@@ -342,11 +337,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
   });
   if (!merged.ok || !merged.landed) {
     clearMarker(ctx, MERGING);
-    return blockWithDetail(
-      ctx,
-      "The change could not be merged; main was left untouched. An engineer needs to look at it.",
-      merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.detail,
-    );
+    return block(ctx, "The change could not be merged; main was left untouched. An engineer needs to look at it.", { detail: merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.detail });
   }
   return finishMerge(ctx);
 }
@@ -372,10 +363,9 @@ async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; 
  * every file the branch changed. A marker whose merge never landed is removed.
  */
 async function alreadyMerged(ctx: StepContext): Promise<boolean> {
-  const marker = join(ctx.runDir, MERGING);
-  if (!existsSync(marker)) return false;
+  const base = readMarker(ctx, MERGING)?.trim();
+  if (base === undefined) return false;
   if (!(await ctx.git.branchExists(ctx.branch))) return true;
-  const base = readFileSync(marker, "utf8").trim();
   const main = ctx.cfg.main_branch;
   const moved = (await ctx.git.run(["rev-parse", main], true)).out.trim() !== base;
   if (moved && (await ctx.git.containsChanges(main, ctx.branch))) return true;

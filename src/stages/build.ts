@@ -1,5 +1,5 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
@@ -23,7 +23,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     }
     return { ok: true as const };
   });
-  if (!branch.ok) return blockWithDetail(ctx, "The workspace for building this change could not be prepared. An engineer needs to look at it.", branch.detail);
+  if (!branch.ok) return block(ctx, "The workspace for building this change could not be prepared. An engineer needs to look at it.", { detail: branch.detail });
 
   const before = await runHookCommands(ctx, "before", "build", ctx.worktreeDir);
   if (!before.ok) return before;
@@ -40,7 +40,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   // The build session is what fix, reconcile, and revise resume.
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);
   const saved = await saveWork(ctx, wt, build.envelope.commit_message || `loopstra(${ctx.slug}): build`);
-  if (!saved.ok) return blockWith(ctx, saved);
+  if (!saved.ok) return block(ctx, saved.note, saved);
 
   // Plan drift: files changed that main's plan did not list.
   let plan = a.plan;
@@ -56,7 +56,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     ctx.trace.event(ctx.slug, "command", { command: "drift", changed, extra });
     return { ok: true as const, extra };
   });
-  if (!drift.ok) return blockWithDetail(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", drift.detail);
+  if (!drift.ok) return block(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", { detail: drift.detail });
   if (drift.extra.length) {
     const rec = await buildSession(ctx, {
       name: "reconcile", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -68,15 +68,15 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     writeMarker(ctx, RECONCILED_PLAN, plan);
     // The session was asked not to change code; anything it left anyway is kept on the branch.
     const savedPlan = await saveWork(ctx, wt, `loopstra(${ctx.slug}): reconcile`);
-    if (!savedPlan.ok) return blockWith(ctx, savedPlan);
+    if (!savedPlan.ok) return block(ctx, savedPlan.note, savedPlan);
   }
 
   const tested = await testLoop(ctx, "test");
-  if (!tested.ok) return blockWith(ctx, tested);
+  if (!tested.ok) return block(ctx, tested.note, tested);
 
   // The verifier. A verify failure gets exactly one fix (then the tests again), then blocks.
   const verified = await verifyChange(ctx, a.spec, plan, "verify");
-  if (!verified.ok) return blockWith(ctx, verified);
+  if (!verified.ok) return block(ctx, verified.note, verified);
   if (!verified.passed) {
     const fix = await buildSession(ctx, {
       name: "fix", traceName: "fix-after-verify", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -84,13 +84,13 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     });
     if (!fix.ok) return block(ctx, fix.note);
     const savedFix = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);
-    if (!savedFix.ok) return blockWith(ctx, savedFix);
+    if (!savedFix.ok) return block(ctx, savedFix.note, savedFix);
     const retested = await testLoop(ctx, "retest");
-    if (!retested.ok) return blockWith(ctx, retested);
+    if (!retested.ok) return block(ctx, retested.note, retested);
     const again = await verifyChange(ctx, a.spec, plan, "verify-2");
-    if (!again.ok) return blockWith(ctx, again);
+    if (!again.ok) return block(ctx, again.note, again);
     if (!again.passed) {
-      return blockWithDetail(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.`, { observations: again.observations });
+      return block(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.`, { detail: { observations: again.observations } });
     }
   }
 

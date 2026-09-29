@@ -2,7 +2,7 @@ import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { block, clearMarker, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
-import { artifacts, bullets, headingsCheck, PLAN_HEADINGS, runHookCommands, settleGate, type GateFlow, type Verdict } from "./shared";
+import { artifacts, headingsCheck, PLAN_HEADINGS, runHookCommands, settleGate, verdictOf, type GateFlow, type JudgePayload, type Verdict } from "./shared";
 
 const REPLANNED = "replanned";
 
@@ -59,8 +59,7 @@ function planFlow(ctx: StepContext): GateFlow {
 async function checkPlan(ctx: StepContext): Promise<Verdict> {
   const a = await artifacts(ctx);
   const files = parsePlanFiles(a.plan) ?? []; // no Files section: the headings check reports it
-  const judge: { broken?: { note: string; detail: string }; concerns: string[] } = { concerns: [] };
-  const checks: Check[] = [
+  const checks: Check<JudgePayload>[] = [
     headingsCheck("headings", a.plan, PLAN_HEADINGS),
     { name: "files", run: async () => { const r = filesExistOrNew(ctx.root, files); return r.ok ? { result: "pass", evidence: `${files.length} files listed` } : { result: "fail", evidence: r.problems.join("; ") }; } },
   ];
@@ -70,16 +69,12 @@ async function checkPlan(ctx: StepContext): Promise<Verdict> {
       run: async () => {
         const r = await agentPhase(ctx, { name: "plan-challenge", model: "strong", permissionMode: "default", tools: "read", vars: { spec: a.spec, plan: a.plan } });
         if (!r.ok) {
-          judge.broken = { note: `The plan could not be checked. ${r.note}`, detail: `plan-challenge failed: ${r.reason}` };
-          return { result: "fail", evidence: `the challenger failed: ${r.reason}` };
+          return { result: "fail", evidence: `the challenger failed: ${r.reason}`, payload: { broken: { note: `The plan could not be checked. ${r.note}`, detail: `plan-challenge failed: ${r.reason}` } } };
         }
-        judge.concerns = r.envelope.concerns.filter((c) => c.blocking).map((c) => c.concern);
-        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: judge.concerns.join("; ") || r.envelope.summary };
+        const concerns = r.envelope.concerns.filter((c) => c.blocking).map((c) => c.concern);
+        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: concerns.join("; ") || r.envelope.summary, payload: { findings: concerns } };
       },
     });
   }
-  const outcome = await evaluateGate(ctx, "plan", checks);
-  if (outcome.result === "pass") return { result: "pass" };
-  if (judge.broken) return { result: "error", ...judge.broken };
-  return { result: "fail", findings: bullets(judge.concerns.length ? judge.concerns : [outcome.evidence]), detail: `${outcome.check}: ${outcome.evidence}` };
+  return verdictOf(await evaluateGate(ctx, "plan", checks));
 }

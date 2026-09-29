@@ -6,7 +6,7 @@ import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
-  StepContext, block, blockNote, blockWithDetail, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
+  StepContext, block, blockNote, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
   readArtifact, setStatus, writeArtifact, loadSessions, saveSession,
 } from "../../src/context";
 import { tempGitRepo } from "../helpers";
@@ -132,9 +132,9 @@ describe("StepContext", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("blockWithDetail puts the plain note on the intent and the detail in the trace", async () => {
+  test("block with a detail puts the plain note on the intent and the detail in the trace", async () => {
     const { repo, ctx, trace } = await setup();
-    await blockWithDetail(ctx, "A project command failed.", "`bun run lint` exited 2");
+    await block(ctx, "A project command failed.", { detail: "`bun run lint` exited 2" });
     const i = await readIntent(repo.path, "x");
     expect(i.file.frontmatter.note).toBe("A project command failed. When that is sorted out, set status to accepted to try again.");
     expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("bun run lint"))).toBe(true);

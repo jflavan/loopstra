@@ -1,4 +1,4 @@
-import { block, blockWith, blockWithDetail, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase } from "../phases";
 import { testLoop } from "./build";
@@ -20,12 +20,12 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   const open = await openBranchWorktree(ctx);
   if (!open.ok) {
     clearMarker(ctx, REVIEW_ROUND);
-    return blockWith(ctx, open);
+    return block(ctx, open.note, open);
   }
   // Stopped part-way through a revision: keep those edits on the branch so the review sees them.
   if (await wt.isDirty()) {
     const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
-    if (!kept.ok) return blockWith(ctx, kept);
+    if (!kept.ok) return block(ctx, kept.note, kept);
     ctx.trace.event(ctx.slug, "command", { command: "keep unfinished changes", note: "the worktree had uncommitted edits at review start" });
   }
 
@@ -59,7 +59,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
 
     if (round > stage.max_rounds) {
       clearMarker(ctx, REVIEW_ROUND);
-      return blockWithDetail(ctx, "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.", { rounds: round, important });
+      return block(ctx, "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.", { detail: { rounds: round, important } });
     }
     const revise = await buildSession(ctx, {
       name: "revise", traceName: `revise-${round}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -67,10 +67,10 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     });
     if (!revise.ok) return block(ctx, revise.note);
     const saved = await saveWork(ctx, wt, revise.envelope.commit_message || `loopstra(${ctx.slug}): revise`);
-    if (!saved.ok) return blockWith(ctx, saved);
+    if (!saved.ok) return block(ctx, saved.note, saved);
     // The revision is saved: a restart from here reviews it as the next round.
     writeRound(ctx, round + 1);
     const tested = await testLoop(ctx, "retest");
-    if (!tested.ok) return blockWith(ctx, tested);
+    if (!tested.ok) return block(ctx, tested.note, tested);
   }
 }

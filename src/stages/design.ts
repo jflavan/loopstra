@@ -1,7 +1,7 @@
 import { block, clearMarker, readMarker, setStatus, writeArtifact, writeIntentPriority, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
-import { artifacts, bullets, headingsCheck, runHookCommands, settleGate, SPEC_HEADINGS, type GateFlow, type Verdict } from "./shared";
+import { artifacts, headingsCheck, runHookCommands, settleGate, SPEC_HEADINGS, verdictOf, type GateFlow, type JudgePayload, type Verdict } from "./shared";
 
 const REDESIGNED = "redesigned";
 
@@ -69,24 +69,19 @@ function specFlow(ctx: StepContext): GateFlow {
 
 async function checkSpec(ctx: StepContext): Promise<Verdict> {
   const a = await artifacts(ctx);
-  const judge: { broken?: { note: string; detail: string }; unmet: string[] } = { unmet: [] };
-  const checks: Check[] = [headingsCheck("headings", a.spec, SPEC_HEADINGS)];
+  const checks: Check<JudgePayload>[] = [headingsCheck("headings", a.spec, SPEC_HEADINGS)];
   if (ctx.cfg.gates.spec.agent) {
     checks.push({
       name: "spec-check",
       run: async () => {
         const r = await agentPhase(ctx, { name: "spec-check", model: "strong", permissionMode: "default", tools: "read", vars: { intent: a.intent, spec: a.spec } });
         if (!r.ok) {
-          judge.broken = { note: `The spec could not be checked. ${r.note}`, detail: `spec-check failed: ${r.reason}` };
-          return { result: "fail", evidence: `the checker failed: ${r.reason}` };
+          return { result: "fail", evidence: `the checker failed: ${r.reason}`, payload: { broken: { note: `The spec could not be checked. ${r.note}`, detail: `spec-check failed: ${r.reason}` } } };
         }
-        judge.unmet = r.envelope.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`);
-        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: judge.unmet.join("; ") || r.envelope.summary };
+        const unmet = r.envelope.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`);
+        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: unmet.join("; ") || r.envelope.summary, payload: { findings: unmet } };
       },
     });
   }
-  const outcome = await evaluateGate(ctx, "spec", checks);
-  if (outcome.result === "pass") return { result: "pass" };
-  if (judge.broken) return { result: "error", ...judge.broken };
-  return { result: "fail", findings: bullets(judge.unmet.length ? judge.unmet : [outcome.evidence]), detail: `${outcome.check}: ${outcome.evidence}` };
+  return verdictOf(await evaluateGate(ctx, "spec", checks));
 }

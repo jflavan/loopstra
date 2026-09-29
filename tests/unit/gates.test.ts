@@ -86,7 +86,7 @@ describe("evaluateGate", () => {
       { name: "agent", run: async () => ({ result: "pass", evidence: "approved" }) },
     ];
     const r = await evaluateGate(ctx, "spec", checks);
-    expect(r).toEqual({ result: "pass" });
+    expect(r).toEqual({ result: "pass", payloads: [] });
     expect(trace.gates("x").map((g) => g.check)).toEqual(["headings", "agent"]);
     trace.close(); repo.cleanup();
   });

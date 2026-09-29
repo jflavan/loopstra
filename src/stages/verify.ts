@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { blockWith, blockWithDetail, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
+import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
 import { agentPhase } from "../phases";
@@ -35,7 +35,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   const a = await artifacts(ctx);
 
   const judged = await doneCheck(ctx, a);
-  if (!judged.ok) return blockWith(ctx, judged);
+  if (!judged.ok) return block(ctx, judged.note, judged);
   const unmet = judged.items.filter((i) => i.result === "unmet");
   const forPerson = judged.items.filter((i) => i.result === "needs-person");
 
@@ -56,7 +56,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   const after = await runHookCommands(ctx, "after", "verify");
   if (!after.ok) return after;
 
-  if (unmet.length) return blockWithDetail(ctx, UNMET_NOTE, { unmet: unmet.map(line) });
+  if (unmet.length) return block(ctx, UNMET_NOTE, { detail: { unmet: unmet.map(line) } });
   const human = ctx.cfg.gates.done.human;
   if (human !== "none") {
     ctx.trace.gate(ctx.slug, "done", "human", "waiting", "waiting for a person to confirm the outcome");

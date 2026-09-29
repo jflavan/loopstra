@@ -1,23 +1,28 @@
 import type { StepContext } from "./context";
 import { passOn } from "./git";
+import { errorText } from "./shell";
 
-export type CheckResult = { result: "pass" | "fail" | "waiting"; evidence: string };
-export interface Check { name: string; run: () => Promise<CheckResult> }
-export type GateName = "intent" | "spec" | "plan" | "merge" | "done";
-export type GateOutcome = { result: "pass" } | { result: "fail" | "waiting"; check: string; evidence: string };
+/** One check's verdict. `payload` carries what the gate's caller needs back from the check (findings, a failure to record). */
+export type CheckResult<P = never> = { result: "pass" | "fail" | "waiting"; evidence: string; payload?: P };
+export interface Check<P = never> { name: string; run: () => Promise<CheckResult<P>> }
+export type GateName = "spec" | "plan" | "merge" | "done";
+/** Pass, with the payloads the passing checks returned; or the first check that did not pass, as it returned. */
+export type GateOutcome<P = never> = { result: "pass"; payloads: P[] } | (CheckResult<P> & { result: "fail" | "waiting"; check: string });
 
 /** Runs checks in order. Stops at the first fail or waiting. Records every check that ran. */
-export async function evaluateGate(ctx: StepContext, gate: GateName, checks: Check[]): Promise<GateOutcome> {
+export async function evaluateGate<P = never>(ctx: StepContext, gate: GateName, checks: Check<P>[]): Promise<GateOutcome<P>> {
+  const payloads: P[] = [];
   for (const check of checks) {
-    let r: CheckResult;
+    let r: CheckResult<P>;
     try {
       r = await check.run();
     } catch (e) {
       passOn(e);
-      r = { result: "fail", evidence: `check crashed: ${(e as Error).message}` };
+      r = { result: "fail", evidence: `check crashed: ${errorText(e)}` };
     }
     ctx.trace.gate(ctx.slug, gate, check.name, r.result, r.evidence);
-    if (r.result !== "pass") return { result: r.result, check: check.name, evidence: r.evidence };
+    if (r.result !== "pass") return { ...r, result: r.result, check: check.name };
+    if (r.payload !== undefined) payloads.push(r.payload);
   }
-  return { result: "pass" };
+  return { result: "pass", payloads };
 }

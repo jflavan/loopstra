@@ -129,8 +129,21 @@ export function blockNote(ctx: StepContext, note: string, retryFrom?: Status): s
   return `${note} When that is sorted out, set status to ${resume} to try again.`;
 }
 
-export async function block(ctx: StepContext, reason: string, retryFrom?: Status): Promise<{ ok: false; note: string }> {
-  const note = blockNote(ctx, reason, retryFrom);
+
+/**
+ * Something went wrong that the caller has not recorded yet: a plain note for the owner and detail
+ * for the trace. `retryFrom` overrides the status a person sets to try again (see blockNote).
+ */
+export type Failure = { ok: false; note: string; detail: string; retryFrom?: Status };
+
+/**
+ * Blocks the change with a plain note for the owner (worded by blockNote). A `detail` (check ids,
+ * commands, output, branch names) goes to the trace, where an engineer can find it. A Failure can
+ * be passed as the options whole: `block(ctx, f.note, f)`.
+ */
+export async function block(ctx: StepContext, reason: string, opts: { detail?: unknown; retryFrom?: Status } = {}): Promise<{ ok: false; note: string }> {
+  if (opts.detail !== undefined) ctx.trace.event(ctx.slug, "error", { note: reason, detail: opts.detail });
+  const note = blockNote(ctx, reason, opts.retryFrom);
   try {
     await setStatus(ctx, "blocked", note);
   } catch (e) {
@@ -142,36 +155,10 @@ export async function block(ctx: StepContext, reason: string, retryFrom?: Status
   return { ok: false, note };
 }
 
-/**
- * Blocks with a plain note for the owner and records the technical detail (check ids,
- * commands, output, branch names) in the trace, where an engineer can find it.
- */
-export async function blockWithDetail(ctx: StepContext, note: string, detail: unknown, retryFrom?: Status): Promise<{ ok: false; note: string }> {
-  ctx.trace.event(ctx.slug, "error", { note, detail });
-  return block(ctx, note, retryFrom);
-}
-
-/**
- * Something went wrong that the caller has not recorded yet: a plain note for the owner and detail
- * for the trace. `retryFrom` overrides the status a person sets to try again (see blockNote).
- */
-export type Failure = { ok: false; note: string; detail: string; retryFrom?: Status };
-
-export function blockWith(ctx: StepContext, f: Failure): Promise<{ ok: false; note: string }> {
-  return blockWithDetail(ctx, f.note, f.detail, f.retryFrom);
-}
-
-/**
- * A once-only runtime marker in the intent's run folder (never in intent/). Returns true when
- * this call created it, false when it already existed, so "do X once" survives a restart. The
- * marker holds `content` (for a resend: the findings it was sent with), read back by readMarker.
- */
-export function onceMarker(ctx: StepContext, name: string, content = ""): boolean {
+/** The content of a run-folder file (the intent's runtime state, never in intent/), or null when it does not exist. */
+export function readMarker(ctx: StepContext, name: string): string | null {
   const p = join(ctx.runDir, name);
-  if (existsSync(p)) return false;
-  mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(p, content);
-  return true;
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
 }
 
 /** Writes a run-folder file, replacing what was there. */
@@ -180,14 +167,19 @@ export function writeMarker(ctx: StepContext, name: string, content: string): vo
   writeFileSync(join(ctx.runDir, name), content);
 }
 
-/** The content of a marker, or null when it does not exist. */
-export function readMarker(ctx: StepContext, name: string): string | null {
-  const p = join(ctx.runDir, name);
-  return existsSync(p) ? readFileSync(p, "utf8") : null;
-}
-
 export function clearMarker(ctx: StepContext, name: string): void {
   rmSync(join(ctx.runDir, name), { force: true });
+}
+
+/**
+ * A once-only run-folder marker. Returns true when this call created it, false when it already
+ * existed, so "do X once" survives a restart. The marker holds `content` (for a resend: the
+ * findings it was sent with), read back by readMarker.
+ */
+export function onceMarker(ctx: StepContext, name: string, content = ""): boolean {
+  if (readMarker(ctx, name) !== null) return false;
+  writeMarker(ctx, name, content);
+  return true;
 }
 
 export async function readArtifact(ctx: StepContext, name: string): Promise<string | null> {
@@ -202,11 +194,12 @@ export async function writeArtifact(ctx: StepContext, name: string, text: string
   await commitArtifacts(ctx, `write ${name}`);
 }
 
+/** Run-folder file: the agent sessions to resume, by key. */
+const SESSIONS = "sessions.json";
+
 export function loadSessions(ctx: StepContext): Record<string, string> {
-  const p = join(ctx.runDir, "sessions.json");
-  if (!existsSync(p)) return {};
   try {
-    return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>;
+    return JSON.parse(readMarker(ctx, SESSIONS) ?? "{}") as Record<string, string>;
   } catch {
     // A corrupt or unreadable sessions.json should never crash a step; start fresh.
     return {};
@@ -214,18 +207,15 @@ export function loadSessions(ctx: StepContext): Record<string, string> {
 }
 
 export function saveSession(ctx: StepContext, key: string, sessionId: string): void {
-  mkdirSync(ctx.runDir, { recursive: true });
-  const all = loadSessions(ctx);
-  all[key] = sessionId;
-  writeFileSync(join(ctx.runDir, "sessions.json"), JSON.stringify(all, null, 2));
+  writeMarker(ctx, SESSIONS, JSON.stringify({ ...loadSessions(ctx), [key]: sessionId }, null, 2));
 }
 
 export function clearSession(ctx: StepContext, key: string): void {
   const all = loadSessions(ctx);
   delete all[key];
-  mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(join(ctx.runDir, "sessions.json"), JSON.stringify(all, null, 2));
+  writeMarker(ctx, SESSIONS, JSON.stringify(all, null, 2));
 }
+
 
 /** Records a priority only when the owner stated none; an owner's own priority is never overwritten. */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
