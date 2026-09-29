@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { loadConfig, type Config } from "./config";
-import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "./git";
 import { GitHub } from "./github";
 import { heartbeatWorkingOn, startHeartbeat } from "./heartbeat";
@@ -115,6 +115,7 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
     return await runStep(ctx);
   } catch (e) {
     if (e instanceof StopRequested) throw e;
+    if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx, e));
   }
@@ -132,6 +133,7 @@ async function blockSafely(ctx: StepContext, note: string): Promise<StepResult> 
   try {
     return await block(ctx, note);
   } catch (e) {
+    if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "block", note, error: errorText(e) });
     return { ok: false, note };
   }
@@ -235,7 +237,7 @@ export async function start(root: string, opts: { once: boolean; installSignals?
         else if (r.paused) log(`paused: ${r.paused}`);
         else if (r.stopped) log(`stopped${r.picked ? ` during ${r.picked}; it resumes on the next start` : ""}`);
         else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
-        else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : "step done") : r.result?.note}`);
+        else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : r.result.personChanged ? "a person changed the status; it is picked up next" : "step done") : r.result?.note}`);
         else log("idle");
       } catch (e) {
         log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);

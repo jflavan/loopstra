@@ -185,6 +185,7 @@ Sources of truth, in order of precedence when they conflict:
 - **Runtime commits (H3, H24).** Every commit the runtime makes (bookkeeping on main, worktree saves, merges, rebases) is authored `Loopstra <loopstra@localhost>`, uses `--no-verify` where the command has it and `-c commit.gpgsign=false`; one constant in `src/git.ts`. The gates run the configured checks instead of the owner's hooks.
 - **commitPaths (H11).** Checks staged changes only for its own paths; other staged files stay staged and out of the commit. Git error messages skip git's `warning:` lines.
 - **Process groups (H15).** On POSIX every child (claude, git, gh, project commands) starts in its own process group, so a timeout or stop kills everything it started; Windows keeps `taskkill /T`.
+- **A person's edits win (H2).** Every intent.md write re-reads the file right before writing and changes only its own frontmatter lines (textual patch: other keys, their order, comments, blank lines, the body, CRLF/LF and a BOM stay; a shape the patcher cannot handle is rewritten whole). If the status on disk is not the one the step started with, a person changed it: nothing is written, the trace gets `person-changed-status`, and the step ends without blocking or advancing; the next tick picks up the person's status. The priority is written only when the file still has none, and only on main.
 
 ## Open
 

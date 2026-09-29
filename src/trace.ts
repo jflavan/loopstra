@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
-  | "status_change" | "phase_end" | "error" | "signal" | "stop";
+  | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;

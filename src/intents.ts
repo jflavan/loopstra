@@ -154,9 +154,111 @@ export class FrontmatterProblem extends Error {
   }
 }
 
-export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>): Promise<void> {
-  Object.assign(intent.file.frontmatter, patch);
-  await Bun.write(join(intent.dir, "intent.md"), serializeIntentFile(intent.file));
+/** One frontmatter value as YAML on a single line (quoted when YAML needs it). */
+function scalar(v: string): string {
+  const s = stringify(v, { lineWidth: 0 }).trimEnd();
+  return s.includes("\n") ? JSON.stringify(v) : s;
+}
+
+/** Where a `key: value` line's trailing comment starts (with the whitespace before it), or -1. */
+function commentStart(rest: string): number {
+  const t = rest.trimStart();
+  let from = rest.length - t.length;
+  const q = t[0];
+  if (q === '"' || q === "'") {
+    // Skip past the closing quote ('' escapes a single quote; \" escapes a double one).
+    let i = from + 1;
+    while (i < rest.length) {
+      if (q === '"' && rest[i] === "\\") { i += 2; continue; }
+      if (rest[i] === q) {
+        if (q === "'" && rest[i + 1] === "'") { i += 2; continue; }
+        break;
+      }
+      i++;
+    }
+    from = i + 1;
+  }
+  const m = /\s#/.exec(rest.slice(from));
+  if (!m) return -1;
+  // Include the whitespace run before the #, so the comment keeps its column.
+  let start = from + m.index;
+  while (start > 0 && /\s/.test(rest[start - 1]!)) start--;
+  return start;
+}
+
+/**
+ * Changes frontmatter keys in intent.md text, line by line: each given key's line is replaced (a
+ * trailing comment is kept), or added just before the closing `---`. Everything else (other keys
+ * and their order, comments, blank lines, the body, CRLF or LF, a leading BOM) stays as it was, so
+ * a person's own edits to the file survive a status change. A frontmatter shape the line patcher
+ * cannot handle (for example a one-line `{...}` map) is rewritten whole, which still parses.
+ */
+export function patchFrontmatter(raw: string, patch: Record<string, string>): string {
+  const bom = raw.startsWith("﻿") ? "﻿" : "";
+  const text = raw.slice(bom.length);
+  const parts = text.split(/(?<=\n)/);
+  const content = (p: string) => p.replace(/\r?\n$/, "");
+  const eol = /\r\n/.exec(text) ? "\r\n" : "\n";
+  const entries = Object.entries(patch);
+  if (!entries.length) return raw;
+
+  const close = content(parts[0] ?? "").trimEnd() === "---" ? parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---") : -1;
+  let out: string;
+  if (close < 0) {
+    out = bom + ["---", ...entries.map(([k, v]) => `${k}: ${scalar(v)}`), "---"].join(eol) + eol + text;
+  } else {
+    const head = parts.slice(0, close);
+    const tail = parts.slice(close);
+    for (const [key, value] of entries) {
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      const line = `${key}: ${scalar(value)}`;
+      if (at < 0) { head.push(line + eol); continue; }
+      const own = content(head[at]!);
+      const ending = head[at]!.slice(own.length) || eol;
+      const rest = own.slice(own.indexOf(":") + 1);
+      const c = commentStart(rest);
+      head[at] = line + (c >= 0 ? rest.slice(c) : "") + ending;
+      // A value that went on over indented lines (a block or folded scalar) is replaced whole.
+      let end = at + 1;
+      while (end < head.length && /^(\s+\S|\s*$)/.test(content(head[end]!))) end++;
+      while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+      head.splice(at + 1, end - at - 1);
+    }
+    out = bom + head.join("") + tail.join("");
+  }
+  if (patched(out, patch)) return out;
+  // Fallback: rewrite the whole frontmatter from what the file says, with the patch on top.
+  const file = parseIntentFile(raw);
+  const next = Frontmatter.parse({ ...file.frontmatter, ...patch });
+  return serializeIntentFile({ ...file, frontmatter: next });
+}
+
+/** True when `text` parses and has every patched value. */
+function patched(text: string, patch: Record<string, string>): boolean {
+  try {
+    const fm = parseIntentFile(text).frontmatter as Record<string, unknown>;
+    return Object.entries(patch).every(([k, v]) => (fm[k] ?? "") === v);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Writes frontmatter keys into intent.md. The file is read from disk right before writing and only
+ * the given keys change (see patchFrontmatter), so a person's edits made meanwhile are kept. With
+ * `expectStatus`, nothing is written when the status on disk is a different one (a person changed
+ * it); the return value says whether it wrote. `intent.file` is refreshed from what was written.
+ */
+export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status } = {}): Promise<boolean> {
+  const path = join(intent.dir, "intent.md");
+  const onDisk = existsSync(path) ? await Bun.file(path).text() : serializeIntentFile(intent.file);
+  if (opts.expectStatus !== undefined && parseIntentFile(onDisk).frontmatter.status !== opts.expectStatus) return false;
+  const values: Record<string, string> = {};
+  for (const [k, v] of Object.entries(patch)) if (v !== undefined) values[k] = String(v);
+  const text = patchFrontmatter(onDisk, values);
+  await Bun.write(path, text);
+  intent.file = parseIntentFile(text);
+  return true;
 }
 
 /** Artifacts a status implies. */

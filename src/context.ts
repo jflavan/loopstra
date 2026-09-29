@@ -22,8 +22,29 @@ export class StepContext {
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
 }
 
-/** `waiting`: the step only looked (for example at a pull request) and nothing changed; another change may run in the same tick. */
-export type StepResult = { ok: true; waiting?: boolean } | { ok: false; note: string };
+/**
+ * `waiting`: the step only looked (for example at a pull request) and nothing changed; another
+ * change may run in the same tick. `personChanged`: a person set the status while the step ran, so
+ * the step ended without writing anything over it; the next tick picks up their status.
+ */
+export type StepResult = { ok: true; waiting?: boolean; personChanged?: boolean } | { ok: false; note: string };
+
+/**
+ * A person changed the status in intent.md while the step ran. The step ends without blocking or
+ * advancing; nothing is written over the person's status.
+ */
+export class PersonChangedStatus extends Error {
+  constructor(public readonly expected: string, public readonly found: string) {
+    super(`a person changed the status from ${expected} to ${found} while the step ran`);
+    this.name = "PersonChangedStatus";
+  }
+}
+
+/** Records that a step ended because a person changed the status, and the quiet result for it. */
+export function personChangedStatus(ctx: StepContext, e: PersonChangedStatus): StepResult {
+  ctx.trace.event(ctx.slug, "person-changed-status", { from: e.expected, to: e.found, note: "the step ended without writing; the next tick picks up the person's status" });
+  return { ok: true, personChanged: true };
+}
 
 const APPROVED: ReadonlySet<Status> = new Set(["accepted", "spec-approved", "plan-approved", "merge-approved", "merged"]);
 
@@ -53,16 +74,28 @@ export async function commitArtifacts(ctx: StepContext, what: string): Promise<v
   await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`);
 }
 
-export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
+/**
+ * Writes frontmatter keys for the runtime: only on main, re-read from disk right before writing,
+ * and never over a status a person set while the step ran (throws PersonChangedStatus instead).
+ */
+async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
   // Check before writing: a status written into another branch's checkout would land on that branch.
   await assertRootOnMain(ctx);
+  const expected = ctx.intent.file.frontmatter.status;
+  if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }))) {
+    const found = (await readIntent(ctx.root, ctx.slug)).file.frontmatter.status;
+    throw new PersonChangedStatus(expected, found);
+  }
+}
+
+export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
   const from = ctx.intent.file.frontmatter.status;
   const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
   // resume_from always follows the approved state being left, even if it was already set:
   // a person may have set an approved status by hand, and the marker must follow.
   if (APPROVED.has(status)) patch.resume_from = status;
   else if (APPROVED.has(from)) patch.resume_from = from;
-  await writeIntent(ctx.intent, patch);
+  await writeForStep(ctx, patch);
   ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
   ctx.trace.statusChange(ctx.slug, from, status, note);
   await commitArtifacts(ctx, `${from} → ${status}`);
@@ -158,7 +191,11 @@ export function clearSession(ctx: StepContext, key: string): void {
 
 /** Records a priority only when the owner stated none; an owner's own priority is never overwritten. */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
-  if (ctx.intent.file.frontmatter.priority !== undefined) return;
-  await writeIntent(ctx.intent, { priority });
+  await assertRootOnMain(ctx);
+  // The owner may have stated one while the step ran: read what the file says now.
+  const now = await readIntent(ctx.root, ctx.slug);
+  if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
+  if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return; }
+  await writeForStep(ctx, { priority });
   ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
 }

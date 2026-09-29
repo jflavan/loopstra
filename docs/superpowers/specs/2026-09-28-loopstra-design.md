@@ -142,6 +142,15 @@ any → blocked | closed
 | blocked | runtime | Needs a person. `note` says what and why. |
 | closed | human | Terminal. Dismissed. |
 
+A person's edits are never overwritten. The runtime re-reads intent.md
+right before every write and changes only the frontmatter lines it owns
+(status, note, resume_from, priority), textually, so the body, other keys,
+comments, key order and line endings stay as the person left them. If the
+status on disk is no longer the one the step started with, a person
+changed it while the step ran: the runtime writes nothing, records
+`person-changed-status` in the trace, and ends the step without blocking;
+the next tick picks up the person's status.
+
 Runnable means: not draft, not blocked, not done, not closed, and not a
 review status whose gate is waiting on a person or on external CI.
 
@@ -475,7 +484,8 @@ JSON), `gates` (slug, gate, check, result, evidence, ts), `signals` (name,
 ts, result, output).
 
 Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
-`status_change`, `phase_end`, `error`, `signal`.
+`status_change`, `phase_end`, `error`, `signal`, `stop`,
+`person-changed-status`.
 
 CLI on top:
 
