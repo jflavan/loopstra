@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Trace } from "../../src/trace";
+import { Database } from "bun:sqlite";
+import { Trace, useJournal } from "../../src/trace";
 import { tempDir } from "../helpers";
 
 describe("Trace", () => {
@@ -85,5 +86,20 @@ describe("Trace", () => {
     again.close();
     expect(said).toHaveLength(1);
     t.cleanup();
+  });
+
+  test("uses WAL where it can, and falls back to DELETE with a note where it cannot", () => {
+    const t = tempDir();
+    const file = new Database(join(t.path, "x.db"));
+    try {
+      expect(useJournal(file)).toBeNull();
+      expect((file.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal");
+    } finally { file.close(); t.cleanup(); }
+    // An in-memory database cannot use WAL: the same answer a file system without it gives.
+    const memory = new Database(":memory:");
+    try {
+      expect(useJournal(memory)).toContain("journal_mode=DELETE");
+      memory.exec("CREATE TABLE t (x INTEGER)");
+    } finally { memory.close(); }
   });
 });

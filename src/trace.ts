@@ -37,14 +37,37 @@ CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, name T
 
 const now = () => new Date().toISOString();
 
+/**
+ * Puts the database in WAL mode, or, where the file system cannot do WAL (some network drives, an
+ * in-memory database), in the default DELETE mode. Returns a note saying so, or null for WAL. A lock
+ * is thrown, as before.
+ */
+export function useJournal(db: Database): string | null {
+  let got: string;
+  try {
+    got = String((db.query("PRAGMA journal_mode = WAL").get() as { journal_mode?: string } | null)?.journal_mode ?? "");
+  } catch (e) {
+    if (/SQLITE_BUSY|locked/i.test(`${(e as { code?: string })?.code ?? ""} ${errorText(e)}`)) throw e;
+    got = errorText(e);
+  }
+  if (got.toLowerCase() === "wal") return null;
+  try { db.exec("PRAGMA journal_mode = DELETE"); } catch { /* keep the mode it has */ }
+  return `the trace database could not use WAL journal mode (${got || "no answer"}), so it uses journal_mode=DELETE`;
+}
+
+/** The WAL fallback is traced once per process, not on every open. */
+let journalNoted = false;
+
 /** Opens and prepares the database; closes it again when that fails. */
-function connect(path: string): Database {
+function connect(path: string): { db: Database; note: string | null } {
   const db = new Database(path);
   try {
-    db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
+    db.exec("PRAGMA busy_timeout = 5000;");
+    const note = useJournal(db);
+    db.exec("PRAGMA synchronous = NORMAL;");
     db.exec(SCHEMA);
     db.query("SELECT COUNT(*) AS n FROM events").get();
-    return db;
+    return { db, note };
   } catch (e) {
     try { db.close(); } catch { /* already unusable */ }
     throw e;
@@ -70,17 +93,27 @@ export class Trace {
     mkdirSync(dir, { recursive: true });
     const path = join(dir, "trace.db");
     try {
-      return new Trace(root, connect(path));
+      return Trace.noted(root, connect(path));
     } catch (e) {
       if (!damaged(e)) throw e;
       const moved = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       renameSync(path, moved);
       for (const side of ["-wal", "-shm"]) if (existsSync(path + side)) renameSync(path + side, moved + side);
       say(`The trace database could not be read, so it was moved to .loopstra/${basename(moved)} and a new one was started.`);
-      const trace = new Trace(root, connect(path));
+      const trace = Trace.noted(root, connect(path));
       trace.event("_loop", "error", { where: "trace", what: "trace.db could not be read; it was moved aside and a new one started", movedTo: moved, error: errorText(e) });
       return trace;
     }
+  }
+
+  /** A Trace on a fresh connection, with the journal-mode note traced the first time there is one. */
+  private static noted(root: string, c: { db: Database; note: string | null }): Trace {
+    const trace = new Trace(root, c.db);
+    if (c.note && !journalNoted) {
+      journalNoted = true;
+      trace.event("_loop", "error", { where: "trace", what: c.note });
+    }
+    return trace;
   }
 
   close(): void { this.db.close(); }

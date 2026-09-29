@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 
 /** Normalizes a heading for comparison: lower case, no trailing colon. */
 function headingKey(h: string): string {
@@ -46,10 +45,28 @@ export function parsePlanFiles(plan: string): PlanFile[] | null {
   return out;
 }
 
-export function filesExistOrNew(root: string, files: PlanFile[]): { ok: true } | { ok: false; problems: string[] } {
+/**
+ * Checks that every file the plan lists as existing is in the repository: `tracked` is `git
+ * ls-files` output, compared exactly, so a path in the wrong case fails on every system (as it
+ * would on Linux), not only where the file system is case-sensitive. A listed folder passes when
+ * it holds a tracked file. Files marked `(new)` are not checked.
+ */
+export function filesExistOrNew(tracked: string[], files: PlanFile[]): { ok: true } | { ok: false; problems: string[] } {
+  const known = new Set(tracked.map(normalizePath).filter(Boolean));
+  const has = (p: string) => {
+    const path = p.replace(/\/+$/, "");
+    if (known.has(path)) return true;
+    for (const k of known) if (k.startsWith(`${path}/`)) return true;
+    return false;
+  };
   const problems: string[] = [];
   for (const f of files) {
-    if (!f.new && !existsSync(join(root, f.path))) problems.push(`${f.path} is listed as an existing file but does not exist`);
+    if (f.new || has(f.path)) continue;
+    const lower = f.path.replace(/\/+$/, "").toLowerCase();
+    const near = [...known].find((k) => k.toLowerCase() === lower);
+    problems.push(near
+      ? `${f.path} is listed as an existing file but does not exist (the repository has ${near}; paths are case-sensitive)`
+      : `${f.path} is listed as an existing file but does not exist`);
   }
   return problems.length ? { ok: false, problems } : { ok: true };
 }

@@ -8,7 +8,7 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
-import { tempGitRepo, tempDir } from "../helpers";
+import { tempGitRepo } from "../helpers";
 
 describe("checks", () => {
   test("headingsPresent names the missing headings", () => {
@@ -42,13 +42,17 @@ describe("checks", () => {
     expect(parsePlanFiles("# Plan\n\n## Files that change\n\n## Order of work\n")).toEqual([]);
   });
 
-  test("filesExistOrNew reports missing files not marked new; an existing file marked new is harmless", async () => {
-    const t = tempDir();
-    mkdirSync(join(t.path, "src"), { recursive: true });
-    await Bun.write(join(t.path, "src", "b.ts"), "");
-    expect(filesExistOrNew(t.path, [{ path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }, { path: "src/b.ts", new: true }])).toEqual({ ok: true });
-    expect(filesExistOrNew(t.path, [{ path: "src/zzz.ts", new: false }])).toEqual({ ok: false, problems: ["src/zzz.ts is listed as an existing file but does not exist"] });
-    t.cleanup();
+  test("filesExistOrNew reports missing files not marked new; an existing file marked new is harmless", () => {
+    const tracked = ["README.md", "src/b.ts", "src/lib/c.ts", ""];
+    expect(filesExistOrNew(tracked, [{ path: "src/a.ts", new: true }, { path: "src/b.ts", new: false }, { path: "src/b.ts", new: true }, { path: "src/lib/", new: false }])).toEqual({ ok: true });
+    expect(filesExistOrNew(tracked, [{ path: "src/zzz.ts", new: false }])).toEqual({ ok: false, problems: ["src/zzz.ts is listed as an existing file but does not exist"] });
+  });
+
+  test("filesExistOrNew compares paths exactly, so the wrong case fails on every system", () => {
+    expect(filesExistOrNew(["src/Widget.ts"], [{ path: "src/widget.ts", new: false }])).toEqual({
+      ok: false, problems: ["src/widget.ts is listed as an existing file but does not exist (the repository has src/Widget.ts; paths are case-sensitive)"],
+    });
+    expect(filesExistOrNew(["src/Widget.ts"], [{ path: "src/widget.ts", new: true }])).toEqual({ ok: true });
   });
 
   test("diffWithinPlan exempts only the intent's own folder and lockfiles anywhere", () => {

@@ -15,6 +15,13 @@ afterEach(() => resetStop());
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 const ago = (s: number) => new Date(NOW.getTime() - s * 1000).toISOString();
 
+/** The pid of a process that ran and has exited: gone on every system (a made-up number might be in use). */
+const DEAD_PID = await (async () => {
+  const p = Bun.spawn({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  await p.exited;
+  return p.pid;
+})();
+
 /** A heartbeat written by this (live) process. */
 function hb(over: Partial<Heartbeat> = {}): Heartbeat {
   return { pid: process.pid, startedAt: ago(3600), lastTickAt: ago(20), lastBeatAt: ago(2), current: null, stopping: false, stopped: false, ...over };
@@ -53,7 +60,7 @@ describe("heartbeatState", () => {
 
   test("a stale heartbeat whose process is gone did not shut down cleanly; a live one is not responding", () => {
     const stale = { lastTickAt: ago(8 * 3600), lastBeatAt: ago(8 * 3600) };
-    expect(heartbeatState(hb({ ...stale, pid: 999_999 }), 60, NOW))
+    expect(heartbeatState(hb({ ...stale, pid: DEAD_PID }), 60, NOW))
       .toMatchObject({ state: "stopped", text: "Stopped — it did not shut down cleanly (last check 8 h ago)", current: null });
     expect(heartbeatState(hb(stale), 60, NOW, { alive: () => true })).toMatchObject({ state: "not-responding", text: "Not responding (last check 8 h ago)" });
     expect(heartbeatState(hb(stale), 60, NOW, { alive: () => false }).state).toBe("stopped");
@@ -66,7 +73,7 @@ describe("heartbeatState", () => {
     const wait = `The assistant was unavailable; the next start waits until ${hhmm}.`;
     expect(heartbeatState(hb({ stopped: true, lastTickAt: ago(300) }), 60, NOW, { pause }).text).toBe(`Stopped — last check 5 min ago. ${wait}`);
     expect(heartbeatState(null, 60, NOW, { pause }).text).toBe(`Stopped. ${wait}`);
-    expect(heartbeatState(hb({ lastTickAt: ago(3600), lastBeatAt: ago(3600), pid: 999_999 }), 60, NOW, { pause }).text)
+    expect(heartbeatState(hb({ lastTickAt: ago(3600), lastBeatAt: ago(3600), pid: DEAD_PID }), 60, NOW, { pause }).text)
       .toBe(`Stopped — it did not shut down cleanly (last check 1 h ago). ${wait}`);
     // A pause that has run out says nothing more.
     expect(heartbeatState(null, 60, NOW, { pause: { ...pause, until: ago(1) } }).text).toBe("Stopped");

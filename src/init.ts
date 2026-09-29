@@ -35,8 +35,10 @@ export async function detectCommands(root: string): Promise<Detected> {
     else if (s.dev) d.run = `${runner} dev`;
     return d;
   }
-  if (existsSync(join(root, "Makefile"))) {
-    const mk = await Bun.file(join(root, "Makefile")).text();
+  // GNU make reads GNUmakefile, makefile, then Makefile.
+  const makefile = ["GNUmakefile", "makefile", "Makefile"].find((n) => hasEntry(root, n));
+  if (makefile) {
+    const mk = await Bun.file(join(root, makefile)).text();
     const has = (t: string) => new RegExp(`^${t}:`, "m").test(mk);
     return { test: has("test") ? "make test" : undefined, lint: has("lint") ? "make lint" : undefined, build: has("build") ? "make build" : undefined, run: has("run") ? "make run" : undefined };
   }
@@ -44,6 +46,43 @@ export async function detectCommands(root: string): Promise<Detected> {
   if (existsSync(join(root, "Cargo.toml"))) return { test: "cargo test", build: "cargo build" };
   if (existsSync(join(root, "go.mod"))) return { test: "go test ./...", build: "go build ./..." };
   return {};
+}
+
+/**
+ * The branch the loop treats as main: the one checked out now, else (a detached HEAD) git's
+ * init.defaultBranch, else `main`. `symbolic-ref` also names the branch of a repository with no
+ * commits yet.
+ */
+async function defaultBranch(root: string): Promise<string> {
+  const git = new Git(root);
+  const head = await git.run(["symbolic-ref", "--short", "HEAD"], true);
+  if (head.code === 0 && head.out.trim()) return head.out.trim();
+  const configured = await git.run(["config", "init.defaultBranch"], true);
+  if (configured.code === 0 && configured.out.trim()) return configured.out.trim();
+  return "main";
+}
+
+/**
+ * Whether the folder has an entry spelled exactly `name`. existsSync ignores case on Windows and
+ * macOS, so `claude.md` would pass for `CLAUDE.md` there but not on Linux; this answers the same
+ * everywhere.
+ */
+function hasEntry(dir: string, name: string): boolean {
+  try { return readdirSync(dir).includes(name); } catch { return false; }
+}
+
+/**
+ * True (with a warning) when the folder has `name` only in another case (`claude.md` for
+ * `CLAUDE.md`). Writing `name` next to it would replace it on Windows and macOS, and it is not what
+ * git or Claude Code read on Linux, so init leaves such a file alone and says so.
+ */
+function otherCase(dir: string, name: string, report: InitReport): boolean {
+  let found: string | undefined;
+  try { found = readdirSync(dir).find((n) => n !== name && n.toLowerCase() === name.toLowerCase()); } catch { /* no folder */ }
+  if (!found || hasEntry(dir, name)) return false;
+  report.kept.push(found);
+  report.warnings.push(`There is a ${found} but no ${name}. Rename it to ${name} (the spelling every system reads), then run init again.`);
+  return true;
 }
 
 /** Writes a file only when it does not exist yet; an existing file is never touched. */
@@ -77,7 +116,10 @@ export async function init(root: string): Promise<InitReport> {
   }
   const d = await detectCommands(root);
 
-  const cfg = (await template("config.yaml")).replace("__COMMANDS__", commandLines(d));
+  const branch = await defaultBranch(root);
+  const cfg = (await template("config.yaml"))
+    .replace("__MAIN_BRANCH__", /^[\w./-]+$/.test(branch) ? branch : JSON.stringify(branch))
+    .replace("__COMMANDS__", commandLines(d));
   if (!d.test) report.warnings.push("No test command was detected. Set commands.test in loopstra/config.yaml before starting the loop.");
   await stamp(root, "loopstra/config.yaml", cfg, report);
 
@@ -95,7 +137,7 @@ export async function init(root: string): Promise<InitReport> {
   await ensureGitignore(root, report);
 
   report.next.push(
-    "Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on main. The loop works in its own checkouts, which only see what is committed.",
+    `Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on ${branch}. The loop works in its own checkouts, which only see what is committed.`,
     "Open loopstra/config.yaml and confirm commands.test.",
     "Decide which gates get a person (gates.*.human).",
     "Start the loop with `loopstra start`; watch it with `loopstra status` or `loopstra ui`.",
@@ -136,7 +178,8 @@ async function mergeSettings(root: string, report: InitReport): Promise<void> {
 async function ensureClaudeMd(root: string, d: Detected, report: InitReport): Promise<void> {
   const rel = "CLAUDE.md";
   const path = join(root, rel);
-  const existing = existsSync(path) ? await Bun.file(path).text() : "";
+  if (otherCase(root, rel, report)) return;
+  const existing = hasEntry(root, rel) ? await Bun.file(path).text() : "";
   if (/^##\s+Commands\s*$/m.test(existing)) { report.kept.push(rel); return; }
   const lines = [
     "## Commands",
@@ -173,7 +216,8 @@ export async function uncommittedSetup(root: string, main: string): Promise<stri
 async function ensureGitignore(root: string, report: InitReport): Promise<void> {
   const rel = ".gitignore";
   const path = join(root, rel);
-  const existing = existsSync(path) ? await Bun.file(path).text() : "";
+  if (otherCase(root, rel, report)) return;
+  const existing = hasEntry(root, rel) ? await Bun.file(path).text() : "";
   if (existing.split(/\r?\n/).some((l) => l.trim() === ".loopstra/" || l.trim() === ".loopstra")) { report.kept.push(rel); return; }
   const sep = existing && !existing.endsWith("\n") ? "\n" : "";
   await Bun.write(path, `${existing}${sep}.loopstra/\n`);

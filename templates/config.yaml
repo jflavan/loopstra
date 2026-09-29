@@ -2,7 +2,7 @@
 # Every key except commands.test has a default. Unknown keys are errors.
 # Changes take effect on the next pass of the loop; no restart needed.
 version: 1
-main_branch: main
+main_branch: __MAIN_BRANCH__
 poll_seconds: 60
 
 commands:

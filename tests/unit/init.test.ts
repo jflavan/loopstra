@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { init } from "../../src/init";
-import { tempDir, tempGitRepo } from "../helpers";
+import { run, tempDir, tempGitRepo } from "../helpers";
 
 describe("init", () => {
   test("stamps a bun repo with detected commands and all files, and merges settings.json", async () => {
@@ -69,6 +69,41 @@ describe("init", () => {
       const report = await init(t.path);
       expect(report.warnings.join(" ")).toMatch(/commands\.test/);
       await expect(loadConfig(t.path)).rejects.toThrow(/commands\.test/);
+    } finally { t.cleanup(); }
+  });
+
+  test("main_branch is the branch the repository is on", async () => {
+    const t = await tempGitRepo();
+    try {
+      await run(["git", "branch", "-m", "master"], t.path);
+      await Bun.write(join(t.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
+      const report = await init(t.path);
+      expect(await Bun.file(join(t.path, "loopstra", "config.yaml")).text()).toContain("\nmain_branch: master\n");
+      expect((await loadConfig(t.path)).main_branch).toBe("master");
+      expect(report.next[0]).toContain(" on master.");
+    } finally { t.cleanup(); }
+  });
+
+  test("a repository with no commits yet gets its unborn branch", async () => {
+    const t = tempDir();
+    try {
+      await run(["git", "init", "-q", "-b", "trunk"], t.path);
+      await init(t.path);
+      expect(await Bun.file(join(t.path, "loopstra", "config.yaml")).text()).toContain("\nmain_branch: trunk\n");
+    } finally { t.cleanup(); }
+  });
+
+  test("file names are matched exactly: makefile is detected, claude.md is left alone with a warning", async () => {
+    const t = await tempGitRepo();
+    try {
+      await Bun.write(join(t.path, "makefile"), "test:\n\techo ok\n");
+      await Bun.write(join(t.path, "claude.md"), "# Mine\n");
+      const report = await init(t.path);
+      expect((await loadConfig(t.path)).commands.test).toBe("make test");
+      expect(report.kept).toContain("claude.md");
+      expect(report.warnings.join(" ")).toContain("There is a claude.md but no CLAUDE.md.");
+      expect(readdirSync(t.path)).not.toContain("CLAUDE.md");
+      expect(await Bun.file(join(t.path, "claude.md")).text()).toBe("# Mine\n");
     } finally { t.cleanup(); }
   });
 

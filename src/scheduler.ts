@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
@@ -319,6 +319,24 @@ export function missingTools(env: Record<string, string | undefined> = process.e
 }
 
 /**
+ * A plain message when LOOPSTRA_CLAUDE_EXECUTABLE is set but cannot be run: not found (as a path, or
+ * on PATH for a bare name), or on POSIX not executable. A `.ts` file is run through bun, so only its
+ * existence matters. Null when it is unset or fine.
+ */
+export function claudeOverrideProblem(env: Record<string, string | undefined> = process.env): string | null {
+  const exe = env[FAKE_CLAUDE_ENV];
+  if (!exe) return null;
+  const bare = !/[\\/]/.test(exe);
+  const path = bare ? Bun.which(exe, { PATH: env.PATH ?? env.Path ?? "" }) : exe;
+  if (!path || !existsSync(path)) return `${FAKE_CLAUDE_ENV} is set to ${exe}, which was not found. Correct it, or unset it to use claude from PATH.`;
+  if (exe.endsWith(".ts") || process.platform === "win32") return null;
+  try { accessSync(path, constants.X_OK); } catch {
+    return `${FAKE_CLAUDE_ENV} is set to ${exe}, which is not executable. Run chmod +x on it, or unset it to use claude from PATH.`;
+  }
+  return null;
+}
+
+/**
  * What `start` checks before the loop begins, as a plain message, or null when it may start: the
  * folder is set up (it has loopstra/config.yaml), the tools are installed, the checkout is on
  * main_branch, Loopstra's own files are committed there, and a repository with a remote has gh,
@@ -326,7 +344,7 @@ export function missingTools(env: Record<string, string | undefined> = process.e
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
   if (!existsSync(configPath(root))) return NOT_SET_UP;
-  const missing = missingTools(env);
+  const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;
   let cfg: Config;
   try { cfg = await loadConfig(root); } catch { return null; }

@@ -6,10 +6,10 @@ import { Git, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
 import { readPause } from "../../src/heartbeat";
-import { missingTools, preflight, start, tick } from "../../src/scheduler";
+import { claudeOverrideProblem, missingTools, preflight, start, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { init } from "../../src/init";
-import { setupRepo, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
@@ -319,7 +319,7 @@ describe("scheduler resilience", () => {
     try {
       await Bun.write(join(repo.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
       await init(repo.path);
-      await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: "fake" }, async () => {
+      await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE }, async () => {
         expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: loopstra/config.yaml, loopstra/prompts/, .claude/settings.json, .claude/hooks/loopstra-protect-tests.ts. Commit them, then start again.");
         const git = new Git(repo.path);
         await git.run(["add", "loopstra/config.yaml", "loopstra/prompts"]);
@@ -336,5 +336,26 @@ describe("scheduler resilience", () => {
   test("start names a missing tool in plain words", () => {
     expect(missingTools({ PATH: "" })).toBe("git was not found. Install Git, then start Loopstra again.");
     expect(missingTools({ PATH: process.env.PATH ?? process.env.Path, LOOPSTRA_CLAUDE_EXECUTABLE: "fake" })).toBeNull();
+  });
+
+  test("start refuses a claude override that cannot be run", () => {
+    const PATH = process.env.PATH ?? process.env.Path;
+    expect(claudeOverrideProblem({ PATH })).toBeNull();
+    expect(claudeOverrideProblem({ PATH, LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE })).toBeNull();
+    expect(claudeOverrideProblem({ PATH, LOOPSTRA_CLAUDE_EXECUTABLE: join(resolve("."), "no-such-claude") }))
+      .toMatch(/^LOOPSTRA_CLAUDE_EXECUTABLE is set to .*no-such-claude, which was not found\./);
+    expect(claudeOverrideProblem({ PATH, LOOPSTRA_CLAUDE_EXECUTABLE: "no-such-claude-on-path" })).toContain("which was not found");
+  });
+
+  test.skipIf(process.platform === "win32")("start refuses a claude override that is not executable (POSIX)", () => {
+    const t = tempDir();
+    try {
+      const exe = join(t.path, "claude");
+      writeFileSync(exe, "#!/bin/sh\necho hi\n");
+      chmodSync(exe, 0o644);
+      expect(claudeOverrideProblem({ LOOPSTRA_CLAUDE_EXECUTABLE: exe })).toBe(`LOOPSTRA_CLAUDE_EXECUTABLE is set to ${exe}, which is not executable. Run chmod +x on it, or unset it to use claude from PATH.`);
+      chmodSync(exe, 0o755);
+      expect(claudeOverrideProblem({ LOOPSTRA_CLAUDE_EXECUTABLE: exe })).toBeNull();
+    } finally { t.cleanup(); }
   });
 });

@@ -13,7 +13,8 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
     name: "files",
     run: async () => {
       const files = parsePlanFiles(a.plan) ?? []; // no Files section: the headings check reports it
-      const r = filesExistOrNew(ctx.root, files);
+      const tracked = (await ctx.git.run(["ls-files", "-z"])).out.split("\0");
+      const r = filesExistOrNew(tracked, files);
       return r.ok ? { result: "pass", evidence: `${files.length} files listed` } : { result: "fail", evidence: r.problems.join("; ") };
     },
   }],
