@@ -539,7 +539,7 @@ CLI on top:
   activity, cost so far, and the note if blocked.
 - `loopstra tail [slug]`: streams events as they are written.
 - `loopstra ui`: serves a single HTML page from `Bun.serve` on
-  `localhost:4646` with a JSON API over the trace db, polling every two
+  `127.0.0.1:4646` (local only) with a JSON API over the trace db, polling every two
   seconds. Shows the queue, each intent's phase timeline, gate results with
   evidence, cost, and the last 200 events, and a "needs attention" list
   (blocked, waiting for a person, unreadable intents, a red main, and

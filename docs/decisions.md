@@ -91,7 +91,7 @@ Sources of truth, in order of precedence when they conflict:
   (error rates, bands, sigma tiers) are a documented extension point, added
   later as one-line commands in config by an engineer, never by the owner.
 
-- **Distribution.** One global install (`bun install -g loopstra`). In a
+- **Distribution.** One global install (clone the repo, `bun install`, `bun link`; no package is published yet). In a
   repo, `loopstra init` runs onboarding and writes only config, stage
   prompts, the operator skill, and hooks into that repo. Runtime code
   stays in the global install; upgrades are one command.

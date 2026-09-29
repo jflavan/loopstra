@@ -7,7 +7,8 @@ const root = process.cwd();
 const HELP = `loopstra <command>
 
   init      stamp Loopstra into this repo
-  start     run the loop (--once for a single tick)
+  start     run the loop (--once for a single tick, e.g. from cron);
+            Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
   ui        local dashboard (--port <n>, default 4646)
@@ -57,7 +58,7 @@ async function main(): Promise<number> {
       } catch (e) { console.error((e as Error).message); return 1; }
     }
     default:
-      console.error(`Unknown or not yet implemented command: ${command}`);
+      console.error(`Unknown command: ${command}`);
       console.log(HELP); return 1;
   }
 }
