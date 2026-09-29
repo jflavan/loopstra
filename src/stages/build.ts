@@ -1,9 +1,8 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase, codePhase } from "../phases";
-import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
-import { StopRequested } from "../stop";
+import { agentPhase, codePhase, projectCommand } from "../phases";
+import type { CommandResult } from "../shell";
 import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
@@ -17,8 +16,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
     await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
     if (ctx.cfg.commands.install) {
-      const r = await runCommand(ctx.cfg.commands.install, ctx.worktreeDir, { env: { LOOPSTRA_SLUG: ctx.slug }, timeoutMs: commandTimeoutMs(ctx.cfg) });
-      ctx.trace.event(ctx.slug, "command", { command: ctx.cfg.commands.install, code: r.code, lastLine: r.lastLine });
+      const r = await projectCommand(ctx, ctx.cfg.commands.install, ctx.worktreeDir);
       if (r.code !== 0) throw new Error(`install failed: ${r.lastLine}`);
     }
     return { ok: true as const };
@@ -160,26 +158,18 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
  * pass. The phase is recorded as failed when a command fails.
  */
 export async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
-  const seq = ctx.trace.phaseStart(ctx.slug, phaseName, "code");
-  try {
-    const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
+  const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
+  let failed = null as CommandResult | null;
+  const r = await codePhase(ctx, phaseName, async (seq) => {
     for (const cmd of cmds) {
-      const res = await runCommand(cmd, ctx.worktreeDir, { env: { LOOPSTRA_SLUG: ctx.slug }, timeoutMs: commandTimeoutMs(ctx.cfg) });
-      ctx.trace.event(ctx.slug, "command", { command: cmd, code: res.code, lastLine: res.lastLine, durationMs: res.durationMs }, seq);
+      const res = await projectCommand(ctx, cmd, ctx.worktreeDir, { seq });
       if (res.code !== 0) {
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: `${cmd} exited ${res.code}: ${res.lastLine}` });
-        return res;
+        failed = res;
+        throw new Error(`${cmd} exited ${res.code}: ${res.lastLine}`);
       }
     }
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
-    return null;
-  } catch (e) {
-    if (e instanceof StopRequested) {
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
-      throw e;
-    }
-    const msg = e instanceof Error ? e.message : String(e);
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
-    return { command: "checks", code: 1, output: msg, lastLine: msg.split("\n")[0] ?? "", durationMs: 0, timedOut: false };
-  }
+    return { ok: true as const };
+  });
+  if (r.ok) return null;
+  return failed ?? { command: "checks", code: 1, output: r.detail, lastLine: r.detail, durationMs: 0, timedOut: false };
 }

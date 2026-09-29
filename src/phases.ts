@@ -7,6 +7,7 @@ import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
+import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
 import { AssistantUnavailable, StopRequested, throwIfStopping } from "./stop";
 
@@ -203,10 +204,6 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   }
 }
 
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
 const PROBE_PROMPT = "This is only a check that you can be reached. Do not use any tools. Answer with ok set to true.";
 /** At most this long, and never longer than a phase may take. */
@@ -246,14 +243,27 @@ function summarize(e: Record<string, unknown>): Record<string, unknown> {
   return { type: e.type, subtype: e.subtype };
 }
 
+/**
+ * Runs a configured project command in `cwd` with the configured time limit, and traces it as a
+ * `command` event of `on.slug` (under phase `seq` when given). `env` defaults to LOOPSTRA_SLUG.
+ */
+export async function projectCommand(
+  on: { trace: Trace; cfg: Config; slug: string }, command: string, cwd: string,
+  opts: { env?: Record<string, string>; seq?: number; where?: string } = {},
+): Promise<CommandResult> {
+  const r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug }, timeoutMs: commandTimeoutMs(on.cfg) });
+  on.trace.event(on.slug, "command", { command, code: r.code, lastLine: r.lastLine, durationMs: r.durationMs, ...(opts.where ? { where: opts.where } : {}) }, opts.seq);
+  return r;
+}
+
 /** `detail`: what went wrong, for the trace (the caller words the owner's note). */
 export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
 /** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
-export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: () => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
+export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
-    const r = await fn();
+    const r = await fn(seq);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return r;
   } catch (e) {

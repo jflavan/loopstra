@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { Config } from "./config";
 import { bookkeeping, Git, withDetachedWorktree } from "./git";
-import { commandTimeoutMs, runCommand } from "./shell";
+import { projectCommand } from "./phases";
+import { errorText } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
@@ -42,22 +43,23 @@ export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: b
 export async function runMainHealth(root: string, cfg: Config, trace: Trace, afterSlug: string | null): Promise<HealthResult> {
   const git = new Git(root);
   const dir = join(root, ".loopstra", "health", "main");
-  const timeoutMs = commandTimeoutMs(cfg);
+  // Traced on the loop; the commands get no change's slug.
+  const on = { trace, cfg, slug: "_loop" };
   let result: HealthResult;
   let output: string;
   try {
     ({ result, output } = await withDetachedWorktree(git, dir, cfg.main_branch, async (cwd): Promise<{ result: HealthResult; output: string }> => {
       if (cfg.commands.install) {
-        const i = await runCommand(cfg.commands.install, cwd, { timeoutMs });
+        const i = await projectCommand(on, cfg.commands.install, cwd, { env: {}, where: SIGNAL });
         if (i.code !== 0) return { result: "error", output: `install failed: ${i.output.slice(-4000)}` };
       }
-      const t = await runCommand(cfg.commands.test, cwd, { timeoutMs });
+      const t = await projectCommand(on, cfg.commands.test, cwd, { env: {}, where: SIGNAL });
       return { result: t.code === 0 ? "pass" : "fail", output: t.output.slice(-4000) };
     }));
   } catch (e) {
     if (e instanceof StopRequested) throw e;
     result = "error";
-    output = e instanceof Error ? e.message : String(e);
+    output = errorText(e);
   }
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);

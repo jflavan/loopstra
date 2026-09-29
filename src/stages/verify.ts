@@ -2,8 +2,7 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
-import { agentPhase } from "../phases";
-import { commandTimeoutMs, runCommand } from "../shell";
+import { agentPhase, projectCommand } from "../phases";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 
 const JUDGE_FAILED = "The final check could not be completed; an engineer should look.";
@@ -82,10 +81,7 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
   try {
     r = await withDetachedWorktree(ctx.git, dir, ctx.cfg.main_branch, async (cwd) => {
       const install = ctx.cfg.commands.install;
-      if (install) {
-        const res = await runCommand(install, cwd, { env: { LOOPSTRA_SLUG: ctx.slug }, timeoutMs: commandTimeoutMs(ctx.cfg) });
-        ctx.trace.event(ctx.slug, "command", { command: install, code: res.code, lastLine: res.lastLine, where: "done-check copy of main" });
-      }
+      if (install) await projectCommand(ctx, install, cwd, { where: "done-check copy of main" });
       return agentPhase(ctx, {
         name: "done-check", model: "strong", permissionMode: "default", tools: "read+commands", cwd,
         vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review },
