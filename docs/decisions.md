@@ -143,6 +143,18 @@ Sources of truth, in order of precedence when they conflict:
   readable, with observability tooling on top, and build the full
   factory.
 
+- **Gate timing (2026-09-28 hardening).** Supersedes "automated gates pass
+  through review statuses". A gate's automated checks run in the step that
+  produced the artifact. Pass with no person on the gate → the approved
+  status; pass with a person → the review status with a plain note, so a
+  review status only ever means "checks passed, waiting for a person" and
+  stepping it never advances. Fail → one automatic rewrite with the
+  findings, then block. A checker that cannot run blocks at once.
+- **Owner notes (2026-09-28 hardening).** Notes on the owner surface are
+  plain sentences with retry advice; check ids, commands, branch names,
+  counts, and raw output go to the trace. Nothing is written on the root
+  checkout unless it is on `main_branch`; otherwise the loop pauses.
+
 ## Open
 
 - None. Remaining details are settled in the design spec.
