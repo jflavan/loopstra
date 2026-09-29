@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runPhase } from "../../src/claude";
+import { GitHub } from "../../src/github";
 import { agentPhase } from "../../src/phases";
 import { runCommand } from "../../src/shell";
 import { onStopSignal, requestStop, resetStop, stopPromise, stopRequested, StopRequested } from "../../src/stop";
 import { FAKE_CLAUDE as FAKE, setupRepo, tempDir } from "../helpers";
+
+const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
 afterEach(() => resetStop());
 
@@ -47,6 +51,17 @@ describe("stop", () => {
     stopAfter(300);
     await expect(runCommand('bun -e "await Bun.sleep(60000)"', t.path, { timeoutMs: 60_000 })).rejects.toBeInstanceOf(StopRequested);
     expect(Date.now() - started).toBeLessThan(15_000);
+    t.cleanup();
+  }, 30_000);
+
+  test("no gh call starts after a stop, and a running one is killed", async () => {
+    const t = tempDir();
+    const gh = new GitHub(t.path, { executable: FAKE_GH, env: { LOOPSTRA_FAKE_GH_STATE: join(t.path, "gh.json"), LOOPSTRA_FAKE_GH_HANG: "1" } });
+    const started = Date.now();
+    stopAfter(300);
+    await expect(gh.lookupPr("intent/x")).rejects.toBeInstanceOf(StopRequested);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    await expect(gh.available()).rejects.toBeInstanceOf(StopRequested);
     t.cleanup();
   }, 30_000);
 

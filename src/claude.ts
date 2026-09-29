@@ -1,5 +1,5 @@
-import { DETACHED, killTree, within } from "./shell";
-import { onStop, StopRequested, throwIfStopping } from "./stop";
+import { lastLine, spawnBounded } from "./shell";
+import { StopRequested } from "./stop";
 
 export interface StreamEvent {
   type: string;
@@ -127,6 +127,8 @@ export interface RunPhaseInput {
   /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
   executable?: string;
   onEvent?: (e: StreamEvent) => void;
+  /** How long the process gets to exit after its result event (and after a kill). Defaults to EXIT_GRACE_MS (tests shorten it). */
+  exitGraceMs?: number;
 }
 
 export type RunPhaseResult = Collected & {
@@ -177,78 +179,23 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   // A .ts fake must be run through bun; the real CLI is a native executable.
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
 
-  throwIfStopping();
-  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-  try {
-    proc = Bun.spawn({
-      cmd, cwd: input.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe",
-      env: { ...process.env, ...(input.env ?? {}) }, detached: DETACHED,
-    });
-  } catch (e) {
-    return fail("not-started", `could not start claude: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // A stop request kills the session's tree; its stdout then closes and the waits below end.
-  let stopped = false;
-  const unsubscribe = onStop(() => { stopped = true; void killTree(proc); });
-
-  try {
-    proc.stdin.write(input.prompt);
-    void Promise.resolve(proc.stdin.end()).catch(() => {});
-  } catch { /* the process already exited; the missing result reports it */ }
-
-  // stderr is drained in the background and read as-is at the end; it is never awaited unbounded.
-  let stderr = "";
-  const stderrDone = (async () => {
-    const dec = new TextDecoder();
-    try { for await (const chunk of proc.stderr) stderr += dec.decode(chunk, { stream: true }); } catch { /* closed */ }
-  })();
-
-  const emit = (line: string) => {
-    const e = collector.push(line);
-    if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
-    return e;
-  };
-
-  const reader = proc.stdout.getReader();
-  const readUntilResult = (async () => {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          const e = emit(buffer.slice(0, nl));
-          buffer = buffer.slice(nl + 1);
-          if (e?.type === "result") return;
-        }
-      }
-      if (buffer.trim()) emit(buffer);
-    } catch { /* stream cancelled or broken; what was collected stands */ }
-  })();
-
-  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<"deadline">((resolve) => { deadlineTimer = setTimeout(() => resolve("deadline"), input.timeoutMs); });
-  const first = await Promise.race([readUntilResult.then(() => "read" as const), deadline]);
-  clearTimeout(deadlineTimer);
-  const timedOut = first === "deadline";
-  void reader.cancel().catch(() => {});
-
-  let exitCode: number | null = timedOut ? null : await within(proc.exited, EXIT_GRACE_MS, null);
-  if (exitCode === null) {
-    await killTree(proc);
-    exitCode = await within(proc.exited, EXIT_GRACE_MS, null);
-  }
-  await within(stderrDone, 250, undefined);
-  unsubscribe();
-  if (stopped) throw new StopRequested();
+  const r = await spawnBounded({
+    cmd, cwd: input.cwd, env: { ...process.env, ...input.env }, stdin: input.prompt,
+    timeoutMs: input.timeoutMs, onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
+    // Reading ends at the result event; the process then gets the grace to exit before it is killed.
+    onLine: (line) => {
+      const e = collector.push(line);
+      if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
+      return e?.type === "result";
+    },
+  });
+  if (r.stopped) throw new StopRequested();
+  if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
+  const { code: exitCode, err: stderr, timedOut } = r;
 
   const collected = collector.finish();
   if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
-  const lastErr = stderr.trim().split("\n").pop()?.trim() ?? "";
+  const lastErr = lastLine(stderr);
   // Before any subtype check: the CLI reports a missing session with an error result as well.
   if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);

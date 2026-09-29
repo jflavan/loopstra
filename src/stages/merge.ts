@@ -7,6 +7,7 @@ import { GitHub, type PrInfo } from "../github";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { pushBranch, shareMain, syncMain } from "../remote";
+import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
@@ -151,7 +152,7 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     const review = await readArtifact(ctx, "review.md");
     if (review && (created || newReview)) {
       // The comment is a courtesy: a failure is traced and does not stop the pull request.
-      try { await gh.comment(pr.number, review); } catch (e) { ctx.trace.event(ctx.slug, "error", { where: "pull request comment", error: (e as Error).message }); }
+      try { await gh.comment(pr.number, review); } catch (e) { passOn(e); ctx.trace.event(ctx.slug, "error", { where: "pull request comment", error: errorText(e) }); }
     }
     ctx.trace.event(ctx.slug, "command", { command: "pull request", number: pr.number, url: pr.url, created });
     return { ok: true as const };

@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { DETACHED, killTree, within } from "./shell";
-import { AssistantUnavailable, onStop, StopRequested, throwIfStopping } from "./stop";
+import { lastLine, spawnBounded } from "./shell";
+import { AssistantUnavailable, StopRequested } from "./stop";
 
 /** How long one git call may take before it is stopped (a Git constructor option overrides it). */
 export const GIT_TIMEOUT_MS = 5 * 60_000;
 
-/** After a stop request, a running git call gets this long to finish on its own before it is killed. */
+/** After a stop request, a running git call gets this long to finish on its own before it is killed (a Git constructor option overrides it). */
 const STOP_GRACE_MS = 2_000;
 
 /** The identity every commit the runtime makes is authored with. */
@@ -31,20 +31,12 @@ export function bookkeeping(message: string): string {
 }
 
 /** Git's own advice lines (line-ending warnings and the like) are not the error. */
-function meaningfulLines(s: string): string[] {
-  return s.trim().split("\n").map((l) => l.trim()).filter((l) => l && !/^warning:/i.test(l));
-}
-
-/** The last meaningful line of some git output, or "" when there is none. */
-function lastNonEmptyLine(s: string): string {
-  const lines = meaningfulLines(s);
-  return lines[lines.length - 1] ?? "";
-}
+const ADVICE = /^warning:/i;
 
 export class GitError extends Error {
   constructor(public readonly args: string[], public readonly stdout: string, public readonly stderr: string, public readonly code: number, message?: string) {
     // git prints conflict text to stdout, not stderr, so fall back to stdout when stderr has nothing useful.
-    super(message ?? `git ${args.join(" ")} failed (${code}): ${lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout)}`);
+    super(message ?? `git ${args.join(" ")} failed (${code}): ${lastLine(stderr, ADVICE) || lastLine(stdout, ADVICE)}`);
   }
 }
 
@@ -123,8 +115,10 @@ export function samePath(a: string, b: string): boolean {
 
 export class Git {
   private readonly timeoutMs: number;
-  constructor(public readonly cwd: string, opts: { timeoutMs?: number } = {}) {
+  private readonly stopGraceMs: number;
+  constructor(public readonly cwd: string, opts: { timeoutMs?: number; stopGraceMs?: number } = {}) {
     this.timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
+    this.stopGraceMs = opts.stopGraceMs ?? STOP_GRACE_MS;
   }
 
   /**
@@ -135,46 +129,16 @@ export class Git {
    */
   async run(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
-    if (!o.cleanup) throwIfStopping();
     const timeoutMs = o.timeoutMs ?? this.timeoutMs;
-    let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
-    try {
-      proc = Bun.spawn({
-        cmd: ["git", ...args], cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-        env: gitEnv(this.cwd), detached: DETACHED,
-      });
-    } catch (e) {
-      const err = e instanceof Error ? e.message : String(e);
-      if (o.allowFail) return { code: 127, out: "", err };
-      throw new GitError(args, "", err, 127);
-    }
-    const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
-    const outP = read(proc.stdout);
-    const errP = read(proc.stderr);
-
-    let stopped = false;
-    let grace: ReturnType<typeof setTimeout> | undefined;
-    const unsubscribe = o.cleanup ? () => {} : onStop(() => {
-      stopped = true;
-      grace = setTimeout(() => { void killTree(proc); }, STOP_GRACE_MS);
+    const r = await spawnBounded({
+      cmd: ["git", ...args], cwd: this.cwd, env: gitEnv(this.cwd), timeoutMs,
+      onStop: o.cleanup ? "ignore" : "grace", graceMs: this.stopGraceMs,
     });
-    let code: number | null;
-    try {
-      code = await within(proc.exited, timeoutMs, null);
-    } finally {
-      unsubscribe();
-    }
-    if (code === null) {
-      clearTimeout(grace);
-      await killTree(proc);
-      await within(proc.exited, 2_000, null);
-      throw new GitTimeout(args, timeoutMs);
-    }
-    clearTimeout(grace);
-    if (stopped) throw new StopRequested();
-    const [out, err] = await Promise.all([within(outP, 2_000, ""), within(errP, 2_000, "")]);
-    if (code !== 0 && !o.allowFail) throw new GitError(args, out, err, code);
-    return { code, out, err };
+    if (r.timedOut) throw new GitTimeout(args, timeoutMs);
+    if (r.stopped) throw new StopRequested();
+    const code = r.code ?? 1;
+    if (code !== 0 && !o.allowFail) throw new GitError(args, r.out, r.err, code);
+    return { code, out: r.out, err: r.err };
   }
 
   /** Runs a command that makes commits, as the runtime: its identity, no signing, no hooks where `--no-verify` exists. */
