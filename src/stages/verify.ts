@@ -44,13 +44,14 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
     vars: { review: a.review, previous: ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail").map((p) => `${p.name}: ${p.error ?? ""}`).join("\n") },
     skills: ctx.cfg.stages.verify.skills,
   });
+  // outcome.md is for the owner; lessons.md is for engineers (`loopstra apply-lessons` reads it).
   let outcome = (judged.outcome || NO_CHECK_OUTCOME).trimEnd();
   if (unmet.length) outcome += `\n\n## Not met\n${bullets(unmet.map(line))}`;
   if (forPerson.length) outcome += `\n\n## For a person to confirm\n${bullets(forPerson.map(line))}`;
-  outcome += lessons.ok
-    ? `\n\n## Lessons\n${bullets(lessons.envelope.lessons) || "- None recorded."}\n\n## Proposed CLAUDE.md additions\n${lessons.envelope.claude_md_additions.trim() || "None."}\n`
-    : "\n\n## Lessons\n- The lessons step did not finish.\n";
   await writeArtifact(ctx, "outcome.md", outcome);
+  await writeArtifact(ctx, "lessons.md", lessons.ok
+    ? `# Lessons\n\n## Lessons\n${bullets(lessons.envelope.lessons) || "- None recorded."}\n\n## Proposed CLAUDE.md additions\n${lessons.envelope.claude_md_additions.trim() || "None."}\n`
+    : "# Lessons\n\n## Lessons\n- The lessons step did not finish.\n");
 
   const after = await runHookCommands(ctx, "after", "verify");
   if (!after.ok) return after;

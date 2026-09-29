@@ -168,6 +168,12 @@ export function onceMarker(ctx: StepContext, name: string, content = ""): boolea
   return true;
 }
 
+/** Writes a run-folder file, replacing what was there. */
+export function writeMarker(ctx: StepContext, name: string, content: string): void {
+  mkdirSync(ctx.runDir, { recursive: true });
+  writeFileSync(join(ctx.runDir, name), content);
+}
+
 /** The content of a marker, or null when it does not exist. */
 export function readMarker(ctx: StepContext, name: string): string | null {
   const p = join(ctx.runDir, name);

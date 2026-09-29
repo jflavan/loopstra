@@ -92,25 +92,32 @@ describe("build stage", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("files outside the plan trigger reconcile; the reconciled plan is used by verify and by a later retry", async () => {
+  test("files outside the plan trigger reconcile; the reconciled plan lives in the run folder, is used by verify, and a new build starts from main's plan", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
-    await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), PLAN.replace("- tests/add.test.ts (new)\n", ""));
+    const narrower = PLAN.replace("- tests/add.test.ts (new)\n", "");
+    await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), narrower);
     await new Git(repo.path).commitAll("narrower plan");
     await ctx.reload();
     await runBuildStep(ctx);
     expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "reconcile", "test-1", "verify"]);
+    const reconciled = join(ctx.runDir, "plan.reconciled.md");
+    expect(await Bun.file(reconciled).text()).toContain("src/extra.ts");
+    // Never on the branch: the branch's copy of plan.md is main's, untouched.
     const wt = join(repo.path, ".loopstra", "worktrees", "add-numbers");
-    expect(await Bun.file(join(wt, "intent", "add-numbers", "plan.md")).text()).toContain("src/extra.ts");
+    expect(await Bun.file(join(wt, "intent", "add-numbers", "plan.md")).text()).not.toContain("src/extra.ts");
     expect(await promptOf(ctx.runDir, trace, "verify")).toContain("src/extra.ts");
     const firstBuildSha = await new Git(wt).headSha();
 
-    // A person retries from plan-approved: the branch and worktree are reused, and drift reads the branch's plan.
+    // A person retries from plan-approved: the branch and worktree are reused, and the new build is
+    // compared with main's plan again, not with the plan reconciled for the earlier build.
+    await Bun.write(reconciled, "# Plan: stale\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n");
     await writeIntent(ctx.intent, { status: "plan-approved" });
     await new Git(repo.path).commitAll("retry");
     await ctx.reload();
     const before = phaseNames(trace).length;
     await runBuildStep(ctx);
-    expect(phaseNames(trace).slice(before)).toEqual(["branch", "build", "drift", "test-1", "verify"]);
+    expect(phaseNames(trace).slice(before)).toEqual(["branch", "build", "drift", "reconcile", "test-1", "verify"]);
+    expect(await Bun.file(reconciled).text()).toContain("src/extra.ts");
     expect(await new Git(wt).isAncestor(firstBuildSha, "HEAD")).toBe(true);
     trace.close(); repo.cleanup();
   });

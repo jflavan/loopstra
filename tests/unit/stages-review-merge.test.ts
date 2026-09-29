@@ -82,6 +82,26 @@ describe("review", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("the reviewer reads the plan reconciled for this build, else main's plan, never the branch's", async () => {
+    const { repo, ctx, trace } = await built(PERSON_MERGES);
+    await Bun.write(join(ctx.worktreeDir, "intent", "add-numbers", "plan.md"), "# Plan: from the branch\n");
+    await new Git(ctx.worktreeDir).commitAll("a plan edited on the branch");
+    const argsFile = join(repo.path, "args.json");
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runReviewStep(ctx));
+    let prompt = (await Bun.file(argsFile).json()).prompt as string;
+    expect(prompt).toContain("## Files that change\n- src/add.ts (new)");
+    expect(prompt).not.toContain("from the branch");
+
+    await writeIntent(ctx.intent, { status: "reviewing" });
+    await new Git(repo.path).commitAll("review again");
+    await ctx.reload();
+    await Bun.write(join(ctx.runDir, "plan.reconciled.md"), "# Plan: reconciled for this build\n");
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runReviewStep(ctx));
+    prompt = (await Bun.file(argsFile).json()).prompt as string;
+    expect(prompt).toContain("reconciled for this build");
+    trace.close(); repo.cleanup();
+  });
+
   test("the verdict comes from the findings: no important findings passes even if the reviewer did not approve", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     await usePrompt(repo.path, "review", "{{spec}} FIXTURE:review-nits-unapproved");

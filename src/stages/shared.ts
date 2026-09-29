@@ -1,6 +1,6 @@
 import { commandTimeoutMs, runCommand } from "../shell";
 import {
-  blockWithDetail, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, saveSession, setStatus,
+  blockWithDetail, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, readMarker, saveSession, setStatus,
   type Failure, type StepContext, type StepResult,
 } from "../context";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -50,11 +50,17 @@ export function humanNote(artifact: string, approvedStatus: Status, surface: "st
   return `Read ${artifact}. When you are happy with it, change the status line to ${approvedStatus}. To stop this change, set it to closed.`;
 }
 
-export async function artifacts(ctx: StepContext): Promise<{ intent: string; spec: string; plan: string; review: string }> {
+/** Run-folder file: the plan as reconciled with what the current build changed. Cleared when a new build starts. */
+export const RECONCILED_PLAN = "plan.reconciled.md";
+
+/** The artifacts, from main. `plan` is main's plan.md; `currentPlan` is the plan reconciled for this build if there is one, else the same. */
+export async function artifacts(ctx: StepContext): Promise<{ intent: string; spec: string; plan: string; currentPlan: string; review: string }> {
+  const plan = (await readArtifact(ctx, "plan.md")) ?? "";
   return {
     intent: ctx.intent.file.body,
     spec: (await readArtifact(ctx, "spec.md")) ?? "",
-    plan: (await readArtifact(ctx, "plan.md")) ?? "",
+    plan,
+    currentPlan: readMarker(ctx, RECONCILED_PLAN) ?? plan,
     review: (await readArtifact(ctx, "review.md")) ?? "",
   };
 }

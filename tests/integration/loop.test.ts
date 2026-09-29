@@ -112,7 +112,7 @@ describe("the loop", () => {
       const waiting = await readIntent(repo.path, "add-numbers");
       expect(waiting.file.frontmatter.status).toBe("verifying");
       expect(waiting.artifacts.has("outcome.md")).toBe(true);
-      expect(await Bun.file(join(repo.path, "intent", "add-numbers", "outcome.md")).text()).toContain("## Lessons");
+      expect(await Bun.file(join(repo.path, "intent", "add-numbers", "lessons.md")).text()).toContain("## Lessons");
       expect((await tick(repo.path)).picked).toBeNull();
 
       await personSets(repo.path, "done");

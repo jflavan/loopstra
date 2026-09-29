@@ -1,17 +1,16 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { block, blockWith, blockWithDetail, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
   clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
+  clearMarker(ctx, RECONCILED_PLAN); // nor is it compared with a plan reconciled for an earlier build
 
   const branch = await codePhase(ctx, "branch", async () => {
     if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
@@ -43,9 +42,8 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   const saved = await saveWork(ctx, wt, build.envelope.commit_message || `loopstra(${ctx.slug}): build`);
   if (!saved.ok) return blockWith(ctx, saved);
 
-  // Plan drift: files changed that the plan did not list. The branch's own plan is the reference
-  // (a retry after a reconcile must not reconcile again).
-  let plan = branchPlan(ctx) ?? a.plan;
+  // Plan drift: files changed that main's plan did not list.
+  let plan = a.plan;
   const drift = await codePhase(ctx, "drift", async () => {
     const changed = await wt.changedFilesSince(ctx.cfg.main_branch);
     const planned = parsePlanFiles(plan);
@@ -65,9 +63,11 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
       vars: { plan, findings: bullets(drift.extra) },
     });
     if (!rec.ok) return block(ctx, rec.note);
+    // Kept for this build only (verify and review read it); never written to the branch or main.
     plan = rec.envelope.plan_markdown;
-    await Bun.write(branchPlanPath(ctx), plan);
-    const savedPlan = await saveWork(ctx, wt, `loopstra(${ctx.slug}): reconcile plan with implementation`);
+    writeMarker(ctx, RECONCILED_PLAN, plan);
+    // The session was asked not to change code; anything it left anyway is kept on the branch.
+    const savedPlan = await saveWork(ctx, wt, `loopstra(${ctx.slug}): reconcile`);
     if (!savedPlan.ok) return blockWith(ctx, savedPlan);
   }
 
@@ -99,16 +99,6 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, REVIEW_ROUND); // a new build gets fresh review rounds
   await setStatus(ctx, "reviewing");
   return { ok: true };
-}
-
-function branchPlanPath(ctx: StepContext): string {
-  return join(ctx.worktreeDir, "intent", ctx.slug, "plan.md");
-}
-
-/** The plan as the intent branch has it (reconciled on an earlier run), or null when the branch has none. */
-export function branchPlan(ctx: StepContext): string | null {
-  const p = branchPlanPath(ctx);
-  return existsSync(p) ? readFileSync(p, "utf8") : null;
 }
 
 type Verified = { ok: true; passed: boolean; observations: string } | Failure;

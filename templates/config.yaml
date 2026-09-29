@@ -17,11 +17,10 @@ claude:
   timeout_minutes: 30
   max_budget_usd: 5
 
-# Gates between stages. human: status (a person edits the status line) | pr (GitHub approval) | none.
-# agent: true runs an independent reviewer with a fresh context.
-# Default: a person only accepts an intent; everything after runs on its own.
+# Gates between stages. human: status (a person edits the status line) | none; the merge gate also
+# takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.
+# A person always accepts an intent (draft -> accepted); by default everything after runs on its own.
 gates:
-  intent: { human: status }
   spec:   { human: none, agent: true }
   plan:   { human: none, agent: true }
   merge:  { human: none, method: squash }

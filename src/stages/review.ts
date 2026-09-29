@@ -1,7 +1,7 @@
 import { block, blockWith, blockWithDetail, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase } from "../phases";
-import { branchPlan, testLoop } from "./build";
+import { testLoop } from "./build";
 import { alreadyMerged, checkMerge, finishMerge, mayReviewAgain, passMergeGate, REVIEWS_USED_UP } from "./merge";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
@@ -36,7 +36,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
   }
 
   const a = await artifacts(ctx);
-  const plan = branchPlan(ctx) ?? a.plan;
+  const plan = a.currentPlan;
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
     const review = await agentPhase(ctx, {

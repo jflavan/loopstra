@@ -58,8 +58,9 @@ export function parseIntentFile(rawText: string): IntentFile {
   const fm = Frontmatter.safeParse(raw ?? {});
   if (!fm.success) {
     const issue = fm.error.issues[0];
-    const field = issue?.path.join(".") || (issue?.code === "unrecognized_keys" ? issue.keys.join(", ") : "") || "top";
-    throw new FrontmatterProblem(field, `intent.md frontmatter problem at ${field}: ${issue?.message}`);
+    const unknown = issue?.code === "unrecognized_keys" ? issue.keys : [];
+    const field = issue?.path.join(".") || unknown.join(", ") || "top";
+    throw new FrontmatterProblem(field, `intent.md frontmatter problem at ${field}: ${issue?.message}`, unknown.length > 0);
   }
   const titleMatch = /^#(?!#)\s*(?:Intent:\s*)?(.+)$/m.exec(body);
   const title = titleMatch?.[1]?.trim() ?? "";
@@ -97,7 +98,7 @@ export interface Intent {
   artifacts: Set<string>;
 }
 
-export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md"] as const;
+export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md"] as const;
 
 export function intentRoot(root: string): string {
   return join(root, "intent");
@@ -115,6 +116,9 @@ export interface Unreadable { slug: string; problem: string; detail: string }
 
 export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 
+/** A change's folder name: lowercase letters and digits, words joined by dashes. */
+const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+
 /** Every intent folder: the readable intents, and the ones a person needs to fix. Never throws for one bad file. */
 export async function scanRepo(root: string): Promise<Scan> {
   const base = intentRoot(root);
@@ -125,6 +129,11 @@ export async function scanRepo(root: string): Promise<Scan> {
     try {
       if (!statSync(dir).isDirectory()) continue;
       if (!existsSync(join(dir, "intent.md"))) continue;
+      // The folder name is also the branch name and the pull request's title: keep it plain.
+      if (!SLUG.test(name)) {
+        scan.unreadable.push({ slug: name, problem: "Rename the folder to lowercase words joined by dashes, like add-numbers.", detail: `"${name}" is not a valid change name (${SLUG})` });
+        continue;
+      }
       scan.intents.push(await readIntent(root, name));
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -140,15 +149,18 @@ export async function scanIntents(root: string): Promise<Intent[]> {
 }
 
 function unreadableProblem(e: unknown): string {
+  if (e instanceof FrontmatterProblem && e.unknownKey) {
+    return `intent.md has a line Loopstra does not recognise: '${e.field.split(", ").join("', '")}'. Remove it or fix the spelling.`;
+  }
   if (e instanceof FrontmatterProblem) {
     return `The ${e.field} line at the top of intent.md has a value Loopstra does not understand. Fix it, and the change is picked up again.`;
   }
   return "The lines between the --- markers at the top of intent.md could not be read. Fix them, and the change is picked up again.";
 }
 
-/** intent.md frontmatter that parsed as YAML but has an invalid field. */
+/** intent.md frontmatter that parsed as YAML but has an invalid field (or, `unknownKey`, a key Loopstra does not know). */
 export class FrontmatterProblem extends Error {
-  constructor(public readonly field: string, message: string) {
+  constructor(public readonly field: string, message: string, public readonly unknownKey = false) {
     super(message);
     this.name = "FrontmatterProblem";
   }

@@ -50,7 +50,8 @@ intent/
     spec.md                       Stage 2
     plan.md                       Stage 3
     review.md                     Stage 5 findings and resolutions
-    outcome.md                    Stage 6 evidence and lessons
+    outcome.md                    Stage 6 evidence, for the owner
+    lessons.md                    Stage 6 lessons and proposed CLAUDE.md additions, for engineers
 loopstra/
   config.yaml                     all machinery configuration
   prompts/<phase>.md              editable prompt per agent phase
@@ -58,8 +59,6 @@ REVIEW.md                         review policy read by the reviewer
 CLAUDE.md                         maintained per the course; init adds a Commands block
 .claude/
   skills/loopstra/SKILL.md        operator skill
-  agents/verifier.md              fresh-context verifier subagent
-  agents/reviewer.md              fresh-context reviewer subagent
   hooks/loopstra-protect-tests.ts hook: blocks test edits during fix phases
   settings.json                   hook wiring (merged, not overwritten)
 .loopstra/                        gitignored
@@ -72,7 +71,12 @@ CLAUDE.md                         maintained per the course; init adds a Command
 ```
 
 Slugs are lowercase words joined by hyphens, chosen by the owner, and are the
-folder name, the branch name (`intent/<slug>`), and the PR title prefix.
+folder name, the branch name (`intent/<slug>`), and the PR title prefix. A
+folder whose name does not match `^[a-z0-9][a-z0-9-]*$` is listed under
+"Needs a person" with "Rename the folder to lowercase words joined by
+dashes, like add-numbers." A frontmatter key Loopstra does not know is
+listed the same way: "intent.md has a line Loopstra does not recognise:
+'<key>'. Remove it or fix the spelling."
 
 ## 3. The intent file
 
@@ -191,7 +195,7 @@ commands:                       # exit code decides; run in the intent worktree
   test: bun test
   lint: bun run lint            # optional
   build: bun run build          # optional
-  run: bun run start            # optional; used by the verifier subagent
+  run: bun run start            # optional; used by the verify session
 
 claude:
   models:
@@ -207,14 +211,17 @@ claude:
     - Glob
     - Grep
     - Bash(bun *)
-    - Bash(git *)
+    - Bash(git diff *)          # git that only reads; the runtime makes every
+    - Bash(git log *)           # commit, branch, and merge itself
+    - Bash(git show *)
+    - Bash(git status *)
 
 gates:
-  intent: { human: status }                 # status | pr | none
-  spec:   { human: none, agent: true }
+  # No intent gate: a person always accepts an intent (draft → accepted).
+  spec:   { human: none, agent: true }          # human: status | none
   plan:   { human: none, agent: true }
-  merge:  { human: none, method: squash }   # squash | merge; pr approval read when human: pr
-  done:   { human: none, agent: true }
+  merge:  { human: none, method: squash }   # human: status | pr | none; method: squash | merge
+  done:   { human: none, agent: true }          # human: status | none
 
 stages:
   design:  { model: strong,  skills: [], before: [], after: [] }
@@ -257,8 +264,8 @@ Phases and their envelopes (all include `status: "success" | "fail"`,
 | build | B, default | build tools | `changed_files[]`, `commit_message` |
 | fix | resume B | build tools, test edits blocked | same as build |
 | reconcile | resume B | build tools | `plan_markdown` |
-| verify | fresh, cheap, verifier agent | Bash, Read | `passed`, `observations[]` |
-| review | fresh, strong, reviewer agent | read-only | `approved`, `findings[{severity, file, line, finding}]`, `review_markdown` |
+| verify | fresh, cheap | read-only plus Bash of configured commands and read-only git | `passed`, `observations[]` |
+| review | fresh, strong | read-only plus read-only git | `approved`, `findings[{severity, file, line, finding}]`, `review_markdown` |
 | revise | resume B | build tools | same as build |
 | done-check | fresh, strong | read-only plus Bash of configured commands | `met`, `evidence[{criterion, met, evidence}]`, `outcome_markdown` |
 | lessons | fresh, cheap | read-only | `lessons[]`, `claude_md_additions` |
@@ -309,8 +316,12 @@ stepping it never advances.)
 10. `before` commands for build. **build** in the worktree. The runtime
     commits anything left uncommitted with the envelope's `commit_message`.
 11. Plan drift check: `git diff --name-only main_branch...HEAD` versus the
-    plan's files. Extra files → **reconcile** rewrites `plan.md`; runtime
-    commits it on the branch.
+    files of main's `plan.md`. Extra files → **reconcile** returns the plan
+    as it now stands; the runtime keeps it in the run folder
+    (`plan.reconciled.md`), never on the branch or main. Verify and review
+    use the reconciled plan when there is one, else main's `plan.md`; the
+    plan is never read from the branch. A new build (every build step)
+    clears it, so a retry is compared with main's plan again.
 
 ### Stage 4: test
 
@@ -318,7 +329,7 @@ stepping it never advances.)
     `build` if configured. First failure's output goes to **fix** with
     `LOOPSTRA_PHASE=fix` in the environment so the protect-tests hook denies
     edits to test files. Green → continue. Exhausted → block.
-13. **verify**: the verifier subagent runs `commands.run` if configured,
+13. **verify**: a fresh read-only session runs `commands.run` if configured,
     exercises the change, and reports. `passed: false` → one more fix loop
     with the observations, then block.
 
@@ -396,13 +407,14 @@ stepping it never advances.)
     `outcome.md`, adding "For a person to confirm" for needs-person items
     (they never block). A judge that cannot finish blocks plainly; it is
     never read as criteria unmet.
-19. **lessons**: appended to `outcome.md` under "Lessons" and "Proposed
-    CLAUDE.md additions". The skill's `apply-lessons` command copies the
-    additions into `CLAUDE.md` for review. Then the verify `after`
-    commands. Unmet criteria → block, pointing at outcome.md. No person on
+19. **lessons**: written to `lessons.md` (for engineers) under "Lessons"
+    and "Proposed CLAUDE.md additions"; `outcome.md` keeps only Outcome,
+    Evidence, Not met, and For a person to confirm. `loopstra
+    apply-lessons <slug>` copies the additions into `CLAUDE.md` for review.
+    Then the verify `after` commands. Unmet criteria → block, pointing at outcome.md. No person on
     the done gate → `done`; a person → `verifying` with a plain note (it
     only ever means "waiting for a person"), and the person sets `done`.
-20. Commit `outcome.md` on main.
+20. Commit `outcome.md` and `lessons.md` on main.
 
 Signals also run on their interval regardless of intents.
 
@@ -548,8 +560,8 @@ behaviors, each a short section, not a cookbook tree:
 - **Unblock**: read the note, explain the options, and on the person's say
   set the status back to the last approved state or to `closed`.
 - **Tune**: edit prompts, gates, and stage settings in `config.yaml`.
-- **Apply lessons**: copy proposed CLAUDE.md additions from an
-  `outcome.md` into `CLAUDE.md` for review.
+- **Apply lessons**: copy proposed CLAUDE.md additions from a change's
+  `lessons.md` into `CLAUDE.md` for review.
 
 The skill never runs `loopstra start` and never performs a stage by hand.
 
@@ -564,14 +576,16 @@ Deterministic and idempotent. Never overwrites a file that exists unless
    which makes `loopstra start` refuse to run until it is set.
 2. Write `loopstra/config.yaml` and `loopstra/prompts/*.md` from templates.
 3. Write `intent/README.md` and `intent/queue.md`.
-4. Write `REVIEW.md`, `.claude/agents/verifier.md`,
-   `.claude/agents/reviewer.md`, `.claude/skills/loopstra/SKILL.md`,
-   `.claude/hooks/loopstra-protect-tests.ts`.
+4. Write `REVIEW.md`, `.claude/skills/loopstra/SKILL.md`,
+   `.claude/hooks/loopstra-protect-tests.ts`. (No subagent files: the
+   runtime runs its judges as fresh sessions itself.)
 5. Merge a `PreToolUse` hook entry for `Edit|Write` into
    `.claude/settings.json`, preserving existing content.
 6. Add a Commands block to `CLAUDE.md` if absent, and `.loopstra/` to
    `.gitignore`.
-7. Print what was written and what the engineer should check next.
+7. Print what was written and what the engineer should do next, first of
+   all commit the stamped files on main: the loop works in worktrees,
+   which only see what is committed.
 
 The protect-tests hook: reads the tool input from stdin, and if
 `LOOPSTRA_PHASE=fix` and the path matches a test pattern (`*.test.*`,
@@ -582,7 +596,12 @@ exits 0.
 
 `loopstra start [--once]`: checks `claude` and `git` are installed, the
 root checkout is on `main_branch` ("Run loopstra from a checkout of
-<main_branch>; you are on <branch>."), and, if a remote exists, that `gh` is
+<main_branch>; you are on <branch>."), that Loopstra's own files are
+committed there (`loopstra/config.yaml`, `loopstra/prompts/`, and, when
+init wired the hook, `.claude/settings.json` and the hook; otherwise "These
+Loopstra files are not committed on main yet, so the loop's own checkouts
+would not see them: <files>. Commit them, then start again."), and, if a
+remote exists, that `gh` is
 available ("This repo has a remote but gh was not found. Install GitHub CLI
 or remove the remote.") and signed in ("GitHub CLI is installed but not
 signed in. Run gh auth login, then start again."), then loops: tick, sleep `poll_seconds`. `--once`

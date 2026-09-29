@@ -9,7 +9,7 @@ describe("applyLessons", () => {
     const t = tempDir();
     try {
       mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-      await Bun.write(join(t.path, "intent", "one", "outcome.md"), "# Outcome\n\n## Evidence\n- x\n\n## Lessons\n- l\n\n## Proposed CLAUDE.md additions\n- Exported functions get a doc comment.\n- Never log tokens.\n");
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "# Lessons\n\n## Evidence\n- x\n\n## Lessons\n- l\n\n## Proposed CLAUDE.md additions\n- Exported functions get a doc comment.\n- Never log tokens.\n");
       await Bun.write(join(t.path, "CLAUDE.md"), "# Project\n");
       const r = await applyLessons(t.path, "one");
       expect(r.added).toEqual(["- Exported functions get a doc comment.", "- Never log tokens."]);
@@ -27,7 +27,7 @@ describe("applyLessons", () => {
     const t = tempDir();
     try {
       mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-      await Bun.write(join(t.path, "intent", "one", "outcome.md"), "# Outcome\n\n## Proposed CLAUDE.md additions\nNone.\n");
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "# Lessons\n\n## Proposed CLAUDE.md additions\nNone.\n");
       const r = await applyLessons(t.path, "one");
       expect(r.added).toEqual([]);
     } finally {
@@ -39,7 +39,7 @@ describe("applyLessons", () => {
     const t = tempDir();
     try {
       mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-      await Bun.write(join(t.path, "intent", "one", "outcome.md"), "# Outcome\r\n\r\n## Proposed CLAUDE.md additions\r\n* Run the linter first.\r\n\r\n## Needs a person\r\n- Not a lesson.\r\n");
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "# Lessons\r\n\r\n## Proposed CLAUDE.md additions\r\n* Run the linter first.\r\n\r\n## Needs a person\r\n- Not a lesson.\r\n");
       await Bun.write(join(t.path, "CLAUDE.md"), "# Project\r\n\r\n## Lessons\r\n- Old lesson.\r\n");
       const r = await applyLessons(t.path, "one");
       expect(r.added).toEqual(["- Run the linter first."]);
@@ -53,7 +53,7 @@ describe("applyLessons", () => {
     const t = tempDir();
     try {
       mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-      await Bun.write(join(t.path, "intent", "one", "outcome.md"), "## Proposed CLAUDE.md additions\n- New.\n");
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "## Proposed CLAUDE.md additions\n- New.\n");
       await Bun.write(join(t.path, "CLAUDE.md"), "# Project\n\n## Lessons\n- Old.\n\n## Commands\n- bun test\n");
       await applyLessons(t.path, "one");
       expect(await Bun.file(join(t.path, "CLAUDE.md")).text()).toBe("# Project\n\n## Lessons\n- Old.\n- New.\n\n## Commands\n- bun test\n");
@@ -66,7 +66,7 @@ describe("applyLessons", () => {
     const t = tempDir();
     try {
       mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-      await Bun.write(join(t.path, "intent", "one", "outcome.md"), "## Proposed CLAUDE.md additions\n- A.\n");
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "## Proposed CLAUDE.md additions\n- A.\n");
       await applyLessons(t.path, "one");
       expect(await Bun.file(join(t.path, "CLAUDE.md")).text()).toBe("# Project\n\n## Lessons\n- A.\n");
     } finally {
@@ -74,10 +74,10 @@ describe("applyLessons", () => {
     }
   });
 
-  test("says plainly when there is no outcome yet, and refuses a slug that is not a folder name", async () => {
+  test("says plainly when there are no lessons yet, and refuses a slug that is not a folder name", async () => {
     const t = tempDir();
     try {
-      await expect(applyLessons(t.path, "one")).rejects.toThrow("one has no outcome.md yet");
+      await expect(applyLessons(t.path, "one")).rejects.toThrow("one has no lessons.md yet");
       await expect(applyLessons(t.path, "../one")).rejects.toThrow("not a change name");
     } finally {
       t.cleanup();

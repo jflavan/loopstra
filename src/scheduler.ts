@@ -15,6 +15,7 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runReviewStep } from "./stages/review";
 import { runVerifyStep } from "./stages/verify";
+import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace } from "./trace";
 
@@ -239,7 +240,8 @@ export function missingTools(env: Record<string, string | undefined> = process.e
 
 /**
  * What `start` checks before the loop begins, as a plain message, or null when it may start: the
- * tools are installed, the checkout is on main_branch, and a repository with a remote has gh.
+ * tools are installed, the checkout is on main_branch, Loopstra's own files are committed there,
+ * and a repository with a remote has gh, signed in.
  * A config that cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
@@ -250,6 +252,10 @@ export async function preflight(root: string, env: Record<string, string | undef
   const git = new Git(root);
   const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
   if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
+  const uncommitted = await uncommittedSetup(root, cfg.main_branch);
+  if (uncommitted.length) {
+    return `These Loopstra files are not committed on ${cfg.main_branch} yet, so the loop's own checkouts would not see them: ${uncommitted.join(", ")}. Commit them, then start again.`;
+  }
   if (await git.remoteName()) {
     const gh = new GitHub(root);
     if (!(await gh.available())) return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";

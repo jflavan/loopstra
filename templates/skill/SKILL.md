@@ -7,7 +7,7 @@ description: Operate the Loopstra development loop in this repo. Use when asked 
 
 Loopstra is an unattended development loop. A Bun runtime (`loopstra start`) owns the loop; Claude Code sessions do bounded work inside it. You are the operator console: you help people set it up, feed it, read it, and unblock it. You never run stages by hand and never run `loopstra start`.
 
-Files that matter: `loopstra/config.yaml` (engineer settings), `loopstra/prompts/*.md` (one prompt per phase), `intent/<slug>/` (one folder per change: `intent.md`, `spec.md`, `plan.md`, `review.md`, `outcome.md`), `intent/queue.md` (generated), `.loopstra/` (runtime state and trace, gitignored).
+Files that matter: `loopstra/config.yaml` (engineer settings), `loopstra/prompts/*.md` (one prompt per phase), `intent/<slug>/` (one folder per change: `intent.md`, `spec.md`, `plan.md`, `review.md`, `outcome.md` for the owner, `lessons.md` for engineers), `intent/queue.md` (generated), `.loopstra/` (runtime state and trace, gitignored). A change's folder name is lowercase words joined by dashes, like `add-numbers`.
 
 ## The state machine
 Status lives in the `status` line of `intent.md`; the `note` line says what to do. The runtime writes it, except where a person is asked to.
@@ -23,9 +23,9 @@ draft -> accepted -> designing -> spec-review -> spec-approved -> planning -> pl
 - Nothing is written on the root checkout unless it is on `main_branch`; otherwise the loop pauses.
 
 ## Onboard
-1. Run `loopstra init` and read what it printed. Files it reports as "kept" already existed and were left alone.
+1. Run `loopstra init` and read what it printed. Files it reports as "kept" already existed and were left alone. Commit what it wrote on main: the loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, prompts, and hook are committed.
 2. Open `loopstra/config.yaml`. Confirm `commands.test` is the one command that runs the tests and exits non-zero on failure; add `install`, `lint`, `build`, `run` if the repo has them.
-3. Ask which gates should have a person: intent (default yes), spec, plan, merge, done. Set `human: status` or `human: pr` accordingly. The defaults are unattended after intent acceptance.
+3. A person always accepts an intent (draft to accepted). Ask which other gates should have a person: spec, plan, merge, done. Set `human: status` for them; the merge gate can instead use `human: pr` (approval of its GitHub pull request). The defaults are unattended after acceptance.
 4. Ask which skills in `.claude/skills/` each stage should load and list them under `stages.<stage>.skills`.
 5. Read `CLAUDE.md`; make sure its Commands block matches the config.
 6. Tell them to start the loop in a terminal with `loopstra start` and to watch it with `loopstra status` or `loopstra ui`.
@@ -45,4 +45,4 @@ Read the `note` in the change's `intent.md`. Explain the choices: retry from the
 Edit `loopstra/prompts/<phase>.md` or `loopstra/config.yaml`. Changes take effect on the next pass. Keep prompts short and explicit; keep gate defaults deterministic.
 
 ## Apply lessons
-Run `loopstra apply-lessons <slug>` to copy the proposed CLAUDE.md additions from that change's `outcome.md` into `CLAUDE.md` under a Lessons heading, then show the diff for review.
+Run `loopstra apply-lessons <slug>` to copy the proposed CLAUDE.md additions from that change's `lessons.md` into `CLAUDE.md` under a Lessons heading, then show the diff for review.

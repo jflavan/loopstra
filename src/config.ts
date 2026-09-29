@@ -6,6 +6,8 @@ import { z } from "zod";
 export class ConfigError extends Error {}
 
 const humanGate = z.enum(["status", "pr", "none"]);
+/** A person on the status line, or nobody: spec, plan, and done have no pull request to approve. */
+const statusGate = z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" });
 const modelRef = z.enum(["default", "cheap", "strong"]);
 
 const stage = z.object({
@@ -37,18 +39,16 @@ export const ConfigSchema = z.object({
     }).strict().prefault({}),
     timeout_minutes: z.number().positive().default(30),
     max_budget_usd: z.number().positive().default(5),
-    allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git *)"]),
+    // Git that only reads: the runtime makes every commit, branch, and merge itself.
+    allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
   }).strict().prefault({}),
+  // There is no intent gate to set: a person always accepts a change by setting its status to accepted.
   gates: z.object({
-    intent: z.object({ human: humanGate.default("status") }).strict().prefault({}),
-    spec: z.object({ human: humanGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
-    plan: z.object({ human: humanGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
+    spec: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
+    plan: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
     merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash") }).strict().prefault({}),
-    // A pull request cannot confirm a result after the merge, so the done gate has no pr surface.
-    done: z.object({
-      human: z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" }).default("none"),
-      agent: z.boolean().default(true),
-    }).strict().prefault({}),
+    // A pull request cannot confirm a result after the merge either.
+    done: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
   }).strict().prefault({}),
   stages: z.object({
     design: stage.extend({ model: modelRef.default("strong") }).prefault({}),
@@ -83,6 +83,9 @@ export async function loadConfig(root: string): Promise<Config> {
   if (!result.success) {
     const lines = result.error.issues.map((i) => {
       const where = i.path.length ? i.path.join(".") : "(top level)";
+      if (i.code === "unrecognized_keys" && where === "gates" && i.keys.includes("intent")) {
+        return "gates.intent: remove this line; a person always accepts a change by setting its status to accepted.";
+      }
       if (i.code === "unrecognized_keys") return `${where}: unknown key(s) ${i.keys.join(", ")}`;
       return `${where}: ${i.message}`;
     });

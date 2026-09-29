@@ -21,8 +21,12 @@ async function outcomeOf(repo: string): Promise<string> {
   return Bun.file(join(repo, "intent", "add-numbers", "outcome.md")).text();
 }
 
+async function lessonsOf(repo: string): Promise<string> {
+  return Bun.file(join(repo, "intent", "add-numbers", "lessons.md")).text();
+}
+
 describe("verify stage", () => {
-  test("merged → done with outcome.md containing evidence and lessons, written by the runtime", async () => {
+  test("merged → done: outcome.md for the owner, lessons.md for engineers, both written by the runtime and committed", async () => {
     const { repo, ctx, trace } = await merged({ config: "stages:\n  verify:\n    skills:\n      - checking-results\n" });
     await runVerifyStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
@@ -30,11 +34,15 @@ describe("verify stage", () => {
     expect(i.file.frontmatter.note).toBe("");
     const outcome = await outcomeOf(repo.path);
     expect(outcome).toContain("## Evidence");
-    expect(outcome).toContain("## Lessons");
-    expect(outcome).toContain("## Proposed CLAUDE.md additions");
-    expect(outcome).toContain("doc comment");
+    expect(outcome).not.toContain("Lessons");
+    expect(outcome).not.toContain("CLAUDE.md");
     expect(outcome).not.toContain("For a person to confirm");
+    const lessons = await lessonsOf(repo.path);
+    expect(lessons).toContain("## Lessons");
+    expect(lessons).toContain("## Proposed CLAUDE.md additions");
+    expect(lessons).toContain("doc comment");
     expect(await new Git(repo.path).isDirty()).toBe(false);
+    expect((await new Git(repo.path).run(["cat-file", "-e", "main:intent/add-numbers/lessons.md"], true)).code).toBe(0);
     // Both judges are told the verify stage's skills.
     for (const name of ["done-check", "lessons"]) {
       const p = trace.phases("add-numbers").find((x) => x.name === name)!;
@@ -72,7 +80,7 @@ describe("verify stage", () => {
     expect(i.file.frontmatter.note).toContain("done");
     const outcome = await outcomeOf(repo.path);
     expect(outcome).toContain("## Evidence");
-    expect(outcome).toContain("## Lessons");
+    expect(await lessonsOf(repo.path)).toContain("## Lessons");
     expect(trace.phases("add-numbers").map((p) => p.name)).toEqual(["done-check", "lessons", "verify-after"]);
 
     // Stepping the waiting status does nothing.
@@ -98,7 +106,7 @@ describe("verify stage", () => {
     const outcome = await outcomeOf(repo.path);
     expect(outcome).toContain("## Not met");
     expect(outcome).toContain("add(1, 2) returns 3.");
-    expect(outcome).toContain("## Lessons");
+    expect(await lessonsOf(repo.path)).toContain("## Lessons");
     trace.close(); repo.cleanup();
   });
 

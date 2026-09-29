@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { readPause } from "../../src/heartbeat";
 import { missingTools, preflight, start, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
-import { setupRepo, TEMPLATES, withEnv } from "../helpers";
+import { init } from "../../src/init";
+import { setupRepo, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
@@ -239,6 +240,25 @@ describe("scheduler resilience", () => {
       expect(await preflight(repo.path)).toBeNull();
     });
     trace.close(); repo.cleanup();
+  });
+
+  test("start refuses, listing them, Loopstra's own files that are not committed on main", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
+      await init(repo.path);
+      await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: "fake" }, async () => {
+        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: loopstra/config.yaml, loopstra/prompts/, .claude/settings.json, .claude/hooks/loopstra-protect-tests.ts. Commit them, then start again.");
+        const git = new Git(repo.path);
+        await git.run(["add", "loopstra/config.yaml", "loopstra/prompts"]);
+        await git.run(["commit", "-q", "-m", "loopstra config"]);
+        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: .claude/settings.json, .claude/hooks/loopstra-protect-tests.ts. Commit them, then start again.");
+        await git.commitAll("the rest of init");
+        expect(await preflight(repo.path)).toBeNull();
+      });
+    } finally {
+      repo.cleanup();
+    }
   });
 
   test("start names a missing tool in plain words", () => {

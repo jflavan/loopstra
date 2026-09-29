@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanIntents, writeIntent,
+  checkConsistency, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanIntents, scanRepo, writeIntent,
   type Intent,
 } from "../../src/intents";
 import { tempDir } from "../helpers";
@@ -23,6 +23,26 @@ describe("scan and queue", () => {
     await Bun.write(join(t.path, "intent", "queue.md"), "queue");
     const intents = await scanIntents(t.path);
     expect(intents.map((i) => i.slug).sort()).toEqual(["a-thing", "b-thing"]);
+    t.cleanup();
+  });
+
+  test("a folder name that is not lowercase words joined by dashes is listed for a person, with how to fix it", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: accepted");
+    await mk(t.path, "Add_Numbers", "status: accepted");
+    await mk(t.path, "add numbers", "status: accepted");
+    const scan = await scanRepo(t.path);
+    expect(scan.intents.map((i) => i.slug)).toEqual(["add-numbers"]);
+    expect(scan.unreadable.map((u) => u.slug).sort()).toEqual(["Add_Numbers", "add numbers"]);
+    for (const u of scan.unreadable) expect(u.problem).toBe("Rename the folder to lowercase words joined by dashes, like add-numbers.");
+    t.cleanup();
+  });
+
+  test("a line in intent.md that Loopstra does not know is named, with how to fix it", async () => {
+    const t = tempDir();
+    await mk(t.path, "one", "status: accepted\ncolour: blue");
+    const [u] = (await scanRepo(t.path)).unreadable;
+    expect(u?.problem).toBe("intent.md has a line Loopstra does not recognise: 'colour'. Remove it or fix the spelling.");
     t.cleanup();
   });
 

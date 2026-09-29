@@ -21,12 +21,15 @@ describe("init", () => {
       expect(cfg.commands.lint).toBe("bun run lint");
       expect(cfg.commands.build).toBe("bun run build");
       expect(cfg.commands.run).toBe("bun run start");
-      expect(cfg.gates.intent.human).toBe("status");
       expect(cfg.gates.spec).toEqual({ human: "none", agent: true });
       expect(cfg.gates.merge).toEqual({ human: "none", method: "squash" });
-      for (const f of ["loopstra/prompts/build.md", "intent/README.md", "intent/queue.md", "REVIEW.md", ".claude/agents/verifier.md", ".claude/agents/reviewer.md", ".claude/skills/loopstra/SKILL.md", ".claude/hooks/loopstra-protect-tests.ts"]) {
+      for (const f of ["loopstra/prompts/build.md", "intent/README.md", "intent/queue.md", "REVIEW.md", ".claude/skills/loopstra/SKILL.md", ".claude/hooks/loopstra-protect-tests.ts"]) {
         expect(existsSync(join(t.path, f))).toBe(true);
       }
+      // The runtime runs its judges as fresh sessions itself; no subagent files.
+      expect(existsSync(join(t.path, ".claude", "agents"))).toBe(false);
+      // The workspaces only see what is committed on main.
+      expect(report.next[0]).toBe("Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on main. The loop works in its own checkouts, which only see what is committed.");
       const settings = JSON.parse(await Bun.file(join(t.path, ".claude", "settings.json")).text());
       expect(settings.permissions.allow).toEqual(["Bash(git *)"]);
       expect(settings.hooks.PreToolUse.length).toBe(2);
