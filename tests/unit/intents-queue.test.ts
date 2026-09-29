@@ -87,4 +87,15 @@ describe("scan and queue", () => {
     expect(md.startsWith("# Queue")).toBe(true);
     t.cleanup();
   });
+
+  test("renderQueue collapses a multi-line note into a single table row", async () => {
+    const t = tempDir();
+    await mk(t.path, "stuck", "status: blocked\nnote: |\n  Need an answer about adjusters.\n  Waiting since Monday.");
+    const md = renderQueue(orderQueue(await scanIntents(t.path)));
+    const row = md.split("\n").find((l) => l.startsWith("| stuck |"));
+    expect(row).toBeDefined();
+    expect(row).toContain("Need an answer about adjusters. Waiting since Monday.");
+    expect(row?.split("\n").length ?? 0).toBe(1);
+    t.cleanup();
+  });
 });

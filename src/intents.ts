@@ -16,12 +16,15 @@ export type Status = (typeof STATUSES)[number];
 export const PRIORITIES = ["urgent", "high", "normal", "low"] as const;
 export type Priority = (typeof PRIORITIES)[number];
 
+/** A plain-language field that non-technical editors often leave blank, yielding YAML null. */
+const blankableString = z.string().nullable().transform((v) => v ?? "").default("");
+
 export const Frontmatter = z.object({
   status: z.enum(STATUSES).default("draft"),
   priority: z.enum(PRIORITIES).default("normal"),
-  author: z.string().default(""),
-  opened: z.string().default(""),
-  note: z.string().default(""),
+  author: blankableString,
+  opened: blankableString,
+  note: blankableString,
   /** The last approved status, so a person can retry from it. Runtime-managed. */
   resume_from: z.enum(STATUSES).optional(),
 }).strict();
@@ -36,7 +39,8 @@ export interface IntentFile {
 
 export const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
 
-export function parseIntentFile(text: string): IntentFile {
+export function parseIntentFile(rawText: string): IntentFile {
+  const text = rawText.replace(/^﻿/, "");
   let fmText = "";
   let body = text;
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
@@ -50,7 +54,7 @@ export function parseIntentFile(text: string): IntentFile {
     const issue = fm.error.issues[0];
     throw new Error(`intent.md frontmatter problem at ${issue?.path.join(".") || "top"}: ${issue?.message}`);
   }
-  const titleMatch = /^#\s*(?:Intent:\s*)?(.+)$/m.exec(body);
+  const titleMatch = /^#(?!#)\s*(?:Intent:\s*)?(.+)$/m.exec(body);
   const title = titleMatch?.[1]?.trim() ?? "";
   return { frontmatter: fm.data, title, body, sections: parseSections(body) };
 }
@@ -71,8 +75,11 @@ function parseSections(body: string): Record<string, string> {
 }
 
 export function serializeIntentFile(file: IntentFile): string {
+  const crlf = file.body.includes("\r\n");
   const fm = stringify(file.frontmatter, { lineWidth: 0 }).trimEnd();
-  return `---\n${fm}\n---\n${file.body.replace(/^\r?\n/, "")}`;
+  const body = file.body.replace(/^\r?\n/, "");
+  const text = `---\n${fm}\n---\n${body}`;
+  return crlf ? text.replace(/\r?\n/g, "\r\n") : text;
 }
 
 export interface Intent {
@@ -197,7 +204,7 @@ export function renderQueue(ordered: Intent[]): string {
   const blocked = ordered.filter((i) => i.file.frontmatter.status === "blocked");
   const drafts = ordered.filter((i) => i.file.frontmatter.status === "draft");
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const row = (i: Intent) => `| ${i.slug} | ${i.file.frontmatter.priority} | ${plainStatus(i.file.frontmatter.status)} | ${i.file.frontmatter.note.replace(/\|/g, "/")} |`;
+  const row = (i: Intent) => `| ${i.slug} | ${i.file.frontmatter.priority} | ${plainStatus(i.file.frontmatter.status)} | ${i.file.frontmatter.note.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/")} |`;
   const table = (rows: Intent[]) => rows.length
     ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows.map(row)].join("\n")
     : "_Nothing here._";
