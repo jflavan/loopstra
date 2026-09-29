@@ -19,8 +19,11 @@ export const ConfigSchema = z.object({
   version: z.literal(1),
   main_branch: z.string().default("main"),
   poll_seconds: z.number().int().positive().default(60),
+  // Empty prefault is deliberate: a missing `commands` block should still report `commands.test`, not `commands`.
   commands: z.object({
-    test: z.string().min(1, "commands.test is required: the single command that runs your tests"),
+    test: z
+      .string({ error: "commands.test is required: the single command that runs your tests" })
+      .min(1, "commands.test is required: the single command that runs your tests"),
     lint: z.string().optional(),
     build: z.string().optional(),
     run: z.string().optional(),
