@@ -1,3 +1,5 @@
+import { killTree, within } from "./shell";
+
 export interface StreamEvent {
   type: string;
   subtype?: string;
@@ -64,6 +66,19 @@ export const FAKE_CLAUDE_ENV = "LOOPSTRA_CLAUDE_EXECUTABLE";
 // The CLI accepts "default" as an alias of the documented "manual" permission mode.
 export type PermissionMode = "default" | "manual" | "plan" | "acceptEdits" | "dontAsk" | "auto";
 
+/**
+ * Why a phase failed, as a machine-readable code. Stages decide on this, never on note text.
+ * - not-started: the executable could not be found or spawned
+ * - timeout: the deadline passed before a result arrived
+ * - budget: the session hit --max-budget-usd
+ * - no-session: --resume named a session the CLI could not find
+ * - crash: the process ended without a usable result, or with an error result
+ * - invalid-envelope: a result arrived but its structured output is missing or the wrong shape
+ * - agent-fail: the agent answered, and its envelope says status "fail"
+ * - missing-prompt: the phase's prompt file is missing (raised by agentPhase)
+ */
+export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt";
+
 export interface RunPhaseInput {
   cwd: string;
   prompt: string;
@@ -71,6 +86,8 @@ export interface RunPhaseInput {
   model: string;
   permissionMode: PermissionMode;
   allowedTools: string[];
+  /** Deny rules (--disallowedTools). A bare tool name removes the tool from the session. */
+  disallowedTools?: string[];
   timeoutMs: number;
   maxBudgetUsd: number;
   resume?: string;
@@ -80,13 +97,14 @@ export interface RunPhaseInput {
   onEvent?: (e: StreamEvent) => void;
 }
 
-export interface RunPhaseResult extends Collected {
-  ok: boolean;
-  reason: string;
+export type RunPhaseResult = Collected & {
   exitCode: number | null;
   durationMs: number;
   stderr: string;
-}
+} & ({ ok: true; reason: null; detail: "" } | { ok: false; reason: FailureReason; detail: string });
+
+/** After the result event, how long the process gets to exit on its own before its tree is killed. */
+const EXIT_GRACE_MS = 2_000;
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -95,15 +113,20 @@ export function resolveClaude(override?: string): string | null {
   return Bun.which("claude");
 }
 
+/**
+ * Runs one `claude -p` session. Everything it awaits is bounded by the deadline (`timeoutMs`)
+ * plus a short grace: it stops reading stdout at the result event, never waits on pipes a
+ * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
+ */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
   const collector = new StreamCollector();
-  const fail = (reason: string, exitCode: number | null = null, stderr = ""): RunPhaseResult => ({
-    ...collector.finish(), ok: false, reason, exitCode, durationMs: Date.now() - started, stderr,
+  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = ""): RunPhaseResult => ({
+    ...collector.finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr,
   });
 
   const exe = resolveClaude(input.executable);
-  if (!exe) return fail("could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
+  if (!exe) return fail("not-started", "could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
 
   const args = [
     "-p", "--output-format", "stream-json", "--verbose",
@@ -113,6 +136,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     "--max-budget-usd", String(input.maxBudgetUsd),
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
+  if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
   if (input.resume) args.push("--resume", input.resume);
 
   // A .ts fake must be run through bun; the real CLI is a native executable.
@@ -125,45 +149,71 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
       env: { ...process.env, ...(input.env ?? {}) },
     });
   } catch (e) {
-    return fail(`could not start claude: ${(e as Error).message}`);
+    return fail("not-started", `could not start claude: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  proc.stdin.write(input.prompt);
-  proc.stdin.end();
+  try {
+    proc.stdin.write(input.prompt);
+    void Promise.resolve(proc.stdin.end()).catch(() => {});
+  } catch { /* the process already exited; the missing result reports it */ }
 
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, input.timeoutMs);
+  // stderr is drained in the background and read as-is at the end; it is never awaited unbounded.
+  let stderr = "";
+  const stderrDone = (async () => {
+    const dec = new TextDecoder();
+    try { for await (const chunk of proc.stderr) stderr += dec.decode(chunk, { stream: true }); } catch { /* closed */ }
+  })();
 
-  const stderrPromise = new Response(proc.stderr).text();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for await (const chunk of proc.stdout) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let nl: number;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl);
-      buffer = buffer.slice(nl + 1);
-      const e = collector.push(line);
-      if (e && input.onEvent) input.onEvent(e);
-    }
+  const emit = (line: string) => {
+    const e = collector.push(line);
+    if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
+    return e;
+  };
+
+  const reader = proc.stdout.getReader();
+  const readUntilResult = (async () => {
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const e = emit(buffer.slice(0, nl));
+          buffer = buffer.slice(nl + 1);
+          if (e?.type === "result") return;
+        }
+      }
+      if (buffer.trim()) emit(buffer);
+    } catch { /* stream cancelled or broken; what was collected stands */ }
+  })();
+
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"deadline">((resolve) => { deadlineTimer = setTimeout(() => resolve("deadline"), input.timeoutMs); });
+  const first = await Promise.race([readUntilResult.then(() => "read" as const), deadline]);
+  clearTimeout(deadlineTimer);
+  const timedOut = first === "deadline";
+  void reader.cancel().catch(() => {});
+
+  let exitCode: number | null = timedOut ? null : await within(proc.exited, EXIT_GRACE_MS, null);
+  if (exitCode === null) {
+    await killTree(proc);
+    exitCode = await within(proc.exited, EXIT_GRACE_MS, null);
   }
-  if (buffer.trim()) { const e = collector.push(buffer); if (e && input.onEvent) input.onEvent(e); }
-  clearTimeout(timer);
+  await within(stderrDone, 250, undefined);
 
-  const exitCode = await proc.exited;
-  const stderr = await stderrPromise;
   const collected = collector.finish();
-  const durationMs = Date.now() - started;
-
-  if (timedOut) return fail(`claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
+  if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
+  const lastErr = stderr.trim().split("\n").pop()?.trim() ?? "";
   if (collected.subtype === "missing_result") {
-    return fail(`claude exited ${exitCode} without a result: ${stderr.trim().split("\n").pop() ?? ""}`.trim(), exitCode, stderr);
+    if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
+    return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   }
-  if (collected.subtype !== "success" || collected.isError) {
-    return fail(`claude ended with ${collected.subtype}`, exitCode, stderr);
-  }
-  if (collected.structuredOutput === undefined) {
-    return fail("claude finished without structured output", exitCode, stderr);
-  }
-  return { ...collected, ok: true, reason: "", exitCode, durationMs, stderr };
+  if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
+  if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
+  if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
+  if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);
+  return { ...collected, ok: true, reason: null, detail: "", exitCode, durationMs: Date.now() - started, stderr };
 }

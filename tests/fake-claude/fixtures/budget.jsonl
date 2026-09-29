@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-budget","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"error_max_budget_usd","is_error":true,"session_id":"fake-budget","total_cost_usd":5.01,"usage":{}}

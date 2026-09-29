@@ -68,6 +68,71 @@ describe("agentPhase", () => {
   });
 });
 
+describe("agentPhase failures", () => {
+  test("passes LOOPSTRA_PHASE and LOOPSTRA_SLUG to the session", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    expect(r.ok).toBe(true);
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.env.LOOPSTRA_PHASE).toBe("intake");
+    trace.close(); repo.cleanup();
+  });
+
+  test("an envelope with status fail is an agent-fail whose note is the agent's own summary", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:agent-fail");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("agent-fail");
+      expect(r.note).toBe("The intent folder could not be read.");
+    }
+    expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a crash is retried once as a separate traced attempt, then reported plainly", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:crash");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("crash");
+      expect(r.note).toBe("The assistant stopped unexpectedly.");
+    }
+    const phases = trace.phases("x");
+    expect(phases.map((p) => `${p.name}:${p.status}`)).toEqual(["intake:fail", "intake-retry:fail"]);
+    expect(phases[0]?.error).toMatch(/^crash: /);
+    expect(existsSync(join(repo.path, ".loopstra", "runs", "x", "phases", "2-intake-retry", "prompt.md"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a budget failure is not retried", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:budget");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("budget");
+      expect(r.note).toBe("This step hit its spending limit.");
+    }
+    expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a runtime error inside the phase never leaves the phase running", async () => {
+    const { repo, ctx, trace } = await setup();
+    mkdirSync(join(repo.path, ".loopstra", "runs", "x"), { recursive: true });
+    await Bun.write(join(repo.path, ".loopstra", "runs", "x", "phases"), "not a directory");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("crash");
+    expect(trace.phases("x").map((p) => p.status)).toEqual(["fail", "fail"]);
+    trace.close(); repo.cleanup();
+  });
+});
+
 describe("codePhase", () => {
   test("runs a function inside a traced phase and reports failure without throwing", async () => {
     const { repo, ctx, trace } = await setup();
@@ -78,6 +143,9 @@ describe("codePhase", () => {
     const phases = trace.phases("x");
     expect(phases.map((p) => p.status)).toEqual(["success", "fail"]);
     expect(phases[1]?.error).toContain("kaboom");
+    const odd = await codePhase(ctx, "odd", async () => { throw null; });
+    expect(odd.ok).toBe(false);
+    if (!odd.ok) expect(odd.note).toContain("null");
     trace.close(); repo.cleanup();
   });
 });

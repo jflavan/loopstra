@@ -31,6 +31,17 @@ if (fixture.endsWith("hang.jsonl")) {
   await new Promise(() => {});
 }
 
+// Like the real CLI when a resumed session no longer exists: an error on stderr, no result.
+const resumeAt = args.indexOf("--resume");
+if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
+  console.error("No conversation found with session ID: missing-session");
+  process.exit(1);
+}
+
+// "linger": emit the result, then keep running with a grandchild that holds stdout open,
+// the way a real session can leave a background process behind.
+const linger = fixture.endsWith("linger.jsonl");
+
 for (const line of (await Bun.file(fixture).text()).split("\n")) {
   if (!line.trim()) continue;
   const e = JSON.parse(line) as { type: string; write?: { path: string; content: string } };
@@ -41,5 +52,9 @@ for (const line of (await Bun.file(fixture).text()).split("\n")) {
     continue;
   }
   console.log(line);
+}
+if (linger) {
+  Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.sleep(600000)"], stdout: "inherit", stderr: "inherit", stdin: "ignore" });
+  await new Promise(() => {});
 }
 process.exit(0);

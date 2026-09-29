@@ -49,7 +49,8 @@ describe("runPhase", () => {
     const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:hang", schema: {}, model: "haiku", permissionMode: "default",
       allowedTools: [], timeoutMs: 1_500, maxBudgetUsd: 1, executable: FAKE });
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/timed out/);
+    expect(r.reason).toBe("timeout");
+    expect(r.detail).toMatch(/timed out/);
     expect(r.sessionId).toBe("hang-session");
     expect(Date.now() - started).toBeLessThan(10_000);
     t.cleanup();
@@ -60,7 +61,45 @@ describe("runPhase", () => {
     const r = await runPhase({ cwd: t.path, prompt: "x", schema: {}, model: "haiku", permissionMode: "default",
       allowedTools: [], timeoutMs: 1_000, maxBudgetUsd: 1, executable: join(t.path, "nope.exe") });
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/could not start/i);
+    expect(r.reason).toBe("not-started");
+    expect(r.detail).toMatch(/could not start/i);
+    t.cleanup();
+  });
+
+  test("returns promptly after the result even if the process and a grandchild keep running", async () => {
+    const t = tempDir();
+    const started = Date.now();
+    const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:linger", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE });
+    expect(r.ok).toBe(true);
+    expect(r.sessionId).toBe("fake-linger");
+    expect(r.structuredOutput).toMatchObject({ status: "success" });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    t.cleanup();
+  }, 30_000);
+
+  test("classifies budget, crash, and missing-session failures", async () => {
+    const t = tempDir();
+    const base = { cwd: t.path, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, executable: FAKE };
+    const budget = await runPhase({ ...base, prompt: "FIXTURE:budget" });
+    expect(budget.ok).toBe(false);
+    expect(budget.reason).toBe("budget");
+    const crash = await runPhase({ ...base, prompt: "FIXTURE:crash" });
+    expect(crash.reason).toBe("crash");
+    const gone = await runPhase({ ...base, prompt: "FIXTURE:simple-success", resume: "missing-session" });
+    expect(gone.reason).toBe("no-session");
+    expect(gone.detail).toMatch(/No conversation found/);
+    t.cleanup();
+  });
+
+  test("passes --disallowedTools when given", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: ["Read"], disallowedTools: ["Edit", "Write", "NotebookEdit"], timeoutMs: 10_000, maxBudgetUsd: 1,
+      env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.args).toEqual(expect.arrayContaining(["--disallowedTools", "Edit,Write,NotebookEdit"]));
     t.cleanup();
   });
 

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { runPhase, type PermissionMode } from "./claude";
+import { runPhase, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor } from "./config";
 import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
@@ -28,7 +28,7 @@ export interface AgentPhaseSpec {
 
 export type AgentPhaseResult<N extends PhaseName> =
   | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number }
-  | { ok: false; note: string; sessionId: string | null };
+  | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
 const READ_TOOLS = ["Read", "Glob", "Grep", "LS"];
 
@@ -39,56 +39,97 @@ export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c})`)];
 }
 
+/** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
+export function ownerNote(reason: FailureReason, agentSummary = ""): string {
+  switch (reason) {
+    case "timeout": return "The assistant took too long on this step.";
+    case "budget": return "This step hit its spending limit.";
+    case "crash": return "The assistant stopped unexpectedly.";
+    case "no-session": return "The assistant could not pick up its earlier work.";
+    case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";
+    case "invalid-envelope": return "The assistant's report could not be read.";
+    case "missing-prompt": return "A prompt file for this step is missing.";
+    case "agent-fail": return sentence(agentSummary) || "The assistant could not do this step.";
+  }
+}
+
+/** Trims and ends with exactly one sentence mark, so notes never read "..". */
+function sentence(s: string): string {
+  const t = s.trim().replace(/[.\s]+$/, "");
+  if (!t) return "";
+  return /[!?]$/.test(t) ? t : `${t}.`;
+}
+
+/** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
+const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
+
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
   const promptPath = join(ctx.root, "loopstra", "prompts", `${spec.name}.md`);
   if (!existsSync(promptPath)) {
-    return { ok: false, note: `The prompt file loopstra/prompts/${spec.name}.md is missing. Run \`loopstra init\` to restore it.`, sessionId: null };
+    return { ok: false, reason: "missing-prompt", note: `The prompt file loopstra/prompts/${spec.name}.md is missing. Run \`loopstra init\` to restore it.`, sessionId: null };
   }
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
   const prompt = skillsLine + renderPrompt(await Bun.file(promptPath).text(), { slug: ctx.slug, ...spec.vars });
 
-  const seq = ctx.trace.phaseStart(ctx.slug, spec.traceName ?? spec.name, "agent");
-  const dir = join(ctx.runDir, "phases", `${seq}-${spec.traceName ?? spec.name}`);
-  mkdirSync(dir, { recursive: true });
-  await Bun.write(join(dir, "prompt.md"), prompt);
-  const raw = Bun.file(join(dir, "raw.jsonl")).writer();
+  const traceName = spec.traceName ?? spec.name;
+  const first = await attempt(ctx, spec, prompt, traceName);
+  if (first.ok || !RETRIED.has(first.reason)) return first;
+  ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
+  return attempt(ctx, spec, prompt, `${traceName}-retry`);
+}
 
-  const r = await runPhase({
-    cwd: spec.cwd ?? ctx.root,
-    prompt,
-    schema: jsonSchemaFor(spec.name),
-    model: modelFor(ctx.cfg, spec.model),
-    permissionMode: spec.permissionMode,
-    allowedTools: toolsFor(ctx, spec.tools),
-    timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
-    maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
-    resume: spec.resume,
-    env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
-    onEvent: (e) => {
-      raw.write(JSON.stringify(e) + "\n");
-      if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
-    },
-  });
-  await raw.end();
+/** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
+async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+  const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
+  const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0, agentSummary = ""): AgentPhaseResult<N> => {
+    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}` });
+    return { ok: false, reason, note: ownerNote(reason, agentSummary), sessionId };
+  };
+  let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+  try {
+    const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(join(dir, "prompt.md"), prompt);
+    const writer = Bun.file(join(dir, "raw.jsonl")).writer();
+    raw = writer;
 
-  if (!r.ok) {
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: r.reason });
-    return { ok: false, note: `The ${spec.name} step could not finish: ${r.reason}.`, sessionId: r.sessionId };
+    const r = await runPhase({
+      cwd: spec.cwd ?? ctx.root,
+      prompt,
+      schema: jsonSchemaFor(spec.name),
+      model: modelFor(ctx.cfg, spec.model),
+      permissionMode: spec.permissionMode,
+      allowedTools: toolsFor(ctx, spec.tools),
+      timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
+      maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
+      resume: spec.resume,
+      env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
+      onEvent: (e) => {
+        writer.write(JSON.stringify(e) + "\n");
+        if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
+      },
+    });
+
+    if (!r.ok) return failed(r.reason, r.detail, r.sessionId, r.costUsd);
+    const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
+    await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
+    if (!parsed.success) {
+      const err = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+      return failed("invalid-envelope", err, r.sessionId, r.costUsd);
+    }
+    const envelope = parsed.data as Envelope<N>;
+    if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd, envelope.summary);
+    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined });
+    return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
+  } catch (e) {
+    return failed("crash", `runtime error: ${errorText(e)}`, null);
+  } finally {
+    if (raw) { try { await raw.end(); } catch { /* already closed */ } }
   }
-  const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
-  await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
-  if (!parsed.success) {
-    const err = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `invalid envelope: ${err}` });
-    return { ok: false, note: `The ${spec.name} step returned an answer in the wrong shape. Details are in the trace.`, sessionId: r.sessionId };
-  }
-  const envelope = parsed.data as Envelope<N>;
-  if (envelope.status === "fail") {
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: envelope.summary });
-    return { ok: false, note: `The ${spec.name} step reported a problem: ${envelope.summary}`, sessionId: r.sessionId };
-  }
-  ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined });
-  return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 function summarize(e: Record<string, unknown>): Record<string, unknown> {
@@ -110,7 +151,7 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return r;
   } catch (e) {
-    const msg = (e as Error).message ?? String(e);
+    const msg = errorText(e);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     return { ok: false, note: `The ${name} step failed: ${msg.split("\n")[0]}` };
   }

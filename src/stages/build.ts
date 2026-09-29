@@ -81,7 +81,8 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
       vars: { failure_output: failure.output.slice(-8000), observations },
     });
     if (!fix.ok) {
-      if (/could not finish/.test(fix.note) && loadSessions(ctx).build) clearSession(ctx, "build"); // a dead session: next attempt starts fresh
+      // A dead session: the next attempt starts fresh.
+      if ((fix.reason === "no-session" || fix.reason === "crash") && loadSessions(ctx).build) clearSession(ctx, "build");
       return block(ctx, fix.note);
     }
     if (fix.sessionId) saveSession(ctx, "build", fix.sessionId);
