@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-outage","cwd":"/","tools":[],"model":"fake"}
+{"type":"fake_exit","code":1,"stderr":"Invalid API key · Please run /login"}

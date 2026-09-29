@@ -1,12 +1,13 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { runPhase, type FailureReason, type PermissionMode } from "./claude";
+import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor } from "./config";
 import { GitTimeout } from "./git";
 import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
-import { StopRequested, throwIfStopping } from "./stop";
+import { clearPause } from "./heartbeat";
+import { AssistantUnavailable, StopRequested, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -71,6 +72,8 @@ export function ownerNote(reason: FailureReason): string {
     case "crash": return "The assistant stopped unexpectedly.";
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";
+    // Never an owner note in practice: an unavailable assistant pauses the loop instead of blocking.
+    case "environment": return "The assistant is unavailable (sign-in, usage limit, or network).";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
     // The agent's own summary is not written for the owner; it goes to the trace.
@@ -136,6 +139,11 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     });
 
     denied = r.denied;
+    if (!r.ok && unavailable(r.reason)) {
+      // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
+      throw new AssistantUnavailable(r.detail);
+    }
     if (!r.ok) return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
@@ -146,8 +154,10 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
+    clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
+    if (e instanceof AssistantUnavailable) throw e;
     if (e instanceof StopRequested) {
       ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
       throw e;

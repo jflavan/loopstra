@@ -38,6 +38,11 @@ describe("tail", () => {
       trace.phaseEnd("two", seq, { status: "success", denied: ["Bash(git tag v1)", "Bash(git push)"] });
       const denied = tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now });
       expect(denied.at(-1)).toContain("2 commands were not allowed: Bash(git tag v1), Bash(git push)");
+
+      // A pause is a heartbeat change like any other.
+      const reason = "The assistant is unavailable (sign-in, usage limit, or network). Retrying at 12:05.";
+      writeHeartbeat(t.path, { pid: 1, startedAt: now.toISOString(), lastTickAt: now.toISOString(), lastBeatAt: now.toISOString(), current: null, stopping: false, stopped: false, pausedUntil: new Date(now.getTime() + 60_000).toISOString(), pauseReason: reason });
+      expect(tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now })).toEqual([expect.stringContaining(`Paused — ${reason}`)]);
     } finally {
       trace.close();
       t.cleanup();

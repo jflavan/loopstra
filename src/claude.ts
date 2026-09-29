@@ -88,8 +88,34 @@ export type PermissionMode = "default" | "manual" | "plan" | "acceptEdits" | "do
  * - invalid-envelope: a result arrived but its structured output is missing or the wrong shape
  * - agent-fail: the agent answered, and its envelope says status "fail"
  * - missing-prompt: the phase's prompt file is missing (raised by agentPhase)
+ * - environment: the assistant could not be used at all (see ENVIRONMENT_PATTERNS); not the agent's doing
  */
-export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt";
+export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt" | "environment";
+
+/**
+ * Text that means the assistant itself could not be used, so a failed session is the environment's
+ * problem, not the agent's. Matched against stderr and the text of an error result, and only when
+ * the session failed. The one list; each entry says what it catches.
+ */
+export const ENVIRONMENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; catches: string }> = [
+  { pattern: /invalid api key|please run \/login|not logged in|login required|oauth token (has )?expired|authentication[_ ]error|API Error: 40[13]\b/i, catches: "signed out, or the sign-in expired" },
+  { pattern: /usage limit|rate[_ ]limit|too many requests|API Error: 429\b/i, catches: "a usage or rate limit was reached" },
+  { pattern: /overloaded|service unavailable|API Error: 5\d\d\b/i, catches: "the service is overloaded or down" },
+  { pattern: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|getaddrinfo|socket hang up|fetch failed|unable to connect|network error|connection error/i, catches: "the network is down or the service cannot be reached" },
+];
+
+/** The first line of `text` that an environment pattern matches, or null. */
+function environmentLine(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    if (ENVIRONMENT_PATTERNS.some((p) => p.pattern.test(line))) return line.trim();
+  }
+  return null;
+}
+
+/** Failures that mean the assistant was unavailable (outage, sign-in, limits, not installed): the loop pauses instead of blocking. */
+export function unavailable(reason: FailureReason): boolean {
+  return reason === "environment" || reason === "not-started";
+}
 
 export interface RunPhaseInput {
   cwd: string;
@@ -229,8 +255,12 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const lastErr = stderr.trim().split("\n").pop()?.trim() ?? "";
   // Before any subtype check: the CLI reports a missing session with an error result as well.
   if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
-  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
+  if (collected.subtype !== "success" || collected.isError) {
+    const outage = environmentLine(`${stderr}\n${collected.resultText}`);
+    if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr);
+  }
+  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);

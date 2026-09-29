@@ -3,7 +3,9 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
-import { heartbeatState, loopStatusLine, readHeartbeat, startHeartbeat, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
+import {
+  activePause, clearPause, heartbeatState, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readPause, startHeartbeat, writeHeartbeat, type Heartbeat,
+} from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { setupRepo, tempDir } from "../helpers";
@@ -53,6 +55,54 @@ describe("heartbeatState", () => {
   });
 });
 
+describe("pause after the assistant was unavailable", () => {
+  test("backs off 1, 2, 4, 8, 16, then 30 minutes, says when it retries, and ends when cleared", () => {
+    const t = tempDir();
+    try {
+      expect(readPause(t.path)).toBeNull();
+      const minutes = [1, 2, 3, 4, 5, 6, 7].map(() => {
+        const p = pauseAfterUnavailable(t.path, NOW);
+        return (Date.parse(p.until) - NOW.getTime()) / 60_000;
+      });
+      expect(minutes).toEqual([1, 2, 4, 8, 16, 30, 30]);
+      const p = readPause(t.path)!;
+      expect(p.failures).toBe(7);
+      const at = new Date(p.until);
+      const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+      expect(p.reason).toBe(`The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${hhmm}.`);
+      expect(activePause(t.path, NOW)).not.toBeNull();
+      expect(activePause(t.path, new Date(Date.parse(p.until) + 1))).toBeNull();
+      clearPause(t.path);
+      expect(readPause(t.path)).toBeNull();
+      expect((Date.parse(pauseAfterUnavailable(t.path, NOW).until) - NOW.getTime()) / 60_000).toBe(1);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a paused loop says so and when it retries; the heartbeat carries it", () => {
+    const reason = "The assistant is unavailable (sign-in, usage limit, or network). Retrying at 12:05.";
+    const paused = heartbeatState(hb({ pausedUntil: new Date(NOW.getTime() + 300_000).toISOString(), pauseReason: reason }), 60, NOW);
+    expect(paused).toMatchObject({ state: "paused", text: `Paused — ${reason}` });
+    // A pause that has run out is running again.
+    expect(heartbeatState(hb({ pausedUntil: ago(1), pauseReason: reason }), 60, NOW).state).toBe("running");
+
+    const t = tempDir();
+    const beat = startHeartbeat(t.path, 60_000);
+    try {
+      const p = pauseAfterUnavailable(t.path);
+      beat.tickEnded();
+      expect(readHeartbeat(t.path)).toMatchObject({ pausedUntil: p.until, pauseReason: p.reason });
+      clearPause(t.path);
+      beat.tickStarted();
+      expect(readHeartbeat(t.path)).toMatchObject({ pausedUntil: null, pauseReason: null });
+    } finally {
+      beat.stopped();
+      t.cleanup();
+    }
+  });
+});
+
 describe("heartbeat file", () => {
   test("round-trips, and an unreadable file reads as none", async () => {
     const t = tempDir();
@@ -98,6 +148,9 @@ describe("heartbeat file", () => {
       // 45s is more than three 10 second polls.
       expect(await loopStatusLine(t.path)).toMatch(/^Loop: Not responding \(last check 4\ds ago\)\n$/);
       expect(await renderStatus(t.path)).toMatch(/^Loop: Not responding \(last check 4\ds ago\)\n\nNo intents yet/);
+      const reason = "The assistant is unavailable (sign-in, usage limit, or network). Retrying at 12:05.";
+      writeHeartbeat(t.path, { ...hb(), lastBeatAt: new Date().toISOString(), lastTickAt: new Date().toISOString(), pausedUntil: new Date(Date.now() + 60_000).toISOString(), pauseReason: reason });
+      expect(await loopStatusLine(t.path)).toBe(`Loop: Paused — ${reason}\n`);
     } finally {
       t.cleanup();
     }

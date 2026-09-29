@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { loadConfig, type Config } from "../config";
-import { agoText, heartbeatState, readHeartbeat, type LoopStatus } from "../heartbeat";
+import { activePause, agoText, heartbeatState, readHeartbeat, type LoopStatus, type Pause } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo, type Intent, type Status, type Unreadable } from "../intents";
 import { humanNote } from "../stages/shared";
 import { SYNC_SIGNAL } from "../remote";
@@ -28,7 +28,7 @@ export interface IntentView {
 }
 
 export interface AttentionItem {
-  kind: "health" | "sync" | "config" | "blocked" | "unreadable" | "waiting";
+  kind: "paused" | "health" | "sync" | "config" | "blocked" | "unreadable" | "waiting";
   /** The change it is about; null for the repository as a whole. */
   slug: string | null;
   title: string;
@@ -69,7 +69,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
     return {
       generatedAt: now.toISOString(),
       loop,
-      attention: attention(ordered, scan.unreadable, cfg, configProblem, health, trace.lastSignal(SYNC_SIGNAL)),
+      attention: attention(ordered, scan.unreadable, cfg, configProblem, health, trace.lastSignal(SYNC_SIGNAL), activePause(root, now)),
       totals: totals(intents, now),
       intents,
       unreadable: scan.unreadable.map((u) => ({ slug: u.slug, problem: u.problem })),
@@ -144,9 +144,10 @@ const REVIEW: Partial<Record<Status, { gate: "spec" | "plan" | "merge" | "done";
 
 function attention(
   intents: Intent[], unreadable: Unreadable[], cfg: Config | null, configProblem: string | null, health: UiState["health"],
-  sync: { result: string; output: string } | null,
+  sync: { result: string; output: string } | null, pause: Pause | null,
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
+  if (pause) items.push({ kind: "paused", slug: null, title: "Loopstra is paused", what: pause.reason });
   if (health && health.result !== "pass") items.push({ kind: "health", slug: null, title: "Main branch", what: health.text });
   // Main and GitHub out of step (waiting on a person's own commits, or failing): the newest outcome only.
   if (sync && (sync.result === "fail" || sync.result === "waiting")) items.push({ kind: "sync", slug: null, title: "Main and GitHub", what: sync.output });

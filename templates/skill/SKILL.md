@@ -36,6 +36,8 @@ Interview the person in plain language: what is wrong today and for whom, what s
 ## Status
 Run `loopstra status`. Explain each row in one sentence: what the change is, where it is, and whether anyone needs to do anything. For a blocked change, read its note aloud and offer the options below.
 
+If the loop line says "Paused", the assistant could not be used (signed out, a usage limit, or the network). Nothing is blocked; the loop retries by itself at the time shown, waiting longer after each failure (up to 30 minutes). If it keeps pausing, check that `claude` works in a terminal (sign in again, or wait for the limit to reset). The detail is in the `pause` events (`loopstra tail`).
+
 ## Unblock
 Read the `note` in the change's `intent.md`. Explain the choices: retry from the last approved state (set `status` to the value in `resume_from`), fix something first and then retry, or `closed`. Make the edit only when the person says which. For details, read `.loopstra/runs/<slug>/events.jsonl` or the phase folders under `.loopstra/runs/<slug>/phases/`.
 

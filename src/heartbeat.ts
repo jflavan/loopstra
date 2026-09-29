@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { onStop } from "./stop";
@@ -7,6 +7,7 @@ import { onStop } from "./stop";
  * The loop's heartbeat, `.loopstra/heartbeat.json`. The scheduler writes it on start, at the start
  * and end of every tick, when a stop is asked for, and when it stops. While the process is alive it
  * is also refreshed every few seconds (`lastBeatAt`), so a long step does not look like a dead loop.
+ * Each write also carries the pause, if one is running (see Pause).
  */
 export interface Heartbeat {
   pid: number;
@@ -19,9 +20,12 @@ export interface Heartbeat {
   current: { slug: string; phase: string | null } | null;
   stopping: boolean;
   stopped: boolean;
+  /** While the loop waits because the assistant was unavailable: until when, and why in plain words. */
+  pausedUntil?: string | null;
+  pauseReason?: string | null;
 }
 
-export type LoopState = "running" | "stopped" | "not-responding";
+export type LoopState = "running" | "paused" | "stopped" | "not-responding";
 
 export interface LoopStatus {
   state: LoopState;
@@ -92,6 +96,7 @@ export function heartbeatState(hb: Heartbeat | null, pollSeconds: number, now: D
   const beat = Date.parse(hb.lastBeatAt ?? hb.lastTickAt ?? hb.startedAt);
   if (t - beat > staleMs) return { state: "not-responding", text: `Not responding (${lastCheck})`, current: hb.current };
   if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, current: hb.current };
+  if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), current: null };
   const working = hb.current ? `working on ${hb.current.slug}, ` : "";
   return { state: "running", text: `Running — ${working}${lastCheck}`, current: hb.current };
 }
@@ -100,6 +105,59 @@ export function heartbeatState(hb: Heartbeat | null, pollSeconds: number, now: D
 export async function loopStatusLine(root: string): Promise<string> {
   const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
   return `Loop: ${heartbeatState(readHeartbeat(root), poll).text}\n`;
+}
+
+/**
+ * The loop's pause after the assistant was unavailable, `.loopstra/paused.json`. It is on disk, not
+ * in the process, so a restart keeps backing off. `failures` counts unavailable sessions in a row.
+ */
+export interface Pause {
+  until: string;
+  /** Plain words for the owner, with the time of the next try. */
+  reason: string;
+  failures: number;
+}
+
+/** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
+const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
+
+function pausePath(root: string): string {
+  return join(root, ".loopstra", "paused.json");
+}
+
+/** The pause on disk (running out or not), or null. */
+export function readPause(root: string): Pause | null {
+  try {
+    const p = JSON.parse(readFileSync(pausePath(root), "utf8")) as Pause;
+    return typeof p?.until === "string" && typeof p.failures === "number" ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The pause, while it has not run out. */
+export function activePause(root: string, now: Date = new Date()): Pause | null {
+  const p = readPause(root);
+  return p && Date.parse(p.until) > now.getTime() ? p : null;
+}
+
+/** Records one more unavailable session in a row and pauses for the next back-off step. Never throws. */
+export function pauseAfterUnavailable(root: string, now: Date = new Date()): Pause {
+  const failures = (readPause(root)?.failures ?? 0) + 1;
+  const minutes = BACKOFF_MINUTES[Math.min(failures, BACKOFF_MINUTES.length) - 1]!;
+  const until = new Date(now.getTime() + minutes * 60_000);
+  const hhmm = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
+  const pause: Pause = { until: until.toISOString(), reason: `The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${hhmm}.`, failures };
+  try {
+    mkdirSync(join(root, ".loopstra"), { recursive: true });
+    writeFileSync(pausePath(root), JSON.stringify(pause, null, 2));
+  } catch { /* without the file the next tick simply tries again */ }
+  return pause;
+}
+
+/** Ends the pause and its back-off (a phase got through to the assistant). */
+export function clearPause(root: string): void {
+  try { rmSync(pausePath(root), { force: true }); } catch { /* nothing to clear */ }
 }
 
 export interface LoopBeat {
@@ -124,7 +182,13 @@ export function heartbeatWorkingOn(root: string, slug: string): void {
 export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   const at = () => new Date().toISOString();
   const hb: Heartbeat = { pid: process.pid, startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, stopping: false, stopped: false };
-  const write = () => { hb.lastBeatAt = at(); writeHeartbeat(root, hb); };
+  const write = () => {
+    hb.lastBeatAt = at();
+    const pause = activePause(root);
+    hb.pausedUntil = pause?.until ?? null;
+    hb.pauseReason = pause?.reason ?? null;
+    writeHeartbeat(root, hb);
+  };
   write();
   const timer = setInterval(write, beatMs);
   (timer as { unref?: () => void }).unref?.();

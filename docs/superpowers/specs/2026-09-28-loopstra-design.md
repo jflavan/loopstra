@@ -519,7 +519,7 @@ line and an event in the new one; the loop and the dashboard keep working.
 
 Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
 `status_change`, `phase_end`, `error`, `signal`, `stop`,
-`person-changed-status`.
+`person-changed-status`, `pause`.
 
 CLI on top:
 
@@ -610,6 +610,19 @@ phase is marked `interrupted`, and the intent keeps its in-progress status
 idempotent. The sleep between ticks ends at once. A second Ctrl-C exits
 with 130.
 
+An unavailable assistant (the CLI could not start, or a session failed
+with text that means signed out, a usage or rate limit, an overloaded
+service, or the network; the one pattern list is `ENVIRONMENT_PATTERNS` in
+`src/claude.ts`) is not the change's fault either: the phase is marked
+`interrupted`, the intent keeps its status and is never blocked, and the
+loop pauses. No step runs until the pause runs out (1, 2, 4, 8, 16, then
+30 minutes for each outage in a row; the next successful phase resets it).
+The pause is kept in `.loopstra/paused.json`, so a restart keeps backing
+off. It is shown with its plain reason ("The assistant is unavailable
+(sign-in, usage limit, or network). Retrying at 14:32.") in the heartbeat
+(`pausedUntil`, `pauseReason`), the dashboard's header and attention list,
+`loopstra status`, and `tail`. `start --once` just returns.
+
 Resumption: `sessions.json` maps phase names to session IDs. A build
 continuation resumes session B if present. If `--resume` fails (session gone),
 the runtime starts a fresh session and records it.
@@ -618,6 +631,9 @@ the runtime starts a fresh session and records it.
 
 - Per-phase timeout and dollar budget from config. Both are failures that
   count against the phase's retry budget, then block.
+- An unavailable assistant (sign-in, limits, outage, network, not
+  installed) never blocks: the loop pauses and backs off (§14). Failures the
+  agent causes keep blocking.
 - Command failures in `before`/`after` block immediately.
 - Git or GitHub command failures block with the stderr's last line.
 - The runtime's own exceptions inside a tick are caught at the tick

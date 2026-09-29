@@ -5,7 +5,7 @@ import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeWorktree, samePath } from "./git";
 import { GitHub } from "./github";
-import { heartbeatWorkingOn, startHeartbeat } from "./heartbeat";
+import { activePause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { syncMain } from "./remote";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanRepo, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
@@ -15,14 +15,17 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runReviewStep } from "./stages/review";
 import { runVerifyStep } from "./stages/verify";
-import { installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace } from "./trace";
 
 export interface TickResult {
   picked: string | null; result?: StepResult; signal?: string;
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
-  /** Set when the tick did nothing because the repository needs a person first (plain words). */
+  /**
+   * Set when no step ran because the repository needs a person first, or because the assistant is
+   * unavailable and the loop is backing off (plain words).
+   */
   paused?: string;
   /** A stop was requested during the tick; the step was interrupted, not blocked. */
   stopped?: boolean;
@@ -77,6 +80,13 @@ export async function tick(root: string): Promise<TickResult> {
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable));
     await cleanupLeftovers(root, cfg, trace, ordered);
 
+    // The assistant was unavailable a moment ago: no step runs until the pause runs out.
+    const pause = activePause(root);
+    if (pause) {
+      out.paused = pause.reason;
+      return out;
+    }
+
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick.
     const human = { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
@@ -92,6 +102,13 @@ export async function tick(root: string): Promise<TickResult> {
       // Not the intent's fault: it keeps its in-progress status and the step resumes on the next start.
       trace.event(out.picked ?? "_loop", "stop", { note: "stopped by request; the step resumes on the next start" });
       out.stopped = true;
+      return out;
+    }
+    if (e instanceof AssistantUnavailable) {
+      // Not the intent's fault either: it keeps its status, and the loop backs off before trying again.
+      const p = pauseAfterUnavailable(root);
+      trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, detail: e.detail });
+      out.paused = p.reason;
       return out;
     }
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
@@ -114,7 +131,7 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     return await runStep(ctx);
   } catch (e) {
-    if (e instanceof StopRequested) throw e;
+    if (e instanceof StopRequested || e instanceof AssistantUnavailable) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));

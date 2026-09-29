@@ -15,6 +15,18 @@ export class StopRequested extends Error {
   }
 }
 
+/**
+ * The assistant could not be used (signed out, a usage limit, an outage, the network, not
+ * installed). Like a stop, it is not the intent's fault: the step ends, the intent keeps its
+ * status, and the loop pauses and tries again later. `detail` is for the trace.
+ */
+export class AssistantUnavailable extends Error {
+  constructor(public readonly detail: string) {
+    super(`the assistant is unavailable: ${detail}`);
+    this.name = "AssistantUnavailable";
+  }
+}
+
 let requested = false;
 let resolveStop: () => void = () => {};
 let stopping = new Promise<void>((resolve) => { resolveStop = resolve; });

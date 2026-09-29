@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { buildState, resolveRunFile, serveUi } from "../../src/commands/ui";
 import { configPath } from "../../src/config";
-import { writeHeartbeat } from "../../src/heartbeat";
+import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
 import { SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -156,6 +156,21 @@ describe("needs attention", () => {
       t2.signal("main_health", "pass", "");
       t2.close();
       expect((await buildState(t.path, 0)).attention).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a pause because the assistant is unavailable is listed first, until it runs out", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      const p = pauseAfterUnavailable(t.path);
+      const s = await buildState(t.path, 0);
+      expect(s.attention).toEqual([{ kind: "paused", slug: null, title: "Loopstra is paused", what: p.reason }]);
+      expect((await buildState(t.path, 0, new Date(Date.parse(p.until) + 1000))).attention).toEqual([]);
+      const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
+      expect(page).toContain("pill.paused");
     } finally {
       t.cleanup();
     }

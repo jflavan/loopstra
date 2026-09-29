@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { runPhase, FAKE_CLAUDE_ENV } from "../../src/claude";
+import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, runPhase, unavailable } from "../../src/claude";
 import { FAKE_CLAUDE as FAKE, tempDir } from "../helpers";
 
 
@@ -113,6 +113,34 @@ describe("runPhase", () => {
       maxBudgetUsd: 1, executable: FAKE, prompt: "FIXTURE:simple-success" });
     expect(plain.denied).toEqual([]);
     t.cleanup();
+  });
+
+  test("an outage is an environment failure, not the agent's: signed out, usage limit", async () => {
+    const t = tempDir();
+    const base = { cwd: t.path, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, executable: FAKE };
+    // No result at all, a sign-in problem on stderr, exit 1.
+    const signedOut = await runPhase({ ...base, prompt: "FIXTURE:outage" });
+    expect(signedOut.reason).toBe("environment");
+    expect(signedOut.detail).toContain("Please run /login");
+    // A result event with is_error and a usage-limit text.
+    const limited = await runPhase({ ...base, prompt: "FIXTURE:usage-limit" });
+    expect(limited.reason).toBe("environment");
+    expect(limited.detail).toContain("usage limit");
+    // An ordinary crash stays the agent's. A missing executable is the environment's too.
+    expect((await runPhase({ ...base, prompt: "FIXTURE:crash" })).reason).toBe("crash");
+    expect(unavailable("environment") && unavailable("not-started")).toBe(true);
+    expect(unavailable("crash") || unavailable("budget") || unavailable("agent-fail") || unavailable("timeout")).toBe(false);
+    t.cleanup();
+  });
+
+  test("the environment patterns each say what they catch", () => {
+    expect(ENVIRONMENT_PATTERNS.length).toBeGreaterThan(0);
+    for (const p of ENVIRONMENT_PATTERNS) expect(p.catches.length).toBeGreaterThan(0);
+    const hit = (s: string) => ENVIRONMENT_PATTERNS.some((p) => p.pattern.test(s));
+    for (const s of ["Invalid API key · Please run /login", "OAuth token has expired", "Claude AI usage limit reached|1790000000",
+      "API Error: 429 rate_limit_error", "API Error: 529 Overloaded", "API Error: 503 Service Unavailable", "getaddrinfo ENOTFOUND api.anthropic.com",
+      "Unable to connect to API (ECONNREFUSED)"]) expect(hit(s)).toBe(true);
+    for (const s of ["TypeError: x is undefined", "claude ended with error_during_execution", "tests failed"]) expect(hit(s)).toBe(false);
   });
 
   test("passes --disallowedTools when given", async () => {

@@ -6,6 +6,8 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, codePhase, disallowedFor, toolsFor } from "../../src/phases";
+import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { AssistantUnavailable } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
@@ -178,6 +180,30 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.note).toBe("The assistant reported it could not finish this step.");
     expect(trace.phases("x")[0]?.error).toContain("not allowed: Bash(git push origin main)");
+    trace.close(); repo.cleanup();
+  });
+
+  test("an unavailable assistant is not the phase's failure: the phase is interrupted, not retried, and the step is told", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:outage");
+    let thrown: unknown;
+    try {
+      await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(AssistantUnavailable);
+    expect((thrown as AssistantUnavailable).detail).toContain("Please run /login");
+    expect(trace.phases("x").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
+    expect(trace.phases("x")[0]?.error).toMatch(/^environment: /);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a successful phase ends a pause's backoff", async () => {
+    const { repo, ctx, trace } = await setup();
+    pauseAfterUnavailable(repo.path);
+    expect(readPause(repo.path)?.failures).toBe(1);
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   });
 

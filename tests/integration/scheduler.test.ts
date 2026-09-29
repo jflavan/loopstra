@@ -5,6 +5,7 @@ import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
+import { readPause } from "../../src/heartbeat";
 import { missingTools, preflight, start, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { setupRepo, TEMPLATES, withEnv } from "../helpers";
@@ -98,6 +99,37 @@ describe("scheduler resilience", () => {
     cpSync(join(TEMPLATES, "intake.md"), join(repo.path, "loopstra", "prompts", "intake.md"));
     await tick(repo.path);
     expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    trace.close(); repo.cleanup();
+  }, 60_000);
+
+  test("an unavailable assistant pauses the loop without blocking; it backs off, and a working phase ends the pause", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const outage = join(import.meta.dir, "..", "fake-claude", "fixtures", "outage.jsonl");
+    const r = await withEnv({ LOOPSTRA_FAKE_FIXTURE: outage }, () => tick(repo.path));
+    expect(r.picked).toBe(SLUG);
+    expect(r.paused).toMatch(/^The assistant is unavailable \(sign-in, usage limit, or network\)\. Retrying at \d\d:\d\d\.$/);
+    // Not the change's fault: it keeps its in-progress status, and nothing is blocked.
+    const i = await readIntent(repo.path, SLUG);
+    expect(i.file.frontmatter.status).toBe("designing");
+    expect(i.file.frontmatter.note).toBe("");
+    expect(trace.phases(SLUG).map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
+    const pause = trace.events(SLUG).find((e) => e.type === "pause")!;
+    expect(JSON.parse(pause.payload)).toMatchObject({ failures: 1, detail: expect.stringContaining("Please run /login") });
+    expect(readPause(repo.path)?.failures).toBe(1);
+
+    // While paused, no step runs.
+    const waiting = await tick(repo.path);
+    expect(waiting.paused).toBe(r.paused);
+    expect(waiting.picked).toBeNull();
+    expect(trace.phases(SLUG)).toHaveLength(1);
+
+    // Once the pause runs out, the step resumes; a working phase ends the backoff.
+    const p = readPause(repo.path)!;
+    await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+    const resumed = await tick(repo.path);
+    expect(resumed.paused).toBeUndefined();
+    expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   }, 60_000);
 
