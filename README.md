@@ -11,10 +11,12 @@ There are two audiences and two surfaces:
 
 ## Requirements
 
-- [Bun](https://bun.sh)
-- git
+- [Bun](https://bun.sh) 1.4.2 or later
+- git 2.28 or later
 - Claude Code CLI (`claude` on PATH), signed in with a subscription. Loopstra drives the CLI, not the API, so no API key is needed.
 - GitHub CLI (`gh`), signed in, when the repo has a remote. `loopstra start` refuses to run otherwise.
+
+Windows, macOS and Linux are all supported; see Platforms.
 
 ## Install
 
@@ -48,12 +50,14 @@ loopstra init
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
 - `REVIEW.md` (what the reviewer looks for) and a Commands block in `CLAUDE.md`
 - `.claude/skills/loopstra/` (an operator skill for drafting intents, reading status and unblocking)
-- a hook, wired into `.claude/settings.json`, that stops build sessions editing tests to make them pass
+- a hook, wired into `.claude/settings.json`, that stops build sessions editing tests to make them pass. Claude Code runs it through its own shell (`bun "$CLAUDE_PROJECT_DIR/.claude/hooks/loopstra-protect-tests.ts"`, Git Bash on Windows), so `bun` must be on the PATH Claude Code sees
 - `.loopstra/` in `.gitignore`
 
 Then:
 
-1. Commit everything `init` wrote, on `main`. The loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, prompts and hook are committed.
+`main_branch` in the config is the branch the repository is on when you run `init` (for a detached checkout, git's `init.defaultBranch`, else `main`).
+
+1. Commit everything `init` wrote, on that branch. The loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, prompts and hook are committed.
 2. Open `loopstra/config.yaml` and confirm `commands.test`: the one command that runs your tests and exits non-zero on failure.
 3. Choose which gates get a person (see Configuration). By default, only accepting an intent needs one.
 
@@ -96,7 +100,15 @@ loopstra start --once   # one tick, then exit (for cron or a scheduler)
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time.
 
-**Stopping.** Press Ctrl-C once to stop gracefully: nothing new starts, a running session is killed, and the change keeps its in-progress status and resumes on the next start. Press Ctrl-C a second time to exit at once.
+**Stopping.** Press Ctrl-C once to stop gracefully: nothing new starts, a running session is killed, and the change keeps its in-progress status and resumes on the next start. Press Ctrl-C a second time to exit at once; any process Loopstra started that is still running (a session, a project command, git) is killed with everything it started. SIGTERM does the same as Ctrl-C, and so does closing the terminal (SIGHUP) on macOS and Linux.
+
+**From cron or a scheduler.** Run `loopstra start --once` from the repository, with an explicit PATH: cron's is short and usually lacks `~/.bun/bin` and wherever `claude` is installed. For example:
+
+```
+*/10 * * * * cd /home/me/your-repo && PATH=/home/me/.bun/bin:/home/me/.local/bin:/usr/local/bin:/usr/bin:/bin loopstra start --once >> .loopstra/cron.log 2>&1
+```
+
+The PATH must reach `bun`, `git`, `claude` and (with a remote) `gh`. Loopstra also puts the folder of the `bun` it runs on first on the PATH of every session and project command it starts.
 
 **When the assistant is unavailable** (signed out, usage limit, overload, network), nothing is blocked. The loop pauses and retries after 1, 2, 4, 8, 16, then 30 minutes, resetting after the next success. The pause survives a restart (`.loopstra/paused.json`) and shows as "The assistant is unavailable ... Retrying at 14:32." in `status`, `tail` and the dashboard; a stopped loop adds "the next start waits until 14:32". If it keeps pausing, check that `claude` works in a terminal. When the same step pauses three times in a row with the same message, the loop sends one tiny test request ($0.05 at most): if that gets through, the step's own failure blocks the change like a crash, so a step that only looks like an outage cannot pause the loop forever.
 
@@ -181,6 +193,16 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`; `d
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, skills, `before`/`after` commands, and loop limits
 - `signals`: how often main's health check runs
+
+## Platforms
+
+Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Requirements are the same everywhere: Bun 1.4.2+, git 2.28+, Claude Code, and `gh` when the repo has a remote.
+
+- **Project commands** (`commands.*`, `before`/`after`) run in Bun's own shell on every system, not in `sh` or `cmd`. Write them portably: `bun test`, `npm test`, `make test`, `&&`, `$VAR`. Avoid sh-only builtins such as `source` or `set -e` (Bun's shell does not have them), or put that in a script the command calls.
+- **Git** runs in the C locale, so its messages are English whatever the machine's language.
+- **Paths are case-sensitive.** A plan that names `src/Widget.ts` for `src/widget.ts` fails its check on every system, not only on Linux.
+- **Ctrl-C**: see Stopping. On Windows, the process trees Loopstra starts are ended with `taskkill /T /F`; on macOS and Linux each child runs in its own process group, which gets SIGTERM, a moment, then SIGKILL, along with anything that left the group.
+- **Network drives.** The trace database uses SQLite's WAL mode. Where the file system cannot do WAL (some network drives), it falls back to the default journal mode and traces a note once; keep the repository on a local disk if you can.
 
 ## Development
 
