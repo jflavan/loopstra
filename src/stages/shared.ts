@@ -1,6 +1,10 @@
 import { commandTimeoutMs, runCommand } from "../shell";
-import { blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type StepContext, type StepResult } from "../context";
-import { codePhase } from "../phases";
+import {
+  blockWithDetail, clearMarker, clearSession, loadSessions, onceMarker, readArtifact, saveSession, setStatus,
+  type Failure, type StepContext, type StepResult,
+} from "../context";
+import type { Git } from "../git";
+import { agentPhase, codePhase, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Check } from "../gates";
 import { headingsPresent } from "../checks";
 import type { Status } from "../intents";
@@ -101,6 +105,42 @@ export async function settleGate(ctx: StepContext, flow: GateFlow): Promise<Step
     const again = await flow.rewrite(v.findings);
     if (!again.ok) return again;
   }
+}
+
+/**
+ * Commits everything in the worktree, but only after confirming it is on the intent branch:
+ * a commit anywhere else could put unreviewed work on another branch.
+ */
+export async function saveWork(ctx: StepContext, wt: Git, message: string): Promise<{ ok: true } | Failure> {
+  try {
+    await wt.assertBranch(ctx.branch);
+    await wt.commitAll(message);
+    return { ok: true };
+  } catch (e) {
+    return {
+      ok: false,
+      note: "The work could not be saved to this change's own branch. An engineer needs to look at it.",
+      detail: `commit in ${wt.cwd}: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
+/** Build-session continuations: they resume the build session. */
+type Continuation = "fix" | "reconcile" | "revise";
+
+/**
+ * Runs a continuation of the build session. If the saved session cannot be resumed, it runs
+ * once more in a fresh session (traced as `<name>-fresh`). Saves the session it ends with.
+ */
+export async function buildSession<N extends Continuation>(ctx: StepContext, spec: Omit<AgentPhaseSpec, "resume" | "name"> & { name: N }): Promise<AgentPhaseResult<N>> {
+  const resume = loadSessions(ctx).build;
+  let r = await agentPhase(ctx, { ...spec, resume });
+  if (!r.ok && r.reason === "no-session" && resume) {
+    clearSession(ctx, "build");
+    r = await agentPhase(ctx, { ...spec, traceName: `${spec.traceName ?? spec.name}-fresh` });
+  }
+  if (r.ok && r.sessionId) saveSession(ctx, "build", r.sessionId);
+  return r;
 }
 
 /** Markdown bullets, one per item. */

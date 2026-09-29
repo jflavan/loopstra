@@ -93,6 +93,10 @@ export async function blockWithDetail(ctx: StepContext, note: string, detail: un
 /** Something went wrong that the caller has not recorded yet: a plain note for the owner and detail for the trace. */
 export type Failure = { ok: false; note: string; detail: string };
 
+export function blockWith(ctx: StepContext, f: Failure): Promise<{ ok: false; note: string }> {
+  return blockWithDetail(ctx, f.note, f.detail);
+}
+
 /**
  * A once-only runtime marker in the intent's run folder (never in intent/). Returns true when
  * this call created it, false when it already existed, so "do X once" survives a restart.

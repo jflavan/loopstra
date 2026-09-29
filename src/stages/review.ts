@@ -2,7 +2,7 @@ import { block, loadSessions, saveSession, setStatus, writeArtifact, type StepCo
 import { Git } from "../git";
 import { agentPhase } from "../phases";
 import { runChecks } from "./build";
-import { artifacts, runHookCommands } from "./shared";
+import { artifacts } from "./shared";
 
 /** Stage 5 review rounds. Called for reviewing. Ends at merge-review or blocked. */
 export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
@@ -35,8 +35,6 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
     if (failure) return block(ctx, `After revising for review, the tests failed: ${failure.lastLine}. An engineer should look at branch ${ctx.branch}.`);
   }
 
-  const after = await runHookCommands(ctx, "after", "build", ctx.worktreeDir);
-  if (!after.ok) return after;
   await setStatus(ctx, "merge-review");
   return { ok: true };
 }

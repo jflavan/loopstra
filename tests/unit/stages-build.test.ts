@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { Git } from "../../src/git";
-import { readIntent } from "../../src/intents";
+import { Git, samePath } from "../../src/git";
+import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
-import { setupRepo } from "../helpers";
+import type { Trace } from "../../src/trace";
+import { setupRepo, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -18,8 +19,17 @@ async function planned(commands: Record<string, string>, config = "") {
   return s;
 }
 
+function phaseNames(trace: Trace): string[] {
+  return trace.phases("add-numbers").map((p) => p.name);
+}
+
+function promptOf(runDir: string, trace: Trace, name: string): Promise<string> {
+  const p = trace.phases("add-numbers").find((x) => x.name === name)!;
+  return Bun.file(join(runDir, "phases", `${p.seq}-${name}`, "prompt.md")).text();
+}
+
 describe("build stage", () => {
-  test("plan-approved → reviewing: branch, worktree, build commits, tests pass, verify passes", async () => {
+  test("plan-approved → reviewing: work lands on the intent branch only, never on main", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
     const r = await runBuildStep(ctx);
     expect(r.ok).toBe(true);
@@ -30,40 +40,102 @@ describe("build stage", () => {
     const wtGit = new Git(wt);
     expect(await wtGit.isDirty()).toBe(false);
     expect(await wtGit.changedFilesSince("main")).toEqual(["src/add.ts", "tests/add.test.ts"]);
-    const names = trace.phases("add-numbers").map((p) => p.name);
-    expect(names).toEqual(["branch", "build", "drift", "test-1", "verify"]);
-    expect(JSON.parse(await Bun.file(join(repo.path, ".loopstra", "runs", "add-numbers", "sessions.json")).text())).toEqual({ build: "fake-build" });
+    expect((await new Git(repo.path).run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
+    expect(existsSync(join(repo.path, "src", "add.ts"))).toBe(false);
+    expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "test-1", "verify"]);
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "sessions.json")).text())).toEqual({ build: "fake-build" });
     trace.close(); repo.cleanup();
   });
 
-  test("a failing test command runs fix with LOOPSTRA_PHASE=fix and resumes the build session, then blocks after max loops", async () => {
+  test("a stale plain folder where the worktree belongs is replaced, not committed to main", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    const wt = join(repo.path, ".loopstra", "worktrees", "add-numbers");
+    mkdirSync(wt, { recursive: true });
+    await Bun.write(join(wt, "leftover.txt"), "from a crashed run\n");
+    const mainBefore = await new Git(repo.path).headSha();
+    await runBuildStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+    expect(samePath(await new Git(wt).toplevel(), wt)).toBe(true);
+    expect(existsSync(join(wt, "leftover.txt"))).toBe(false);
+    const mainLog = (await new Git(repo.path).run(["log", "--name-only", "--format=", `${mainBefore}..main`])).out;
+    expect(mainLog).not.toContain("src/add.ts");
+    expect(mainLog).not.toContain("leftover.txt");
+    trace.close(); repo.cleanup();
+  });
+
+  test("failing tests run fix in the resumed build session, record failed test phases, then block in plain words", async () => {
     const { repo, ctx, trace } = await planned({ test: "exit 1" }, "stages:\n  build:\n    max_fix_loops: 2\n");
     const argsFile = join(repo.path, "args.json");
-    process.env.LOOPSTRA_FAKE_ARGS = argsFile;
-    const r = await runBuildStep(ctx);
-    delete process.env.LOOPSTRA_FAKE_ARGS;
+    const r = await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runBuildStep(ctx));
     expect(r.ok).toBe(false);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toMatch(/2 fix attempt/);
-    const names = trace.phases("add-numbers").map((p) => p.name);
-    expect(names).toEqual(["branch", "build", "drift", "test-1", "fix-1", "test-2", "fix-2", "test-3"]);
+    expect(i.file.frontmatter.note).toBe("The tests kept failing after several attempts to fix them. An engineer needs to look at the change.");
+    expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "test-1", "fix-1", "test-2", "fix-2", "test-3"]);
+    expect(trace.phases("add-numbers").filter((p) => p.name.startsWith("test-")).map((p) => p.status)).toEqual(["fail", "fail", "fail"]);
     const recorded = await Bun.file(argsFile).json();
     expect(recorded.env.LOOPSTRA_PHASE).toBe("fix");
     expect(recorded.args).toEqual(expect.arrayContaining(["--resume", "fake-build"]));
+    expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("exit 1"))).toBe(true);
     trace.close(); repo.cleanup();
   });
 
-  test("files outside the plan trigger reconcile which rewrites plan.md on the branch", async () => {
+  test("when the build session cannot be resumed, fix retries once in a fresh session and saves it", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    await Bun.write(join(repo.path, "loopstra", "prompts", "build.md"), "{{plan}} FIXTURE:build-broken");
+    const r = await runBuildStep(ctx);
+    expect(r.ok).toBe(true);
+    expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "test-1", "fix-1", "fix-1-fresh", "test-2", "verify"]);
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "sessions.json")).text())).toEqual({ build: "fake-build" });
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+    trace.close(); repo.cleanup();
+  });
+
+  test("files outside the plan trigger reconcile; the reconciled plan is used by verify and by a later retry", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
     await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), PLAN.replace("- tests/add.test.ts (new)\n", ""));
     await new Git(repo.path).commitAll("narrower plan");
     await ctx.reload();
     await runBuildStep(ctx);
-    const names = trace.phases("add-numbers").map((p) => p.name);
-    expect(names).toContain("reconcile");
-    const wtPlan = await Bun.file(join(repo.path, ".loopstra", "worktrees", "add-numbers", "intent", "add-numbers", "plan.md")).text();
-    expect(wtPlan).toContain("src/extra.ts");
+    expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "reconcile", "test-1", "verify"]);
+    const wt = join(repo.path, ".loopstra", "worktrees", "add-numbers");
+    expect(await Bun.file(join(wt, "intent", "add-numbers", "plan.md")).text()).toContain("src/extra.ts");
+    expect(await promptOf(ctx.runDir, trace, "verify")).toContain("src/extra.ts");
+    const firstBuildSha = await new Git(wt).headSha();
+
+    // A person retries from plan-approved: the branch and worktree are reused, and drift reads the branch's plan.
+    await writeIntent(ctx.intent, { status: "plan-approved" });
+    await new Git(repo.path).commitAll("retry");
+    await ctx.reload();
+    const before = phaseNames(trace).length;
+    await runBuildStep(ctx);
+    expect(phaseNames(trace).slice(before)).toEqual(["branch", "build", "drift", "test-1", "verify"]);
+    expect(await new Git(wt).isAncestor(firstBuildSha, "HEAD")).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a verify failure gets exactly one fix, then blocks; observations are sent once", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    await Bun.write(join(repo.path, "loopstra", "prompts", "verify.md"), "{{spec}} {{plan}} FIXTURE:verify-reject");
+    const r = await runBuildStep(ctx);
+    expect(r.ok).toBe(false);
+    expect(phaseNames(trace)).toEqual(["branch", "build", "drift", "test-1", "verify", "fix-after-verify", "retest-1", "verify-2"]);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toContain("still did not work as the spec describes");
+    expect(i.file.frontmatter.note).not.toMatch(/intent\/|verify|\d/);
+    const fixPrompt = await promptOf(ctx.runDir, trace, "fix-after-verify");
+    expect(fixPrompt.split("printed 12 instead of 3").length - 1).toBe(1);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a failing after command for build blocks in plain words before review", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "stages:\n  build:\n    after:\n      - exit 4\n");
+    await runBuildStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toBe("A project command that runs after the build stage failed. An engineer needs to look at it.");
+    expect(phaseNames(trace).at(-1)).toBe("build-after");
     trace.close(); repo.cleanup();
   });
 });
