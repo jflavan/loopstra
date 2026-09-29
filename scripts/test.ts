@@ -26,6 +26,11 @@ const args = process.argv.slice(2);
 const i = args.indexOf("--shards");
 const shards = i >= 0 ? Math.max(1, Number(args.splice(i, 2)[1]) || 4) : 4;
 
+// Many tests build real git repositories and spawn processes: well under a second each on Linux and
+// macOS, but several seconds on a busy Windows CI runner. Bun's 5s default is too tight there, and a
+// timed-out test keeps running and disturbs the next one. (Bun ignores a timeout in bunfig.toml.)
+if (!args.some((a) => a.startsWith("--timeout"))) args.push("--timeout", "30000");
+
 const files = [...new Glob("tests/**/*.test.ts").scanSync(".")].map((f) => f.replaceAll("\\", "/")).sort();
 const buckets = Array.from({ length: shards }, () => ({ files: [] as string[], weight: 0 }));
 for (const f of [...files].sort((a, b) => (WEIGHTS[b] ?? 2) - (WEIGHTS[a] ?? 2))) {

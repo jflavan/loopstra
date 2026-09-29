@@ -6,7 +6,7 @@
   "bin": { "loopstra": "./src/cli.ts" },
   "scripts": {
     "test": "bun scripts/test.ts",
-    "test:serial": "bun test",
+    "test:serial": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
