@@ -253,7 +253,8 @@ small set of `{{variables}}` (the list is `PROMPT_VARS` in `src/prompts.ts`):
 `{{slug}}`, `{{main_branch}}` and `{{commands}}` are always set; the others
 are `{{intent}}`, `{{priority}}`, `{{spec}}`, `{{plan}}`, `{{review}}`,
 `{{previous}}` (the failed phases so far, for lessons), `{{failure_output}}`,
-`{{observations}}`, `{{findings}}`, `{{concerns}}`, `{{done_when}}`,
+`{{findings}}`, `{{concerns}}`, `{{done_when}}`, `{{test_result}}` (what the
+runtime's own test run says about the code a judge sees),
 `{{test_command}}`, and `{{run_command}}`. `{{commands}}` is the plain list
 of shell commands the session's tool set allows (for example `` `bun test`,
 `git diff` ``, or `none`), so a prompt can say exactly what may be run.
@@ -275,7 +276,7 @@ Phases and their envelopes (all include `status: "success" | "fail"` and
 | spec-check | fresh, strong | read-only | `approved`, `findings[{requirement, met, evidence}]` |
 | plan | fresh, strong, plan mode | read-only | `plan_markdown` (its "Files that change" list is the file list) |
 | plan-challenge | fresh, strong | read-only | `approved`, `concerns[{concern, blocking}]` |
-| build | B, default | build tools (`claude.allowed_tools` plus the configured commands, install included) | `changed_files[]`, `commit_message` |
+| build | B, default | build tools (`claude.allowed_tools` plus the configured commands, install included) | `commit_message` (the changed files come from git) |
 | fix | resume B | build tools, test edits blocked | same as build |
 | reconcile | resume B | build tools | `plan_markdown` |
 | verify | fresh, cheap | read-only plus Bash of configured commands and read-only git | `passed`, `observations[]` |
@@ -343,17 +344,22 @@ stepping it never advances.)
 ### Stage 4: test
 
 12. Test loop, up to `max_fix_loops`: run `commands.test`, then `lint`, then
-    `build` if configured. First failure's output goes to **fix** with
+    `build` if configured. The first failing command and the end of its
+    output go to **fix** with
     `LOOPSTRA_PHASE=fix` in the environment so the protect-tests hook denies
     edits to test files. Green → continue. Exhausted → block.
 13. **verify**: a fresh read-only session runs `commands.run` if configured,
-    exercises the change, and reports. `passed: false` → one more fix loop
-    with the observations, then block.
+    exercises the change, and reports. It is told the tests passed and not
+    to run them again. `passed: false` → one more fix, told "The checks
+    pass; the verifier found the change does not do what the spec says:"
+    and the observations, then the test loop and verify again, then block.
 
 ### Stage 5: review and merge
 
 14. Status `reviewing`. Review rounds, up to `max_rounds`: **review** writes
-    `review.md`. Findings with severity `important` → **revise**, then the
+    `review.md`. The reviewer is told the runtime's test result on the
+    code it reviews (`{{test_result}}`), not to run tests, and never to
+    report unverified tests as a finding. Findings with severity `important` → **revise**, then the
     test loop again, then review again. Exhausted with open important
     findings → block.
 15. `after` commands for review.

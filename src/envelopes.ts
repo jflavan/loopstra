@@ -18,8 +18,8 @@ const requirement = z.object({
   evidence: z.string(),
 });
 
+/** The files a change touched come from git, never from the agent's own list. */
 const codeChange = base.extend({
-  changed_files: z.array(z.string()),
   commit_message: z.string(),
 });
 

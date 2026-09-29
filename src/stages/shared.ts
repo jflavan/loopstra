@@ -173,6 +173,26 @@ export function lastTested(ctx: StepContext): string | null {
   return sha && marker === testedMarker(ctx, sha) ? sha : null;
 }
 
+/**
+ * The current test commands already passed on the worktree's commit: the same commit, or one that
+ * differs only in records under intent/ (a rebase that brought in main's bookkeeping).
+ */
+export async function alreadyTested(ctx: StepContext, wt: Git): Promise<boolean> {
+  const passedAt = lastTested(ctx);
+  return !!passedAt && (await wt.run(["diff", "--quiet", passedAt, "HEAD", "--", ".", ":(exclude)intent"], true)).code === 0;
+}
+
+export const TESTS_PASSED = "The test command passed after the latest change.";
+export const TESTS_NOT_RUN = "The tests have not run on the latest change yet; the runtime runs them before merging.";
+
+/**
+ * `{{test_result}}` for a judge: what the runtime's own test run says about the code it is judging.
+ * A failing run never reaches a judge (the test loop fixes or blocks first), so it is one of two sentences.
+ */
+export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
+  return (await alreadyTested(ctx, wt)) ? TESTS_PASSED : TESTS_NOT_RUN;
+}
+
 /** Run-folder marker written just before merging (holds main's commit before the merge). */
 export const MERGING = "merging";
 

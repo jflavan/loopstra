@@ -10,7 +10,7 @@ import { pushBranch, shareMain, syncMain } from "../remote";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { lastTested, MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -65,8 +65,7 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         const before = await wt.headSha();
         // Already tested: the same commit, or one that differs only in records under intent/ (a
         // rebase that brought in main's bookkeeping). Running the tests again would prove nothing new.
-        const passedAt = lastTested(ctx);
-        if (passedAt && (await wt.run(["diff", "--quiet", passedAt, before, "--", ".", ":(exclude)intent"], true)).code === 0) {
+        if (await alreadyTested(ctx, wt)) {
           return { result: "pass", evidence: "the tests already passed on this code; only records under intent/ changed since" };
         }
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.

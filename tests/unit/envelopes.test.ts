@@ -47,6 +47,8 @@ describe("envelopes", () => {
   test("json schema has no additional properties and lists required fields", () => {
     const s = jsonSchemaFor("build");
     expect(s.additionalProperties).toBe(false);
-    expect(s.required).toEqual(expect.arrayContaining(["status", "summary", "changed_files", "commit_message"]));
+    expect(s.required).toEqual(expect.arrayContaining(["status", "summary", "commit_message"]));
+    // Nothing read the list of changed files: the runtime asks git.
+    for (const name of ["build", "fix", "revise"] as const) expect(jsonSchemaFor(name).properties).not.toHaveProperty("changed_files");
   });
 });

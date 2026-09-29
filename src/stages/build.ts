@@ -4,7 +4,7 @@ import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -80,7 +80,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (!verified.passed) {
     const fix = await buildSession(ctx, {
       name: "fix", traceName: "fix-after-verify", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-      vars: { failure_output: "", observations: verified.observations, test_command: ctx.cfg.commands.test },
+      vars: { failure_output: `${VERIFY_FAILED}\n${verified.observations}`, test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return block(ctx, fix.note);
     const savedFix = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);
@@ -101,13 +101,23 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   return { ok: true };
 }
 
+/** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
+export const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
+
+/** What fix is told about a failed project command: which one, and the end of its output. */
+function failureOutput(f: CommandResult): string {
+  const how = f.timedOut ? "ran past its time limit and was stopped" : "failed";
+  return `The command \`${f.command}\` ${how}. The end of its output:\n\n${f.output.slice(-8000)}`;
+}
+
 type Verified = { ok: true; passed: boolean; observations: string } | Failure;
 
 /** Runs the verifier (a fresh, read-only session that exercises the change). */
 async function verifyChange(ctx: StepContext, spec: string, plan: string, traceName: string): Promise<Verified> {
   const r = await agentPhase(ctx, {
     name: "verify", traceName, model: ctx.cfg.stages.verify.model, permissionMode: "default", tools: "read+commands", cwd: ctx.worktreeDir,
-    vars: { spec, plan, run_command: ctx.cfg.commands.run || "none configured" }, skills: ctx.cfg.stages.verify.skills,
+    vars: { spec, plan, run_command: ctx.cfg.commands.run || "none configured", test_result: await testResult(ctx, new Git(ctx.worktreeDir)) },
+    skills: ctx.cfg.stages.verify.skills,
   });
   if (!r.ok) return { ok: false, note: `The finished change could not be checked. ${r.note}`, detail: `${traceName} failed: ${r.reason}` };
   return { ok: true, passed: r.envelope.passed, observations: bullets(r.envelope.observations) };
@@ -137,7 +147,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
     }
     const fix = await buildSession(ctx, {
       name: "fix", traceName: `fix-${i}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-      vars: { failure_output: failure.output.slice(-8000), test_command: ctx.cfg.commands.test },
+      vars: { failure_output: failureOutput(failure), test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return { ok: false, note: fix.note, detail: `fix-${i} failed: ${fix.reason}` };
     const saved = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);

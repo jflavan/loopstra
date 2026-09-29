@@ -15,4 +15,4 @@ Rules:
 - Run the test command (`{{test_command}}`) before you finish and fix what fails.
 - The shell commands you may run, with any arguments: {{commands}}. Others are refused, so do not try them.
 
-When done, report every file you changed in `changed_files` and a one-line `commit_message` the runtime will use for your work.
+When done, write a one-line `commit_message` for your work; the runtime uses it.

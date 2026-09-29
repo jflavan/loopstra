@@ -134,6 +134,27 @@ describe("build stage", () => {
     expect(i.file.frontmatter.note).not.toMatch(/intent\/|verify|\d/);
     const fixPrompt = await promptOf(ctx.runDir, trace, "fix-after-verify");
     expect(fixPrompt.split("printed 12 instead of 3").length - 1).toBe(1);
+    // The checks passed: the fix is told what the verifier found, not that the checks failed.
+    expect(fixPrompt).toContain("The checks pass; the verifier found the change does not do what the spec says:\n- add(1, 2) printed 12 instead of 3");
+    expect(fixPrompt).not.toContain("checks failed");
+    trace.close(); repo.cleanup();
+  });
+
+  test("the verifier is told the tests passed and may run exactly the project's commands; a test failure reaches fix with the command's name", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test", run: "bun run start" });
+    await runBuildStep(ctx);
+    const verifyPrompt = await promptOf(ctx.runDir, trace, "verify");
+    expect(verifyPrompt).toContain("The test command passed after the latest change.");
+    expect(verifyPrompt).toContain("You may run only these shell commands, with any arguments: `bun test`, `bun run start`, `git diff`, `git log`, `git show`, `git status`.");
+    trace.close(); repo.cleanup();
+  });
+
+  test("a failing test run reaches fix with the command that failed and the end of its output", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo boom && exit 1" }, "stages:\n  build:\n    max_fix_loops: 1\n");
+    await runBuildStep(ctx);
+    const fixPrompt = await promptOf(ctx.runDir, trace, "fix-1");
+    expect(fixPrompt).toContain("The command `echo boom && exit 1` failed. The end of its output:");
+    expect(fixPrompt).toContain("boom");
     trace.close(); repo.cleanup();
   });
 

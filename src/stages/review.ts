@@ -2,7 +2,7 @@ import { block, blockWith, blockWithDetail, clearMarker, writeArtifact, type Ste
 import { Git } from "../git";
 import { agentPhase } from "../phases";
 import { testLoop } from "./build";
-import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
+import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
@@ -40,7 +40,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     writeRound(ctx, round);
     const review = await agentPhase(ctx, {
       name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-      vars: { spec: a.spec, plan: a.currentPlan }, skills: stage.skills,
+      vars: { spec: a.spec, plan: a.currentPlan, test_result: await testResult(ctx, wt) }, skills: stage.skills,
     });
     if (!review.ok) return block(ctx, review.note);
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);

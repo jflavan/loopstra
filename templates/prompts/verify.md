@@ -14,4 +14,6 @@ Command that runs the project: {{run_command}}
 
 You may run only these shell commands, with any arguments: {{commands}}. Others are refused, so do not try them.
 
-Exercise the changed behavior and the flows next to it. Record each thing you tried and what happened in `observations`. Set `passed` to false if anything the spec requires does not work or anything adjacent broke.
+The runtime runs the tests itself: {{test_result}} Do not run the test suite again to check that, and never report that tests were not run or not verified. Spend your effort on the behaviour.
+
+Exercise the changed behaviour and the flows next to it. Record each thing you tried and what happened in `observations`. Set `passed` to false if anything the spec requires does not work or anything adjacent broke.

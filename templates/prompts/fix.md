@@ -1,11 +1,7 @@
-The checks failed after your last change. Fix the code, not the checks. Test files are protected during this step.
-
-Failure output:
+Your last change on this branch is not finished yet. What the runtime found:
 
 {{failure_output}}
 
-Verifier observations, if any:
+Fix the code, not the checks: test files are protected during this step. Make the smallest change that fixes what is described above, then run the test command (`{{test_command}}`) and fix what still fails. The shell commands you may run, with any arguments: {{commands}}. Others are refused, so do not try them. Do not commit: the runtime commits your work.
 
-{{observations}}
-
-Make the smallest change that makes the checks pass, run the test command (`{{test_command}}`) again, and report every file you changed in `changed_files` with a one-line `commit_message`. The shell commands you may run, with any arguments: {{commands}}. Others are refused, so do not try them.
+Write a one-line `commit_message` for your work.

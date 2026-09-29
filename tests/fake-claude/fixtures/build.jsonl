@@ -1,4 +1,4 @@
 {"type":"system","subtype":"init","session_id":"fake-build","cwd":"/","tools":[],"model":"fake"}
 {"type":"fake_action","write":{"path":"src/add.ts","content":"export function add(a: number, b: number): number {\n  return a + b;\n}\n"}}
 {"type":"fake_action","write":{"path":"tests/add.test.ts","content":"import { expect, test } from \"bun:test\";\nimport { add } from \"../src/add\";\ntest(\"adds\", () => { expect(add(1, 2)).toBe(3); });\n"}}
-{"type":"result","subtype":"success","is_error":false,"session_id":"fake-build","total_cost_usd":0.2,"usage":{},"structured_output":{"status":"success","summary":"implemented add","changed_files":["src/add.ts","tests/add.test.ts"],"commit_message":"feat: add function"},"result":"ok"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-build","total_cost_usd":0.2,"usage":{},"structured_output":{"status":"success","summary":"implemented add","commit_message":"feat: add function"},"result":"ok"}

@@ -78,6 +78,19 @@ describe("review", () => {
     expect(allowed).not.toContain("Edit");
     expect(recorded.args).toEqual(expect.arrayContaining(["--disallowedTools", "Edit,Write,NotebookEdit,PowerShell"]));
     expect(recorded.prompt).toContain("git diff main...HEAD");
+    // The runtime ran the tests; the reviewer is told so and told not to run them.
+    expect(recorded.prompt).toContain("The test command passed after the latest change.");
+    expect(recorded.prompt).toContain("Do not run the tests yourself");
+    trace.close(); repo.cleanup();
+  });
+
+  test("unfinished edits no test run has seen are reviewed with a prompt that says the tests have not run on them yet", async () => {
+    const { repo, ctx, trace } = await built(PERSON_MERGES);
+    await Bun.write(join(ctx.worktreeDir, "src", "add.ts"), "export const add = (a: number, b: number) => a + b;\n");
+    const argsFile = join(repo.path, "args.json");
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
+    const reviewPrompt = await Bun.file(join(ctx.runDir, "phases", `${trace.phases("add-numbers").find((p) => p.name === "review-1")!.seq}-review-1`, "prompt.md")).text();
+    expect(reviewPrompt).toContain("The tests have not run on the latest change yet; the runtime runs them before merging.");
     trace.close(); repo.cleanup();
   });
 
