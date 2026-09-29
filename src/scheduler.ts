@@ -5,7 +5,7 @@ import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
 import { Git } from "./git";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanRepo, type Intent } from "./intents";
-import { runMainHealth } from "./signals";
+import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
@@ -27,9 +27,6 @@ export interface TickResult {
   crashed?: string;
 }
 
-let lastMainHealth = 0;
-let lastMergedSlug: string | null = null;
-
 /** Statuses after a merge: the change's worktree and branch are no longer needed. */
 const MERGED_STATUSES = new Set(["merged", "verifying", "done"]);
 
@@ -50,13 +47,9 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
-    // Signals: after a merge, or on the interval.
-    const due = Date.now() - lastMainHealth > cfg.signals.main_health.every_minutes * 60_000;
-    if (lastMergedSlug || due) {
-      out.signal = await runMainHealth(root, cfg, trace, lastMergedSlug);
-      lastMainHealth = Date.now();
-      lastMergedSlug = null;
-    }
+    // Signals: after a merge, or on the interval. Both are read from disk and the trace.
+    const health = mainHealthDue(root, cfg, trace);
+    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlug);
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
@@ -84,7 +77,6 @@ export async function tick(root: string): Promise<TickResult> {
       trace.event(next.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
       out.result = await blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx));
     }
-    if (ctx.intent.file.frontmatter.status === "merged") lastMergedSlug = ctx.slug;
     return out;
   } catch (e) {
     if (e instanceof StopRequested) {

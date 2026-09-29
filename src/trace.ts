@@ -117,6 +117,12 @@ export class Trace {
       'SELECT result, evidence, ts FROM gates WHERE slug = ? AND gate = ? AND "check" = ? ORDER BY id DESC LIMIT 1').get(slug, gate, check) ?? null;
   }
 
+  /** The newest result of one signal, optionally skipping errors (a check that could not run). */
+  lastSignal(name: string, opts: { excludeErrors?: boolean } = {}): { ts: string; result: string; output: string } | null {
+    const sql = `SELECT ts, result, output FROM signals WHERE name = ?${opts.excludeErrors ? " AND result != 'error'" : ""} ORDER BY id DESC LIMIT 1`;
+    return this.db.query<{ ts: string; result: string; output: string }, [string]>(sql).get(name) ?? null;
+  }
+
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {
     return this.db.query<{ name: string; ts: string; result: string; output: string }, [number]>(
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);

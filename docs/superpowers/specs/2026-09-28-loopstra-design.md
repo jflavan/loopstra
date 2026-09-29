@@ -339,11 +339,16 @@ stepping it never advances.)
 
 ### Stage 6: verify and maintain
 
-17. Signal `main_health` runs immediately after a merge: `commands.test` on
-    `main_branch` in a clean worktree. Red after green → open
-    `intent/<generated-slug>/intent.md` in draft with what merged, what
-    failed, and a proposed outcome. The generated slug is
-    `fix-tests-after-<slug>`.
+17. Signal `main_health` runs on the tick after a merge (a
+    `.loopstra/health-pending` file written at merge) and whenever the
+    newest check is older than the interval: `commands.test` (after
+    `commands.install`) on `main_branch` in a throwaway detached worktree at
+    `.loopstra/health/main`. The baseline is the newest result that was not
+    an error. Red after green → open `intent/<generated-slug>/intent.md` in
+    draft, in plain language (what merged, a proposed outcome); the test
+    output goes to the trace. No baseline yet → record only. Install or
+    setup problems record `error` and open nothing. The generated slug is
+    `fix-tests-after-<slug>`, or `fix-tests-on-main-<local date>`.
 18. While the status is `merged` (so a restart resumes it): **done-check**
     judges each "Done when" criterion as met, unmet, or needs-person, in a
     throwaway detached worktree of main. The runtime always writes

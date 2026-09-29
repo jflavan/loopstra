@@ -4,6 +4,7 @@ import { blockWith, blockWithDetail, clearMarker, setStatus, type Failure, type 
 import { evaluateGate, type Check } from "../gates";
 import { Git } from "../git";
 import { codePhase } from "../phases";
+import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
@@ -191,6 +192,7 @@ export async function alreadyMerged(ctx: StepContext): Promise<boolean> {
 /** The change is on main: tidy up (best effort) and record it as merged. */
 export async function finishMerge(ctx: StepContext): Promise<StepResult> {
   await cleanupChange(ctx);
+  markHealthPending(ctx.root, ctx.slug);
   await setStatus(ctx, "merged");
   clearMarker(ctx, MERGING);
   clearMarker(ctx, REVIEW_ROUND);

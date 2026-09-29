@@ -160,6 +160,8 @@ describe("merge", () => {
     expect(gateRows(trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
     expect(existsSync(join(ctx.runDir, "merging"))).toBe(false);
     expect(existsSync(join(ctx.runDir, "review-round"))).toBe(false);
+    // The next tick checks main's health, attributed to this change.
+    expect(await Bun.file(join(repo.path, ".loopstra", "health-pending")).text()).toBe("add-numbers");
     expect(await new Git(repo.path).isDirty()).toBe(false);
     trace.close(); repo.cleanup();
   });
