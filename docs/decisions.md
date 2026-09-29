@@ -215,3 +215,8 @@ Sources of truth, in order of precedence when they conflict:
 
 - None. Remaining details are settled in the design spec.
 
+
+## Verified live (2026-09-29)
+
+- **End-to-end smoke run with the real Claude Code CLI.** A throwaway Bun repo, `loopstra init`, one owner intent ("say goodbye") set to accepted, `loopstra start`. The loop went accepted → designing → spec-approved → planning → plan-approved → building → reviewing → merged → done in about 2.5 minutes for $1.35 (sonnet for strong/default, haiku for cheap), with no person in the path. 15 phases, all successful; one squash commit of the change on main; branch and worktree cleaned up; plain outcome.md and a separate lessons.md; `loopstra status` and `loopstra ui` showed it live.
+- **CLI behaviour confirmed by probes:** missing session gives an `error_during_execution` result plus "No conversation found" on stderr; budget exhaustion gives `error_max_budget_usd`; `--allowedTools` takes one comma-joined argument with spaces inside rules; `--disallowedTools` removes tools; read-only shell commands are auto-approved and mutating ones denied and listed in `permission_denials`; plan mode with `--json-schema` returns `structured_output` normally.
