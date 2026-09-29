@@ -74,6 +74,13 @@ describe("the loop with a GitHub remote", () => {
     await withEnv(s.env, async () => {
       await tick(s.repo); // build
       expect((await intentOf(s.repo)).status).toBe("reviewing");
+      // Two status changes in the tick (building, reviewing), one push of main, at its end.
+      const shares = () => {
+        const t = Trace.open(s.repo);
+        try { return t.events("_loop").filter((e) => e.type === "command" && e.payload.includes("\"share main\"")).length; } finally { t.close(); }
+      };
+      expect(shares()).toBe(1);
+      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).toContain("status: reviewing");
       await tick(s.repo); // review, merge checks, pull request
       const waiting = await intentOf(s.repo);
       expect(waiting.status).toBe("merge-review");
@@ -116,7 +123,15 @@ describe("the loop with a GitHub remote", () => {
       expect(existsSync(join(s.repo, ".loopstra", "worktrees", SLUG))).toBe(false);
       expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
       expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], s.remote)).out).toContain("status: merged");
-      expect(await git.isDirty()).toBe(false);
+      // Loopstra's bookkeeping on main skips CI; the change itself does not.
+      const subjects = (await run(["git", "log", "--format=%s", "main"], s.remote)).out.trim().split(/\r?\n/);
+      const bookkeeping = subjects.filter((l) => l.startsWith(`loopstra(${SLUG}): `));
+      expect(bookkeeping.length).toBeGreaterThan(3);
+      for (const l of bookkeeping) expect(l).toEndWith(" [skip ci]");
+      expect(subjects).toContain("add-numbers: add numbers");
+      expect(subjects.some((l) => l.includes("update queue"))).toBe(false);
+      // queue.md lives on as a generated file; unsaved, it holds nothing up.
+      expect((await git.run(["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)intent/queue.md"])).out.trim()).toBe("");
       const trace = Trace.open(s.repo);
       try {
         expect(trace.events(SLUG).some((e) => e.type === "command" && e.payload.includes("\"pull request\""))).toBe(true);

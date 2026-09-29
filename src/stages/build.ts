@@ -4,7 +4,7 @@ import { Git } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { commandTimeoutMs, runCommand, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -124,7 +124,11 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
   const wt = new Git(ctx.worktreeDir);
   for (let i = 1; ; i++) {
     const failure = await runChecks(ctx, `${prefix}-${i}`);
-    if (!failure) return { ok: true };
+    if (!failure) {
+      // The merge checks need not run them again on the same code (see checkMerge).
+      writeMarker(ctx, TESTED, testedMarker(ctx, await wt.headSha()));
+      return { ok: true };
+    }
     if (i > max) {
       const note = failure.timedOut
         ? "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it."

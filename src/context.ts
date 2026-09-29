@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
-import { Git } from "./git";
+import { bookkeeping, Git } from "./git";
 import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
-import { shareMain } from "./remote";
 import type { Trace } from "./trace";
 
 export class StepContext {
@@ -69,14 +68,13 @@ export async function assertRootOnMain(ctx: StepContext): Promise<void> {
 }
 
 /**
- * Commit intent-folder changes on the main branch, then share them with the remote when main has
- * only Loopstra's own commits ahead of it (see shareMain). Refuses when the root is on any other branch.
+ * Commits the change's folder on the main branch, with the generated queue.md along (the queue is
+ * never committed on its own). The tick shares main with the remote once, at its end. Refuses when
+ * the root is on any other branch.
  */
 export async function commitArtifacts(ctx: StepContext, what: string): Promise<void> {
   await assertRootOnMain(ctx);
-  if (await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`)) {
-    await shareMain(ctx.root, ctx.cfg, ctx.trace);
-  }
+  await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], bookkeeping(`loopstra(${ctx.slug}): ${what}`));
 }
 
 /**

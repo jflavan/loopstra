@@ -155,7 +155,9 @@ describe("review", () => {
     const { repo, ctx, trace } = await built(`${PERSON_MERGES}stages:\n  review:\n    before:\n      - echo before\n    after:\n      - echo after\n`);
     const before = phaseNames(trace).length;
     await runMergeStep(ctx);
-    expect(phaseNames(trace).slice(before)).toEqual(["review-before", "review-1", "review-after", "merge-test-1"]);
+    // The merge checks do not run the tests again: they passed on this code, and main only gained records.
+    expect(phaseNames(trace).slice(before)).toEqual(["review-before", "review-1", "review-after"]);
+    expect(trace.gates("add-numbers").find((g) => g.gate === "merge" && g.check === "tests")?.evidence).toBe("the tests already passed on this code; only records under intent/ changed since");
     trace.close(); repo.cleanup();
   });
 
@@ -245,7 +247,7 @@ describe("merge", () => {
     expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     // The person's status edit is on main, and the other change's unsaved edit is still unsaved.
     const log = (await git.run(["log", "--format=%s", "main"])).out.split(/\r?\n/);
-    expect(log).toContain("loopstra(add-numbers): record edits made by a person");
+    expect(log).toContain("loopstra(add-numbers): record edits made by a person [skip ci]");
     expect(await Bun.file(other).text()).toContain("Still thinking.");
     expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("M intent/other/intent.md");
     // The merge itself is one commit whose tree is the branch's (as it was when merged).
@@ -253,6 +255,20 @@ describe("merge", () => {
     expect(mergeCommit).toHaveLength(1);
     expect((await git.run(["diff", "--name-only", `${mergeCommit[0]}^`, mergeCommit[0]!])).out.trim().split(/\r?\n/).sort()).toEqual(["src/add.ts", "tests/add.test.ts"]);
     expect((await git.run(["diff", "--cached", "--name-only"])).out.trim()).toBe("");
+    trace.close(); repo.cleanup();
+  });
+
+  test("an unsaved queue.md (the generated queue, committed only along with other records) never holds up a merge", async () => {
+    const { repo, ctx, trace } = await built(PERSON_MERGES);
+    await runMergeStep(ctx);
+    await personSets(ctx, "merge-approved");
+    const queue = join(repo.path, "intent", "queue.md");
+    await Bun.write(queue, "# Queue\n\ncommitted\n");
+    await ctx.git.commitPaths(["intent/queue.md"], "queue");
+    await Bun.write(queue, "# Queue\n\nnewer, not committed\n");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     trace.close(); repo.cleanup();
   });
 
@@ -419,7 +435,8 @@ describe("merge", () => {
     await runMergeStep(ctx);
     i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("merge-review");
-    expect(phaseNames(trace).slice(before)).toEqual(["review-2", "merge-test-1"]);
+    // The fix already passed the tests (merge-test-2 before the review); nothing moved since.
+    expect(phaseNames(trace).slice(before)).toEqual(["review-2"]);
     expect(await onMain(repo.path, "FIXED")).toBe(false);
     trace.close(); repo.cleanup();
   });

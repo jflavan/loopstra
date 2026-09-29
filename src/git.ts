@@ -22,6 +22,14 @@ export const RUNTIME_COMMIT_CONFIG: readonly string[] = [
   "-c", `user.name=${RUNTIME_NAME}`, "-c", `user.email=${RUNTIME_EMAIL}`, "-c", "commit.gpgsign=false",
 ];
 
+/**
+ * The message of a bookkeeping commit on main (status changes, artifacts, a person's recorded
+ * edits): marked so CI skips it. The change's own merge commit is not bookkeeping.
+ */
+export function bookkeeping(message: string): string {
+  return `${message} [skip ci]`;
+}
+
 /** Git's own advice lines (line-ending warnings and the like) are not the error. */
 function meaningfulLines(s: string): string[] {
   return s.trim().split("\n").map((l) => l.trim()).filter((l) => l && !/^warning:/i.test(l));

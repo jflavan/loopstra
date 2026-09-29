@@ -2,15 +2,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertRootOnMain, blockWith, blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
-import { Git, passOn } from "../git";
+import { bookkeeping, Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
-import { pushBranch, syncMain } from "../remote";
+import { pushBranch, shareMain, syncMain } from "../remote";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { lastTested, MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -62,8 +62,14 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
     {
       name: "tests",
       run: async () => {
-        // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const before = await wt.headSha();
+        // Already tested: the same commit, or one that differs only in records under intent/ (a
+        // rebase that brought in main's bookkeeping). Running the tests again would prove nothing new.
+        const passedAt = lastTested(ctx);
+        if (passedAt && (await wt.run(["diff", "--quiet", passedAt, before, "--", ".", ":(exclude)intent"], true)).code === 0) {
+          return { result: "pass", evidence: "the tests already passed on this code; only records under intent/ changed since" };
+        }
+        // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
         if (!tested.ok) { failure = tested; return { result: "fail", evidence: tested.detail }; }
         changed = (await wt.headSha()) !== before;
@@ -112,12 +118,14 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * Pushes the branch and makes sure it has an open pull request (title `<slug>: <title>`, a body
+ * Shares main, pushes the branch, and makes sure it has an open pull request (title `<slug>: <title>`, a body
  * naming the artifacts and the review summary). The review goes on it as a comment when the pull
  * request is new or `newReview` says a review just passed. The number and link go to the trace.
  */
 async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
   const r = await codePhase(ctx, "pull-request", async () => {
+    // Main first, so the pull request's diff against it shows only the change, not the records.
+    await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const pushed = await pushBranch(ctx.git, ctx.branch);
     if (!pushed.ok) throw new Error(pushed.detail);
     const gh = new GitHub(ctx.root);
@@ -299,7 +307,7 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
 /** Commits the change's own folder on main (a person's uncommitted edits to it). Nothing else is touched. */
 async function recordPersonEdits(ctx: StepContext): Promise<void> {
   await assertRootOnMain(ctx);
-  await ctx.git.commitPaths([`intent/${ctx.slug}`], `loopstra(${ctx.slug}): record edits made by a person`);
+  await ctx.git.commitPaths([`intent/${ctx.slug}`], bookkeeping(`loopstra(${ctx.slug}): record edits made by a person`));
 }
 
 /**

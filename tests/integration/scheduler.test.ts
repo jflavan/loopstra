@@ -180,6 +180,30 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   }, 60_000);
 
+  test("queue.md is written every tick but committed only along with another runtime commit", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    const git = new Git(repo.path);
+    const queue = join(repo.path, "intent", "queue.md");
+    const head = await git.headSha();
+    // Nothing else to commit: the queue is written and left uncommitted.
+    await tick(repo.path);
+    expect(await git.headSha()).toBe(head);
+    expect(await Bun.file(queue).text()).toContain("| add-numbers |");
+    expect((await git.run(["status", "--porcelain", "--", "intent/queue.md"])).out.trim()).toBe("?? intent/queue.md");
+
+    // A step that commits takes the queue along in its first commit; there is no queue commit of its own.
+    const i = await readIntent(repo.path, SLUG);
+    await Bun.write(join(i.dir, "intent.md"), (await Bun.file(join(i.dir, "intent.md")).text()).replace("status: draft", "status: accepted"));
+    await tick(repo.path);
+    const subjects = (await git.run(["log", "--format=%s", `${head}..main`])).out.trim().split(/\r?\n/);
+    expect(subjects.some((s) => /queue/.test(s))).toBe(false);
+    const queueCommits = (await git.run(["log", "--format=%s", "--", "intent/queue.md"])).out.trim().split(/\r?\n/);
+    expect(queueCommits).toEqual([`loopstra(${SLUG}): accepted → designing [skip ci]`]);
+    // The file itself is brought up to date at the end of the tick, uncommitted until the next commit.
+    expect(await Bun.file(queue).text()).toContain("spec approved, waiting to plan");
+    trace.close(); repo.cleanup();
+  }, 60_000);
+
   test("a git index lock older than ten minutes is removed at the start of a tick and traced; a fresh one is left", async () => {
     const { repo, ctx, trace } = await setupRepo("draft");
     const git = new Git(repo.path);

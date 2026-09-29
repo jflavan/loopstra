@@ -157,6 +157,22 @@ export async function buildSession<N extends Continuation>(ctx: StepContext, spe
  */
 export const REVIEW_ROUND = "review-round";
 
+/** Run-folder marker: the branch commit on which the test commands last passed, and those commands. */
+export const TESTED = "tested";
+
+/** The TESTED marker's content: the commit, then the commands that passed on it (a changed command must run again). */
+export function testedMarker(ctx: StepContext, sha: string): string {
+  const { test, lint, build } = ctx.cfg.commands;
+  return [sha, test, lint ?? "", build ?? ""].join("\n");
+}
+
+/** The commit the current test commands last passed on, or null. */
+export function lastTested(ctx: StepContext): string | null {
+  const marker = readMarker(ctx, TESTED);
+  const sha = marker?.split("\n")[0];
+  return sha && marker === testedMarker(ctx, sha) ? sha : null;
+}
+
 /** Run-folder marker written just before merging (holds main's commit before the merge). */
 export const MERGING = "merging";
 

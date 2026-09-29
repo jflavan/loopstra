@@ -7,6 +7,9 @@ function lastLine(s: string): string {
   return s.trim().split(/\r?\n/).pop() ?? "";
 }
 
+/** The generated queue, left uncommitted between runtime commits. */
+const QUEUE = "intent/queue.md";
+
 /** The signal that says whether main here and main on GitHub are in step. */
 export const SYNC_SIGNAL = "main_sync";
 
@@ -43,10 +46,11 @@ function recordSync(trace: Trace, o: SyncOutcome | null): void {
  * of the remote's main (`pull --rebase`), so an owner's status edits made on GitHub or pushed from
  * another clone, and merges done on GitHub, arrive here; then share Loopstra's own records (see
  * shareMain). Runs only when the checkout is on main with no staged or unstaged changes to tracked
- * files, so a person's work there is never touched. Never throws (except for a stop request) and
- * never stops the tick: the outcome is the `main_sync` signal, and a rebase that conflicts is aborted.
+ * files (the generated queue.md aside), so a person's work there is never touched. Never throws
+ * (except for a stop request) and never stops the tick: the outcome is the `main_sync` signal, and a
+ * rebase that conflicts is aborted. Returns the outcome's result (null without a remote).
  */
-export async function syncMain(root: string, cfg: Config, trace: Trace): Promise<void> {
+export async function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
   const git = new Git(root);
   const main = cfg.main_branch;
   let outcome: SyncOutcome | null;
@@ -57,6 +61,7 @@ export async function syncMain(root: string, cfg: Config, trace: Trace): Promise
     outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: e instanceof Error ? e.message : String(e) } };
   }
   recordSync(trace, outcome);
+  return outcome?.result ?? null;
 }
 
 async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome | null> {
@@ -66,7 +71,10 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
   if (branch !== main) return { result: "waiting", text: SYNC_TEXT.offMain, detail: { what: "skipped: the root checkout is not on main", branch } };
   const status = await git.run(["status", "--porcelain", "--untracked-files=no"], true);
   if (status.code !== 0) return { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "skipped: git status failed", error: lastLine(status.err) || `exit ${status.code}` } };
-  if (status.out.trim()) return { result: "waiting", text: SYNC_TEXT.unsaved, detail: { what: "skipped: the root checkout has changes to tracked files" } };
+  const changed = status.out.split(/\r?\n/).filter((l) => l.trim());
+  if (changed.some((l) => l.slice(3) !== QUEUE)) return { result: "waiting", text: SYNC_TEXT.unsaved, detail: { what: "skipped: the root checkout has changes to tracked files" } };
+  // queue.md is generated and rewritten later in this tick; its unsaved copy never holds up the sync.
+  if (changed.length) await git.run(["checkout", "--", QUEUE], true);
 
   const fetched = await git.run(["fetch", "--quiet", remote], true);
   if (fetched.code !== 0) return { result: "fail", text: SYNC_TEXT.unreachable, detail: { what: "fetch failed", remote, error: lastLine(fetched.err) || `exit ${fetched.code}` } };
@@ -85,8 +93,8 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
 }
 
 /**
- * Shares Loopstra's own records (status changes and artifacts committed on main) with the remote,
- * right after they are committed. Main is pushed only when every commit the remote does not have is
+ * Shares Loopstra's own records (status changes and artifacts committed on main) with the remote:
+ * once at the end of each tick, and before a pull request's branch is pushed. Main is pushed only when every commit the remote does not have is
  * Loopstra's own: a person's unpushed commits are theirs to share, so then nothing is pushed and
  * the signal waits. A push the remote refuses (a protected branch) is a `main_sync` failure; the
  * loop carries on. Never throws, except for a stop request.

@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
+import { setStatus, StepContext } from "../../src/context";
 import { Git } from "../../src/git";
+import { readIntent } from "../../src/intents";
 import { shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { run, tempDir, tempGitRepo } from "../helpers";
@@ -75,6 +77,32 @@ describe("syncMain", () => {
     await shareMain(s.repo, s.cfg, s.trace);
     expect((await run(["git", "cat-file", "-e", "main:intent/x/intent.md"], s.remote)).code).toBe(0);
     expect(s.trace.lastSignal(SYNC_SIGNAL)?.result).toBe("pass");
+    s.cleanup();
+  });
+
+  test("a status change is committed on main with [skip ci] and not pushed by itself (the tick shares main once, at its end)", async () => {
+    const s = await setup();
+    await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: accepted\n---\n# Intent: x\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
+    await new Git(s.repo).commitAll("x");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    const ctx = new StepContext(s.repo, s.cfg, s.trace, await readIntent(s.repo, "x"));
+    await setStatus(ctx, "designing");
+    expect((await run(["git", "log", "-1", "--format=%s", "main"], s.repo)).out.trim()).toBe("loopstra(x): accepted → designing [skip ci]");
+    expect((await run(["git", "show", "main:intent/x/intent.md"], s.remote)).out).toContain("status: accepted");
+    s.cleanup();
+  });
+
+  test("a queue.md left uncommitted does not hold up the sync: it is regenerated every tick", async () => {
+    const s = await setup();
+    await Bun.write(join(s.repo, "intent", "queue.md"), "# Queue\n");
+    await new Git(s.repo).commitAll("queue");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    await run(["git", "pull", "-q"], s.other);
+    await pushFromOther(s.other, "theirs.md", "theirs\n");
+    await Bun.write(join(s.repo, "intent", "queue.md"), "# Queue\n\nnewer, not committed\n");
+    await syncMain(s.repo, s.cfg, s.trace);
+    expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "pass" });
     s.cleanup();
   });
 

@@ -79,7 +79,8 @@ describe("the loop", () => {
       expect(await new Git(repo.path).branchExists("intent/add-numbers")).toBe(false);
       expect(existsSync(join(repo.path, ".loopstra", "worktrees", "add-numbers"))).toBe(false);
       expect(existsSync(join(repo.path, ".loopstra", "health-pending"))).toBe(false);
-      expect(await new Git(repo.path).isDirty()).toBe(false);
+      // Only the generated queue may be unsaved: it rides along in the next runtime commit.
+      expect((await new Git(repo.path).run(["status", "--porcelain"])).out.trim()).toMatch(/^(M intent\/queue\.md)?$/);
       const trace = Trace.open(repo.path);
       try {
         expect(trace.signals().map((s) => s.result)).toEqual(["pass", "pass"]);

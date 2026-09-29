@@ -342,7 +342,10 @@ stepping it never advances.)
 15. `after` commands for review.
 16. Merge gate, in the same step as the approving review (gate timing
     rule): branch contains `main_branch` tip (otherwise rebase), the test
-    loop passes, and the newest review had no important findings. If the
+    loop passes (skipped when the tests already passed on the same code:
+    the same commit, or one that differs only under `intent/`, with the
+    same test, lint and build commands; the `tested` run-folder marker),
+    and the newest review had no important findings. If the
     test loop committed fixes, the change is reviewed again (the round
     count continues; exhausted → block), so nothing reaches main that a
     review did not see.
@@ -361,7 +364,7 @@ stepping it never advances.)
       is a commit with the branch's tree on top of main
       (`commit-tree`) and a fast-forward to it, so it lands whole or not
       at all; `merge` is `merge --no-ff`.
-    - **With a remote (the PR gate).** Push the branch
+    - **With a remote (the PR gate).** Share main (Main sync), then push the branch
       (`--force-with-lease`, since the checks may have rebased it), open a
       PR titled `<slug>: <intent title>` if none is open (body: the artifact
       paths and the review summary; `review.md` as a comment), and trace its
@@ -483,18 +486,21 @@ through the merge gate.
 
 With a remote, at the start of each tick and after a PR merge, if the root
 checkout is on `main_branch` with no staged or unstaged changes to tracked
-files: fetch, then rebase local main onto the remote's main (`pull
---rebase`), so a PR merged on GitHub and an owner's status edit made on
-GitHub or pushed from another clone reach this checkout, and that tick's
-scan sees them. Then Loopstra's own records are shared: main is pushed
-when every commit the remote's main lacks is authored by Loopstra (the same
-happens right after every artifact commit). A person's unpushed commits are
+files (an unsaved `intent/queue.md` aside: it is generated, so it is put
+back and written again later in the tick): fetch, then rebase local main
+onto the remote's main (`pull --rebase`), so a PR merged on GitHub and an
+owner's status edit made on GitHub or pushed from another clone reach this
+checkout, and that tick's scan sees them. Then Loopstra's own records are
+shared: main is pushed when every commit the remote's main lacks is
+authored by Loopstra. Artifact commits are not pushed one by one: main is
+shared once at the end of each tick (when that tick's sync went through),
+and before an intent branch is pushed for its PR. A person's unpushed commits are
 theirs to share, so then nothing is pushed and the `main_sync` signal waits
 ("Main has your own unpushed commits; Loopstra will share its records
 after you push yours."). A refused push (a protected branch) is a
 `main_sync` failure and the loop carries on. Intent branches are pushed
-for their PRs; since a branch is created after the artifact commits are
-pushed, its PR shows only the change. A
+for their PRs, right after main is shared, and the merge checks have
+rebased the branch onto main, so its PR shows only the change. A
 rebase conflict only inside `intent/` takes the remote's version (an
 owner's edit on GitHub wins over the local record; a merged PR also
 carries the artifacts committed before its branch was last rebased). Any
@@ -507,9 +513,14 @@ dashboard's attention list shows it while it is waiting or failing.
 ### Artifact commits
 
 Artifacts under `intent/` (`intent.md` status changes, `spec.md`, `plan.md`,
-`outcome.md`, `queue.md`) are markdown, not code. The runtime commits them
-on `main_branch` directly (shared as described in Main sync), with the message
-`loopstra(<slug>): <what changed>`. This is the course's model: the file
+`review.md`, `outcome.md`, `lessons.md`) are markdown, not code. The runtime
+commits them on `main_branch` directly (shared as described in Main sync),
+with the message `loopstra(<slug>): <what changed> [skip ci]`: bookkeeping
+does not start CI; the change's own merge commit (`<slug>: <title>`) does.
+`queue.md` is written every tick and committed only along with another
+runtime commit (it rides in the next one), so a tick with nothing else to
+record adds no commit; its unsaved copy never blocks a merge or a sync.
+This is the course's model: the file
 pair is committed alongside the intent, and git history is the audit trail.
 The loop's checkout is the source of truth for status; with a remote,
 the records reach GitHub's main when only Loopstra's commits are ahead.

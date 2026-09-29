@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
-import { Git, withDetachedWorktree } from "./git";
+import { bookkeeping, Git, withDetachedWorktree } from "./git";
 import { commandTimeoutMs, runCommand } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -104,5 +104,5 @@ Everyone working on this repository.
 Should the change be reverted, or fixed forward?
 `);
   trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlug, output });
-  await git.commitPaths([`intent/${slug}`], `loopstra(${slug}): open intent for failing tests on main`);
+  await git.commitPaths([`intent/${slug}`], bookkeeping(`loopstra(${slug}): open intent for failing tests on main`));
 }

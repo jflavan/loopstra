@@ -7,7 +7,7 @@ import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, sa
 import { GitHub } from "./github";
 import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant } from "./phases";
-import { syncMain } from "./remote";
+import { shareMain, syncMain } from "./remote";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
@@ -42,6 +42,8 @@ export async function tick(root: string): Promise<TickResult> {
   try { cfg = await loadConfig(root); } catch (e) { return { picked: null, error: (e as Error).message }; }
   const trace = Trace.open(root);
   const out: TickResult = { picked: null };
+  // Known once the checkout is on main: whether main is shared with a remote at the end of the tick.
+  let share: boolean | null = null;
   try {
     trace.event("_loop", "tick", {});
 
@@ -61,7 +63,8 @@ export async function tick(root: string): Promise<TickResult> {
     // With a remote: pull what others pushed (an owner's status edits, merges on GitHub), and share
     // Loopstra's own records when only its commits are ahead. Best effort; never stops the tick.
     const hasRemote = (await new Git(root).remoteName()) !== null;
-    if (hasRemote) await syncMain(root, cfg, trace);
+    // Shared at the end only after a sync that went through: a sync that waits or fails says why itself.
+    share = hasRemote && (await syncMain(root, cfg, trace)) === "pass";
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
@@ -114,7 +117,26 @@ export async function tick(root: string): Promise<TickResult> {
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
   } finally {
+    await endOfTick(root, cfg, trace, out, share);
     trace.close();
+  }
+}
+
+/**
+ * After the step: queue.md is brought up to date (uncommitted; the next runtime commit takes it
+ * along), and with a remote, main is shared once for the whole tick. Best effort; not after a stop.
+ * `share` is null when the tick stopped before it knew the checkout was on main.
+ */
+async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResult, share: boolean | null): Promise<void> {
+  if (share === null || stopRequested()) return;
+  try {
+    if (out.picked) {
+      const scan = await scanRepo(root);
+      await writeQueue(root, trace, renderQueue(orderQueue(scan.intents), scan.unreadable));
+    }
+    if (share) await shareMain(root, cfg, trace);
+  } catch (e) {
+    if (!(e instanceof StopRequested)) trace.event("_loop", "error", { where: "end of tick", error: errorText(e) });
   }
 }
 
@@ -190,10 +212,15 @@ async function blockSafely(ctx: StepContext, note: string): Promise<StepResult> 
   }
 }
 
+/**
+ * Writes the generated queue.md (only when it changed). It is never committed on its own: the next
+ * runtime commit on main takes it along, so a tick with nothing else to record adds no commit.
+ */
 async function writeQueue(root: string, trace: Trace, text: string): Promise<void> {
   try {
-    await Bun.write(join(root, "intent", "queue.md"), text);
-    await new Git(root).commitPaths(["intent/queue.md"], "loopstra: update queue");
+    const path = join(root, "intent", "queue.md");
+    if (existsSync(path) && (await Bun.file(path).text()) === text) return;
+    await Bun.write(path, text);
   } catch (e) {
     trace.event("_loop", "error", { where: "queue", error: errorText(e) });
   }
