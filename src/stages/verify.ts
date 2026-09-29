@@ -31,7 +31,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   const outcome = await evaluateGate(ctx, "done", checks);
   if (outcomeMd) await writeArtifact(ctx, "outcome.md", outcomeMd);
   if (outcome.result === "waiting") {
-    if (!ctx.intent.file.frontmatter.note) await setStatus(ctx, "verifying", humanNote("outcome.md", "done"));
+    if (!ctx.intent.file.frontmatter.note) await setStatus(ctx, "verifying", humanNote("outcome.md", "done", ctx.cfg.gates.done.human));
     return { ok: true };
   }
   if (outcome.result === "fail") {

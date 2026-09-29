@@ -31,9 +31,7 @@ describe("the loop", () => {
       if (status === "done") break;
     }
     expect(seen).toEqual([
-      "add-numbers:spec-review",
       "add-numbers:spec-approved",
-      "add-numbers:plan-review",
       "add-numbers:plan-approved",
       "add-numbers:reviewing",
       "add-numbers:merge-review",

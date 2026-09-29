@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-spec-check-reject","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-spec-check-reject","total_cost_usd":0.03,"usage":{},"structured_output":{"status":"success","summary":"spec misses a requirement","notes_for_next_phase":"","approved":false,"findings":[{"requirement":"add handles negative numbers","met":false,"evidence":"The spec never mentions negative numbers."}]},"result":"ok"}

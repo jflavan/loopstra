@@ -1,13 +1,24 @@
-import { block, setStatus, writeArtifact, writeIntentPriority, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, setStatus, writeArtifact, writeIntentPriority, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
-import { artifacts, headingsCheck, humanNote, runHookCommands, SPEC_HEADINGS } from "./shared";
+import { artifacts, bullets, headingsCheck, runHookCommands, settleGate, SPEC_HEADINGS, type GateFlow, type Verdict } from "./shared";
 
-/** One step of Stage 1 and 2. Called when status is accepted, designing, or spec-review. */
+const REDESIGNED = "redesigned";
+const RETRY = "Set status to spec-approved to accept the spec as it is, or to accepted to write it again.";
+
+/**
+ * Stage 1 and 2. accepted/designing: intake, design, and the spec gate's checks in one step.
+ * spec-review means the checks passed and a person is deciding; it never advances here.
+ */
 export async function runDesignStep(ctx: StepContext): Promise<StepResult> {
   const status = ctx.intent.file.frontmatter.status;
+  if (status === "accepted") clearMarker(ctx, REDESIGNED);
   if (status === "accepted" || status === "designing") return design(ctx);
-  if (status === "spec-review") return specGate(ctx);
+  if (status === "spec-review") {
+    if (ctx.cfg.gates.spec.human !== "none") return { ok: true };
+    // No person on this gate (config changed, or the status was set by hand): run the checks now.
+    return settleGate(ctx, specFlow(ctx));
+  }
   return { ok: true };
 }
 
@@ -21,41 +32,62 @@ async function design(ctx: StepContext): Promise<StepResult> {
     name: "intake", model: "cheap", permissionMode: "default", tools: "read",
     vars: { intent: a.intent, priority: ctx.intent.file.frontmatter.priority ?? "not stated" },
   });
-  if (!intake.ok) return block(ctx, intake.note);
+  if (!intake.ok) return block(ctx, `${intake.note} To try again, set status to accepted.`);
   if (intake.envelope.question || intake.envelope.missing_sections.length) {
     const missing = intake.envelope.missing_sections.length ? ` Missing sections: ${intake.envelope.missing_sections.join(", ")}.` : "";
     return block(ctx, `${intake.envelope.question || "The intent needs more detail before it can be designed."}${missing} Update intent.md, then set status to accepted.`);
   }
   await writeIntentPriority(ctx, intake.envelope.priority);
 
-  const design = await agentPhase(ctx, {
-    name: "design", model: ctx.cfg.stages.design.model, permissionMode: "default", tools: "read",
-    vars: { intent: a.intent }, skills: ctx.cfg.stages.design.skills,
-  });
-  if (!design.ok) return block(ctx, design.note);
-  await writeArtifact(ctx, "spec.md", design.envelope.spec_markdown);
-
-  const after = await runHookCommands(ctx, "after", "design");
-  if (!after.ok) return after;
-  await setStatus(ctx, "spec-review", ctx.cfg.gates.spec.human === "none" ? "" : humanNote("spec.md", "spec-approved"));
-  return { ok: true };
+  const written = await writeSpec(ctx, "");
+  if (!written.ok) return written;
+  return settleGate(ctx, specFlow(ctx));
 }
 
-async function specGate(ctx: StepContext): Promise<StepResult> {
+/** One design session: writes spec.md and runs the after commands. */
+async function writeSpec(ctx: StepContext, findings: string): Promise<StepResult> {
   const a = await artifacts(ctx);
+  const r = await agentPhase(ctx, {
+    name: "design", model: ctx.cfg.stages.design.model, permissionMode: "default", tools: "read",
+    vars: { intent: a.intent, findings }, skills: ctx.cfg.stages.design.skills,
+  });
+  if (!r.ok) return block(ctx, `${r.note} To try again, set status to accepted.`);
+  await writeArtifact(ctx, "spec.md", r.envelope.spec_markdown);
+  return runHookCommands(ctx, "after", "design");
+}
+
+function specFlow(ctx: StepContext): GateFlow {
+  return {
+    gate: "spec", artifact: "spec.md", working: "designing", review: "spec-review", approved: "spec-approved",
+    marker: REDESIGNED,
+    check: () => checkSpec(ctx),
+    rewrite: (findings) => writeSpec(ctx, findings),
+    rewritingNote: "The first spec did not pass its automatic check, so it is being written again.",
+    failedNote: "The spec did not pass its automatic check, even after being written a second time.",
+    retry: RETRY,
+  };
+}
+
+async function checkSpec(ctx: StepContext): Promise<Verdict> {
+  const a = await artifacts(ctx);
+  const judge: { broken?: { note: string; detail: string }; unmet: string[] } = { unmet: [] };
   const checks: Check[] = [headingsCheck("headings", a.spec, SPEC_HEADINGS)];
   if (ctx.cfg.gates.spec.agent) {
     checks.push({
       name: "spec-check",
       run: async () => {
         const r = await agentPhase(ctx, { name: "spec-check", model: "strong", permissionMode: "default", tools: "read", vars: { intent: a.intent, spec: a.spec } });
-        if (!r.ok) return { result: "fail", evidence: r.note };
-        const unmet = r.envelope.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`);
-        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: unmet.join("; ") || r.envelope.summary };
+        if (!r.ok) {
+          judge.broken = { note: `The spec could not be checked. ${r.note}`, detail: `spec-check failed: ${r.reason}` };
+          return { result: "fail", evidence: `the checker failed: ${r.reason}` };
+        }
+        judge.unmet = r.envelope.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`);
+        return r.envelope.approved ? { result: "pass", evidence: r.envelope.summary } : { result: "fail", evidence: judge.unmet.join("; ") || r.envelope.summary };
       },
     });
   }
   const outcome = await evaluateGate(ctx, "spec", checks);
-  if (outcome.result === "pass") { await setStatus(ctx, "spec-approved"); return { ok: true }; }
-  return block(ctx, `The spec did not pass its check (${outcome.check}): ${outcome.evidence}. Fix spec.md or the intent, then set status to accepted to redesign.`);
+  if (outcome.result === "pass") return { result: "pass" };
+  if (judge.broken) return { result: "error", ...judge.broken };
+  return { result: "fail", findings: bullets(judge.unmet.length ? judge.unmet : [outcome.evidence]), detail: `${outcome.check}: ${outcome.evidence}` };
 }

@@ -127,10 +127,10 @@ any → blocked | closed
 | draft | owner or signals | Being written. Runtime ignores. |
 | accepted | owner (intent gate) | Ready for design. |
 | designing | runtime | Stage 2 running. |
-| spec-review | runtime | Spec written. Gate pending. |
+| spec-review | runtime | Spec written and its automated checks passed; waiting for a person. |
 | spec-approved | runtime or human | Spec gate passed. |
 | planning | runtime | Plan phase running. |
-| plan-review | runtime | Plan written. Gate pending. |
+| plan-review | runtime | Plan written and its automated checks passed; waiting for a person. |
 | plan-approved | runtime or human | Plan gate passed. |
 | building | runtime | Build, test, fix, verify running on the branch. |
 | reviewing | runtime | Review and revise rounds running. |
@@ -269,21 +269,29 @@ the full error in the trace.
    `question` is set, block with that question as the note.
 4. **design**: runtime writes `spec.md` from `spec_markdown`. Concerns go
    under an "Areas of concern" heading in the spec.
-5. `after` commands. Commit `spec.md` on main. Status `spec-review`.
-6. Spec gate: code check that required headings exist; **spec-check** if
-   `gates.spec.agent`; human wait if `gates.spec.human` is `status`
-   (note: "Read spec.md. Change this line to spec-approved to continue, or
-   closed to stop.") or `pr` (a PR adding `spec.md`; approval read via `gh`).
-   Pass → `spec-approved`. Agent not approved → one resend of design with
-   the findings, then block.
+5. `after` commands. Commit `spec.md` on main.
+6. Spec gate, in the same step: code check that required headings exist;
+   **spec-check** if `gates.spec.agent`. Pass with no person on the gate →
+   `spec-approved`. Pass with `gates.spec.human` set → `spec-review` with a
+   note ("Read spec.md. When you are happy with it, change the status line
+   to spec-approved."), so `spec-review` only ever means "checks passed,
+   waiting for a person". Any check failing → one resend of design with the
+   findings (marker `redesigned` in the run folder), then block. A checker
+   that cannot run at all blocks at once.
+
+(Gate timing rule, 2026-09-28 hardening: automated checks always run in the
+step that produced the artifact; a review status is a wait for a person and
+stepping it never advances.)
 
 ### Stage 3: plan and build
 
 7. `spec-approved` → `planning`. **plan** with `--permission-mode plan`.
-   Runtime writes `plan.md`. Commit on main. Status `plan-review`.
-8. Plan gate: code check of headings and that listed files exist or are
-   marked new; **plan-challenge** if enabled; blocking concerns → one resend
-   of plan with the concerns; human wait as for spec. Pass → `plan-approved`.
+   Runtime writes `plan.md`. Commit on main.
+8. Plan gate, in the same step: code check of headings and that listed
+   files exist or are marked new; **plan-challenge** if enabled. Failing
+   checks → one resend of plan with the concerns (marker `replanned`), then
+   block. Pass → `plan-approved`, or `plan-review` when a person is on the
+   gate, as for spec.
 9. `plan-approved` → `building`. Runtime creates branch `intent/<slug>` from
    `main_branch` and a worktree under `.loopstra/worktrees/<slug>`. If both
    already exist (retry), reuse them.

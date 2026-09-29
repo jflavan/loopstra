@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { Git } from "./git";
@@ -50,6 +50,34 @@ export async function setStatus(ctx: StepContext, status: Status, note = ""): Pr
 export async function block(ctx: StepContext, note: string): Promise<{ ok: false; note: string }> {
   await setStatus(ctx, "blocked", note);
   return { ok: false, note };
+}
+
+/**
+ * Blocks with a plain note for the owner and records the technical detail (check ids,
+ * commands, output, branch names) in the trace, where an engineer can find it.
+ */
+export async function blockWithDetail(ctx: StepContext, note: string, detail: unknown): Promise<{ ok: false; note: string }> {
+  ctx.trace.event(ctx.slug, "error", { note, detail });
+  return block(ctx, note);
+}
+
+/** Something went wrong that the caller has not recorded yet: a plain note for the owner and detail for the trace. */
+export type Failure = { ok: false; note: string; detail: string };
+
+/**
+ * A once-only runtime marker in the intent's run folder (never in intent/). Returns true when
+ * this call created it, false when it already existed, so "do X once" survives a restart.
+ */
+export function onceMarker(ctx: StepContext, name: string): boolean {
+  const p = join(ctx.runDir, name);
+  if (existsSync(p)) return false;
+  mkdirSync(ctx.runDir, { recursive: true });
+  writeFileSync(p, new Date().toISOString());
+  return true;
+}
+
+export function clearMarker(ctx: StepContext, name: string): void {
+  rmSync(join(ctx.runDir, name), { force: true });
 }
 
 export async function readArtifact(ctx: StepContext, name: string): Promise<string | null> {
