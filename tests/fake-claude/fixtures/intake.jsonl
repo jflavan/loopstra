@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-intake","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-intake","total_cost_usd":0.002,"usage":{},"structured_output":{"status":"success","summary":"intent is clear","notes_for_next_phase":"","priority":"high","missing_sections":[],"question":""},"result":"ok"}
