@@ -1,30 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { cpSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { configPath, loadConfig } from "../../src/config";
-import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
-import { Trace } from "../../src/trace";
-import { tempGitRepo } from "../helpers";
-
-const FAKE = new URL("../fake-claude/claude.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-const TEMPLATES = new URL("../../templates/prompts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-
-export async function setupRepo(status: string, configExtra = "") {
-  const repo = await tempGitRepo();
-  mkdirSync(join(repo.path, "loopstra"), { recursive: true });
-  cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
-  await Bun.write(configPath(repo.path), `version: 1\n${/^commands:/m.test(configExtra) ? "" : "commands:\n  test: echo ok\n"}${configExtra}`);
-  mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
-  await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
-  await new Git(repo.path).commitAll("intent");
-  process.env.LOOPSTRA_CLAUDE_EXECUTABLE = FAKE;
-  const trace = Trace.open(repo.path);
-  const ctx = new StepContext(repo.path, await loadConfig(repo.path), trace, await readIntent(repo.path, "add-numbers"));
-  return { repo, ctx, trace };
-}
+import { setupRepo } from "../helpers";
 
 describe("design stage", () => {
   test("accepted → spec-review with spec.md written and committed; then agent gate → spec-approved", async () => {
@@ -69,7 +48,7 @@ describe("design stage", () => {
   });
 
   test("spec-review with a human gate leaves a note and does not advance", async () => {
-    const { repo, ctx, trace } = await setupRepo("accepted", "gates:\n  spec:\n    human: status\n");
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "gates:\n  spec:\n    human: status\n" });
     await runDesignStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("spec-review");

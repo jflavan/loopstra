@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
-import { setupRepo } from "./stages-design.test";
+import { setupRepo } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-async function planned(configExtra = "") {
-  const s = await setupRepo("plan-approved", configExtra);
+async function planned(commands: Record<string, string>, config = "") {
+  const s = await setupRepo("plan-approved", { commands, config });
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "spec.md"), "# Spec\n\n## Summary\ns\n");
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "plan.md"), PLAN);
   await Bun.write(join(s.repo.path, "package.json"), JSON.stringify({ name: "target", type: "module" }));
@@ -20,7 +20,7 @@ async function planned(configExtra = "") {
 
 describe("build stage", () => {
   test("plan-approved → reviewing: branch, worktree, build commits, tests pass, verify passes", async () => {
-    const { repo, ctx, trace } = await planned("commands:\n  test: bun test\n");
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
     const r = await runBuildStep(ctx);
     expect(r.ok).toBe(true);
     const i = await readIntent(repo.path, "add-numbers");
@@ -37,7 +37,7 @@ describe("build stage", () => {
   });
 
   test("a failing test command runs fix with LOOPSTRA_PHASE=fix and resumes the build session, then blocks after max loops", async () => {
-    const { repo, ctx, trace } = await planned("commands:\n  test: exit 1\nstages:\n  build:\n    max_fix_loops: 2\n");
+    const { repo, ctx, trace } = await planned({ test: "exit 1" }, "stages:\n  build:\n    max_fix_loops: 2\n");
     const argsFile = join(repo.path, "args.json");
     process.env.LOOPSTRA_FAKE_ARGS = argsFile;
     const r = await runBuildStep(ctx);
@@ -55,7 +55,7 @@ describe("build stage", () => {
   });
 
   test("files outside the plan trigger reconcile which rewrites plan.md on the branch", async () => {
-    const { repo, ctx, trace } = await planned("commands:\n  test: bun test\n");
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
     await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), PLAN.replace("- tests/add.test.ts (new)\n", ""));
     await new Git(repo.path).commitAll("narrower plan");
     await ctx.reload();

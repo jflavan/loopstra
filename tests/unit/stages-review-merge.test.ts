@@ -6,12 +6,12 @@ import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { runReviewStep } from "../../src/stages/review";
-import { setupRepo } from "./stages-design.test";
+import { setupRepo } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-async function built(configExtra = "") {
-  const s = await setupRepo("plan-approved", "commands:\n  test: bun test\n" + configExtra);
+async function built(config = "") {
+  const s = await setupRepo("plan-approved", { commands: { test: "bun test" }, config });
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "spec.md"), "# Spec\n\n## Summary\ns\n");
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "plan.md"), PLAN);
   await Bun.write(join(s.repo.path, "package.json"), JSON.stringify({ name: "target", type: "module" }));

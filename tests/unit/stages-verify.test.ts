@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runVerifyStep } from "../../src/stages/verify";
-import { setupRepo } from "./stages-design.test";
+import { setupRepo } from "../helpers";
 
 describe("verify stage", () => {
   test("merged → done with outcome.md containing evidence and lessons", async () => {

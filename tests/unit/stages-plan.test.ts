@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { readIntent } from "../../src/intents";
 import { runPlanStep } from "../../src/stages/plan";
-import { setupRepo } from "./stages-design.test";
+import { setupRepo } from "../helpers";
 
 describe("plan stage", () => {
   test("spec-approved → plan-review with plan.md; agent gate → plan-approved", async () => {
@@ -23,7 +23,7 @@ describe("plan stage", () => {
   });
 
   test("replan limit survives a human plan gate", async () => {
-    const { repo, ctx, trace } = await setupRepo("spec-approved", "gates:\n  plan:\n    human: status\n");
+    const { repo, ctx, trace } = await setupRepo("spec-approved", { config: "gates:\n  plan:\n    human: status\n" });
     await Bun.write(join(repo.path, "intent", "add-numbers", "spec.md"), "# Spec\n\n## Summary\ns\n");
     await Bun.write(join(repo.path, "loopstra", "prompts", "plan-challenge.md"), "{{spec}} {{plan}} FIXTURE:plan-challenge-reject");
     await ctx.reload();

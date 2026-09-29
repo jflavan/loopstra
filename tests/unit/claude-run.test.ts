@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { runPhase, FAKE_CLAUDE_ENV } from "../../src/claude";
-import { tempDir } from "../helpers";
+import { FAKE_CLAUDE as FAKE, tempDir } from "../helpers";
 
-const FAKE = new URL("../fake-claude/claude.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 describe("runPhase", () => {
   test("spawns claude with the expected flags, pipes the prompt, and returns structured output", async () => {

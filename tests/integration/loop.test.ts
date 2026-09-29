@@ -5,10 +5,8 @@ import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
-import { tempGitRepo } from "../helpers";
+import { FAKE_CLAUDE as FAKE, TEMPLATES, tempGitRepo } from "../helpers";
 
-const FAKE = new URL("../fake-claude/claude.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-const TEMPLATES = new URL("../../templates/prompts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 describe("the loop", () => {
   test("drives one intent from accepted to done across ticks, one step per tick, with no remote", async () => {

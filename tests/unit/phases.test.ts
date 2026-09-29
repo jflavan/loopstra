@@ -7,9 +7,8 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, codePhase, disallowedFor, toolsFor } from "../../src/phases";
 import { Trace } from "../../src/trace";
-import { tempGitRepo } from "../helpers";
+import { FAKE_CLAUDE as FAKE, tempGitRepo } from "../helpers";
 
-const FAKE = new URL("../fake-claude/claude.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 async function setup() {
   const repo = await tempGitRepo();
