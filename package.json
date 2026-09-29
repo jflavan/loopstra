@@ -1,0 +1,19 @@
+{
+  "name": "loopstra",
+  "version": "0.1.0",
+  "description": "Unattended, Claude Code based SDLC loop. Code owns the loop; agents own bounded phases.",
+  "type": "module",
+  "bin": { "loopstra": "./src/cli.ts" },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
