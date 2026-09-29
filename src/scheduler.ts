@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config";
-import { StepContext, block, type StepResult } from "./context";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
 import { Git } from "./git";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanIntents } from "./intents";
 import { runMainHealth } from "./signals";
@@ -12,7 +12,11 @@ import { runReviewStep } from "./stages/review";
 import { runVerifyStep } from "./stages/verify";
 import { Trace } from "./trace";
 
-export interface TickResult { picked: string | null; result?: StepResult; error?: string; signal?: string }
+export interface TickResult {
+  picked: string | null; result?: StepResult; error?: string; signal?: string;
+  /** Set when the tick did nothing because the repository needs a person first (plain words). */
+  paused?: string;
+}
 
 let lastMainHealth = 0;
 let lastMergedSlug: string | null = null;
@@ -24,6 +28,15 @@ export async function tick(root: string): Promise<TickResult> {
   try {
     trace.event("_loop", "tick", {});
     const out: TickResult = { picked: null };
+
+    // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
+    // no signals, no queue, no steps (each would write into someone else's branch).
+    const branch = await new Git(root).run(["rev-parse", "--abbrev-ref", "HEAD"], true);
+    if (branch.code !== 0 || branch.out.trim() !== cfg.main_branch) {
+      trace.event("_loop", "error", { where: "tick", expected: cfg.main_branch, actual: branch.out.trim() || branch.err.trim() });
+      out.paused = OFF_MAIN_NOTE;
+      return out;
+    }
 
     // Signals: after a merge, or on the interval.
     const due = Date.now() - lastMainHealth > cfg.signals.main_health.every_minutes * 60_000;
@@ -58,7 +71,8 @@ export async function tick(root: string): Promise<TickResult> {
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
       trace.event(next.slug, "error", { error: msg, stack: (e as Error).stack });
-      out.result = await block(ctx, `Something unexpected went wrong: ${msg.split("\n")[0]}. Details are in the trace.`);
+      const note = e instanceof MainCheckoutMoved ? e.message : `Something unexpected went wrong: ${msg.split("\n")[0]}. Details are in the trace.`;
+      out.result = await block(ctx, note);
     }
     if (ctx.intent.file.frontmatter.status === "merged") lastMergedSlug = ctx.slug;
     return out;
@@ -86,6 +100,7 @@ export async function start(root: string, opts: { once: boolean }): Promise<void
   do {
     const r = await tick(root);
     if (r.error) console.error(`Config problem, will retry next tick:\n${r.error}`);
+    else if (r.paused) console.error(`${new Date().toISOString()} paused: ${r.paused}`);
     else if (r.picked) console.log(`${new Date().toISOString()} ${r.picked}: ${r.result?.ok ? "step done" : r.result?.note}`);
     else console.log(`${new Date().toISOString()} idle`);
     if (opts.once || stopping) break;

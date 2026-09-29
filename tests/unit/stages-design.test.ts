@@ -122,6 +122,18 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a failing before command blocks with a plain note; the command and its output go to the trace", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "stages:\n  design:\n    before:\n      - bun -e \"console.log('lint says no'); process.exit(3)\"\n" });
+    const r = await runDesignStep(ctx);
+    expect(r.ok).toBe(false);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toBe("A project command that runs before the design stage failed. An engineer needs to look at it.");
+    expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("lint says no"))).toBe(true);
+    expect(phaseNames(trace)).toEqual(["design-before"]);
+    trace.close(); repo.cleanup();
+  });
+
   test("intake naming missing sections blocks with the section names and how to continue", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-missing");

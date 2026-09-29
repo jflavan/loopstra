@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
-import { StepContext, block, readArtifact, setStatus, writeArtifact, loadSessions, saveSession } from "../../src/context";
+import {
+  StepContext, block, blockWithDetail, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
+  readArtifact, setStatus, writeArtifact, loadSessions, saveSession,
+} from "../../src/context";
 import { tempGitRepo } from "../helpers";
 
 async function setup() {
@@ -85,6 +88,49 @@ describe("StepContext", () => {
     expect(await readArtifact(ctx, "spec.md")).toBe("# Spec\n");
     expect(ctx.intent.artifacts.has("spec.md")).toBe(true);
     expect(await new Git(repo.path).isDirty()).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("with the main checkout on another branch, status and artifact writes refuse before touching anything", async () => {
+    const { repo, ctx, trace } = await setup();
+    await new Git(repo.path).run(["checkout", "-q", "-b", "someone-elses-work"]);
+    const head = await new Git(repo.path).headSha();
+    await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(MainCheckoutMoved);
+    await expect(writeArtifact(ctx, "spec.md", "# Spec\n")).rejects.toThrow(OFF_MAIN_NOTE);
+    expect(existsSync(join(repo.path, "intent", "x", "spec.md"))).toBe(false);
+    expect(await new Git(repo.path).isDirty()).toBe(false);
+    expect(await new Git(repo.path).headSha()).toBe(head);
+    trace.close(); repo.cleanup();
+  });
+
+  test("block on a moved main checkout commits nothing, returns the plain note, and traces why", async () => {
+    const { repo, ctx, trace } = await setup();
+    await new Git(repo.path).run(["checkout", "-q", "-b", "someone-elses-work"]);
+    const r = await block(ctx, "The tests kept failing.");
+    expect(r).toEqual({ ok: false, note: OFF_MAIN_NOTE });
+    expect(await new Git(repo.path).isDirty()).toBe(false);
+    expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("accepted");
+    const err = trace.events("x").find((e) => e.type === "error");
+    expect(err?.payload).toContain("The tests kept failing.");
+    expect(err?.payload).toContain("someone-elses-work");
+    trace.close(); repo.cleanup();
+  });
+
+  test("blockWithDetail puts the plain note on the intent and the detail in the trace", async () => {
+    const { repo, ctx, trace } = await setup();
+    await blockWithDetail(ctx, "A project command failed.", "`bun run lint` exited 2");
+    const i = await readIntent(repo.path, "x");
+    expect(i.file.frontmatter.note).toBe("A project command failed.");
+    expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("bun run lint"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("onceMarker is true only the first time; clearMarker resets it", async () => {
+    const { repo, ctx, trace } = await setup();
+    expect(onceMarker(ctx, "replanned")).toBe(true);
+    expect(onceMarker(ctx, "replanned")).toBe(false);
+    clearMarker(ctx, "replanned");
+    expect(onceMarker(ctx, "replanned")).toBe(true);
     trace.close(); repo.cleanup();
   });
 

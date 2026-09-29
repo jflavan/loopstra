@@ -76,7 +76,8 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
   const promptPath = join(ctx.root, "loopstra", "prompts", `${spec.name}.md`);
   if (!existsSync(promptPath)) {
-    return { ok: false, reason: "missing-prompt", note: `The prompt file loopstra/prompts/${spec.name}.md is missing. Run \`loopstra init\` to restore it.`, sessionId: null };
+    ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
+    return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
   const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, skills: (spec.skills ?? []).join(", "), ...spec.vars };

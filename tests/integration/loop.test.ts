@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { configPath } from "../../src/config";
+import { OFF_MAIN_NOTE } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
@@ -46,6 +47,27 @@ describe("the loop", () => {
     expect(idle.picked).toBeNull();
     repo.cleanup();
   }, 120_000);
+
+  test("with the main checkout on another branch, a tick pauses in plain words and commits nothing", async () => {
+    const repo = await tempGitRepo();
+    mkdirSync(join(repo.path, "loopstra"), { recursive: true });
+    cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\n");
+    mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
+    await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), "---\nstatus: accepted\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n");
+    const git = new Git(repo.path);
+    await git.commitAll("setup");
+    await git.run(["checkout", "-q", "-b", "someone-elses-work"]);
+    const head = await git.headSha();
+    process.env.LOOPSTRA_CLAUDE_EXECUTABLE = FAKE;
+    const r = await tick(repo.path);
+    expect(r.picked).toBeNull();
+    expect(r.paused).toBe(OFF_MAIN_NOTE);
+    expect(await git.headSha()).toBe(head);
+    expect(await git.isDirty()).toBe(false);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("accepted");
+    repo.cleanup();
+  });
 
   test("a bad config does not crash a tick", async () => {
     const repo = await tempGitRepo();

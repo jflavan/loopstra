@@ -26,8 +26,28 @@ export type StepResult = { ok: true } | { ok: false; note: string };
 
 const APPROVED: ReadonlySet<Status> = new Set(["accepted", "spec-approved", "plan-approved", "merged"]);
 
-/** Commit intent-folder changes on the main branch. */
+export const OFF_MAIN_NOTE = "The main checkout is on a different branch; an engineer needs to switch it back.";
+
+/** The repository root is not on `main_branch`, so artifacts must not be written or committed there. */
+export class MainCheckoutMoved extends Error {
+  constructor(public readonly detail: string) {
+    super(OFF_MAIN_NOTE);
+    this.name = "MainCheckoutMoved";
+  }
+}
+
+/** Throws MainCheckoutMoved unless the repository root is on `main_branch`. */
+export async function assertRootOnMain(ctx: StepContext): Promise<void> {
+  try {
+    await ctx.git.assertBranch(ctx.cfg.main_branch);
+  } catch (e) {
+    throw new MainCheckoutMoved(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Commit intent-folder changes on the main branch. Refuses when the root is on any other branch. */
 export async function commitArtifacts(ctx: StepContext, what: string): Promise<void> {
+  await assertRootOnMain(ctx);
   await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`);
   if (await ctx.git.hasRemote()) {
     try { await ctx.git.pushCurrent(); } catch (e) { ctx.trace.event(ctx.slug, "error", { where: "push", error: (e as Error).message }); }
@@ -35,6 +55,8 @@ export async function commitArtifacts(ctx: StepContext, what: string): Promise<v
 }
 
 export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
+  // Check before writing: a status written into another branch's checkout would land on that branch.
+  await assertRootOnMain(ctx);
   const from = ctx.intent.file.frontmatter.status;
   const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
   // resume_from always follows the approved state being left, even if it was already set:
@@ -48,7 +70,14 @@ export async function setStatus(ctx: StepContext, status: Status, note = ""): Pr
 }
 
 export async function block(ctx: StepContext, note: string): Promise<{ ok: false; note: string }> {
-  await setStatus(ctx, "blocked", note);
+  try {
+    await setStatus(ctx, "blocked", note);
+  } catch (e) {
+    if (!(e instanceof MainCheckoutMoved)) throw e;
+    // Nothing can be recorded on main while the checkout is elsewhere; the loop pauses until it is back.
+    ctx.trace.event(ctx.slug, "error", { where: "block", note, detail: e.detail });
+    return { ok: false, note: OFF_MAIN_NOTE };
+  }
   return { ok: false, note };
 }
 
@@ -86,6 +115,7 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
 }
 
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
+  await assertRootOnMain(ctx);
   await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
   ctx.intent.artifacts.add(name);
   await commitArtifacts(ctx, `write ${name}`);

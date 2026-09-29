@@ -53,7 +53,11 @@ describe("agentPhase", () => {
     const { repo, ctx, trace } = await setup();
     const r = await agentPhase(ctx, { name: "design", model: "strong", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.note).toMatch(/loopstra\/prompts\/design\.md/);
+    if (!r.ok) {
+      expect(r.reason).toBe("missing-prompt");
+      expect(r.note).toBe("A prompt file for this step is missing. An engineer needs to restore it.");
+    }
+    expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("loopstra/prompts/design.md"))).toBe(true);
     trace.close(); repo.cleanup();
   });
 
