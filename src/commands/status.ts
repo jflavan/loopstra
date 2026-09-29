@@ -1,9 +1,14 @@
+import { loopStatusLine } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo } from "../intents";
 import { Trace } from "../trace";
 
 function pad(s: string, n: number): string { return s.length >= n ? s : s + " ".repeat(n - s.length); }
 
 export async function renderStatus(root: string): Promise<string> {
+  return (await loopStatusLine(root)) + "\n" + await renderTable(root);
+}
+
+async function renderTable(root: string): Promise<string> {
   const scan = await scanRepo(root);
   const intents = orderQueue(scan.intents);
   if (!intents.length && !scan.unreadable.length) return "No intents yet. Create intent/<slug>/intent.md, or ask the loopstra skill to draft one.\n";

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loopstra</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1c1d21; --muted: #6b6f78; --line: #e3e5ea; --panel: #f6f7f9;
+    --ok: #1f8a4c; --ok-bg: #e3f5ea; --warn: #9a6200; --warn-bg: #fff3d6; --bad: #c4262e; --bad-bg: #fde5e6; --idle-bg: #eceef2;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e7e8ea; --muted: #9a9ea8; --line: #2c2e34; --panel: #1e2024;
+      --ok: #5fd08e; --ok-bg: #173323; --warn: #f0bd57; --warn-bg: #3a2d10; --bad: #ff7b82; --bad-bg: #401a1d; --idle-bg: #2a2c32;
+    }
+  }
+  body { margin: 0 auto; padding: 16px; max-width: 1200px; background: var(--bg); color: var(--fg); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  a { color: inherit; }
+  .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; background: var(--idle-bg); }
+  .pill.running { background: var(--ok-bg); color: var(--ok); }
+  .pill.not-responding { background: var(--bad-bg); color: var(--bad); }
+  .pill.stopping { background: var(--warn-bg); color: var(--warn); }
+  .totals { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; min-width: 110px; }
+  .stat b { display: block; font-size: 18px; }
+  .attention { display: grid; gap: 8px; }
+  .item { border: 1px solid var(--line); border-left: 4px solid var(--warn); background: var(--panel); border-radius: 6px; padding: 8px 12px; }
+  .item.blocked, .item.health, .item.unreadable, .item.config { border-left-color: var(--bad); }
+  .item .kind { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .calm { background: var(--ok-bg); color: var(--ok); border-radius: 6px; padding: 8px 12px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  tr.change { cursor: pointer; }
+  tr.change:hover { background: var(--panel); }
+  tr.drill > td { background: var(--panel); padding: 10px 12px 14px; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 12px; background: var(--idle-bg); white-space: nowrap; }
+  .tag.fail, .tag.blocked { background: var(--bad-bg); color: var(--bad); }
+  .tag.pass, .tag.success, .tag.done, .tag.merged { background: var(--ok-bg); color: var(--ok); }
+  .tag.waiting, .tag.running, .tag.interrupted, .tag.error { background: var(--warn-bg); color: var(--warn); }
+  .num { text-align: right; white-space: nowrap; }
+  .caret { display: inline-block; width: 1em; color: var(--muted); }
+  details > summary { cursor: pointer; }
+  #events { max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--panel); border-radius: 6px; padding: 8px; }
+  .files a { margin-right: 8px; }
+  .err { color: var(--bad); }
+</style>
+
+<header>
+  <h1>Loopstra</h1>
+  <span id="loop" class="pill">Loading…</span>
+  <span id="ts" class="muted"></span>
+</header>
+
+<div class="totals">
+  <div class="stat"><span class="muted">Spent today</span><b id="today">–</b></div>
+  <div class="stat"><span class="muted">This week</span><b id="week">–</b></div>
+  <div class="stat"><span class="muted">All time</span><b id="all">–</b></div>
+</div>
+
+<h2>Needs attention</h2>
+<div id="attention" class="attention"></div>
+
+<h2>Changes</h2>
+<p class="muted" style="margin:0 0 6px">Click a change to see each step it went through, what it cost, and the files it left.</p>
+<div class="scroll">
+  <table>
+    <thead><tr><th>Change</th><th>Priority</th><th>Where it is</th><th>For</th><th class="num">Cost</th><th>Note</th></tr></thead>
+    <tbody id="intents"></tbody>
+  </table>
+</div>
+
+<h2>Main branch</h2>
+<div id="health"></div>
+
+<h2>Activity</h2>
+<details>
+  <summary class="muted">Technical event log</summary>
+  <div id="events"></div>
+</details>
+
+<script>
+  let after = 0;
+  const seen = [];
+  const open = new Set();
+  let last = null;
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const money = (n) => "$" + (n || 0).toFixed(2);
+  const took = (ms) => {
+    const s = Math.round((ms || 0) / 1000);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + " min";
+    return Math.floor(m / 60) + " h " + (m % 60) + " min";
+  };
+  const time = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  const KIND = { health: "Main branch", config: "Settings", blocked: "Stopped", unreadable: "Cannot read intent.md", waiting: "Waiting for you" };
+
+  function renderLoop(loop) {
+    const el = document.getElementById("loop");
+    el.textContent = loop.text;
+    el.className = "pill " + (loop.text.startsWith("Stopping") ? "stopping" : loop.state);
+    if (loop.current && loop.current.phase) el.textContent += " (" + loop.current.phase + ")";
+  }
+
+  function renderAttention(items) {
+    document.getElementById("attention").innerHTML = items.length
+      ? items.map((a) => `<div class="item ${esc(a.kind)}"><div class="kind">${esc(KIND[a.kind] || a.kind)}</div>
+          <b>${esc(a.title)}</b>${a.slug && a.slug !== a.title ? ` <span class="muted">${esc(a.slug)}</span>` : ""}<div>${esc(a.what)}</div></div>`).join("")
+      : `<div class="calm">Nothing needs you right now.</div>`;
+  }
+
+  function drill(i) {
+    const phases = i.phases.length
+      ? `<table><thead><tr><th>#</th><th>Step</th><th>Kind</th><th>Result</th><th>Started</th><th>Took</th><th class="num">Cost</th><th>Files</th><th>Problem</th></tr></thead><tbody>
+        ${i.phases.map((p) => `<tr><td>${p.seq}</td><td>${esc(p.name)}</td><td class="muted">${esc(p.kind)}</td>
+          <td><span class="tag ${esc(p.status)}">${esc(p.status)}</span></td><td class="muted">${esc(time(p.started))}</td>
+          <td>${took(p.durationMs)}</td><td class="num">${money(p.costUsd)}</td>
+          <td class="files">${p.files.map((f) => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join("")}</td>
+          <td class="err">${esc(p.error || "")}</td></tr>`).join("")}</tbody></table>`
+      : `<span class="muted">Nothing has run for this change yet.</span>`;
+    const gates = i.gates.length
+      ? `<h3 style="font-size:13px;margin:12px 0 4px">Gate checks</h3><table><thead><tr><th>Gate</th><th>Check</th><th>Result</th><th>Evidence</th><th>When</th></tr></thead><tbody>
+        ${i.gates.map((g) => `<tr><td>${esc(g.gate)}</td><td>${esc(g.check)}</td><td><span class="tag ${esc(g.result)}">${esc(g.result)}</span></td><td>${esc(g.evidence)}</td><td class="muted">${esc(time(g.ts))}</td></tr>`).join("")}</tbody></table>`
+      : "";
+    return `<tr class="drill"><td colspan="6"><div class="muted" style="margin-bottom:6px">Status line: <code>${esc(i.status)}</code> · priority ${esc(i.priority)}</div>${phases}${gates}</td></tr>`;
+  }
+
+  function renderIntents(s) {
+    const rows = s.intents.map((i) => {
+      const isOpen = open.has(i.slug);
+      return `<tr class="change" data-slug="${esc(i.slug)}">
+        <td><span class="caret">${isOpen ? "▾" : "▸"}</span><b>${esc(i.title)}</b><br><span class="muted">${esc(i.slug)}</span></td>
+        <td>${esc(i.priority)}</td>
+        <td><span class="tag ${esc(i.status)}">${esc(i.plain)}</span></td>
+        <td class="muted">${esc(i.inStatus || "")}</td>
+        <td class="num">${money(i.costUsd)}</td>
+        <td>${esc(i.note)}</td></tr>${isOpen ? drill(i) : ""}`;
+    });
+    for (const u of s.unreadable) {
+      rows.push(`<tr><td><b>${esc(u.slug)}</b></td><td>–</td><td><span class="tag blocked">needs a person</span></td><td></td><td></td><td>${esc(u.problem)}</td></tr>`);
+    }
+    document.getElementById("intents").innerHTML = rows.join("")
+      || `<tr><td colspan="6" class="muted">No changes yet. Create intent/&lt;slug&gt;/intent.md, or ask the loopstra skill to draft one.</td></tr>`;
+  }
+
+  function renderHealth(s) {
+    const recent = s.signals.filter((g) => g.name === "main_health").slice(0, 12);
+    document.getElementById("health").innerHTML = (s.health ? `<div>${esc(s.health.text)}</div>` : `<div class="muted">The tests on main have not been checked yet.</div>`)
+      + (recent.length ? `<div style="margin-top:6px">${recent.map((g) => `<span class="tag ${esc(g.result)}" title="${esc(g.output.slice(-400))}">${esc(time(g.ts))} ${esc(g.result)}</span>`).join(" ")}</div>` : "");
+  }
+
+  function renderEvents(events) {
+    for (const e of events) { seen.push(e); after = Math.max(after, e.id); }
+    while (seen.length > 300) seen.shift();
+    const box = document.getElementById("events");
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+    box.innerHTML = seen.map((e) => `<div>${esc(e.ts.slice(11, 19))} ${esc(e.slug)} <b>${esc(e.type)}</b> ${esc(JSON.stringify(e.payload).slice(0, 200))}</div>`).join("");
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function render(s) {
+    last = s;
+    renderLoop(s.loop);
+    document.getElementById("ts").textContent = "Updated " + new Date(s.generatedAt).toLocaleTimeString();
+    document.getElementById("today").textContent = money(s.totals.todayUsd);
+    document.getElementById("week").textContent = money(s.totals.weekUsd);
+    document.getElementById("all").textContent = money(s.totals.allUsd);
+    renderAttention(s.attention);
+    renderIntents(s);
+    renderHealth(s);
+  }
+
+  document.getElementById("intents").addEventListener("click", (ev) => {
+    if (ev.target.closest("a")) return;
+    const row = ev.target.closest("tr.change");
+    if (!row) return;
+    const slug = row.dataset.slug;
+    open.has(slug) ? open.delete(slug) : open.add(slug);
+    if (last) renderIntents(last);
+  });
+
+  async function refresh() {
+    try {
+      const s = await (await fetch(`/api/state?after=${after}`)).json();
+      render(s);
+      renderEvents(s.events);
+    } catch {
+      const el = document.getElementById("loop");
+      el.textContent = "The dashboard lost contact with loopstra ui";
+      el.className = "pill not-responding";
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</html>

@@ -5,6 +5,7 @@ import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
 import { Git } from "./git";
 import { GitHub } from "./github";
+import { heartbeatWorkingOn, startHeartbeat } from "./heartbeat";
 import { syncMain } from "./remote";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanRepo, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
@@ -81,6 +82,7 @@ export async function tick(root: string): Promise<TickResult> {
     const human = { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
     for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote))) {
       out.picked = next.slug;
+      heartbeatWorkingOn(root, next.slug);
       const ctx = new StepContext(root, cfg, trace, next);
       try {
         out.result = await runStep(ctx);
@@ -215,9 +217,11 @@ function log(line: string): void {
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<void> {
   resetStop();
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
+  const beat = startHeartbeat(root);
   try {
     for (;;) {
       try {
+        beat.tickStarted();
         const r = await tick(root);
         if (r.error) console.error(`Config problem, will retry next tick:\n${r.error}`);
         else if (r.paused) log(`paused: ${r.paused}`);
@@ -232,12 +236,14 @@ export async function start(root: string, opts: { once: boolean; installSignals?
           try { trace.event("_loop", "error", { where: "start", error: errorText(e), stack: e instanceof Error ? e.stack : undefined }); } finally { trace.close(); }
         } catch { /* nowhere to record it; the console line above stands */ }
       }
+      beat.tickEnded();
       if (opts.once || stopRequested()) break;
       const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
       await sleepUnlessStopped(poll * 1000);
       if (stopRequested()) break;
     }
   } finally {
+    beat.stopped();
     uninstall();
   }
 }
