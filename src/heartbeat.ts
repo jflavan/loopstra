@@ -82,19 +82,40 @@ export function agoText(ms: number): string {
   return `${Math.floor(h / 24)} days`;
 }
 
+/** True when a process with this id exists (a process owned by someone else counts). */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as { code?: string })?.code === "EPERM";
+  }
+}
+
 /**
- * Running, stopped, or not responding. Not responding means the heartbeat is older than three
- * polls (never less than three beats), and the loop did not stop cleanly: it was killed, crashed,
- * or the machine slept.
+ * Running, paused, stopped, or not responding. A heartbeat older than three polls (never less than
+ * three beats) whose process is gone is a loop that did not shut down cleanly (killed, crashed);
+ * with the process still there it is not responding (hung, or the machine slept). A stopped loop
+ * with a pause still running says when the next start will try. `pause` defaults to the one the
+ * heartbeat carries; `alive` is for tests.
  */
-export function heartbeatState(hb: Heartbeat | null, pollSeconds: number, now: Date = new Date()): LoopStatus {
-  if (!hb) return { state: "stopped", text: "Stopped", current: null };
+export function heartbeatState(
+  hb: Heartbeat | null, pollSeconds: number, now: Date = new Date(),
+  opts: { pause?: Pause | null; alive?: (pid: number) => boolean } = {},
+): LoopStatus {
   const t = now.getTime();
+  const until = opts.pause !== undefined ? opts.pause?.until : hb?.pausedUntil;
+  const waits = until && Date.parse(until) > t ? ` The assistant was unavailable; the next start waits until ${clockText(new Date(until))}.` : "";
+  const stopped = (text: string): LoopStatus => ({ state: "stopped", text: waits ? `${text}.${waits}` : text, current: null });
+  if (!hb) return stopped("Stopped");
   const lastCheck = `last check ${agoText(t - Date.parse(hb.lastTickAt ?? hb.startedAt))} ago`;
-  if (hb.stopped) return { state: "stopped", text: hb.lastTickAt ? `Stopped — ${lastCheck}` : "Stopped", current: null };
+  if (hb.stopped) return stopped(hb.lastTickAt ? `Stopped — ${lastCheck}` : "Stopped");
   const staleMs = Math.max(3 * pollSeconds * 1000, 3 * BEAT_MS);
   const beat = Date.parse(hb.lastBeatAt ?? hb.lastTickAt ?? hb.startedAt);
-  if (t - beat > staleMs) return { state: "not-responding", text: `Not responding (${lastCheck})`, current: hb.current };
+  if (t - beat > staleMs) {
+    if (!(opts.alive ?? pidAlive)(hb.pid)) return stopped(`Stopped — it did not shut down cleanly (${lastCheck})`);
+    return { state: "not-responding", text: `Not responding (${lastCheck})`, current: hb.current };
+  }
   if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, current: hb.current };
   if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), current: null };
   const working = hb.current ? `working on ${hb.current.slug}, ` : "";
@@ -104,7 +125,7 @@ export function heartbeatState(hb: Heartbeat | null, pollSeconds: number, now: D
 /** "Loop: Running — last check 20s ago" plus a newline, for `status`. */
 export async function loopStatusLine(root: string): Promise<string> {
   const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
-  return `Loop: ${heartbeatState(readHeartbeat(root), poll).text}\n`;
+  return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root) }).text}\n`;
 }
 
 /**

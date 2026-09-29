@@ -6,6 +6,7 @@ import { buildState, resolveRunFile, serveUi } from "../../src/commands/ui";
 import { configPath } from "../../src/config";
 import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
 import { SYNC_TEXT } from "../../src/remote";
+import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -93,11 +94,14 @@ describe("ui state", () => {
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "stopped", text: "Stopped" });
-      writeHeartbeat(t.path, { pid: 1, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one", phase: null }, stopping: false, stopped: false });
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one", phase: null }, stopping: false, stopped: false });
       const s = await buildState(t.path, 0, now);
       expect(s.loop).toMatchObject({ state: "running", text: "Running — working on one, last check 20s ago", current: { slug: "one", phase: "build" } });
-      writeHeartbeat(t.path, { pid: 1, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "not-responding", text: "Not responding (last check 14 min ago)" });
+      // The same, from a process that is gone: it did not shut down cleanly.
+      writeHeartbeat(t.path, { pid: 999_999, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "stopped", text: "Stopped — it did not shut down cleanly (last check 14 min ago)" });
     } finally {
       t.cleanup();
     }
@@ -125,9 +129,10 @@ describe("needs attention", () => {
       const by = Object.fromEntries(s.attention.map((a) => [a.slug ?? a.kind, a]));
       expect(s.attention[0]).toMatchObject({ kind: "health", slug: null });
       expect(s.attention[0]?.what).toContain("The tests on main are failing");
-      expect(by.stuck).toMatchObject({ kind: "blocked", what: "The tests failed three times." });
-      expect(by["spec-ready"]).toMatchObject({ kind: "waiting", what: "Read spec.md. When you are happy with it, change the status line to spec-approved." });
-      expect(by.idea).toMatchObject({ kind: "waiting" });
+      // Blocked changes say Blocked (never "Stopped", which reads like the loop); waiting ones say so.
+      expect(by.stuck).toMatchObject({ kind: "blocked", label: "Blocked", what: "The tests failed three times." });
+      expect(by["spec-ready"]).toMatchObject({ kind: "waiting", label: "Waiting for you", what: "Read spec.md. When you are happy with it, change the status line to spec-approved." });
+      expect(by.idea).toMatchObject({ kind: "waiting", label: "Waiting for you" });
       expect(by.idea?.what).toContain("accepted");
       expect(by.broken).toMatchObject({ kind: "unreadable" });
       expect(by.broken?.what).toContain("The status line at the top of intent.md");
@@ -167,10 +172,33 @@ describe("needs attention", () => {
       await config(t.path);
       const p = pauseAfterUnavailable(t.path);
       const s = await buildState(t.path, 0);
-      expect(s.attention).toEqual([{ kind: "paused", slug: null, title: "Loopstra is paused", what: p.reason }]);
+      expect(s.attention).toEqual([{ kind: "paused", label: "Paused", slug: null, title: "Loopstra is paused", what: p.reason }]);
       expect((await buildState(t.path, 0, new Date(Date.parse(p.until) + 1000))).attention).toEqual([]);
       const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
       expect(page).toContain("pill.paused");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a config problem the loop hit is traced by the tick and listed", async () => {
+    const t = tempDir();
+    try {
+      await Bun.write(join(t.path, "loopstra", "config.yaml"), "version: 1\nbogus: true\n");
+      const r = await tick(t.path);
+      expect(r.error).toContain("bogus");
+      const trace = Trace.open(t.path);
+      try {
+        expect(trace.events("_loop").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"config\"")).length).toBe(1);
+      } finally { trace.close(); }
+      // The same problem on the next tick is not traced again.
+      await tick(t.path);
+      const again = Trace.open(t.path);
+      try {
+        expect(again.events("_loop").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"config\"")).length).toBe(1);
+      } finally { again.close(); }
+      const s = await buildState(t.path, 0);
+      expect(s.attention.find((a) => a.kind === "config")).toMatchObject({ label: "Settings", what: expect.stringContaining("bogus") });
     } finally {
       t.cleanup();
     }
@@ -183,7 +211,7 @@ describe("needs attention", () => {
       const trace = Trace.open(t.path);
       trace.signal("main_sync", "waiting", SYNC_TEXT.ownCommits);
       trace.close();
-      expect((await buildState(t.path, 0)).attention).toEqual([{ kind: "sync", slug: null, title: "Main and GitHub", what: SYNC_TEXT.ownCommits }]);
+      expect((await buildState(t.path, 0)).attention).toEqual([{ kind: "sync", label: "GitHub", slug: null, title: "Main and GitHub", what: SYNC_TEXT.ownCommits }]);
       const t2 = Trace.open(t.path);
       t2.signal("main_sync", "fail", SYNC_TEXT.pushFailed);
       t2.close();
@@ -278,6 +306,34 @@ describe("phase files", () => {
         expect({ bad, r: resolveRunFile(t.path, bad) }).toEqual({ bad, r: null });
       }
     } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a change links its own documents, served read-only as plain text from intent/<slug>/", async () => {
+    const t = await seeded();
+    const server = serveUi(t.path, 0);
+    try {
+      await Bun.write(join(t.path, "intent", "one", "spec.md"), "# Spec <b>\n");
+      const s = await buildState(t.path, 0);
+      expect(s.intents[0]?.documents).toEqual([
+        { name: "intent.md", url: "/docs/one/intent.md" },
+        { name: "spec.md", url: "/docs/one/spec.md" },
+      ]);
+      const base = server.url.href.replace(/\/$/, "");
+      const doc = await fetch(`${base}/docs/one/spec.md`);
+      expect(doc.status).toBe(200);
+      expect(doc.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(await doc.text()).toBe("# Spec <b>\n");
+      for (const bad of ["/docs/one/plan.md", "/docs/one/secret.txt", "/docs/one/..%2F..%2Fsecret.txt", "/docs/..%2F..%2Fsecret.txt/intent.md", "/docs/One/intent.md",
+        "/docs/one%2F..%2Fone/intent.md", "/docs/one", "/docs/", "/docs/one/intent.md/x"]) {
+        const r = await fetch(`${base}${bad}`);
+        expect({ bad, status: r.status }).toEqual({ bad, status: 404 });
+      }
+      const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
+      expect(page).toContain("i.documents");
+    } finally {
+      server.stop(true);
       t.cleanup();
     }
   });

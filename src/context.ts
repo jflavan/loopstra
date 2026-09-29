@@ -109,16 +109,24 @@ function saysWhatToSet(note: string): boolean {
   return /\b(set|change)\b[^.]*\b(status|to closed|to done)\b/i.test(note);
 }
 
+/** The owner's notes for a passing hiccup (the assistant crashed, or took too long): nothing to sort out first. */
+export const CRASH_NOTE = "The assistant stopped unexpectedly.";
+export const TIMEOUT_NOTE = "The assistant took too long on this step.";
+
 /**
  * The note a block writes: the reason, plus how to try again when the reason does not already say
  * which status to set. The retry status is `retryFrom` when given (a merge retried without a
- * rebuild), else the approved status the change is resumed from. Only this function words it.
+ * rebuild), else the approved status the change is resumed from. A passing hiccup (a crash or a
+ * timeout) just says "To try again, ..."; anything else says "When that is sorted out, ...". Only
+ * this function words it.
  */
 export function blockNote(ctx: StepContext, note: string, retryFrom?: Status): string {
   if (saysWhatToSet(note)) return note;
   const from = ctx.intent.file.frontmatter.status;
   const resume = retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from);
-  return resume ? `${note} When that is sorted out, set status to ${resume} to try again.` : note;
+  if (!resume) return note;
+  if (note.includes(CRASH_NOTE) || note.includes(TIMEOUT_NOTE)) return `${note} To try again, set status to ${resume}.`;
+  return `${note} When that is sorted out, set status to ${resume} to try again.`;
 }
 
 export async function block(ctx: StepContext, reason: string, retryFrom?: Status): Promise<{ ok: false; note: string }> {

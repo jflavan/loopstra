@@ -4,7 +4,7 @@ import { runPhase, unavailable, type FailureReason, type PermissionMode } from "
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
-import type { StepContext } from "./context";
+import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
 import { clearPause } from "./heartbeat";
@@ -71,9 +71,9 @@ export function disallowedFor(set: ToolSet): string[] {
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
 export function ownerNote(reason: FailureReason): string {
   switch (reason) {
-    case "timeout": return "The assistant took too long on this step.";
+    case "timeout": return TIMEOUT_NOTE;
     case "budget": return "This step hit its spending limit. An engineer may need to raise the limit.";
-    case "crash": return "The assistant stopped unexpectedly.";
+    case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";
     // Never an owner note in practice: an unavailable assistant pauses the loop instead of blocking.

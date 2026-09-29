@@ -1,14 +1,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
-import { loadConfig, type Config } from "./config";
+import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, samePath, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant } from "./phases";
 import { shareMain, syncMain } from "./remote";
-import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type HumanGates, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
@@ -39,7 +39,13 @@ const MERGED_STATUSES = new Set(["merged", "verifying", "done"]);
 
 export async function tick(root: string): Promise<TickResult> {
   let cfg: Config;
-  try { cfg = await loadConfig(root); } catch (e) { return { picked: null, error: (e as Error).message }; }
+  try {
+    cfg = await loadConfig(root);
+  } catch (e) {
+    const error = errorText(e);
+    traceConfigProblem(root, error);
+    return { picked: null, error };
+  }
   const trace = Trace.open(root);
   const out: TickResult = { picked: null };
   // Known once the checkout is on main: whether main is shared with a remote at the end of the tick.
@@ -85,7 +91,7 @@ export async function tick(root: string): Promise<TickResult> {
     }
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable));
+    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg)));
     await cleanupLeftovers(root, cfg, trace, ordered);
 
     // The assistant was unavailable a moment ago: no step runs until the pause runs out.
@@ -97,7 +103,7 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick.
-    const human = { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
+    const human = humanGates(cfg);
     for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote))) {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
@@ -132,7 +138,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
   try {
     if (out.picked) {
       const scan = await scanRepo(root);
-      await writeQueue(root, trace, renderQueue(orderQueue(scan.intents), scan.unreadable));
+      await writeQueue(root, trace, renderQueue(orderQueue(scan.intents), scan.unreadable, humanGates(cfg)));
     }
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {
@@ -142,6 +148,27 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Which gates have a person on them, for the queue and for what is runnable. */
+function humanGates(cfg: Config): HumanGates {
+  return { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
+}
+
+/**
+ * A config that cannot be loaded is traced (once while it stays the same), so `tail` and the trace
+ * show it; the attention list shows it too, from loading the config itself. Never throws.
+ */
+function traceConfigProblem(root: string, error: string): void {
+  try {
+    const trace = Trace.open(root);
+    try {
+      const last = trace.lastEvent("_loop", "error", '"where":"config"');
+      if (!last || (JSON.parse(last.payload) as { error?: string }).error !== error) trace.event("_loop", "error", { where: "config", error });
+    } finally {
+      trace.close();
+    }
+  } catch { /* nowhere to record it; the console line stands */ }
 }
 
 /** After this many pauses in a row for the same change, phase, and line, a probe checks whether it really is an outage. */
@@ -297,11 +324,12 @@ export function missingTools(env: Record<string, string | undefined> = process.e
 
 /**
  * What `start` checks before the loop begins, as a plain message, or null when it may start: the
- * tools are installed, the checkout is on main_branch, Loopstra's own files are committed there,
- * and a repository with a remote has gh, signed in.
- * A config that cannot be loaded is left to the loop, which reports it and retries.
+ * folder is set up (it has loopstra/config.yaml), the tools are installed, the checkout is on
+ * main_branch, Loopstra's own files are committed there, and a repository with a remote has gh,
+ * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  if (!existsSync(configPath(root))) return NOT_SET_UP;
   const missing = missingTools(env);
   if (missing) return missing;
   let cfg: Config;

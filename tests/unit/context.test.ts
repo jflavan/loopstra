@@ -83,8 +83,10 @@ describe("StepContext", () => {
 
   test("block owns the retry wording: it adds the status to set, unless the note already says one", async () => {
     const { repo, ctx, trace } = await setup();
-    // From an approved status, that status is the one to set again.
-    expect(blockNote(ctx, "The assistant stopped unexpectedly.")).toBe("The assistant stopped unexpectedly. When that is sorted out, set status to accepted to try again.");
+    // From an approved status, that status is the one to set again. A passing hiccup (the assistant
+    // crashed or took too long) needs nothing sorted out first: just try again.
+    expect(blockNote(ctx, "The assistant stopped unexpectedly.")).toBe("The assistant stopped unexpectedly. To try again, set status to accepted.");
+    expect(blockNote(ctx, "The finished change could not be checked. The assistant took too long on this step.")).toBe("The finished change could not be checked. The assistant took too long on this step. To try again, set status to accepted.");
     await setStatus(ctx, "designing");
     expect(blockNote(ctx, "A project command failed.")).toBe("A project command failed. When that is sorted out, set status to accepted to try again.");
     expect(blockNote(ctx, "The pull request could not be merged.", "merge-approved")).toBe("The pull request could not be merged. When that is sorted out, set status to merge-approved to try again.");

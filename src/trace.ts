@@ -150,6 +150,11 @@ export class Trace {
       "SELECT * FROM events WHERE slug = ? AND type = ? AND instr(payload, ?) > 0 ORDER BY id DESC LIMIT 1").get(slug, type, contains) ?? null;
   }
 
+  /** The newest `limit` events of one slug, oldest first. */
+  lastEvents(slug: string, limit: number): EventRow[] {
+    return this.db.query<EventRow, [string, number]>("SELECT * FROM events WHERE slug = ? ORDER BY id DESC LIMIT ?").all(slug, limit).reverse();
+  }
+
   recentEvents(afterId = 0, limit = 200): EventRow[] {
     return this.db.query<EventRow, [number, number]>("SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?").all(afterId, limit).reverse();
   }

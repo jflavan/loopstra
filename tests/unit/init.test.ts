@@ -3,11 +3,11 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { init } from "../../src/init";
-import { tempDir } from "../helpers";
+import { tempDir, tempGitRepo } from "../helpers";
 
 describe("init", () => {
   test("stamps a bun repo with detected commands and all files, and merges settings.json", async () => {
-    const t = tempDir();
+    const t = await tempGitRepo();
     try {
       await Bun.write(join(t.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test", lint: "eslint .", build: "tsc", start: "bun run src/main.ts" } }));
       mkdirSync(join(t.path, ".claude"), { recursive: true });
@@ -42,7 +42,7 @@ describe("init", () => {
   });
 
   test("is idempotent and keeps any file a person has edited", async () => {
-    const t = tempDir();
+    const t = await tempGitRepo();
     try {
       await Bun.write(join(t.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
       await init(t.path);
@@ -64,11 +64,21 @@ describe("init", () => {
   });
 
   test("with no detectable test command, leaves a placeholder that loadConfig rejects", async () => {
-    const t = tempDir();
+    const t = await tempGitRepo();
     try {
       const report = await init(t.path);
       expect(report.warnings.join(" ")).toMatch(/commands\.test/);
       await expect(loadConfig(t.path)).rejects.toThrow(/commands\.test/);
+    } finally { t.cleanup(); }
+  });
+
+  test("in a folder that is not a git repository, warns and writes nothing", async () => {
+    const t = tempDir();
+    try {
+      const report = await init(t.path);
+      expect(report).toMatchObject({ stopped: true, written: [], kept: [], next: [], warnings: ["This folder is not a git repository; run git init first."] });
+      expect(existsSync(join(t.path, "loopstra"))).toBe(false);
+      expect(existsSync(join(t.path, ".loopstra"))).toBe(false);
     } finally { t.cleanup(); }
   });
 });

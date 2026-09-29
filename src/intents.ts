@@ -117,7 +117,7 @@ export interface Unreadable { slug: string; problem: string; detail: string }
 export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 
 /** A change's folder name: lowercase letters and digits, words joined by dashes. */
-const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+export const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
 /** Every intent folder: the readable intents, and the ones a person needs to fix. Never throws for one bad file. */
 export async function scanRepo(root: string): Promise<Scan> {
@@ -290,15 +290,34 @@ export function checkConsistency(intent: Intent): string | null {
     }
   }
   const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
-  if (missing.length) return `intent.md is missing the section(s): ${missing.join(", ")}. Add them, then set status to accepted.`;
+  if (missing.length) {
+    return `This request is missing ${listText(missing.map((s) => `a ${s}`))} section. Add ${missing.length > 1 ? "them" : "it"} to intent.md, then set status to accepted.`;
+  }
   return null;
+}
+
+/** "a", "a and b", "a, b and c". */
+function listText(items: string[]): string {
+  return items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}` : items[0] ?? "";
 }
 
 export type HumanGates = { spec: "status" | "pr" | "none"; plan: "status" | "pr" | "none"; merge: "status" | "pr" | "none"; done: "status" | "pr" | "none" };
 
-const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
+/** The review statuses, and the gate whose `human` setting decides whether a person is on each. */
+export const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
   "spec-review": "spec", "plan-review": "plan", "merge-review": "merge", verifying: "done",
 };
+
+/**
+ * Waiting for a person: blocked, a draft, or a review status whose gate has a person on it. (A
+ * merge-review with nobody on the gate waits for GitHub's checks, not for a person.)
+ */
+export function waitsForPerson(intent: Intent, human: HumanGates): boolean {
+  const s = intent.file.frontmatter.status;
+  if (s === "blocked" || s === "draft") return true;
+  const gate = REVIEW_GATE[s];
+  return !!gate && human[gate] !== "none";
+}
 
 /**
  * Runnable: the runtime has something to do for this intent right now.
@@ -352,12 +371,17 @@ export function plainStatus(status: Status): string {
   return PLAIN[status];
 }
 
-/** Intents whose intent.md cannot be read are listed under "Needs a person" with their plain problem. */
-export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = []): string {
-  const active = ordered.filter((i) => !["done", "closed", "blocked", "draft"].includes(i.file.frontmatter.status));
-  const blocked = ordered.filter((i) => i.file.frontmatter.status === "blocked");
-  const drafts = ordered.filter((i) => i.file.frontmatter.status === "draft");
+const NOBODY: HumanGates = { spec: "none", plan: "none", merge: "none", done: "none" };
+
+/**
+ * The generated queue.md. "Needs a person" holds every change waiting for one (blocked, drafts, and
+ * reviews with a person on the gate; see waitsForPerson) and intents whose intent.md cannot be read,
+ * with their plain problem.
+ */
+export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
+  const waiting = ordered.filter((i) => waitsForPerson(i, human));
+  const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
   const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(i.file.frontmatter.note)} |`;
   const badRow = (u: Unreadable) => `| ${u.slug} | - | ${plainStatus("blocked")} | ${cell(u.problem)} |`;
@@ -375,11 +399,7 @@ export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = []): s
     "",
     "## Needs a person",
     "",
-    table([...blocked.map(row), ...unreadable.map(badRow)]),
-    "",
-    "## Drafts",
-    "",
-    table(drafts.map(row)),
+    table([...waiting.map(row), ...unreadable.map(badRow)]),
     "",
     "## Finished",
     "",

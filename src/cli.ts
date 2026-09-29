@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
+import { existsSync } from "node:fs";
 import { renderStatus } from "./commands/status";
+import { configPath, NOT_SET_UP } from "./config";
 
 const [command = "help", ...rest] = Bun.argv.slice(2);
 const root = process.cwd();
@@ -15,6 +17,13 @@ const HELP = `loopstra <command>
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
 `;
 
+/** status, tail, and ui read a set-up repo; elsewhere they say so and create nothing. */
+function setUp(): boolean {
+  if (existsSync(configPath(root))) return true;
+  console.error(NOT_SET_UP);
+  return false;
+}
+
 async function main(): Promise<number> {
   switch (command) {
     case "help": case "--help": case "-h":
@@ -22,6 +31,7 @@ async function main(): Promise<number> {
     case "init": {
       const { init } = await import("./init");
       const r = await init(root);
+      if (r.stopped) { for (const w of r.warnings) console.error(`warning: ${w}`); return 1; }
       for (const f of r.written) console.log(`wrote  ${f}`);
       for (const f of r.kept) console.log(`kept   ${f}`);
       for (const w of r.warnings) console.log(`warning: ${w}`);
@@ -29,6 +39,7 @@ async function main(): Promise<number> {
       return 0;
     }
     case "status":
+      if (!setUp()) return 1;
       process.stdout.write(await renderStatus(root)); return 0;
     case "start": {
       const { preflight, start } = await import("./scheduler");
@@ -37,8 +48,14 @@ async function main(): Promise<number> {
       await start(root, { once: rest.includes("--once") });
       return 0;
     }
-    case "tail": { const { tail } = await import("./commands/tail"); await tail(root, rest[0]); return 0; }
+    case "tail": {
+      if (!setUp()) return 1;
+      const { tail } = await import("./commands/tail");
+      await tail(root, rest[0]);
+      return 0;
+    }
     case "ui": {
+      if (!setUp()) return 1;
       const { serveUi } = await import("./commands/ui");
       const flag = rest.indexOf("--port");
       const port = flag >= 0 ? Number(rest[flag + 1]) : 4646;

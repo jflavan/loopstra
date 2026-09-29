@@ -67,7 +67,7 @@ describe("scheduler resilience", () => {
     expect(r.picked).toBe(SLUG);
     expect(r.crashed).toBeUndefined();
     const queue = await Bun.file(join(repo.path, "intent", "queue.md")).text();
-    const needs = queue.slice(queue.indexOf("## Needs a person"), queue.indexOf("## Drafts"));
+    const needs = queue.slice(queue.indexOf("## Needs a person"), queue.indexOf("## Finished"));
     expect(needs).toContain("| broken |");
     expect(needs).toContain("The status line at the top of intent.md has a value Loopstra does not understand.");
     expect(needs).not.toMatch(/Invalid|enum|zod/i);

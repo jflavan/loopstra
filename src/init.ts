@@ -12,6 +12,8 @@ export interface InitReport {
   kept: string[];
   warnings: string[];
   next: string[];
+  /** Set when init wrote nothing because the folder cannot be set up (the warning says why). */
+  stopped?: boolean;
 }
 
 interface Detected { test?: string; install?: string; lint?: string; build?: string; run?: string }
@@ -69,6 +71,10 @@ function commandLines(d: Detected): string {
 
 export async function init(root: string): Promise<InitReport> {
   const report: InitReport = { written: [], kept: [], warnings: [], next: [] };
+  // The loop lives in git (branches, worktrees, commits on main): without a repository, write nothing.
+  if ((await new Git(root).run(["rev-parse", "--is-inside-work-tree"], true)).code !== 0) {
+    return { ...report, stopped: true, warnings: ["This folder is not a git repository; run git init first."] };
+  }
   const d = await detectCommands(root);
 
   const cfg = (await template("config.yaml")).replace("__COMMANDS__", commandLines(d));

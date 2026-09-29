@@ -64,6 +64,9 @@ export const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 
+/** What every command but init says in a folder without loopstra/config.yaml. */
+export const NOT_SET_UP = "This folder is not set up for Loopstra. Run loopstra init first.";
+
 export function configPath(root: string): string {
   return join(root, "loopstra", "config.yaml");
 }

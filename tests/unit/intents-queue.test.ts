@@ -135,6 +135,40 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("renderQueue lists everything waiting for a person under Needs a person: blocked, drafts, and reviews with a person on the gate", async () => {
+    const t = tempDir();
+    await mk(t.path, "stuck", "status: blocked\nnote: The tests failed.");
+    await mk(t.path, "idea", "status: draft");
+    await mk(t.path, "spec-ready", "status: spec-review", { "spec.md": "s" });
+    await mk(t.path, "plan-ready", "status: plan-review", { "spec.md": "s", "plan.md": "p" });
+    await mk(t.path, "busy", "status: building", { "spec.md": "s", "plan.md": "p" });
+    const md = renderQueue(orderQueue((await scanRepo(t.path)).intents), [], { spec: "status", plan: "none", merge: "none", done: "none" });
+    const section = (name: string) => md.slice(md.indexOf(`## ${name}`)).split("\n## ")[0]!;
+    const needs = section("Needs a person");
+    for (const slug of ["stuck", "idea", "spec-ready"]) expect(needs).toContain(`| ${slug} |`);
+    const active = section("In progress, in order");
+    for (const slug of ["plan-ready", "busy"]) expect(active).toContain(`| ${slug} |`);
+    expect(active).not.toContain("| spec-ready |");
+    expect(md).not.toContain("## Drafts");
+    t.cleanup();
+  });
+
+  test("a request missing required sections is told which, in plain words", async () => {
+    const t = tempDir();
+    const write = async (slug: string, body: string) => {
+      mkdirSync(join(t.path, "intent", slug), { recursive: true });
+      await Bun.write(join(t.path, "intent", slug, "intent.md"), `---\nstatus: accepted\n---\n# Intent: ${slug}\n${body}`);
+    };
+    await write("two", "\n## Problem\np\n");
+    await write("one", "\n## Problem\np\n\n## Proposed outcome\no\n");
+    await write("none", "");
+    const by = Object.fromEntries((await scanRepo(t.path)).intents.map((i) => [i.slug, checkConsistency(i)]));
+    expect(by.two).toBe("This request is missing a Proposed outcome and a Done when section. Add them to intent.md, then set status to accepted.");
+    expect(by.one).toBe("This request is missing a Done when section. Add it to intent.md, then set status to accepted.");
+    expect(by.none).toBe("This request is missing a Problem, a Proposed outcome and a Done when section. Add them to intent.md, then set status to accepted.");
+    t.cleanup();
+  });
+
   test("renderQueue collapses a multi-line note into a single table row", async () => {
     const t = tempDir();
     await mk(t.path, "stuck", "status: blocked\nnote: |\n  Need an answer about adjusters.\n  Waiting since Monday.");

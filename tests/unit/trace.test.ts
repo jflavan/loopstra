@@ -44,6 +44,17 @@ describe("Trace", () => {
     t.cleanup();
   });
 
+  test("lastEvents reads only the newest events of one change, oldest first", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    for (let n = 1; n <= 5; n++) trace.event("x", "command", { n });
+    trace.event("y", "command", { n: 99 });
+    expect(trace.lastEvents("x", 3).map((e) => JSON.parse(e.payload).n)).toEqual([3, 4, 5]);
+    expect(trace.lastEvents("z", 3)).toEqual([]);
+    trace.close();
+    t.cleanup();
+  });
+
   test("phase sequence increments per intent and survives reopen", () => {
     const t = tempDir();
     let trace = Trace.open(t.path);

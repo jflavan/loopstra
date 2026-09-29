@@ -1,5 +1,5 @@
 import { loadConfig } from "../config";
-import { heartbeatState, readHeartbeat } from "../heartbeat";
+import { heartbeatState, readHeartbeat, readPause } from "../heartbeat";
 import { Trace, type EventRow } from "../trace";
 
 export interface TailCursor {
@@ -16,7 +16,7 @@ export interface TailCursor {
 export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: { slug?: string; pollSeconds: number; now?: Date }): string[] {
   const out: string[] = [];
   const hb = readHeartbeat(root);
-  const loop = heartbeatState(hb, opts.pollSeconds, opts.now);
+  const loop = heartbeatState(hb, opts.pollSeconds, opts.now, { pause: readPause(root) });
   const key = `${loop.state}|${hb?.stopping ? "stopping" : ""}|${loop.current?.slug ?? ""}`;
   if (key !== cursor.loopKey) {
     out.push(`${clock(opts.now ?? new Date())} ${"loop".padEnd(24)} ${"heartbeat".padEnd(13)} ${loop.text}`);
@@ -24,7 +24,7 @@ export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: 
   }
   const first = cursor.lastId === 0;
   const rows = opts.slug
-    ? (first ? lastOf(trace.events(opts.slug, 0, 100_000), 50) : trace.events(opts.slug, cursor.lastId))
+    ? (first ? trace.lastEvents(opts.slug, 50) : trace.events(opts.slug, cursor.lastId))
     : trace.recentEvents(cursor.lastId, first ? 50 : 500);
   for (const e of rows) {
     out.push(...format(e));
@@ -42,10 +42,6 @@ export async function tail(root: string, slug?: string): Promise<never> {
     for (const line of tailLines(root, trace, cursor, { slug, pollSeconds })) console.log(line);
     await Bun.sleep(1000);
   }
-}
-
-function lastOf<T>(rows: T[], n: number): T[] {
-  return rows.slice(Math.max(0, rows.length - n));
 }
 
 function clock(d: Date): string {

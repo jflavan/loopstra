@@ -2,14 +2,26 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
+import { configPath } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
+
+const BODY = "\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n";
+
+async function intent(root: string, slug: string, fm: string): Promise<void> {
+  mkdirSync(join(root, "intent", slug), { recursive: true });
+  await Bun.write(join(root, "intent", slug, "intent.md"), `---\n${fm}\n---\n# Intent: ${slug}\n${BODY}`);
+}
+
+async function config(root: string): Promise<void> {
+  mkdirSync(join(root, "loopstra"), { recursive: true });
+  await Bun.write(configPath(root), "version: 1\ncommands:\n  test: echo ok\n");
+}
 
 describe("renderStatus", () => {
   test("shows each intent with plain status, phase, cost, and note", async () => {
     const t = tempDir();
-    mkdirSync(join(t.path, "intent", "one"), { recursive: true });
-    await Bun.write(join(t.path, "intent", "one", "intent.md"), "---\nstatus: blocked\npriority: high\nnote: Tests failed three times.\n---\n# Intent: one\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
+    await intent(t.path, "one", "status: blocked\npriority: high\nnote: Tests failed three times.");
     const trace = Trace.open(t.path);
     trace.upsertIntent("one", "blocked", "high");
     const seq = trace.phaseStart("one", "fix", "agent");
@@ -39,5 +51,52 @@ describe("renderStatus", () => {
     const t = tempDir();
     expect(await renderStatus(t.path)).toMatch(/No intents yet/);
     t.cleanup();
+  });
+
+  test("a Needs attention block sits under the loop line, the same list as the dashboard's", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "busy", "status: building");
+      expect((await renderStatus(t.path, 100)).split("\n").slice(0, 3)).toEqual(["Loop: Stopped", "", "Nothing needs you right now."]);
+      await intent(t.path, "stuck", "status: blocked\nnote: The tests failed three times.");
+      await intent(t.path, "idea", "status: draft");
+      const text = await renderStatus(t.path, 100);
+      const block = text.slice(0, text.indexOf("\n\nChange"));
+      expect(block).toBe([
+        "Loop: Stopped",
+        "",
+        "Needs attention:",
+        "- Blocked (stuck): The tests failed three times.",
+        "- Waiting for you (idea): A draft. When it says what you want, change the status line to accepted.",
+        "  To drop it, set it to closed.",
+      ].join("\n"));
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("never pads the last column, and wraps long notes to the width", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "quiet", "status: building");
+      const long = "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.";
+      await intent(t.path, "stuck", `status: blocked\nnote: "${long}"`);
+      const text = await renderStatus(t.path, 100);
+      const lines = text.trimEnd().split("\n");
+      for (const l of lines) {
+        expect(l).toBe(l.trimEnd());
+        expect(l.length).toBeLessThanOrEqual(100);
+      }
+      // The note continues on the next lines, under its own column.
+      const noteAt = lines.find((l) => l.startsWith("Change"))!.indexOf("Note");
+      const at = lines.findIndex((l) => l.startsWith("stuck"));
+      expect(lines[at]!.slice(noteAt)).toStartWith("The reviewer");
+      expect(lines[at + 1]!.slice(0, noteAt).trim()).toBe("");
+      expect(lines.slice(at).map((l) => l.slice(noteAt)).join(" ")).toContain("An engineer needs to look at the change.");
+    } finally {
+      t.cleanup();
+    }
   });
 });

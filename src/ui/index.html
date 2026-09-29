@@ -69,7 +69,7 @@
 <div id="attention" class="attention"></div>
 
 <h2>Changes</h2>
-<p class="muted" style="margin:0 0 6px">Click a change to see each step it went through, what it cost, and the files it left.</p>
+<p class="muted" style="margin:0 0 6px">Click a change to read its documents and see each step it went through, what it cost, and the files it left.</p>
 <div class="scroll">
   <table>
     <thead><tr><th>Change</th><th>Priority</th><th>Where it is</th><th>For</th><th class="num">Cost</th><th>Note</th></tr></thead>
@@ -103,7 +103,6 @@
   };
   const time = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   const notAllowed = (d) => d.length + (d.length === 1 ? " command was" : " commands were") + " not allowed: " + d.join(", ");
-  const KIND = { paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings", blocked: "Stopped", unreadable: "Cannot read intent.md", waiting: "Waiting for you" };
 
   function renderLoop(loop) {
     const el = document.getElementById("loop");
@@ -114,7 +113,7 @@
 
   function renderAttention(items) {
     document.getElementById("attention").innerHTML = items.length
-      ? items.map((a) => `<div class="item ${esc(a.kind)}"><div class="kind">${esc(KIND[a.kind] || a.kind)}</div>
+      ? items.map((a) => `<div class="item ${esc(a.kind)}"><div class="kind">${esc(a.label || a.kind)}</div>
           <b>${esc(a.title)}</b>${a.slug && a.slug !== a.title ? ` <span class="muted">${esc(a.slug)}</span>` : ""}<div>${esc(a.what)}</div></div>`).join("")
       : `<div class="calm">Nothing needs you right now.</div>`;
   }
@@ -132,7 +131,10 @@
       ? `<h3 style="font-size:13px;margin:12px 0 4px">Gate checks</h3><table><thead><tr><th>Gate</th><th>Check</th><th>Result</th><th>Evidence</th><th>When</th></tr></thead><tbody>
         ${i.gates.map((g) => `<tr><td>${esc(g.gate)}</td><td>${esc(g.check)}</td><td><span class="tag ${esc(g.result)}">${esc(g.result)}</span></td><td>${esc(g.evidence)}</td><td class="muted">${esc(time(g.ts))}</td></tr>`).join("")}</tbody></table>`
       : "";
-    return `<tr class="drill"><td colspan="6"><div class="muted" style="margin-bottom:6px">Status line: <code>${esc(i.status)}</code> · priority ${esc(i.priority)}</div>${phases}${gates}</td></tr>`;
+    const docs = i.documents.length
+      ? `<div class="files" style="margin-bottom:8px">Documents: ${i.documents.map((d) => `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)}</a>`).join("")}</div>`
+      : "";
+    return `<tr class="drill"><td colspan="6"><div class="muted" style="margin-bottom:6px">Status line: <code>${esc(i.status)}</code> · priority ${esc(i.priority)}</div>${docs}${phases}${gates}</td></tr>`;
   }
 
   function renderIntents(s) {
