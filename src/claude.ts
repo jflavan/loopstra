@@ -1,4 +1,4 @@
-import { lastLine, spawnBounded } from "./shell";
+import { lastLine, spawnBounded, withBunOnPath } from "./shell";
 import { StopRequested } from "./stop";
 
 export interface StreamEvent {
@@ -180,7 +180,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
 
   const r = await spawnBounded({
-    cmd, cwd: input.cwd, env: { ...process.env, ...input.env }, stdin: input.prompt,
+    cmd, cwd: input.cwd, env: withBunOnPath({ ...process.env, ...input.env }), stdin: input.prompt,
     timeoutMs: input.timeoutMs, onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
     // Reading ends at the result event; the process then gets the grace to exit before it is killed.
     onLine: (line) => {

@@ -1,3 +1,4 @@
+import { delimiter, dirname } from "node:path";
 import { onStop, StopRequested, throwIfStopping } from "./stop";
 
 /** Resolves to the promise's value, or to `fallback` once `ms` pass. Never waits longer than `ms`. */
@@ -24,17 +25,104 @@ export function lastLine(s: string, skip?: RegExp): string {
  */
 const DETACHED = process.platform !== "win32";
 
-/** Kills a process and everything it started. Best effort; never throws, never waits more than a few seconds. */
+/** How long a POSIX process group gets to end after SIGTERM before it is SIGKILLed. */
+const TERM_GRACE_MS = 1_500;
+
+/** True while any process of the group `pgid` is left (POSIX). */
+function groupAlive(pgid: number): boolean {
+  try { process.kill(-pgid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; }
+}
+
+/**
+ * Every process below `pid`, from `ps -A -o pid=,ppid=` (POSIX). It catches grandchildren that
+ * left the child's process group (their own group or session). Empty when ps cannot be run.
+ */
+async function descendants(pid: number): Promise<number[]> {
+  try {
+    const ps = Bun.spawn({ cmd: ["ps", "-A", "-o", "pid=,ppid="], stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const text = await within(new Response(ps.stdout).text(), 2_000, "");
+    const children = new Map<number, number[]>();
+    for (const line of text.split("\n")) {
+      const [c, p] = line.trim().split(/\s+/).map(Number);
+      if (!c || p === undefined || Number.isNaN(p)) continue;
+      children.set(p, [...(children.get(p) ?? []), c]);
+    }
+    const out: number[] = [];
+    const queue = [pid];
+    while (queue.length) {
+      for (const c of children.get(queue.shift()!) ?? []) {
+        if (c === pid || out.includes(c)) continue;
+        out.push(c);
+        queue.push(c);
+      }
+    }
+    return out;
+  } catch { return []; }
+}
+
+/**
+ * Kills a process and everything it started. Best effort; never throws, never waits more than a few
+ * seconds. POSIX: SIGTERM to the process group, up to TERM_GRACE_MS for it to go, then SIGKILL to
+ * the group and to every descendant found under the child (collected before anything is signalled,
+ * since orphans are adopted by init and drop out of the tree). Windows: taskkill /T /F.
+ */
 async function killTree(proc: { pid: number; kill: (signal?: number | NodeJS.Signals) => void }): Promise<void> {
   try {
     if (process.platform === "win32") {
       const k = Bun.spawn({ cmd: ["taskkill", "/T", "/F", "/PID", String(proc.pid)], stdout: "ignore", stderr: "ignore", stdin: "ignore" });
       await within(k.exited, 5_000, null);
     } else {
-      try { process.kill(-proc.pid, "SIGKILL"); } catch { /* not a group leader */ }
+      const below = await descendants(proc.pid);
+      try { process.kill(-proc.pid, "SIGTERM"); } catch { /* not a group leader, or already gone */ }
+      const until = Date.now() + TERM_GRACE_MS;
+      while (groupAlive(proc.pid) && Date.now() < until) await Bun.sleep(50);
+      const later = await descendants(proc.pid);
+      try { process.kill(-proc.pid, "SIGKILL"); } catch { /* already gone */ }
+      for (const pid of new Set([...below, ...later])) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
     }
   } catch { /* fall through to a direct kill */ }
   try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+}
+
+/**
+ * The children spawnBounded started that have not exited yet. When this process exits (a second
+ * Ctrl-C, or an exit during a stop grace) each one's tree is killed, so no child outlives Loopstra.
+ */
+const live = new Set<number>();
+let exitHookInstalled = false;
+
+/** Kills what is left of each live child's tree. Synchronous: it runs in the process's exit handler. */
+function killLiveChildren(): void {
+  for (const pid of live) {
+    try {
+      if (process.platform === "win32") Bun.spawnSync({ cmd: ["taskkill", "/T", "/F", "/PID", String(pid)], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      else { try { process.kill(-pid, "SIGKILL"); } catch { /* not a group leader */ } }
+    } catch { /* best effort */ }
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+  live.clear();
+}
+
+function track(proc: { pid: number; exited: Promise<unknown> }): void {
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on("exit", killLiveChildren);
+  }
+  live.add(proc.pid);
+  void proc.exited.then(() => live.delete(proc.pid), () => live.delete(proc.pid));
+}
+
+/**
+ * `env` with the folder of the running Bun first on its PATH, so children (agent sessions, project
+ * commands, the hook) find the same `bun` even when Loopstra was started with a short PATH (cron).
+ * Keeps the existing key's spelling (`Path` on Windows).
+ */
+export function withBunOnPath(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+  const dir = dirname(process.execPath);
+  const current = env[key] ?? "";
+  if (current.split(delimiter)[0] === dir) return env;
+  return { ...env, [key]: current ? `${dir}${delimiter}${current}` : dir };
 }
 
 export interface SpawnOptions {
@@ -90,6 +178,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   } catch (e) {
     return { code: 127, out: "", err: errorText(e), started: false, timedOut: false, stopped: false };
   }
+  track(proc);
 
   let stopped = false;
   let grace: ReturnType<typeof setTimeout> | undefined;
@@ -186,7 +275,7 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: { ...process.env, ...opts.env }, timeoutMs, onStop: "kill" });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath({ ...process.env, ...opts.env }), timeoutMs, onStop: "kill" });
   if (r.stopped) throw new StopRequested();
   if (!r.started) throw new Error(r.err);
   let output = r.out + r.err;

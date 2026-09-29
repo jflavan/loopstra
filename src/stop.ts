@@ -1,7 +1,8 @@
 /**
- * Graceful stop. The first Ctrl-C (or SIGTERM, or SIGBREAK on Windows) asks the loop to stop: no new
- * agent session or project command starts, one in flight is killed, and the step is left in its
- * in-progress status so the next start resumes it. A second signal exits at once.
+ * Graceful stop. The first Ctrl-C (or SIGTERM; SIGHUP on POSIX, SIGBREAK on Windows) asks the loop
+ * to stop: no new agent session or project command starts, one in flight is killed, and the step is
+ * left in its in-progress status so the next start resumes it. A second signal exits at once, and
+ * every child still running is killed with its tree on the way out (see spawnBounded).
  *
  * This is process-wide state by nature (a signal reaches the whole process), so it lives here and
  * nowhere else.
@@ -87,11 +88,12 @@ export function onStopSignal(exit: (code: number) => void = (code) => process.ex
   say("\nStopping. The current step is interrupted and resumes on the next start. Press Ctrl-C again to exit at once.");
 }
 
-const SIGNALS: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM"];
+// SIGHUP (the terminal closed) stops like SIGTERM on POSIX; Windows has no such signal to catch.
+export const STOP_SIGNALS: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 
 /** Installs the stop handlers once. Returns a function that removes them. */
 export function installStopSignals(): () => void {
   const handler = () => onStopSignal();
-  for (const s of SIGNALS) process.on(s, handler);
-  return () => { for (const s of SIGNALS) process.off(s, handler); };
+  for (const s of STOP_SIGNALS) process.on(s, handler);
+  return () => { for (const s of STOP_SIGNALS) process.off(s, handler); };
 }
