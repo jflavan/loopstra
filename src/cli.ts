@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
-const [command = "help"] = Bun.argv.slice(2);
+import { renderStatus } from "./commands/status";
+
+const [command = "help", ...rest] = Bun.argv.slice(2);
+const root = process.cwd();
 
 const HELP = `loopstra <command>
 
@@ -10,10 +13,16 @@ const HELP = `loopstra <command>
   ui        local dashboard
 `;
 
-if (command === "help" || command === "--help" || command === "-h") {
-  console.log(HELP);
-} else {
-  console.error(`Unknown or not yet implemented command: ${command}`);
-  console.log(HELP);
-  process.exit(1);
+async function main(): Promise<number> {
+  switch (command) {
+    case "help": case "--help": case "-h":
+      console.log(HELP); return 0;
+    case "status":
+      process.stdout.write(await renderStatus(root)); return 0;
+    default:
+      console.error(`Unknown or not yet implemented command: ${command}`);
+      console.log(HELP); return 1;
+  }
 }
+
+process.exit(await main());
