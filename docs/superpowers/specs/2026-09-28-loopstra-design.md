@@ -430,9 +430,20 @@ Behavior:
   `structured_output`, `total_cost_usd`, `usage`, and `subtype` from the
   result event.
 - Kills the process after `timeoutMs` and returns a failure. A result subtype
-  other than `success` is a failure with the subtype as the reason.
-- The read-only tool set is `Read, Glob, Grep, LS` and for verify and
-  done-check additionally `Bash(<each configured command>)`.
+  other than `success` is a failure with the subtype as the reason. A
+  `--resume` whose session is gone ("No conversation found" on stderr) is
+  `no-session`, checked before the result, since the CLI also sends an
+  `error_during_execution` result then.
+- The read-only tool set is `Read, Glob, Grep` (the write tools are removed
+  with `--disallowedTools`) and for verify and done-check additionally
+  `Bash(<each configured command>)` and read-only git. Every session also
+  loses the `PowerShell` tool, so on Windows shell commands go through Bash,
+  which the allow rules cover.
+- Reads `permission_denials` from the result event: the commands the session
+  tried and was not allowed to run are kept on the phase in the trace (as
+  allow-rule text, e.g. `Bash(git tag v1)`) and shown by the dashboard and
+  `tail` ("N commands were not allowed"), so an engineer can add allow
+  rules. The owner note stays plain.
 
 The adapter is the only module that knows the CLI exists. Tests use a fake
 `claude` script that replays fixture JSONL.

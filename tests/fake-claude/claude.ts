@@ -4,6 +4,9 @@
 // $LOOPSTRA_FAKE_FIXTURE_DIR/<$LOOPSTRA_PHASE>.jsonl, fixtures/<$LOOPSTRA_PHASE>.jsonl, fixtures/simple-success.jsonl.
 // A fixture line {"type":"fake_action","write":{"path":"...","content":"..."}} writes a file
 // under the current directory before the remaining lines are emitted, so a fake "build" can change code.
+// A fixture line {"type":"fake_exit","code":1,"stderr":"..."} writes that line to stderr and exits
+// with that code at once (an outage: the CLI gives up without a result).
+// Like the real CLI, the process exits 1 after a result event with is_error.
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -31,9 +34,11 @@ if (fixture.endsWith("hang.jsonl")) {
   await new Promise(() => {});
 }
 
-// Like the real CLI when a resumed session no longer exists: an error on stderr, no result.
+// Like the real CLI (2.1.x) when a resumed session no longer exists: an error result on stdout,
+// the reason on stderr, exit 1.
 const resumeAt = args.indexOf("--resume");
 if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
+  console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "fresh-after-missing", total_cost_usd: 0, usage: {} }));
   console.error("No conversation found with session ID: missing-session");
   process.exit(1);
 }
@@ -42,19 +47,25 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
 // the way a real session can leave a background process behind.
 const linger = fixture.endsWith("linger.jsonl");
 
+let failed = false;
 for (const line of (await Bun.file(fixture).text()).split("\n")) {
   if (!line.trim()) continue;
-  const e = JSON.parse(line) as { type: string; write?: { path: string; content: string } };
+  const e = JSON.parse(line) as { type: string; is_error?: boolean; write?: { path: string; content: string }; code?: number; stderr?: string };
   if (e.type === "fake_action" && e.write) {
     const target = join(process.cwd(), e.write.path);
     mkdirSync(dirname(target), { recursive: true });
     await Bun.write(target, e.write.content);
     continue;
   }
+  if (e.type === "fake_exit") {
+    if (e.stderr) console.error(e.stderr);
+    process.exit(e.code ?? 1);
+  }
+  if (e.type === "result" && e.is_error) failed = true;
   console.log(line);
 }
 if (linger) {
   Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.sleep(600000)"], stdout: "inherit", stderr: "inherit", stdin: "ignore" });
   await new Promise(() => {});
 }
-process.exit(0);
+process.exit(failed ? 1 : 0);

@@ -112,10 +112,22 @@ export class Trace {
     return seq;
   }
 
-  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail" | "interrupted"; costUsd?: number; sessionId?: string; error?: string }): void {
+  /** Ends a phase. `denied`: commands the session was not allowed to run, kept on the phase_end event. */
+  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail" | "interrupted"; costUsd?: number; sessionId?: string; error?: string; denied?: string[] }): void {
     this.db.run("UPDATE phases SET status = ?, ended = ?, cost_usd = ?, session_id = COALESCE(?, session_id), error = ? WHERE slug = ? AND seq = ?",
       [r.status, now(), r.costUsd ?? 0, r.sessionId ?? null, r.error ?? null, slug, seq]);
-    this.event(slug, "phase_end", { status: r.status, cost_usd: r.costUsd ?? 0, error: r.error ?? null }, seq);
+    this.event(slug, "phase_end", { status: r.status, cost_usd: r.costUsd ?? 0, error: r.error ?? null, ...(r.denied?.length ? { denied: r.denied } : {}) }, seq);
+  }
+
+  /** The commands each phase of a change was not allowed to run, by phase seq (phases with none are absent). */
+  deniedCommands(slug: string): Map<number, string[]> {
+    const rows = this.db.query<{ phase_seq: number; payload: string }, [string]>(
+      "SELECT phase_seq, payload FROM events WHERE slug = ? AND type = 'phase_end' AND instr(payload, '\"denied\"') > 0 ORDER BY id").all(slug);
+    const out = new Map<number, string[]>();
+    for (const r of rows) {
+      try { out.set(r.phase_seq, (JSON.parse(r.payload) as { denied: string[] }).denied); } catch { /* unreadable row */ }
+    }
+    return out;
   }
 
   gate(slug: string, gate: string, check: string, result: "pass" | "fail" | "waiting", evidence: string): void {

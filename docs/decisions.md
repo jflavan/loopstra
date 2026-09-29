@@ -195,6 +195,9 @@ Sources of truth, in order of precedence when they conflict:
 - **gh signed in (H27).** With a remote, `start` also refuses when `gh auth status` fails: "GitHub CLI is installed but not signed in. Run gh auth login, then start again."
 - **Closed changes (H16).** The scheduler's cleanup removes a closed change's worktree once it has nothing uncommitted (untracked files count); the branch is kept. A worktree with uncommitted work is left, traced once.
 - **Damaged trace (H17).** A `trace.db` that is not a database (or is malformed) is renamed to `trace.db.corrupt-<time>` and a fresh one started, with a plain console line and an event in the new db. A lock or other error is not treated as damage.
+- **Missing session (H21).** A `--resume` whose session is gone is recognised from stderr ("No conversation found") before any result check, since the CLI also sends an `error_during_execution` result; the continuation then runs once in a fresh session.
+- **No PowerShell (H22).** Every session gets `--disallowedTools PowerShell` (read-only sessions also lose Edit, Write, NotebookEdit), so on Windows shell commands go through Bash, which the allow rules cover.
+- **Refused commands (H23).** The result event's `permission_denials` are collected and kept on the phase (the `phase_end` event's `denied`, as allow-rule text like `Bash(git tag v1)`); a failed phase's traced error names them. The dashboard's phase drill-down and event log, and `tail`, say "N commands were not allowed: ...". The owner note stays plain.
 
 ## Open
 

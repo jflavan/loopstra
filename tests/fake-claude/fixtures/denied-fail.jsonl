@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-denied-fail","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-denied-fail","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"fail","summary":"could not push","notes_for_next_phase":"","priority":"normal","missing_sections":[],"question":""},"result":"ok","permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"git push origin main"}}]}

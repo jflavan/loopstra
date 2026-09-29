@@ -80,10 +80,11 @@ describe("agentPhase tools and prompt", () => {
     const gitRead = ["Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"];
     expect(toolsFor(ctx, "read+commands")).toEqual(["Read", "Glob", "Grep", "Bash(echo ok *)", "Bash(bun run start *)", ...gitRead]);
     expect(toolsFor(ctx, "read+git")).toEqual(["Read", "Glob", "Grep", ...gitRead]);
-    expect(disallowedFor("read")).toEqual(["Edit", "Write", "NotebookEdit"]);
-    expect(disallowedFor("read+git")).toEqual(["Edit", "Write", "NotebookEdit"]);
-    expect(disallowedFor("read+commands")).toEqual(["Edit", "Write", "NotebookEdit"]);
-    expect(disallowedFor("build")).toEqual([]);
+    // PowerShell is removed everywhere, so shell commands go through Bash, which the allow rules cover.
+    expect(disallowedFor("read")).toEqual(["Edit", "Write", "NotebookEdit", "PowerShell"]);
+    expect(disallowedFor("read+git")).toEqual(["Edit", "Write", "NotebookEdit", "PowerShell"]);
+    expect(disallowedFor("read+commands")).toEqual(["Edit", "Write", "NotebookEdit", "PowerShell"]);
+    expect(disallowedFor("build")).toEqual(["PowerShell"]);
     const build = toolsFor(ctx, "build");
     build.push("Bash(rm *)");
     expect(ctx.cfg.claude.allowed_tools).not.toContain("Bash(rm *)");
@@ -91,7 +92,7 @@ describe("agentPhase tools and prompt", () => {
     const argsFile = join(repo.path, "args.json");
     await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
     const recorded = await Bun.file(argsFile).json();
-    expect(recorded.args).toEqual(expect.arrayContaining(["--allowedTools", "Read,Glob,Grep", "--disallowedTools", "Edit,Write,NotebookEdit"]));
+    expect(recorded.args).toEqual(expect.arrayContaining(["--allowedTools", "Read,Glob,Grep", "--disallowedTools", "Edit,Write,NotebookEdit,PowerShell"]));
     trace.close(); repo.cleanup();
   });
 
@@ -156,6 +157,27 @@ describe("agentPhase failures", () => {
       expect(r.note).toBe("This step hit its spending limit. An engineer may need to raise the limit.");
     }
     expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("commands the session was not allowed to run are recorded on the phase", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:denied");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    const end = trace.events("x").find((e) => e.type === "phase_end")!;
+    expect(JSON.parse(end.payload).denied).toEqual(["Bash(git tag v1)", "Write(/repo/notes.txt)"]);
+    expect(trace.deniedCommands("x").get(1)).toEqual(["Bash(git tag v1)", "Write(/repo/notes.txt)"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a failed phase with denied commands keeps the owner note plain and names them in the trace", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:denied-fail");
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.note).toBe("The assistant reported it could not finish this step.");
+    expect(trace.phases("x")[0]?.error).toContain("not allowed: Bash(git push origin main)");
     trace.close(); repo.cleanup();
   });
 

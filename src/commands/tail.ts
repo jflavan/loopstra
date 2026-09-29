@@ -27,7 +27,7 @@ export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: 
     ? (first ? lastOf(trace.events(opts.slug, 0, 100_000), 50) : trace.events(opts.slug, cursor.lastId))
     : trace.recentEvents(cursor.lastId, first ? 50 : 500);
   for (const e of rows) {
-    out.push(format(e));
+    out.push(...format(e));
     cursor.lastId = Math.max(cursor.lastId, e.id);
   }
   return out;
@@ -52,12 +52,22 @@ function clock(d: Date): string {
   return d.toTimeString().slice(0, 8);
 }
 
-function format(e: EventRow): string {
+/** One line per event; a phase that was refused commands gets a second line naming them. */
+function format(e: EventRow): string[] {
   let payload: Record<string, unknown>;
   try { payload = JSON.parse(e.payload) as Record<string, unknown>; } catch { payload = { payload: e.payload }; }
+  const denied = Array.isArray(payload?.denied) ? (payload.denied as string[]) : [];
   const detail = Object.entries(payload ?? {})
-    .filter(([k]) => k !== "stack")
+    .filter(([k]) => k !== "stack" && k !== "denied")
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ").replace(/\s*\r?\n\s*/g, " ").slice(0, 200);
-  return `${clock(new Date(e.ts))} ${e.slug.padEnd(24)} ${e.type.padEnd(13)} ${detail}`;
+  const head = `${clock(new Date(e.ts))} ${e.slug.padEnd(24)} `;
+  const lines = [`${head}${e.type.padEnd(13)} ${detail}`];
+  if (denied.length) lines.push(`${head}${"not allowed".padEnd(13)} ${deniedText(denied)}`);
+  return lines;
+}
+
+/** "2 commands were not allowed: Bash(git tag v1), Bash(git push)". */
+export function deniedText(denied: string[]): string {
+  return `${denied.length} ${denied.length === 1 ? "command was" : "commands were"} not allowed: ${denied.join(", ")}`;
 }

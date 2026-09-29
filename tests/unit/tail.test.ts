@@ -32,6 +32,12 @@ describe("tail", () => {
       const lines = tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now });
       expect(lines.slice(1).every((l) => l.includes(" two "))).toBe(true);
       expect(lines).toHaveLength(2);
+
+      // A phase that tried commands it was not allowed to run says so on a line of its own.
+      const seq = trace.phaseStart("two", "build", "agent");
+      trace.phaseEnd("two", seq, { status: "success", denied: ["Bash(git tag v1)", "Bash(git push)"] });
+      const denied = tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now });
+      expect(denied.at(-1)).toContain("2 commands were not allowed: Bash(git tag v1), Bash(git push)");
     } finally {
       trace.close();
       t.cleanup();

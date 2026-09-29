@@ -77,7 +77,7 @@ describe("review", () => {
     const allowed = recorded.args[recorded.args.indexOf("--allowedTools") + 1] as string;
     expect(allowed.split(",")).toEqual(expect.arrayContaining(["Read", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]));
     expect(allowed).not.toContain("Edit");
-    expect(recorded.args).toEqual(expect.arrayContaining(["--disallowedTools", "Edit,Write,NotebookEdit"]));
+    expect(recorded.args).toEqual(expect.arrayContaining(["--disallowedTools", "Edit,Write,NotebookEdit,PowerShell"]));
     expect(recorded.prompt).toContain("git diff main...HEAD");
     trace.close(); repo.cleanup();
   });

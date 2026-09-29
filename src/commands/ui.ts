@@ -15,6 +15,8 @@ export interface PhaseView {
   /** Ended minus started; for a running phase, so far. */
   durationMs: number; costUsd: number; error: string | null;
   files: Array<{ name: string; url: string }>;
+  /** Commands the session was not allowed to run (allow-rule text). */
+  denied: string[];
 }
 
 export interface IntentView {
@@ -83,6 +85,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
 
 function intentView(root: string, trace: Trace, i: Intent, now: Date): IntentView {
   const fm = i.file.frontmatter;
+  const denied = trace.deniedCommands(i.slug);
   const phases: PhaseView[] = trace.phases(i.slug).map((p) => {
     const end = p.ended ? Date.parse(p.ended) : now.getTime();
     const dir = `${p.seq}-${p.name}`;
@@ -92,6 +95,7 @@ function intentView(root: string, trace: Trace, i: Intent, now: Date): IntentVie
     return {
       seq: p.seq, name: p.name, kind: p.kind, status: p.status, started: p.started, ended: p.ended,
       durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.cost_usd ?? 0, error: p.error, files,
+      denied: denied.get(p.seq) ?? [],
     };
   });
   const since = statusSince(trace, i);

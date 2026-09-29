@@ -20,6 +20,15 @@ export interface Collected {
   resultText: string;
   events: StreamEvent[];
   isError: boolean;
+  /** What the session tried and was not allowed (the result event's permission_denials), as allow-rule text, e.g. `Bash(git tag v1)`. */
+  denied: string[];
+}
+
+/** One permission denial as allow-rule text: the command for Bash, the path for file tools, else the tool name. */
+function deniedText(d: { tool_name?: string; tool_input?: Record<string, unknown> }): string {
+  const input = d.tool_input ?? {};
+  const what = input.command ?? input.file_path ?? input.notebook_path ?? input.path ?? input.pattern;
+  return typeof what === "string" && what ? `${d.tool_name ?? "?"}(${what})` : d.tool_name ?? "?";
 }
 
 /** Accumulates `--output-format stream-json` lines into one result. */
@@ -47,6 +56,7 @@ export class StreamCollector {
   finish(): Collected {
     const r = this.result as (StreamEvent & {
       structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
+      permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>;
     }) | null;
     return {
       sessionId: this.sessionId ?? r?.session_id ?? null,
@@ -58,6 +68,7 @@ export class StreamCollector {
       resultText: r?.result ?? "",
       events: this.events,
       isError: r?.is_error ?? r === null,
+      denied: Array.isArray(r?.permission_denials) ? r.permission_denials.map(deniedText) : [],
     };
   }
 }
@@ -216,10 +227,9 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const collected = collector.finish();
   if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
   const lastErr = stderr.trim().split("\n").pop()?.trim() ?? "";
-  if (collected.subtype === "missing_result") {
-    if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
-    return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
-  }
+  // Before any subtype check: the CLI reports a missing session with an error result as well.
+  if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
+  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);

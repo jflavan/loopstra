@@ -91,6 +91,30 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("a missing session is no-session even though the CLI also sends an error result", async () => {
+    const t = tempDir();
+    const gone = await runPhase({ cwd: t.path, schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 10_000,
+      maxBudgetUsd: 1, executable: FAKE, prompt: "FIXTURE:simple-success", resume: "missing-session" });
+    // The real shape (Claude Code 2.1.x): a result event error_during_execution, the reason on stderr, exit 1.
+    expect(gone.subtype).toBe("error_during_execution");
+    expect(gone.exitCode).toBe(1);
+    expect(gone.ok).toBe(false);
+    expect(gone.reason).toBe("no-session");
+    t.cleanup();
+  });
+
+  test("collects the commands the session was not allowed to run", async () => {
+    const t = tempDir();
+    const r = await runPhase({ cwd: t.path, schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 10_000,
+      maxBudgetUsd: 1, executable: FAKE, prompt: "FIXTURE:denied" });
+    expect(r.ok).toBe(true);
+    expect(r.denied).toEqual(["Bash(git tag v1)", "Write(/repo/notes.txt)"]);
+    const plain = await runPhase({ cwd: t.path, schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 10_000,
+      maxBudgetUsd: 1, executable: FAKE, prompt: "FIXTURE:simple-success" });
+    expect(plain.denied).toEqual([]);
+    t.cleanup();
+  });
+
   test("passes --disallowedTools when given", async () => {
     const t = tempDir();
     const argsFile = join(t.path, "args.json");

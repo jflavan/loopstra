@@ -41,7 +41,7 @@ describe("ui state", () => {
       trace.close();
       const s = await buildState(t.path, 0);
       expect(s.intents[0]).toMatchObject({ slug: "one", title: "one", status: "building", plain: "building and testing", priority: "high", costUsd: 0.3 });
-      expect(s.intents[0]?.phases[0]).toMatchObject({ seq: 1, name: "build", kind: "agent", status: "success", costUsd: 0.3 });
+      expect(s.intents[0]?.phases[0]).toMatchObject({ seq: 1, name: "build", kind: "agent", status: "success", costUsd: 0.3, denied: [] });
       expect(s.intents[0]?.gates[0]).toMatchObject({ gate: "plan", check: "headings", result: "pass" });
       expect(s.signals[0]?.name).toBe("main_health");
       expect(s.health).toMatchObject({ result: "pass" });
@@ -49,6 +49,23 @@ describe("ui state", () => {
       expect(s.lastEventId).toBeGreaterThan(0);
       // Only newer events on the next poll.
       expect((await buildState(t.path, s.lastEventId)).events).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a phase lists the commands it was not allowed to run", async () => {
+    const t = tempDir();
+    try {
+      await intent(t.path, "one", "status: building");
+      const trace = Trace.open(t.path);
+      const seq = trace.phaseStart("one", "build", "agent");
+      trace.phaseEnd("one", seq, { status: "success", denied: ["Bash(git tag v1)"] });
+      trace.close();
+      const s = await buildState(t.path, 0);
+      expect(s.intents[0]?.phases[0]?.denied).toEqual(["Bash(git tag v1)"]);
+      const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
+      expect(page).toContain("not allowed: ");
     } finally {
       t.cleanup();
     }

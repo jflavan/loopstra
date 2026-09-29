@@ -41,6 +41,11 @@ const READ_TOOLS = ["Read", "Glob", "Grep"];
 const GIT_READ = ["git diff", "git log", "git show", "git status"].map((c) => `Bash(${c} *)`);
 /** Removed from read-only sessions outright (a bare name in --disallowedTools removes the tool). */
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+/**
+ * Removed from every session: on Windows the CLI also offers a PowerShell tool, which the Bash(...)
+ * allow rules do not cover. Without it the agent uses Bash, where the rules apply.
+ */
+const NO_POWERSHELL = ["PowerShell"];
 
 /** Tools a session may use without asking. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
@@ -53,9 +58,9 @@ export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c} *)`), ...GIT_READ];
 }
 
-/** Tools a session must not have. Read-only sessions lose every file-writing tool. */
+/** Tools a session must not have. Read-only sessions lose every file-writing tool; no session has PowerShell. */
 export function disallowedFor(set: ToolSet): string[] {
-  return set === "build" ? [] : [...WRITE_TOOLS];
+  return set === "build" ? [...NO_POWERSHELL] : [...WRITE_TOOLS, ...NO_POWERSHELL];
 }
 
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
@@ -97,8 +102,11 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   throwIfStopping();
   const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
+  // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
+  let denied: string[] = [];
   const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}` });
+    const refused = denied.length ? `; not allowed: ${denied.join(", ")}` : "";
+    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}${refused}`, denied });
     return { ok: false, reason, note: ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
@@ -127,6 +135,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       },
     });
 
+    denied = r.denied;
     if (!r.ok) return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
@@ -136,7 +145,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     }
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined });
+    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested) {
