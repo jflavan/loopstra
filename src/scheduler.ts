@@ -5,9 +5,10 @@ import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, samePath, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { activePause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { ownerNote, probeAssistant } from "./phases";
 import { syncMain } from "./remote";
-import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanRepo, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
@@ -108,13 +109,7 @@ export async function tick(root: string): Promise<TickResult> {
       out.stopped = true;
       return out;
     }
-    if (e instanceof AssistantUnavailable) {
-      // Not the intent's fault either: it keeps its status, and the loop backs off before trying again.
-      const p = pauseAfterUnavailable(root);
-      trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, detail: e.detail });
-      out.paused = p.reason;
-      return out;
-    }
+    if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
@@ -125,6 +120,43 @@ export async function tick(root: string): Promise<TickResult> {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** After this many pauses in a row for the same change, phase, and line, a probe checks whether it really is an outage. */
+export const PROBE_AFTER = 3;
+
+/**
+ * The assistant could not be used. Not the intent's fault: it keeps its status, and the loop backs
+ * off before trying again. When the same phase keeps failing with the same line, a tiny probe
+ * session tells an outage from the phase's own failure: the probe gets through → the pause ends
+ * and the change is blocked like any crash (the detail, probe included, goes to the trace); the
+ * probe does not → the loop keeps backing off.
+ */
+async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, e: AssistantUnavailable): Promise<TickResult> {
+  const cause = out.picked && e.phase ? { slug: out.picked, phase: e.phase, line: e.line } : null;
+  const p = pauseAfterUnavailable(root, new Date(), cause);
+  trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
+  out.paused = p.reason;
+  if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
+  try {
+    const probe = await probeAssistant(root, cfg, trace, cause.slug);
+    if (!probe.reached) {
+      trace.event(cause.slug, "pause", { note: "the probe could not reach the assistant either; still backing off", probe: probe.detail });
+      return out;
+    }
+    clearPause(root);
+    out.paused = undefined;
+    const ctx = new StepContext(root, cfg, trace, await readIntent(root, cause.slug));
+    trace.event(cause.slug, "error", {
+      where: "probe", phase: cause.phase, line: cause.line, repeats: p.repeats,
+      detail: `the ${cause.phase} phase failed ${p.repeats} times in a row with the same line, but a probe session reached the assistant, so the failure is the phase's own (crash)`,
+    });
+    out.result = await blockSafely(ctx, ownerNote("crash"));
+  } catch (err) {
+    if (err instanceof StopRequested) { out.stopped = true; return out; }
+    trace.event(cause.slug, "error", { where: "probe", error: errorText(err) });
+  }
+  return out;
 }
 
 /**

@@ -16,6 +16,9 @@ claude:
     strong: opus
   timeout_minutes: 30
   max_budget_usd: 5
+  # What a build session may do without asking. The commands above (test, lint, build, run, install)
+  # are always added. Git stays read-only: Loopstra makes every commit itself. The default:
+  # allowed_tools: [Read, Edit, Write, Glob, Grep, "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]
 
 # Gates between stages. human: status (a person edits the status line) | none; the merge gate also
 # takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.

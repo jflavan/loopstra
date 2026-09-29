@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
-import { modelFor } from "./config";
+import { modelFor, type Config } from "./config";
+import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
@@ -11,7 +12,8 @@ import { AssistantUnavailable, StopRequested, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
- * configured project commands except install, and read-only git (verify, done-check). build: config.
+ * configured project commands except install, and read-only git (verify, done-check). build:
+ * `claude.allowed_tools` plus every configured project command, install included.
  */
 export type ToolSet = "read" | "read+git" | "read+commands" | "build";
 
@@ -52,11 +54,13 @@ const NO_POWERSHELL = ["PowerShell"];
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
-  if (set === "build") return [...ctx.cfg.claude.allowed_tools];
-  // The install command is not for judges. `Bash(<cmd> *)` matches the command alone and with arguments.
-  const { test, lint, build, run } = ctx.cfg.commands;
-  const cmds = [test, lint, build, run].filter((c): c is string => !!c);
-  return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c} *)`), ...GIT_READ];
+  const { test, lint, build, run, install } = ctx.cfg.commands;
+  // `Bash(<cmd> *)` matches the command alone and with arguments.
+  const rules = (cmds: Array<string | undefined>) => cmds.filter((c): c is string => !!c).map((c) => `Bash(${c} *)`);
+  // A build session runs the project's own commands (tests, install) whatever the allow list says.
+  if (set === "build") return [...new Set([...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])])];
+  // The install command is not for judges.
+  return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
 }
 
 /** Tools a session must not have. Read-only sessions lose every file-writing tool; no session has PowerShell. */
@@ -142,7 +146,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     if (!r.ok && unavailable(r.reason)) {
       // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
       ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
-      throw new AssistantUnavailable(r.detail);
+      throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
     }
     if (!r.ok) return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
@@ -170,6 +174,36 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+const PROBE_PROMPT = "This is only a check that you can be reached. Do not use any tools. Answer with ok set to true.";
+/** At most this long, and never longer than a phase may take. */
+const PROBE_TIMEOUT_MS = 2 * 60_000;
+
+/**
+ * One tiny session (cheap model, $0.05, no tools, a trivial prompt) to tell an outage from a phase
+ * that keeps failing with words that look like one. Traced as a `probe` phase of the change.
+ * `reached`: the assistant answered; otherwise `detail` says why not.
+ */
+export async function probeAssistant(root: string, cfg: Config, trace: Trace, slug: string): Promise<{ reached: boolean; detail: string }> {
+  const seq = trace.phaseStart(slug, "probe", "agent");
+  let r: Awaited<ReturnType<typeof runPhase>>;
+  try {
+    r = await runPhase({
+      cwd: root, prompt: PROBE_PROMPT, schema: PROBE_SCHEMA, model: modelFor(cfg, "cheap"), permissionMode: "default",
+      allowedTools: [], disallowedTools: ["Bash", ...WRITE_TOOLS, ...NO_POWERSHELL],
+      timeoutMs: Math.min(PROBE_TIMEOUT_MS, cfg.claude.timeout_minutes * 60_000), maxBudgetUsd: 0.05,
+      env: { LOOPSTRA_PHASE: "probe", LOOPSTRA_SLUG: slug },
+    });
+  } catch (e) {
+    trace.phaseEnd(slug, seq, { status: e instanceof StopRequested ? "interrupted" : "fail", error: errorText(e) });
+    throw e;
+  }
+  const reached = r.ok && (r.structuredOutput as { ok?: unknown } | undefined)?.ok === true;
+  const detail = reached ? "the assistant answered the probe" : r.ok ? "the probe's answer was not ok: true" : `${r.reason}: ${r.detail}`;
+  trace.phaseEnd(slug, seq, { status: reached ? "success" : "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: reached ? undefined : detail });
+  return { reached, detail };
 }
 
 function summarize(e: Record<string, unknown>): Record<string, unknown> {

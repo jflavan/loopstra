@@ -80,6 +80,22 @@ describe("pause after the assistant was unavailable", () => {
     }
   });
 
+  test("the pause names the change, phase, and matched line, and counts pauses in a row for the same one", () => {
+    const t = tempDir();
+    try {
+      const same = { slug: "add-numbers", phase: "intake", line: "Please run /login" };
+      expect(pauseAfterUnavailable(t.path, NOW, same)).toMatchObject({ ...same, repeats: 1, failures: 1 });
+      expect(pauseAfterUnavailable(t.path, NOW, same)).toMatchObject({ repeats: 2, failures: 2 });
+      expect(readPause(t.path)).toMatchObject({ ...same, repeats: 2 });
+      // A different line (or phase, or change) starts the count again; the back-off keeps going.
+      expect(pauseAfterUnavailable(t.path, NOW, { ...same, line: "API Error: 529 Overloaded" })).toMatchObject({ repeats: 1, failures: 3 });
+      expect(pauseAfterUnavailable(t.path, NOW, { ...same, line: "API Error: 529 Overloaded", phase: "design" })).toMatchObject({ repeats: 1, failures: 4 });
+      expect(pauseAfterUnavailable(t.path, NOW)).toMatchObject({ slug: null, phase: null, line: null, repeats: 1, failures: 5 });
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a paused loop says so and when it retries; the heartbeat carries it", () => {
     const reason = "The assistant is unavailable (sign-in, usage limit, or network). Retrying at 12:05.";
     const paused = heartbeatState(hb({ pausedUntil: new Date(NOW.getTime() + 300_000).toISOString(), pauseReason: reason }), 60, NOW);

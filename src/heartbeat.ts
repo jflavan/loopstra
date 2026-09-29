@@ -116,7 +116,16 @@ export interface Pause {
   /** Plain words for the owner, with the time of the next try. */
   reason: string;
   failures: number;
+  /** The change and phase that could not reach the assistant, and the line that said so (null when unknown). */
+  slug?: string | null;
+  phase?: string | null;
+  line?: string | null;
+  /** Pauses in a row for the same change, phase, and line (see PROBE_AFTER in the scheduler). */
+  repeats?: number;
 }
+
+/** What made the loop pause: the change, its phase, and the line that matched. */
+export interface PauseCause { slug: string; phase: string; line: string }
 
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
@@ -141,18 +150,31 @@ export function activePause(root: string, now: Date = new Date()): Pause | null 
   return p && Date.parse(p.until) > now.getTime() ? p : null;
 }
 
-/** Records one more unavailable session in a row and pauses for the next back-off step. Never throws. */
-export function pauseAfterUnavailable(root: string, now: Date = new Date()): Pause {
-  const failures = (readPause(root)?.failures ?? 0) + 1;
+/**
+ * Records one more unavailable session in a row and pauses for the next back-off step, with what
+ * caused it. `repeats` counts pauses in a row for the same change, phase, and line. Never throws.
+ */
+export function pauseAfterUnavailable(root: string, now: Date = new Date(), cause: PauseCause | null = null): Pause {
+  const last = readPause(root);
+  const failures = (last?.failures ?? 0) + 1;
+  const same = !!cause && !!last && last.slug === cause.slug && last.phase === cause.phase && last.line === cause.line;
+  const repeats = same ? (last?.repeats ?? 1) + 1 : 1;
   const minutes = BACKOFF_MINUTES[Math.min(failures, BACKOFF_MINUTES.length) - 1]!;
   const until = new Date(now.getTime() + minutes * 60_000);
-  const hhmm = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
-  const pause: Pause = { until: until.toISOString(), reason: `The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${hhmm}.`, failures };
+  const pause: Pause = {
+    until: until.toISOString(), reason: `The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${clockText(until)}.`, failures,
+    slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, repeats,
+  };
   try {
     mkdirSync(join(root, ".loopstra"), { recursive: true });
     writeFileSync(pausePath(root), JSON.stringify(pause, null, 2));
   } catch { /* without the file the next tick simply tries again */ }
   return pause;
+}
+
+/** "14:32", local time. */
+export function clockText(d: Date): string {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** Ends the pause and its back-off (a phase got through to the assistant). */

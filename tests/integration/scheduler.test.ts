@@ -134,6 +134,52 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   }, 60_000);
 
+  test("the third pause in a row for the same phase and line runs a probe; the probe gets through, so the phase's own failure blocks", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    // Only the intake phase fails, always with the same sign-in words; the probe (its own phase) answers.
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:outage");
+    const expire = async () => {
+      const p = readPause(repo.path)!;
+      await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+    };
+    for (const n of [1, 2]) {
+      const r = await tick(repo.path);
+      expect(r.paused).toBeDefined();
+      expect(readPause(repo.path)).toMatchObject({ slug: SLUG, phase: "intake", line: "Invalid API key · Please run /login", repeats: n });
+      await expire();
+    }
+    expect(trace.phases(SLUG).some((p) => p.name === "probe")).toBe(false);
+    const third = await tick(repo.path);
+    expect(third.paused).toBeUndefined();
+    expect(readPause(repo.path)).toBeNull();
+    const i = await readIntent(repo.path, SLUG);
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toMatch(/^The assistant stopped unexpectedly\./);
+    expect(i.file.frontmatter.note).toContain("accepted");
+    expect(trace.phases(SLUG).map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted", "intake:interrupted", "intake:interrupted", "probe:success"]);
+    const why = trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"probe\""));
+    expect(why).toHaveLength(1);
+    expect(JSON.parse(why[0]!.payload)).toMatchObject({ where: "probe", phase: "intake", line: "Invalid API key · Please run /login" });
+    trace.close(); repo.cleanup();
+  }, 60_000);
+
+  test("when the probe cannot reach the assistant either, the loop keeps backing off and nothing is blocked", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const outage = join(import.meta.dir, "..", "fake-claude", "fixtures", "outage.jsonl");
+    await withEnv({ LOOPSTRA_FAKE_FIXTURE: outage }, async () => {
+      for (const n of [1, 2, 3]) {
+        const r = await tick(repo.path);
+        expect(r.paused).toMatch(/^The assistant is unavailable/);
+        expect(readPause(repo.path)).toMatchObject({ repeats: n, failures: n });
+        const p = readPause(repo.path)!;
+        await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+      }
+    });
+    expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+    expect(trace.phases(SLUG).filter((p) => p.name === "probe").map((p) => p.status)).toEqual(["fail"]);
+    trace.close(); repo.cleanup();
+  }, 60_000);
+
   test("a git index lock older than ten minutes is removed at the start of a tick and traced; a fresh one is left", async () => {
     const { repo, ctx, trace } = await setupRepo("draft");
     const git = new Git(repo.path);

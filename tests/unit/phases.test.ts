@@ -98,6 +98,24 @@ describe("agentPhase tools and prompt", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("build sessions may run the project's configured commands, install included, on top of claude.allowed_tools", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.commands.test = "npm test";
+    ctx.cfg.commands.install = "npm install";
+    ctx.cfg.commands.lint = "bun"; // Bash(bun *) is in the default allowed_tools already: not repeated
+    const tools = toolsFor(ctx, "build");
+    expect(tools.slice(0, ctx.cfg.claude.allowed_tools.length)).toEqual(ctx.cfg.claude.allowed_tools);
+    expect(tools).toEqual(expect.arrayContaining(["Bash(npm test *)", "Bash(npm install *)", "Bash(bun *)"]));
+    expect(new Set(tools).size).toBe(tools.length);
+
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "acceptEdits", tools: "build", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const recorded = await Bun.file(argsFile).json();
+    const allowed = (recorded.args[recorded.args.indexOf("--allowedTools") + 1] as string).split(",");
+    expect(allowed).toContain("Bash(npm test *)");
+    trace.close(); repo.cleanup();
+  });
+
   test("skills are prepended as one line and also fill {{skills}}; slug and main_branch are always set", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "slug={{slug}} main={{main_branch}} skills={{skills}}");

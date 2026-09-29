@@ -133,6 +133,25 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("stderr is matched only when the session never answered; the error result's text always is", async () => {
+    const t = tempDir();
+    const base = { cwd: t.path, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, executable: FAKE };
+    // The session worked (an assistant event) and then died with a network word on stderr: that is
+    // the session's own failure (for example a command it ran), not an outage.
+    const worked = await runPhase({ ...base, prompt: "FIXTURE:worked-then-died" });
+    expect(worked.reason).toBe("crash");
+    expect(worked.matched).toBeNull();
+    // No assistant event: stderr counts, and the matched line is kept.
+    const out = await runPhase({ ...base, prompt: "FIXTURE:outage" });
+    expect(out.reason).toBe("environment");
+    expect(out.matched).toBe("Invalid API key · Please run /login");
+    // An assistant event, but the error result itself says usage limit.
+    const limited = await runPhase({ ...base, prompt: "FIXTURE:usage-limit" });
+    expect(limited.reason).toBe("environment");
+    expect(limited.matched).toBe("Claude AI usage limit reached|1790000000");
+    t.cleanup();
+  });
+
   test("the environment patterns each say what they catch", () => {
     expect(ENVIRONMENT_PATTERNS.length).toBeGreaterThan(0);
     for (const p of ENVIRONMENT_PATTERNS) expect(p.catches.length).toBeGreaterThan(0);

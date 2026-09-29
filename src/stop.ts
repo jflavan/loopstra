@@ -18,12 +18,18 @@ export class StopRequested extends Error {
 /**
  * The assistant could not be used (signed out, a usage limit, an outage, the network, not
  * installed). Like a stop, it is not the intent's fault: the step ends, the intent keeps its
- * status, and the loop pauses and tries again later. `detail` is for the trace.
+ * status, and the loop pauses and tries again later. `detail` is for the trace; `phase` and `line`
+ * (the phase that could not reach the assistant, and the text that said so) let the loop notice the
+ * same failure repeating.
  */
 export class AssistantUnavailable extends Error {
-  constructor(public readonly detail: string) {
+  readonly phase: string | null;
+  readonly line: string;
+  constructor(public readonly detail: string, where: { phase: string; line: string } | null = null) {
     super(`the assistant is unavailable: ${detail}`);
     this.name = "AssistantUnavailable";
+    this.phase = where?.phase ?? null;
+    this.line = where?.line ?? detail;
   }
 }
 

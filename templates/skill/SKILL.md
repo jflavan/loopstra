@@ -25,6 +25,7 @@ draft -> accepted -> designing -> spec-review -> spec-approved -> planning -> pl
 ## Onboard
 1. Run `loopstra init` and read what it printed. Files it reports as "kept" already existed and were left alone. Commit what it wrote on main: the loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, prompts, and hook are committed.
 2. Open `loopstra/config.yaml`. Confirm `commands.test` is the one command that runs the tests and exits non-zero on failure; add `install`, `lint`, `build`, `run` if the repo has them.
+   Build sessions may always run these commands; anything else they need (another tool, a script) goes in `claude.allowed_tools`, for example `"Bash(make *)"`. Refused commands show in the dashboard and `loopstra tail`.
 3. A person always accepts an intent (draft to accepted). Ask which other gates should have a person: spec, plan, merge, done. Set `human: status` for them; the merge gate can instead use `human: pr` (approval of its GitHub pull request). The defaults are unattended after acceptance.
 4. Ask which skills in `.claude/skills/` each stage should load and list them under `stages.<stage>.skills`.
 5. Read `CLAUDE.md`; make sure its Commands block matches the config.

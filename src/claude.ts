@@ -86,8 +86,10 @@ export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" 
 
 /**
  * Text that means the assistant itself could not be used, so a failed session is the environment's
- * problem, not the agent's. Matched against stderr and the text of an error result, and only when
- * the session failed. The one list; each entry says what it catches.
+ * problem, not the agent's. Matched only when the session failed: always against the error result's
+ * text, and against stderr only when the session never answered (no assistant event), since a
+ * session that worked may print such words itself (a command it ran). The one list; each entry says
+ * what it catches.
  */
 export const ENVIRONMENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; catches: string }> = [
   { pattern: /invalid api key|please run \/login|not logged in|login required|oauth token (has )?expired|authentication[_ ]error|API Error: 40[13]\b/i, catches: "signed out, or the sign-in expired" },
@@ -131,6 +133,8 @@ export type RunPhaseResult = Collected & {
   exitCode: number | null;
   durationMs: number;
   stderr: string;
+  /** For an environment failure, the line that matched ENVIRONMENT_PATTERNS; else null. */
+  matched: string | null;
 } & ({ ok: true; reason: null; detail: "" } | { ok: false; reason: FailureReason; detail: string });
 
 /** After the result event, how long the process gets to exit on its own before its tree is killed. */
@@ -152,8 +156,8 @@ export function resolveClaude(override?: string): string | null {
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
   const collector = new StreamCollector();
-  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = ""): RunPhaseResult => ({
-    ...collector.finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr,
+  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => ({
+    ...collector.finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
   });
 
   const exe = resolveClaude(input.executable);
@@ -249,12 +253,13 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) {
-    const outage = environmentLine(`${stderr}\n${collected.resultText}`);
-    if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr);
+    const answered = collected.events.some((e) => e.type === "assistant");
+    const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr));
+    if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
   }
   if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);
-  return { ...collected, ok: true, reason: null, detail: "", exitCode, durationMs: Date.now() - started, stderr };
+  return { ...collected, ok: true, reason: null, detail: "", exitCode, durationMs: Date.now() - started, stderr, matched: null };
 }
