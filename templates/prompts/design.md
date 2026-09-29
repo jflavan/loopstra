@@ -20,7 +20,3 @@ Write `spec_markdown` as a complete Markdown document with these headings, in th
 ## Areas of concern
 
 Requirements must be testable statements. Design describes how the change fits the existing code, naming real files and modules you found. Carry every open question from the intent forward: answer it or list it. Areas of concern lists anything where policies, constraints, or existing code conflict, or where you had to guess.
-
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
-
-Respond only through the structured output.

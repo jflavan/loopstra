@@ -8,8 +8,4 @@ Verifier observations, if any:
 
 {{observations}}
 
-Make the smallest change that makes the checks pass, run the test command (`{{test_command}}`) again, and report every file you changed in `changed_files` with a one-line `commit_message`.
-
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
-
-Respond only through the structured output.
+Make the smallest change that makes the checks pass, run the test command (`{{test_command}}`) again, and report every file you changed in `changed_files` with a one-line `commit_message`. The shell commands you may run, with any arguments: {{commands}}. Others are refused, so do not try them.

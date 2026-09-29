@@ -63,6 +63,37 @@ export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
 }
 
+/**
+ * The shell commands a tool set lets a session run, for the prompt's `{{commands}}`: "`bun test`,
+ * `git diff`" (each with any arguments), "any command" for a bare Bash rule, "none" without Bash.
+ */
+export function commandsFor(ctx: StepContext, set: ToolSet): string {
+  const tools = toolsFor(ctx, set);
+  if (tools.includes("Bash")) return "any command";
+  const cmds = tools.map((t) => /^Bash\((.+?)(?: \*|:\*)?\)$/.exec(t)?.[1]).filter((c): c is string => !!c);
+  return cmds.length ? [...new Set(cmds)].map((c) => `\`${c}\``).join(", ") : "none";
+}
+
+/** Every prompt ends with these two lines. agentPhase appends them, so a template need not. */
+export const CONTRACT_LINES = [
+  "Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.",
+  "Respond only through the structured output.",
+] as const;
+
+/**
+ * The rendered prompt with the contract lines at the end. A prompt that already ends with them
+ * (a copy stamped by an older `loopstra init`) loses that copy first, so they never appear twice.
+ */
+export function withContract(rendered: string): string {
+  const lines = rendered.trimEnd().split("\n");
+  for (const line of [...CONTRACT_LINES].reverse()) {
+    while (lines.length && lines.at(-1)!.trim() === "") lines.pop();
+    if (lines.at(-1)?.trim() === line) lines.pop();
+  }
+  while (lines.length && lines.at(-1)!.trim() === "") lines.pop();
+  return `${lines.join("\n")}\n\n${CONTRACT_LINES.join("\n\n")}\n`;
+}
+
 /** Tools a session must not have. Read-only sessions lose every file-writing tool; no session has PowerShell. */
 export function disallowedFor(set: ToolSet): string[] {
   return set === "build" ? [...NO_POWERSHELL] : [...WRITE_TOOLS, ...NO_POWERSHELL];
@@ -95,8 +126,8 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, skills: (spec.skills ?? []).join(", "), ...spec.vars };
-  const prompt = skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars);
+  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
+  const prompt = withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);

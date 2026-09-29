@@ -5,18 +5,19 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase, disallowedFor, toolsFor } from "../../src/phases";
+import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AssistantUnavailable } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
+const CONTRACT = CONTRACT_LINES.join("\n\n");
 
 async function setup() {
   const repo = await tempGitRepo();
   mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
   await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\n");
-  await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "Intent for {{slug}}:\n{{intent}}\nSkills: {{skills}}");
+  await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "Intent for {{slug}}:\n{{intent}}\n");
   mkdirSync(join(repo.path, "intent", "x"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "x", "intent.md"), "---\nstatus: accepted\n---\n# Intent: x\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
   await new Git(repo.path).commitAll("intent");
@@ -32,7 +33,7 @@ describe("agentPhase", () => {
     const { repo, ctx, trace } = await setup();
     const r = await agentPhase(ctx, {
       name: "intake", model: "cheap", permissionMode: "default", tools: "read",
-      vars: { intent: ctx.intent.file.body, skills: "" },
+      vars: { intent: ctx.intent.file.body },
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -116,12 +117,39 @@ describe("agentPhase tools and prompt", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("skills are prepended as one line and also fill {{skills}}; slug and main_branch are always set", async () => {
+  test("skills are prepended as one line; slug, main_branch and commands are always set; the contract ends every prompt", async () => {
     const { repo, ctx, trace } = await setup();
-    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "slug={{slug}} main={{main_branch}} skills={{skills}}");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "slug={{slug}} main={{main_branch}} commands={{commands}}\n");
     await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, skills: ["brand", "tone"] });
     const prompt = await Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", "1-intake", "prompt.md")).text();
-    expect(prompt).toBe("Use these skills: `brand`, `tone`.\n\nslug=x main=main skills=brand, tone");
+    expect(prompt).toBe(`Use these skills: \`brand\`, \`tone\`.\n\nslug=x main=main commands=none\n\n${CONTRACT}\n`);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a user's prompt that still ends with the contract does not get it twice", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), `Do the thing.\n\n${CONTRACT}\n\n`);
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    const prompt = await Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", "1-intake", "prompt.md")).text();
+    expect(prompt).toBe(`Do the thing.\n\n${CONTRACT}\n`);
+    // Only the last line left: still one copy of each.
+    expect(withContract("Do it.\n\nRespond only through the structured output.")).toBe(`Do it.\n\n${CONTRACT}\n`);
+    // The words inside a sentence are not a copy.
+    expect(withContract("Never say: Respond only through the structured output. Ok")).toStartWith("Never say: Respond only through the structured output. Ok\n\n");
+    trace.close(); repo.cleanup();
+  });
+
+  test("commands lists exactly the shell commands the tool set allows", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.commands.run = "bun run start";
+    ctx.cfg.commands.install = "bun install";
+    expect(commandsFor(ctx, "read")).toBe("none");
+    expect(commandsFor(ctx, "read+git")).toBe("`git diff`, `git log`, `git show`, `git status`");
+    expect(commandsFor(ctx, "read+commands")).toBe("`echo ok`, `bun run start`, `git diff`, `git log`, `git show`, `git status`");
+    ctx.cfg.claude.allowed_tools = ["Read", "Edit", "Bash(npm run lint:*)"];
+    expect(commandsFor(ctx, "build")).toBe("`npm run lint`, `echo ok`, `bun run start`, `bun install`");
+    ctx.cfg.claude.allowed_tools = ["Read", "Bash"];
+    expect(commandsFor(ctx, "build")).toBe("any command");
     trace.close(); repo.cleanup();
   });
 });

@@ -249,10 +249,21 @@ session loads them.
 ## 7. Prompts and envelopes
 
 Each agent phase has a prompt file in `loopstra/prompts/` rendered with a
-small set of `{{variables}}`: `{{slug}}`, `{{intent}}`, `{{spec}}`,
-`{{plan}}`, `{{review}}`, `{{previous}}` (the previous envelope as JSON),
-`{{failure_output}}`, `{{skills}}`, and `{{done_when}}`. Missing variables
-render as `(none)`. Prompts are stamped by init and edited like code.
+small set of `{{variables}}` (the list is `PROMPT_VARS` in `src/prompts.ts`):
+`{{slug}}`, `{{main_branch}}` and `{{commands}}` are always set; the others
+are `{{intent}}`, `{{priority}}`, `{{spec}}`, `{{plan}}`, `{{review}}`,
+`{{previous}}` (the failed phases so far, for lessons), `{{failure_output}}`,
+`{{observations}}`, `{{findings}}`, `{{concerns}}`, `{{done_when}}`,
+`{{test_command}}`, and `{{run_command}}`. `{{commands}}` is the plain list
+of shell commands the session's tool set allows (for example `` `bun test`,
+`git diff` ``, or `none`), so a prompt can say exactly what may be run.
+Missing variables render as `(none)`. Skills are not a variable: they are
+named in one line at the top of the prompt. Every prompt ends with the same
+two contract lines ("Set `status` to fail only if …" and "Respond only
+through the structured output."); the runtime appends them after the
+rendered template, so templates leave them out (a copy an older init stamped
+at the end of a prompt is dropped first, never doubled). Prompts are stamped
+by init and edited like code.
 
 Phases and their envelopes (all include `status: "success" | "fail"` and
 `summary`):

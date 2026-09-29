@@ -9,7 +9,3 @@ Spec:
 {{spec}}
 
 For each requirement you can derive from the intent's Problem, Proposed outcome, and Done when sections, record whether the spec meets it and the evidence, quoting the spec. Set `approved` to true only when every requirement is met and no open question from the intent has been dropped.
-
-Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success.
-
-Respond only through the structured output.
