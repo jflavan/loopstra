@@ -32,7 +32,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   const build = await agentPhase(ctx, {
     name: "build", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-    vars: { plan: a.plan, spec: a.spec, skills: stage.skills.join(", ") }, skills: stage.skills,
+    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test }, skills: stage.skills,
   });
   if (!build.ok) return block(ctx, build.note);
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);
@@ -65,7 +65,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     if (!failure) {
       const verify = await agentPhase(ctx, {
         name: "verify", model: ctx.cfg.stages.verify.model, permissionMode: "default", tools: "read+commands", cwd: ctx.worktreeDir,
-        vars: { spec: a.spec, plan: a.plan, skills: ctx.cfg.commands.run ? `run command: ${ctx.cfg.commands.run}` : "" },
+        vars: { spec: a.spec, plan: a.plan, run_command: ctx.cfg.commands.run || "none configured" }, skills: ctx.cfg.stages.verify.skills,
       });
       if (!verify.ok) return block(ctx, verify.note);
       if (verify.envelope.passed) break;
@@ -78,7 +78,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     const fix = await agentPhase(ctx, {
       name: "fix", traceName: `fix-${i}`, model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       resume: loadSessions(ctx).build, env: { LOOPSTRA_PHASE: "fix" },
-      vars: { failure_output: failure.output.slice(-8000), observations },
+      vars: { failure_output: failure.output.slice(-8000), observations, test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) {
       // A dead session: the next attempt starts fresh.

@@ -25,7 +25,7 @@ async function plan(ctx: StepContext, concerns: string): Promise<StepResult> {
   const a = await artifacts(ctx);
   const r = await agentPhase(ctx, {
     name: "plan", model: ctx.cfg.stages.plan.model, permissionMode: "plan", tools: "read",
-    vars: { intent: a.intent, spec: a.spec, skills: ctx.cfg.stages.plan.skills.join(", "), concerns }, skills: ctx.cfg.stages.plan.skills,
+    vars: { intent: a.intent, spec: a.spec, concerns }, skills: ctx.cfg.stages.plan.skills,
   });
   if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, "plan.md", r.envelope.plan_markdown);

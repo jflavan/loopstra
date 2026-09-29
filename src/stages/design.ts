@@ -27,7 +27,7 @@ async function design(ctx: StepContext): Promise<StepResult> {
 
   const design = await agentPhase(ctx, {
     name: "design", model: ctx.cfg.stages.design.model, permissionMode: "default", tools: "read",
-    vars: { intent: a.intent, skills: ctx.cfg.stages.design.skills.join(", ") }, skills: ctx.cfg.stages.design.skills,
+    vars: { intent: a.intent }, skills: ctx.cfg.stages.design.skills,
   });
   if (!design.ok) return block(ctx, design.note);
   await writeArtifact(ctx, "spec.md", design.envelope.spec_markdown);

@@ -30,13 +30,23 @@ export type AgentPhaseResult<N extends PhaseName> =
   | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number }
   | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
-const READ_TOOLS = ["Read", "Glob", "Grep", "LS"];
+const READ_TOOLS = ["Read", "Glob", "Grep"];
+/** Removed from read-only sessions outright (a bare name in --disallowedTools removes the tool). */
+const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
+/** Tools a session may use without asking. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
-  if (set === "read") return READ_TOOLS;
-  if (set === "build") return ctx.cfg.claude.allowed_tools;
-  const cmds = Object.values(ctx.cfg.commands).filter((c): c is string => !!c);
-  return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c})`)];
+  if (set === "read") return [...READ_TOOLS];
+  if (set === "build") return [...ctx.cfg.claude.allowed_tools];
+  // The install command is not for judges. `Bash(<cmd> *)` matches the command alone and with arguments.
+  const { test, lint, build, run } = ctx.cfg.commands;
+  const cmds = [test, lint, build, run].filter((c): c is string => !!c);
+  return [...READ_TOOLS, ...cmds.map((c) => `Bash(${c} *)`)];
+}
+
+/** Tools a session must not have. Read-only sessions lose every file-writing tool. */
+export function disallowedFor(set: ToolSet): string[] {
+  return set === "build" ? [] : [...WRITE_TOOLS];
 }
 
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
@@ -69,7 +79,8 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     return { ok: false, reason: "missing-prompt", note: `The prompt file loopstra/prompts/${spec.name}.md is missing. Run \`loopstra init\` to restore it.`, sessionId: null };
   }
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const prompt = skillsLine + renderPrompt(await Bun.file(promptPath).text(), { slug: ctx.slug, ...spec.vars });
+  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, skills: (spec.skills ?? []).join(", "), ...spec.vars };
+  const prompt = skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars);
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);
@@ -100,6 +111,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       model: modelFor(ctx.cfg, spec.model),
       permissionMode: spec.permissionMode,
       allowedTools: toolsFor(ctx, spec.tools),
+      disallowedTools: disallowedFor(spec.tools),
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
       resume: spec.resume,

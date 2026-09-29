@@ -4,7 +4,9 @@ Intent `{{slug}}`:
 
 {{intent}}
 
-Skills to apply: {{skills}}
+Findings from a check of an earlier version of this spec; address each one:
+
+{{findings}}
 
 Write `spec_markdown` as a complete Markdown document with these headings, in this order:
 
@@ -18,5 +20,7 @@ Write `spec_markdown` as a complete Markdown document with these headings, in th
 ## Areas of concern
 
 Requirements must be testable statements. Design describes how the change fits the existing code, naming real files and modules you found. Carry every open question from the intent forward: answer it or list it. Areas of concern lists anything where policies, constraints, or existing code conflict, or where you had to guess. Put the same concerns in the `concerns` array.
+
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
 
 Respond only through the structured output.

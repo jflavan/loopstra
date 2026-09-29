@@ -5,7 +5,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase } from "../../src/phases";
+import { agentPhase, codePhase, disallowedFor, toolsFor } from "../../src/phases";
 import { Trace } from "../../src/trace";
 import { tempGitRepo } from "../helpers";
 
@@ -64,6 +64,37 @@ describe("agentPhase", () => {
     const r = await agentPhase(ctx, { name: "design", model: "strong", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(false);
     expect(trace.phases("x")[0]?.status).toBe("fail");
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("agentPhase tools and prompt", () => {
+  test("read-only phases get read tools and lose the write tools; read+commands allows configured commands with arguments, not install", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.commands.run = "bun run start";
+    ctx.cfg.commands.install = "bun install";
+    expect(toolsFor(ctx, "read")).toEqual(["Read", "Glob", "Grep"]);
+    expect(toolsFor(ctx, "read+commands")).toEqual(["Read", "Glob", "Grep", "Bash(echo ok *)", "Bash(bun run start *)"]);
+    expect(disallowedFor("read")).toEqual(["Edit", "Write", "NotebookEdit"]);
+    expect(disallowedFor("read+commands")).toEqual(["Edit", "Write", "NotebookEdit"]);
+    expect(disallowedFor("build")).toEqual([]);
+    const build = toolsFor(ctx, "build");
+    build.push("Bash(rm *)");
+    expect(ctx.cfg.claude.allowed_tools).not.toContain("Bash(rm *)");
+
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.args).toEqual(expect.arrayContaining(["--allowedTools", "Read,Glob,Grep", "--disallowedTools", "Edit,Write,NotebookEdit"]));
+    trace.close(); repo.cleanup();
+  });
+
+  test("skills are prepended as one line and also fill {{skills}}; slug and main_branch are always set", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "slug={{slug}} main={{main_branch}} skills={{skills}}");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, skills: ["brand", "tone"] });
+    const prompt = await Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", "1-intake", "prompt.md")).text();
+    expect(prompt).toBe("Use these skills: `brand`, `tone`.\n\nslug=x main=main skills=brand, tone");
     trace.close(); repo.cleanup();
   });
 });

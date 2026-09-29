@@ -1,7 +1,10 @@
-export type PromptVars = Partial<Record<
-  "slug" | "intent" | "spec" | "plan" | "review" | "previous" | "failure_output" | "skills" | "done_when" | "observations" | "concerns" | "findings",
-  string
->>;
+/** Every variable a prompt template may use. A variable with no value renders as `(none)`. */
+export const PROMPT_VARS = [
+  "slug", "main_branch", "intent", "priority", "spec", "plan", "review", "previous", "failure_output", "skills",
+  "done_when", "observations", "concerns", "findings", "test_command", "run_command",
+] as const;
+
+export type PromptVars = Partial<Record<(typeof PROMPT_VARS)[number], string>>;
 
 const VARIABLE = /\{\{([a-z_]+)\}\}/g;
 

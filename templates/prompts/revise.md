@@ -4,6 +4,8 @@ Findings:
 
 {{findings}}
 
-Make the changes, run the test command, and report every file you changed in `changed_files` with a one-line `commit_message`.
+Make the changes, run the test command (`{{test_command}}`), and report every file you changed in `changed_files` with a one-line `commit_message`.
+
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
 
 Respond only through the structured output.

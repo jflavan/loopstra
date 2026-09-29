@@ -14,7 +14,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
   for (let round = 1; round <= stage.max_rounds + 1; round++) {
     const review = await agentPhase(ctx, {
       name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read", cwd: ctx.worktreeDir,
-      vars: { spec: a.spec, plan: a.plan, skills: stage.skills.join(", ") }, skills: stage.skills,
+      vars: { spec: a.spec, plan: a.plan }, skills: stage.skills,
     });
     if (!review.ok) return block(ctx, review.note);
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
@@ -26,7 +26,7 @@ export async function runReviewStep(ctx: StepContext): Promise<StepResult> {
     }
     const revise = await agentPhase(ctx, {
       name: "revise", traceName: `revise-${round}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-      resume: loadSessions(ctx).build, vars: { findings: lastImportant.map((f) => `- ${f}`).join("\n") },
+      resume: loadSessions(ctx).build, vars: { findings: lastImportant.map((f) => `- ${f}`).join("\n"), test_command: ctx.cfg.commands.test },
     });
     if (!revise.ok) return block(ctx, revise.note);
     if (revise.sessionId) saveSession(ctx, "build", revise.sessionId);

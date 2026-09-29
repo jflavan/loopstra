@@ -14,4 +14,6 @@ Review summary:
 
 For each criterion, record whether it is met and the evidence: a test that covers it, a command output, or a file you inspected. Be honest about criteria that cannot be verified from the repository alone; mark them unmet and say why. Write `outcome_markdown` as a short document with an Outcome heading and an Evidence heading, in plain language a product owner can read.
 
+Set `status` to fail only if you could not do the task at all; a negative judgement (not approved, criteria unmet) is still status success. Put anything the next step should know in `notes_for_next_phase`, or leave it empty.
+
 Respond only through the structured output.
