@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-plan-challenge","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-plan-challenge","total_cost_usd":0.03,"usage":{},"structured_output":{"status":"success","summary":"plan is sound","notes_for_next_phase":"","approved":true,"concerns":[]},"result":"ok"}
