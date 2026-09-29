@@ -1,4 +1,4 @@
-import { block, clearMarker, setStatus, writeArtifact, writeIntentPriority, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, readMarker, setStatus, writeArtifact, writeIntentPriority, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
 import { artifacts, bullets, headingsCheck, runHookCommands, settleGate, SPEC_HEADINGS, type GateFlow, type Verdict } from "./shared";
@@ -39,7 +39,8 @@ async function design(ctx: StepContext): Promise<StepResult> {
   }
   await writeIntentPriority(ctx, intake.envelope.priority);
 
-  const written = await writeSpec(ctx, "");
+  // Restarted during the automatic rewrite: send the same findings again.
+  const written = await writeSpec(ctx, readMarker(ctx, REDESIGNED) ?? "");
   if (!written.ok) return written;
   return settleGate(ctx, specFlow(ctx));
 }

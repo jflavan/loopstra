@@ -86,6 +86,22 @@ describe("plan stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a restart during the automatic replan sends the same concerns again", async () => {
+    const { repo, ctx, trace } = await specApproved();
+    mkdirSync(ctx.runDir, { recursive: true });
+    await Bun.write(join(ctx.runDir, "replanned"), "- The plan never says how add is tested.");
+    const path = join(repo.path, "intent", "add-numbers", "intent.md");
+    await Bun.write(path, (await Bun.file(path).text()).replace("status: spec-approved", "status: planning"));
+    await new Git(repo.path).commitAll("planning");
+    await ctx.reload();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "plan.md"), "{{concerns}} FIXTURE:plan");
+    await runPlanStep(ctx);
+    const planPrompt = trace.phases("add-numbers").find((p) => p.name === "plan")!;
+    const prompt = await Bun.file(join(ctx.runDir, "phases", `${planPrompt.seq}-plan`, "prompt.md")).text();
+    expect(prompt).toContain("The plan never says how add is tested.");
+    trace.close(); repo.cleanup();
+  });
+
   test("when the plan challenger itself fails, the intent blocks without a replan", async () => {
     const { repo, ctx, trace } = await specApproved();
     await Bun.write(join(repo.path, "loopstra", "prompts", "plan-challenge.md"), "{{plan}} FIXTURE:budget");

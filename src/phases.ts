@@ -57,7 +57,7 @@ export function disallowedFor(set: ToolSet): string[] {
 }
 
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
-export function ownerNote(reason: FailureReason, agentSummary = ""): string {
+export function ownerNote(reason: FailureReason): string {
   switch (reason) {
     case "timeout": return "The assistant took too long on this step.";
     case "budget": return "This step hit its spending limit.";
@@ -66,15 +66,9 @@ export function ownerNote(reason: FailureReason, agentSummary = ""): string {
     case "not-started": return "The assistant could not be started. An engineer needs to check that Claude Code is installed.";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
-    case "agent-fail": return sentence(agentSummary) || "The assistant could not do this step.";
+    // The agent's own summary is not written for the owner; it goes to the trace.
+    case "agent-fail": return "The assistant reported it could not finish this step.";
   }
-}
-
-/** Trims and ends with exactly one sentence mark, so notes never read "..". */
-function sentence(s: string): string {
-  const t = s.trim().replace(/[.\s]+$/, "");
-  if (!t) return "";
-  return /[!?]$/.test(t) ? t : `${t}.`;
 }
 
 /** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
@@ -100,9 +94,9 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
-  const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0, agentSummary = ""): AgentPhaseResult<N> => {
+  const failed = (reason: FailureReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}` });
-    return { ok: false, reason, note: ownerNote(reason, agentSummary), sessionId };
+    return { ok: false, reason, note: ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
   try {
@@ -138,7 +132,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       return failed("invalid-envelope", err, r.sessionId, r.costUsd);
     }
     const envelope = parsed.data as Envelope<N>;
-    if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd, envelope.summary);
+    if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined });
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {

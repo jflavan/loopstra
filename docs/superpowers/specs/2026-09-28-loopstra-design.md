@@ -344,13 +344,18 @@ stepping it never advances.)
     `intent/<generated-slug>/intent.md` in draft with what merged, what
     failed, and a proposed outcome. The generated slug is
     `fix-tests-after-<slug>`.
-18. `merged` → `verifying`. **done-check** evaluates each "Done when"
-    criterion with the tools it has and returns evidence. Runtime writes
-    `outcome.md`. Human wait if `gates.done.human`. `met: false` → block
-    with the unmet criteria as the note; otherwise `done`.
+18. While the status is `merged` (so a restart resumes it): **done-check**
+    judges each "Done when" criterion as met, unmet, or needs-person, in a
+    throwaway detached worktree of main. The runtime always writes
+    `outcome.md`, adding "For a person to confirm" for needs-person items
+    (they never block). A judge that cannot finish blocks plainly; it is
+    never read as criteria unmet.
 19. **lessons**: appended to `outcome.md` under "Lessons" and "Proposed
     CLAUDE.md additions". The skill's `apply-lessons` command copies the
-    additions into `CLAUDE.md` for review.
+    additions into `CLAUDE.md` for review. Then the verify `after`
+    commands. Unmet criteria → block, pointing at outcome.md. No person on
+    the done gate → `done`; a person → `verifying` with a plain note (it
+    only ever means "waiting for a person"), and the person sets `done`.
 20. Commit `outcome.md` on main.
 
 Signals also run on their interval regardless of intents.

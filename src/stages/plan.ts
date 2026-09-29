@@ -1,5 +1,5 @@
 import { filesExistOrNew, parsePlanFiles } from "../checks";
-import { block, clearMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { agentPhase } from "../phases";
 import { artifacts, bullets, headingsCheck, PLAN_HEADINGS, runHookCommands, settleGate, type GateFlow, type Verdict } from "./shared";
@@ -27,7 +27,8 @@ async function plan(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "planning") await setStatus(ctx, "planning");
   const before = await runHookCommands(ctx, "before", "plan");
   if (!before.ok) return before;
-  const written = await writePlan(ctx, "");
+  // Restarted during the automatic rewrite: send the same concerns again.
+  const written = await writePlan(ctx, readMarker(ctx, REPLANNED) ?? "");
   if (!written.ok) return written;
   return settleGate(ctx, planFlow(ctx));
 }

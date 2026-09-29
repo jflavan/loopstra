@@ -60,8 +60,8 @@ export const Envelopes = {
   }),
   revise: codeChange,
   "done-check": base.extend({
-    met: z.boolean(),
-    evidence: z.array(z.object({ criterion: z.string(), met: z.boolean(), evidence: z.string() })),
+    /** One item per Done when criterion. needs-person: it cannot be judged from the repository. */
+    evidence: z.array(z.object({ criterion: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })),
     outcome_markdown: z.string(),
   }),
   lessons: base.extend({

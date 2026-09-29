@@ -1,5 +1,5 @@
-import { existsSync, realpathSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 /** The last non-empty line of some git output, or "" when there is none. */
 function lastNonEmptyLine(s: string): string {
@@ -150,4 +150,31 @@ export class Git {
   async push(branch: string): Promise<void> { await this.run(["push", "-u", "origin", branch]); }
   async pushCurrent(): Promise<void> { await this.run(["push"]); }
   async fetch(): Promise<void> { await this.run(["fetch", "--quiet"], true); }
+}
+
+/** Removes a worktree directory however it can: git first, then the file system, then prunes git's record of it. */
+export async function removeWorktree(git: Git, dir: string): Promise<void> {
+  if (existsSync(dir)) {
+    try {
+      await git.worktreeRemove(dir);
+    } catch {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  await git.run(["worktree", "prune"], true);
+}
+
+/**
+ * Runs `fn` in a throwaway detached worktree of `ref` at `dir` (never the owner's checkout), and
+ * always removes it afterwards. A leftover directory from an earlier run is removed first.
+ */
+export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  await removeWorktree(git, dir);
+  mkdirSync(dirname(dir), { recursive: true });
+  await git.run(["worktree", "add", "--detach", dir, ref]);
+  try {
+    return await fn(dir);
+  } finally {
+    await removeWorktree(git, dir);
+  }
 }

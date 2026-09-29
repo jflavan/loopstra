@@ -102,7 +102,7 @@ export async function settleGate(ctx: StepContext, flow: GateFlow): Promise<Step
       return { ok: true };
     }
     if (v.result === "error") return blockWithDetail(ctx, `${v.note} ${flow.retry}`, v.detail);
-    if (!onceMarker(ctx, flow.marker)) return blockWithDetail(ctx, `${flow.failedNote} ${flow.retry}`, v.detail);
+    if (!onceMarker(ctx, flow.marker, v.findings)) return blockWithDetail(ctx, `${flow.failedNote} ${flow.retry}`, v.detail);
     await setStatus(ctx, flow.working, flow.rewritingNote);
     const again = await flow.rewrite(v.findings);
     if (!again.ok) return again;

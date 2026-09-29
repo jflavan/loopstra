@@ -99,14 +99,21 @@ export function blockWith(ctx: StepContext, f: Failure): Promise<{ ok: false; no
 
 /**
  * A once-only runtime marker in the intent's run folder (never in intent/). Returns true when
- * this call created it, false when it already existed, so "do X once" survives a restart.
+ * this call created it, false when it already existed, so "do X once" survives a restart. The
+ * marker holds `content` (for a resend: the findings it was sent with), read back by readMarker.
  */
-export function onceMarker(ctx: StepContext, name: string): boolean {
+export function onceMarker(ctx: StepContext, name: string, content = ""): boolean {
   const p = join(ctx.runDir, name);
   if (existsSync(p)) return false;
   mkdirSync(ctx.runDir, { recursive: true });
-  writeFileSync(p, new Date().toISOString());
+  writeFileSync(p, content);
   return true;
+}
+
+/** The content of a marker, or null when it does not exist. */
+export function readMarker(ctx: StepContext, name: string): string | null {
+  const p = join(ctx.runDir, name);
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
 }
 
 export function clearMarker(ctx: StepContext, name: string): void {

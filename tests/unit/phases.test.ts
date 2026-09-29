@@ -116,16 +116,17 @@ describe("agentPhase failures", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("an envelope with status fail is an agent-fail whose note is the agent's own summary", async () => {
+  test("an envelope with status fail is an agent-fail with a plain note; the agent's summary goes to the trace", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:agent-fail");
     const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe("agent-fail");
-      expect(r.note).toBe("The intent folder could not be read.");
+      expect(r.note).toBe("The assistant reported it could not finish this step.");
     }
     expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
+    expect(trace.phases("x")[0]?.error).toContain("The intent folder could not be read");
     trace.close(); repo.cleanup();
   });
 
