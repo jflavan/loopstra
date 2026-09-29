@@ -5,7 +5,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
 import type { Trace } from "../../src/trace";
-import { setupRepo } from "../helpers";
+import { setupRepo, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -75,6 +75,17 @@ describe("design stage", () => {
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check"]);
     expect(i.file.frontmatter.note).toContain("could not be checked");
+    trace.close(); repo.cleanup();
+  });
+
+  test("design is read-only and runs in plan mode, like plan", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "gates:\n  spec:\n    agent: false\n" });
+    const argsFile = join(repo.path, "args.json");
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runDesignStep(ctx));
+    expect(phaseNames(trace)).toEqual(["intake", "design"]);
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.env.LOOPSTRA_PHASE).toBe("design");
+    expect(recorded.args).toEqual(expect.arrayContaining(["--permission-mode", "plan", "--allowedTools", "Read,Glob,Grep"]));
     trace.close(); repo.cleanup();
   });
 

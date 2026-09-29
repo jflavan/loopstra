@@ -29,6 +29,27 @@ describe("prompt templates", () => {
     }
   });
 
+  test("the spec's owner sections are written for the owner, and the spec check holds it to that", async () => {
+    const owner = "Summary, Requirements, Out of scope, Open questions, and Areas of concern";
+    const design = await Bun.file(join(ROOT, "design.md")).text();
+    expect(design).toContain(owner);
+    expect(design).toMatch(/no code, regular expressions, file paths, or function names/);
+    expect(design).toContain("Design and Affected code are for engineers");
+    const check = await Bun.file(join(ROOT, "spec-check.md")).text();
+    expect(check).toContain(owner);
+    expect(check).toMatch(/blocking/i);
+    const guide = await Bun.file(join(ROOT, "..", "intent-README.md")).text();
+    expect(guide).toContain("`plan.md` is written for the engineers");
+    expect(guide).toContain("Design and Affected code");
+  });
+
+  test("the done-check asks for the outcome's exact headings and plain-words evidence", async () => {
+    const text = await Bun.file(join(ROOT, "done-check.md")).text();
+    expect(text).toContain("`## Outcome`");
+    expect(text).toContain("`## Evidence`");
+    expect(text).toMatch(/no test names, commands, file paths, or line numbers/);
+  });
+
   test("every {{variable}} is a known prompt variable", async () => {
     const known = new Set<string>(PROMPT_VARS);
     for (const name of Object.keys(Envelopes)) {

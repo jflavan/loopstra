@@ -5,7 +5,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runPlanStep } from "../../src/stages/plan";
 import type { Trace } from "../../src/trace";
-import { setupRepo } from "../helpers";
+import { setupRepo, withEnv } from "../helpers";
 
 const HUMAN_PLAN = "gates:\n  plan:\n    human: status\n";
 
@@ -26,6 +26,16 @@ function phaseNames(trace: Trace): string[] {
 }
 
 describe("plan stage", () => {
+  test("plan is read-only and runs in plan mode, like design", async () => {
+    const { repo, ctx, trace } = await specApproved("gates:\n  plan:\n    agent: false\n");
+    const argsFile = join(repo.path, "args.json");
+    await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runPlanStep(ctx));
+    expect(phaseNames(trace)).toEqual(["plan"]);
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.args).toEqual(expect.arrayContaining(["--permission-mode", "plan", "--allowedTools", "Read,Glob,Grep"]));
+    trace.close(); repo.cleanup();
+  });
+
   test("with no human gate, spec-approved → plan-approved in one step with the checks run in that step", async () => {
     const { repo, ctx, trace } = await specApproved();
     const r = await runPlanStep(ctx);

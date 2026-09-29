@@ -46,7 +46,8 @@ async function design(ctx: StepContext): Promise<StepResult> {
 async function writeSpec(ctx: StepContext, findings: string): Promise<StepResult> {
   const a = await artifacts(ctx);
   const r = await agentPhase(ctx, {
-    name: "design", model: ctx.cfg.stages.design.model, permissionMode: "default", tools: "read",
+    // Read-only like plan, so the same mode: plan mode returns the structured output normally (verified live).
+    name: "design", model: ctx.cfg.stages.design.model, permissionMode: "plan", tools: "read",
     vars: { intent: a.intent, findings }, skills: ctx.cfg.stages.design.skills,
   });
   if (!r.ok) return block(ctx, r.note);

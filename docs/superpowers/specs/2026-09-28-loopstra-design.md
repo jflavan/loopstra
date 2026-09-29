@@ -272,7 +272,7 @@ Phases and their envelopes (all include `status: "success" | "fail"` and
 | Phase | Session | Tools | Envelope adds |
 |---|---|---|---|
 | intake | fresh, cheap | read-only | `priority`, `question` |
-| design | fresh, strong | read-only | `spec_markdown` (concerns are its "Areas of concern" heading) |
+| design | fresh, strong, plan mode | read-only | `spec_markdown` (concerns are its "Areas of concern" heading; the owner sections are plain language) |
 | spec-check | fresh, strong | read-only | `approved`, `findings[{requirement, met, evidence}]` |
 | plan | fresh, strong, plan mode | read-only | `plan_markdown` (its "Files that change" list is the file list) |
 | plan-challenge | fresh, strong | read-only | `approved`, `concerns[{concern, blocking}]` |
@@ -282,7 +282,7 @@ Phases and their envelopes (all include `status: "success" | "fail"` and
 | verify | fresh, cheap | read-only plus Bash of configured commands and read-only git | `passed`, `observations[]` |
 | review | fresh, strong | read-only plus read-only git | `approved`, `findings[{severity, file, line, finding}]`, `review_markdown` |
 | revise | resume B | build tools | same as build |
-| done-check | fresh, strong | read-only plus Bash of configured commands | `met`, `evidence[{criterion, met, evidence}]`, `outcome_markdown` |
+| done-check | fresh, strong | read-only plus Bash of configured commands and read-only git | `evidence[{criterion, result (met, unmet, or needs-person), evidence}]` (plain words for the owner), `outcome_markdown` (`# Outcome`, `## Outcome`, `## Evidence`) |
 | lessons | fresh, cheap | read-only | `lessons[]`, `claude_md_additions` |
 
 Envelopes are Zod schemas in `src/envelopes.ts`. The JSON Schema passed to
@@ -304,7 +304,11 @@ the full error in the trace.
    outcome and a Done when section. Add them to intent.md, then set status to
    accepted.")
 4. **design**: runtime writes `spec.md` from `spec_markdown`. Concerns are
-   the spec's own "Areas of concern" heading.
+   the spec's own "Areas of concern" heading. Summary, Requirements, Out
+   of scope, Open questions, and Areas of concern are written for the owner
+   in plain language (no code, regular expressions, file paths, or function
+   names); Design and Affected code are for engineers. spec-check treats a
+   technical owner section as a finding that is not met.
 5. `after` commands. Commit `spec.md` on main.
 6. Spec gate, in the same step: code check that required headings exist;
    **spec-check** if `gates.spec.agent`. Pass with no person on the gate →
