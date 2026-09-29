@@ -1,0 +1,39 @@
+# Loopstra configuration. Engineers edit this; product owners never need to.
+# Every key except commands.test has a default. Unknown keys are errors.
+# Changes take effect on the next pass of the loop; no restart needed.
+version: 1
+main_branch: main
+poll_seconds: 60
+
+commands:
+  # The single command that runs your tests and exits non-zero on failure.
+__COMMANDS__
+
+claude:
+  models:
+    default: sonnet
+    cheap: haiku
+    strong: opus
+  timeout_minutes: 30
+  max_budget_usd: 5
+
+# Gates between stages. human: status (a person edits the status line) | pr (GitHub approval) | none.
+# agent: true runs an independent reviewer with a fresh context.
+# Default: a person only accepts an intent; everything after runs on its own.
+gates:
+  intent: { human: status }
+  spec:   { human: none, agent: true }
+  plan:   { human: none, agent: true }
+  merge:  { human: none, method: squash }
+  done:   { human: none, agent: true }
+
+# Per-stage model, skills to load, and deterministic commands to run before and after.
+stages:
+  design: { model: strong,  skills: [], before: [], after: [] }
+  plan:   { model: strong,  skills: [], before: [], after: [] }
+  build:  { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
+  review: { model: strong,  skills: [], before: [], after: [], max_rounds: 2 }
+  verify: { model: cheap,   skills: [], before: [], after: [] }
+
+signals:
+  main_health: { every_minutes: 30 }

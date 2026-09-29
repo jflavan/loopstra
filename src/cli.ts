@@ -17,6 +17,15 @@ async function main(): Promise<number> {
   switch (command) {
     case "help": case "--help": case "-h":
       console.log(HELP); return 0;
+    case "init": {
+      const { init } = await import("./init");
+      const r = await init(root);
+      for (const f of r.written) console.log(`wrote  ${f}`);
+      for (const f of r.kept) console.log(`kept   ${f}`);
+      for (const w of r.warnings) console.log(`warning: ${w}`);
+      console.log(["", "Next:", ...r.next.map((n) => `  - ${n}`)].join("\n"));
+      return 0;
+    }
     case "status":
       process.stdout.write(await renderStatus(root)); return 0;
     case "start": {
