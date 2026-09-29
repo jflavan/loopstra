@@ -193,6 +193,8 @@ Sources of truth, in order of precedence when they conflict:
 - **Pull requests in every mode (H25).** With a remote, `merge-review` is runnable for every `gates.merge.human` mode: merged on GitHub → recorded as merged; closed → blocked; with `status`, anything else waits until a person sets `merge-approved`.
 - **main_sync signal (H26).** Sync outcomes (pass, waiting, fail, in plain words; detail in the trace) are the `main_sync` signal, written only when the outcome changes; a lasting condition (unsaved changes, GitHub out of reach, the remote has no main) is one trace line. The dashboard's attention list shows `main_sync` waiting or failing.
 - **gh signed in (H27).** With a remote, `start` also refuses when `gh auth status` fails: "GitHub CLI is installed but not signed in. Run gh auth login, then start again."
+- **Closed changes (H16).** The scheduler's cleanup removes a closed change's worktree once it has nothing uncommitted (untracked files count); the branch is kept. A worktree with uncommitted work is left, traced once.
+- **Damaged trace (H17).** A `trace.db` that is not a database (or is malformed) is renamed to `trace.db.corrupt-<time>` and a fresh one started, with a plain console line and an event in the new db. A lock or other error is not treated as damage.
 
 ## Open
 

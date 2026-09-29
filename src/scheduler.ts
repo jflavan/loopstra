@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { loadConfig, type Config } from "./config";
-import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, personChangedStatus, type StepResult } from "./context";
-import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "./git";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
+import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeWorktree, samePath } from "./git";
 import { GitHub } from "./github";
 import { heartbeatWorkingOn, startHeartbeat } from "./heartbeat";
 import { syncMain } from "./remote";
@@ -148,9 +148,18 @@ async function writeQueue(root: string, trace: Trace, text: string): Promise<voi
 
 /**
  * A merged change's worktree and branch are removed right after the merge; if that failed, try
- * again here. Best effort and traced; never blocks anything.
+ * again here. A closed change's worktree is removed once it holds nothing uncommitted (its branch
+ * is kept, so nothing is lost). Best effort and traced; never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
+  for (const i of intents.filter((x) => x.file.frontmatter.status === "closed")) {
+    try {
+      await removeClosedWorktree(new StepContext(root, cfg, trace, i));
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      trace.event(i.slug, "error", { where: "cleanup", what: "closed worktree", error: errorText(e) });
+    }
+  }
   const merged = intents.filter((i) => MERGED_STATUSES.has(i.file.frontmatter.status));
   if (!merged.length) return;
   const refs = await new Git(root).run(["for-each-ref", "--format=%(refname:short)", "refs/heads/intent/"], true);
@@ -162,6 +171,29 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
     // branch it keeps, once), so a change waiting for a person does not add a line every tick.
     if (await cleanupChange(ctx)) trace.event(ctx.slug, "command", { command: "clean up after merge (retry)", clean: true });
   }
+}
+
+/** Run-folder marker: a closed change's worktree was kept because it has uncommitted work (traced once). */
+const WORKTREE_KEPT = "worktree-kept";
+
+/**
+ * Removes a closed change's worktree when it is a real worktree with nothing uncommitted (untracked
+ * files count as uncommitted). Its branch stays. A worktree with uncommitted work is left as it is,
+ * and that is traced once.
+ */
+async function removeClosedWorktree(ctx: StepContext): Promise<void> {
+  if (!existsSync(ctx.worktreeDir)) return;
+  const wt = new Git(ctx.worktreeDir);
+  const top = await wt.run(["rev-parse", "--show-toplevel"], true);
+  // A plain folder would resolve to the main checkout: never judge (or remove) that.
+  if (top.code !== 0 || !samePath(top.out.trim(), ctx.worktreeDir)) return;
+  if (await wt.isDirty()) {
+    if (onceMarker(ctx, WORKTREE_KEPT)) ctx.trace.event(ctx.slug, "command", { command: "clean up closed change", kept: ctx.worktreeDir, reason: "the worktree has uncommitted work" });
+    return;
+  }
+  await removeWorktree(ctx.git, ctx.worktreeDir);
+  clearMarker(ctx, WORKTREE_KEPT);
+  ctx.trace.event(ctx.slug, "command", { command: "clean up closed change", removed: ctx.worktreeDir, branchKept: ctx.branch });
 }
 
 async function runStep(ctx: StepContext): Promise<StepResult> {

@@ -375,6 +375,8 @@ stepping it never advances.)
     (best effort; the scheduler retries). Cleanup happens only when main
     already has the branch's changes; otherwise (for example `merged` set by
     hand) the branch and worktree stay, and the reason is traced once.
+    A `closed` change's worktree is removed by the scheduler once it
+    holds nothing uncommitted; its branch is kept.
 
 ### Stage 6: verify and maintain
 
@@ -499,6 +501,10 @@ updated), `phases` (slug, seq, name, kind, status, started, ended, cost,
 session_id, error), `events` (rowid, slug, phase_seq, type, ts, payload
 JSON), `gates` (slug, gate, check, result, evidence, ts), `signals` (name,
 ts, result, output).
+
+A `trace.db` that cannot be read as a database is moved aside to
+`trace.db.corrupt-<time>` and a fresh one is started, with a plain console
+line and an event in the new one; the loop and the dashboard keep working.
 
 Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
 `status_change`, `phase_end`, `error`, `signal`, `stop`,

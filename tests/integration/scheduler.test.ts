@@ -148,6 +148,26 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a closed change's worktree is removed once it holds nothing uncommitted; its branch is kept", async () => {
+    const { repo, ctx, trace } = await setupRepo("closed");
+    const git = new Git(repo.path);
+    await git.createBranch(ctx.branch, "main");
+    await git.worktreeAdd(ctx.worktreeDir, ctx.branch);
+    await Bun.write(join(ctx.worktreeDir, "work.ts"), "export const work = 1;\n");
+    // Uncommitted work: kept, and said once.
+    await tick(repo.path);
+    await tick(repo.path);
+    expect(existsSync(join(ctx.worktreeDir, "work.ts"))).toBe(true);
+    expect(trace.events(SLUG).filter((e) => e.type === "command" && e.payload.includes("\"kept\""))).toHaveLength(1);
+    // Committed on the branch: the worktree goes, the branch and its work stay.
+    await new Git(ctx.worktreeDir).commitAll("work");
+    await tick(repo.path);
+    expect(existsSync(ctx.worktreeDir)).toBe(false);
+    expect(await git.branchExists(ctx.branch)).toBe(true);
+    expect((await git.run(["cat-file", "-e", `${ctx.branch}:work.ts`], true)).code).toBe(0);
+    trace.close(); repo.cleanup();
+  });
+
   test("start refuses, in plain words, a checkout off main and a remote without gh", async () => {
     const { repo, trace } = await setupRepo("draft");
     const git = new Git(repo.path);

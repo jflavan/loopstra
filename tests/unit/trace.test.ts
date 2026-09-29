@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -53,6 +53,26 @@ describe("Trace", () => {
     trace = Trace.open(t.path);
     expect(trace.phaseStart("x", "plan", "agent")).toBe(3);
     trace.close();
+    t.cleanup();
+  });
+
+  test("a damaged trace.db is moved aside and a fresh one started, with a plain line and a recorded event", () => {
+    const t = tempDir();
+    mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+    writeFileSync(join(t.path, ".loopstra", "trace.db"), "this is not a database, just some bytes that got written here by mistake".repeat(20));
+    const said: string[] = [];
+    const trace = Trace.open(t.path, (l) => said.push(l));
+    trace.event("x", "tick", {});
+    expect(trace.events("x")).toHaveLength(1);
+    const moved = readdirSync(join(t.path, ".loopstra")).filter((f) => f.startsWith("trace.db.corrupt-"));
+    expect(moved).toHaveLength(1);
+    expect(said).toEqual([`The trace database could not be read, so it was moved to .loopstra/${moved[0]} and a new one was started.`]);
+    expect(trace.events("_loop").some((e) => e.type === "error" && e.payload.includes("moved aside"))).toBe(true);
+    trace.close();
+    // The fresh database opens normally next time.
+    const again = Trace.open(t.path, (l) => said.push(l));
+    again.close();
+    expect(said).toHaveLength(1);
     t.cleanup();
   });
 });

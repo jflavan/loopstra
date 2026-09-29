@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
+import { basename, join } from "node:path";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
@@ -36,16 +36,50 @@ CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, name T
 
 const now = () => new Date().toISOString();
 
+/** Opens and prepares the database; closes it again when that fails. */
+function connect(path: string): Database {
+  const db = new Database(path);
+  try {
+    db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
+    db.exec(SCHEMA);
+    db.query("SELECT COUNT(*) AS n FROM events").get();
+    return db;
+  } catch (e) {
+    try { db.close(); } catch { /* already unusable */ }
+    throw e;
+  }
+}
+
+/** True for errors that mean the file is not a usable database (as opposed to, say, a lock). */
+function damaged(e: unknown): boolean {
+  const text = `${(e as { code?: string })?.code ?? ""} ${e instanceof Error ? e.message : String(e)}`;
+  return /SQLITE_(CORRUPT|NOTADB)|not a database|malformed/i.test(text);
+}
+
 export class Trace {
   private constructor(private readonly root: string, private readonly db: Database) {}
 
-  static open(root: string): Trace {
+  /**
+   * Opens the trace database. A damaged one (not a database, or malformed) is moved aside to
+   * `trace.db.corrupt-<time>` and a fresh one is started, with a plain console line and an event in
+   * the new one, so the loop and the dashboard keep working. Any other problem (a lock) is thrown.
+   */
+  static open(root: string, say: (line: string) => void = (l) => console.log(l)): Trace {
     const dir = join(root, ".loopstra");
     mkdirSync(dir, { recursive: true });
-    const db = new Database(join(dir, "trace.db"));
-    db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
-    db.exec(SCHEMA);
-    return new Trace(root, db);
+    const path = join(dir, "trace.db");
+    try {
+      return new Trace(root, connect(path));
+    } catch (e) {
+      if (!damaged(e)) throw e;
+      const moved = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      renameSync(path, moved);
+      for (const side of ["-wal", "-shm"]) if (existsSync(path + side)) renameSync(path + side, moved + side);
+      say(`The trace database could not be read, so it was moved to .loopstra/${basename(moved)} and a new one was started.`);
+      const trace = new Trace(root, connect(path));
+      trace.event("_loop", "error", { where: "trace", what: "trace.db could not be read; it was moved aside and a new one started", movedTo: moved, error: e instanceof Error ? e.message : String(e) });
+      return trace;
+    }
   }
 
   close(): void { this.db.close(); }
