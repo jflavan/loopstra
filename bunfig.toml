@@ -1,0 +1,5 @@
+[test]
+# Many tests build real git repositories and spawn processes. That takes well under a second on
+# Linux and macOS but can take several seconds on a busy Windows CI runner; Bun's default of 5s
+# per test is too tight there, and a timed-out test keeps running and disturbs the next one.
+timeout = 30000
