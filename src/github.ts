@@ -4,7 +4,7 @@ export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
 export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; url: string }
-export type ChecksState = "pass" | "fail" | "pending";
+export type ChecksState = "pass" | "fail" | "pending" | "unknown";
 
 export class GitHub {
   private readonly exe: string | null;
@@ -40,12 +40,24 @@ export class GitHub {
   async available(): Promise<boolean> { return (await this.run(["--version"])).code === 0; }
 
   async prForBranch(branch: string): Promise<PrInfo | null> {
+    const r = await this.lookupPr(branch);
+    return "pr" in r ? r.pr : null;
+  }
+
+  /**
+   * The pull request for a branch: `{ pr: null }` when GitHub says there is none, and `{ error }`
+   * when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
+   */
+  async lookupPr(branch: string): Promise<{ pr: PrInfo | null } | { error: string }> {
     const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,url"]);
-    if (r.code !== 0) return null;
+    if (r.code !== 0) {
+      if (/no pull requests found/i.test(r.err)) return { pr: null };
+      return { error: r.err.trim().split("\n").pop() || `gh exited ${r.code}` };
+    }
     try {
       const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; url: string };
-      return { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url };
-    } catch { return null; }
+      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url } };
+    } catch { return { error: "gh pr view printed something that is not JSON" }; }
   }
 
   async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {
@@ -61,11 +73,15 @@ export class GitHub {
     if (r.code !== 0) throw new Error(`gh pr comment failed: ${r.err.trim().split("\n").pop()}`);
   }
 
-  /** gh pr checks exits 0 when all pass, 1 when any fail, 8 when pending. A timed-out call counts as fail. */
+  /**
+   * gh pr checks exits 0 when all pass, 1 when any fail, 8 when pending. A call that timed out or
+   * could not start is `unknown` (ask again later), never read as a failure.
+   */
   async checks(number: number): Promise<ChecksState> {
     const r = await this.run(["pr", "checks", String(number), "--json", "name,state"]);
     if (r.code === 0) return "pass";
     if (r.code === 8) return "pending";
+    if (r.code === 124 || r.code === 127) return "unknown";
     if (/no checks reported/i.test(r.err)) return "pass";
     return "fail";
   }

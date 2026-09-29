@@ -134,7 +134,7 @@ any → blocked | closed
 | plan-approved | runtime or human | Plan gate passed. |
 | building | runtime | Build, test, fix, verify running on the branch. |
 | reviewing | runtime | Review and revise rounds running. |
-| merge-review | runtime | Reviewed and its merge checks passed; waiting for a person. |
+| merge-review | runtime | Reviewed and its merge checks passed; waiting for a person, or with a remote for its pull request (checks, approval). |
 | merge-approved | runtime or human | Merge gate passed; the next step re-checks and merges. |
 | merged | runtime | On main. Done-when checks, outcome, and lessons run from here. |
 | verifying | runtime | Outcome written; waiting for a person to confirm. |
@@ -318,24 +318,43 @@ stepping it never advances.)
     `review.md`. Findings with severity `important` → **revise**, then the
     test loop again, then review again. Exhausted with open important
     findings → block.
-15. `after` commands for build. If a remote exists: push, open PR titled
-    `<slug>: <intent title>` with a body linking the artifacts and the review
-    summary, and post the findings as a comment. Status `merge-review`.
+15. `after` commands for review.
 16. Merge gate, in the same step as the approving review (gate timing
     rule): branch contains `main_branch` tip (otherwise rebase), the test
     loop passes, and the newest review had no important findings. If the
     test loop committed fixes, the change is reviewed again (the round
     count continues; exhausted → block), so nothing reaches main that a
-    review did not see. Pass with no person → merge now; with a person →
-    `merge-review` with a plain note, and the person sets `merge-approved`,
-    whose step re-checks and merges. Merging requires the root checkout on
-    `main_branch` with no staged or unstaged changes to tracked files;
-    otherwise block. A `merging` marker in the run folder makes a merge
-    interrupted after it landed finish as merged instead of merging twice.
-    Merge with `gates.merge.method`. Status `merged`. Remove the worktree and
-    delete the branch (best effort; the scheduler retries). The PR path
-    (`gates.merge.human: pr`, PR checks, approvals) is wired in Plan 3;
-    until then `pr` blocks plainly.
+    review did not see.
+    - **No remote.** Pass with no person → merge now; with a person →
+      `merge-review` with a plain note, and the person sets
+      `merge-approved`, whose step re-checks and merges. `human: pr` blocks
+      plainly (there is nowhere to open a pull request; `merge-approved`
+      merges locally instead). Merging requires the root checkout on
+      `main_branch` with no staged or unstaged changes to tracked files;
+      otherwise block. A `merging` marker in the run folder makes a merge
+      interrupted after it landed finish as merged instead of merging twice.
+      Merge with `gates.merge.method`.
+    - **With a remote (the PR gate).** Push the branch
+      (`--force-with-lease`, since the checks may have rebased it), open a
+      PR titled `<slug>: <intent title>` if none is open (body: the artifact
+      paths and the review summary; `review.md` as a comment), and trace its
+      number and link. Status `merge-review` with a note per
+      `gates.merge.human`: `none` "Waiting for the automatic checks on
+      GitHub."; `pr` "A pull request is open. Approve it on GitHub to
+      merge, or close it to stop."; `status` the usual status-line note.
+      With `none` or `pr`, `merge-review` stays runnable and each tick's
+      merge step looks at the PR: checks pending (or `gh` not answering) or,
+      for `pr`, not approved yet → wait, changing nothing; checks failed →
+      block; PR closed → block ("Set status to closed, or to plan-approved
+      to rebuild."); otherwise merge with `gh pr merge` and
+      `gates.merge.method`. With `status`, the person sets `merge-approved`
+      and the step requires the PR checks to pass, then merges. For `pr`, a
+      person setting `merge-approved` counts as the approval. A PR already
+      merged (on GitHub, or by a step that stopped before recording it) is
+      recorded, never merged again.
+    After either merge: sync main (with a remote), status `merged`, write
+    `.loopstra/health-pending`, remove the worktree and delete the branch
+    (best effort; the scheduler retries).
 
 ### Stage 6: verify and maintain
 
@@ -402,21 +421,37 @@ The adapter is the only module that knows the CLI exists. Tests use a fake
 commit paths, diff names, merge-base, contains, rebase, merge, log.
 `src/github.ts` wraps `gh`: remote detection, PR create, PR view (state,
 reviews, checks), PR comment, PR merge. All calls are logged to the trace.
-The runtime never pushes to `main_branch` directly; it merges through the
-merge gate only.
+Every `gh` call and every git call the sync and PR path make is bounded by
+a timeout and never prompts. Code never reaches `main_branch` except
+through the merge gate.
+
+### Main sync
+
+With a remote, at the start of each tick and after a PR merge, if the root
+checkout is on `main_branch` with no staged or unstaged changes to tracked
+files: fetch, then rebase local main onto the remote's main (`pull
+--rebase`), so a PR merged on GitHub and an owner's status edit made on
+GitHub or pushed from another clone reach this checkout, and that tick's
+scan sees them. Main is never pushed (that would also push a person's own
+unpushed commits); only intent branches are pushed, for their PRs. A
+rebase conflict only inside `intent/` takes the remote's version (an
+owner's edit on GitHub wins over the local record; a merged PR also
+carries the artifacts committed before its branch was last rebased). Any
+other conflict aborts the rebase, and the loop carries on unsynced until
+an engineer resolves it. Every failure is traced and never stops the tick.
 
 ### Artifact commits
 
 Artifacts under `intent/` (`intent.md` status changes, `spec.md`, `plan.md`,
 `outcome.md`, `queue.md`) are markdown, not code. The runtime commits them
-on `main_branch` directly and pushes when a remote exists, with the message
+on `main_branch` directly (never pushed; see Main sync), with the message
 `loopstra(<slug>): <what changed>`. This is the course's model: the file
 pair is committed alongside the intent, and git history is the audit trail.
-Consequence: the runtime's git identity must be allowed to push markdown
-under `intent/` to `main_branch`. Teams with strict branch protection grant
-that bypass to the runtime's account or set the spec and plan gates to
-`human: pr`, which delivers those artifacts as PRs instead. Code never takes
-this path; it always goes through the merge gate.
+The loop's checkout is the source of truth for status; with a remote,
+artifacts reach GitHub only inside a change's pull request (its branch
+carries main's artifact commits from when it was last rebased), so no push
+to `main_branch` bypass is needed. Code never takes this path; it always
+goes through the merge gate.
 
 ## 11. Trace and observability
 
@@ -488,17 +523,23 @@ exits 0.
 
 ## 14. Runtime process
 
-`loopstra start [--once]`: validates config, checks `claude`, `git`, and (if
-a remote exists) `gh` are available, then loops: tick, sleep
-`poll_seconds`. `--once` runs one tick and exits, for tests and cron. A tick:
+`loopstra start [--once]`: checks `claude` and `git` are installed, the
+root checkout is on `main_branch` ("Run loopstra from a checkout of
+<main_branch>; you are on <branch>."), and, if a remote exists, that `gh` is
+available ("This repo has a remote but gh was not found. Install GitHub CLI
+or remove the remote."), then loops: tick, sleep `poll_seconds`. `--once`
+runs one tick and exits, for tests and cron. A tick:
 
 1. Load config. On validation failure, log and sleep; never crash on a bad
    edit.
-2. Run due signals.
-3. Scan intents, consistency-check, regenerate `queue.md`.
-4. Poll waiting gates (human status changes are picked up by the scan; PR
-   state via `gh`).
-5. Pick the top runnable intent and run exactly one stage step for it.
+2. With a remote, sync main (§10).
+3. Run due signals.
+4. Scan intents, consistency-check, regenerate `queue.md`.
+5. Pick the top runnable intent and run exactly one stage step for it
+   (human status changes are picked up by the scan). A step that only
+   looked at a pull request and found it still waiting changes nothing and
+   lets the next runnable intent run in the same tick, so a pull request
+   waiting on GitHub never holds up other changes.
 6. Sleep.
 
 One step per tick keeps the loop legible and interruptible. A step is

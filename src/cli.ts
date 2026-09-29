@@ -29,9 +29,9 @@ async function main(): Promise<number> {
     case "status":
       process.stdout.write(await renderStatus(root)); return 0;
     case "start": {
-      const { missingTools, start } = await import("./scheduler");
-      const missing = missingTools();
-      if (missing) { console.error(missing); return 1; }
+      const { preflight, start } = await import("./scheduler");
+      const refusal = await preflight(root);
+      if (refusal) { console.error(refusal); return 1; }
       await start(root, { once: rest.includes("--once") });
       return 0;
     }

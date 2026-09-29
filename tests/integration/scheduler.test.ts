@@ -4,9 +4,12 @@ import { join } from "node:path";
 import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { missingTools, start, tick } from "../../src/scheduler";
+import { fileURLToPath } from "node:url";
+import { missingTools, preflight, start, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
-import { setupRepo, TEMPLATES } from "../helpers";
+import { setupRepo, TEMPLATES, withEnv } from "../helpers";
+
+const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
 afterEach(() => resetStop());
 
@@ -99,6 +102,23 @@ describe("scheduler resilience", () => {
     await tick(repo.path);
     expect(existsSync(ctx.worktreeDir)).toBe(false);
     expect(await git.branchExists(ctx.branch)).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("start refuses, in plain words, a checkout off main and a remote without gh", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    const git = new Git(repo.path);
+    await withEnv({ LOOPSTRA_GH_EXECUTABLE: join(repo.path, "missing-gh.exe") }, async () => {
+      expect(await preflight(repo.path)).toBeNull();
+      await git.run(["checkout", "-q", "-b", "elsewhere"]);
+      expect(await preflight(repo.path)).toBe("Run loopstra from a checkout of main; you are on elsewhere.");
+      await git.run(["checkout", "-q", "main"]);
+      await git.run(["remote", "add", "origin", join(repo.path, "nowhere.git")]);
+      expect(await preflight(repo.path)).toBe("This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.");
+    });
+    await withEnv({ LOOPSTRA_GH_EXECUTABLE: FAKE_GH }, async () => {
+      expect(await preflight(repo.path)).toBeNull();
+    });
     trace.close(); repo.cleanup();
   });
 

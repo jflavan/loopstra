@@ -13,6 +13,7 @@ describe("GitHub", () => {
     const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath } });
     expect(await gh.available()).toBe(true);
     expect(await gh.prForBranch("intent/x")).toBeNull();
+    expect(await gh.lookupPr("intent/x")).toEqual({ pr: null });
     const created = await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" });
     expect(created.number).toBe(1);
     let pr = await gh.prForBranch("intent/x");
@@ -47,8 +48,11 @@ describe("GitHub", () => {
     const started = Date.now();
     expect(await gh.prForBranch("intent/x")).toBeNull();
     expect(Date.now() - started).toBeLessThan(8_000);
+    // A caller can tell "gh did not answer" from "there is no pull request", and waits.
+    expect(await gh.lookupPr("intent/x")).toMatchObject({ error: expect.stringContaining("was stopped") });
+    expect(await gh.checks(1)).toBe("unknown");
     expect(await gh.available()).toBe(false);
     await expect(gh.comment(1, "x")).rejects.toThrow();
     t.cleanup();
-  });
+  }, 30_000);
 });

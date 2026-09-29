@@ -161,6 +161,23 @@ Sources of truth, in order of precedence when they conflict:
   clean root checkout on `main_branch`; an interrupted merge that landed is
   finished, never repeated. Worktree and branch cleanup is best effort and
   retried by the scheduler.
+- **PR gate (2026-09-28, Plan 3).** With a remote, the approving review
+  pushes the branch and opens a PR instead of merging locally; the status
+  is merge-review with a note per `gates.merge.human`. With `none` or `pr`
+  the merge step watches the PR each tick (pending or `gh` silent → wait,
+  changing nothing; failed checks or a closed PR → block; `pr` also needs
+  an approval, or a person setting merge-approved); with `status` a person
+  sets merge-approved and the PR's checks must pass. Merges go through
+  `gh pr merge`; a PR already merged is recorded, never merged twice. A
+  step that only looked at a waiting PR lets the next change run in the
+  same tick.
+- **Main sync (2026-09-28, Plan 3).** With a remote, each tick (and after
+  a PR merge) fetches and rebases local main onto the remote's main when
+  the checkout is on main with no tracked changes. Main is never pushed,
+  since that would push a person's own commits; only intent branches are
+  pushed (`--force-with-lease`). Conflicts only in `intent/` take the
+  remote's version (an owner's edit wins); any other conflict aborts and
+  is traced. `start` refuses a checkout off main, or a remote without gh.
 
 ## Open
 

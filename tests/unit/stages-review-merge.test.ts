@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
-import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, runMergeStep } from "../../src/stages/merge";
+import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import { runReviewStep } from "../../src/stages/review";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
@@ -163,6 +163,20 @@ describe("merge", () => {
     // The next tick checks main's health, attributed to this change.
     expect(await Bun.file(join(repo.path, ".loopstra", "health-pending")).text()).toBe("add-numbers");
     expect(await new Git(repo.path).isDirty()).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("approval through a pull request without a remote blocks plainly; merge-approved merges here instead", async () => {
+    const { repo, ctx, trace } = await built("gates:\n  merge:\n    human: pr\n");
+    await runReviewStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toBe(NO_REMOTE_PR_NOTE);
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+    await personSets(ctx, "merge-approved");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     trace.close(); repo.cleanup();
   });
 

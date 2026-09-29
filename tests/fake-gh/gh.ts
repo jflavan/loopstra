@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending"; merged: boolean; title?: string; body?: string; comments: string[] };
 type State = { prs: Record<string, Pr>; next: number };
@@ -42,7 +44,22 @@ if (cmd === "view") {
   process.exit(pr.checks === "pass" ? 0 : pr.checks === "fail" ? 1 : 8);
 } else if (cmd === "merge") {
   const number = Number(args[2]);
-  const pr = Object.values(state.prs).find((p) => p.number === number)!;
+  const [branch, pr] = Object.entries(state.prs).find(([, p]) => p.number === number)!;
+  // Test knob: with a bare repository as the remote, merge on it for real, the way GitHub would.
+  const remote = process.env.LOOPSTRA_FAKE_GH_REMOTE;
+  if (remote) {
+    const dir = mkdtempSync(join(tmpdir(), "fake-gh-merge-"));
+    const git = (...a: string[]) => {
+      const r = Bun.spawnSync({ cmd: ["git", "-c", "user.name=GitHub", "-c", "user.email=github@example.test", ...a], cwd: dir, stdout: "pipe", stderr: "pipe" });
+      if (r.exitCode !== 0) { console.error(`fake gh: git ${a.join(" ")} failed: ${r.stderr.toString()}`); rmSync(dir, { recursive: true, force: true }); process.exit(1); }
+    };
+    git("clone", "-q", remote, ".");
+    if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
+    else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
+    git("push", "-q", "origin", "HEAD");
+    if (args.includes("--delete-branch")) git("push", "-q", "origin", "--delete", branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
   pr.state = "MERGED"; pr.merged = true;
   await save();
 } else {

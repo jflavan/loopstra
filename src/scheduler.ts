@@ -4,6 +4,8 @@ import { FAKE_CLAUDE_ENV } from "./claude";
 import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
 import { Git } from "./git";
+import { GitHub } from "./github";
+import { syncMain } from "./remote";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, renderQueue, scanRepo, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
@@ -47,6 +49,11 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
+    // With a remote: pull what others pushed (an owner's status edits, merges on GitHub). Main is
+    // never pushed. Best effort; problems are traced and never stop the tick.
+    const hasRemote = (await new Git(root).remoteName()) !== null;
+    if (hasRemote) await syncMain(root, cfg, trace);
+
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
     if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlug);
@@ -64,18 +71,20 @@ export async function tick(root: string): Promise<TickResult> {
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable));
     await cleanupLeftovers(root, cfg, trace, ordered);
 
-    // Pick and run one step.
+    // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
+    // still waiting on GitHub) does not hold up the next change: it runs in the same tick.
     const human = { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
-    const next = ordered.find((i) => isRunnable(i, human));
-    if (!next) return out;
-    out.picked = next.slug;
-    const ctx = new StepContext(root, cfg, trace, next);
-    try {
-      out.result = await runStep(ctx);
-    } catch (e) {
-      if (e instanceof StopRequested) throw e;
-      trace.event(next.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
-      out.result = await blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx));
+    for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote))) {
+      out.picked = next.slug;
+      const ctx = new StepContext(root, cfg, trace, next);
+      try {
+        out.result = await runStep(ctx);
+      } catch (e) {
+        if (e instanceof StopRequested) throw e;
+        trace.event(next.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
+        out.result = await blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx));
+      }
+      if (!(out.result.ok && out.result.waiting)) break;
     }
     return out;
   } catch (e) {
@@ -159,6 +168,25 @@ export function missingTools(env: Record<string, string | undefined> = process.e
   return null;
 }
 
+/**
+ * What `start` checks before the loop begins, as a plain message, or null when it may start: the
+ * tools are installed, the checkout is on main_branch, and a repository with a remote has gh.
+ * A config that cannot be loaded is left to the loop, which reports it and retries.
+ */
+export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const missing = missingTools(env);
+  if (missing) return missing;
+  let cfg: Config;
+  try { cfg = await loadConfig(root); } catch { return null; }
+  const git = new Git(root);
+  const branch = (await git.runBounded(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim();
+  if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
+  if ((await git.remoteName()) && !(await new GitHub(root).available())) {
+    return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";
+  }
+  return null;
+}
+
 /** Waits up to `ms`, or until a stop is requested. Leaves no timer behind. */
 async function sleepUnlessStopped(ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -189,7 +217,7 @@ export async function start(root: string, opts: { once: boolean; installSignals?
         else if (r.paused) log(`paused: ${r.paused}`);
         else if (r.stopped) log(`stopped${r.picked ? ` during ${r.picked}; it resumes on the next start` : ""}`);
         else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
-        else if (r.picked) log(`${r.picked}: ${r.result?.ok ? "step done" : r.result?.note}`);
+        else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : "step done") : r.result?.note}`);
         else log("idle");
       } catch (e) {
         log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);

@@ -22,7 +22,8 @@ export class StepContext {
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
 }
 
-export type StepResult = { ok: true } | { ok: false; note: string };
+/** `waiting`: the step only looked (for example at a pull request) and nothing changed; another change may run in the same tick. */
+export type StepResult = { ok: true; waiting?: boolean } | { ok: false; note: string };
 
 const APPROVED: ReadonlySet<Status> = new Set(["accepted", "spec-approved", "plan-approved", "merge-approved", "merged"]);
 
@@ -48,10 +49,8 @@ export async function assertRootOnMain(ctx: StepContext): Promise<void> {
 /** Commit intent-folder changes on the main branch. Refuses when the root is on any other branch. */
 export async function commitArtifacts(ctx: StepContext, what: string): Promise<void> {
   await assertRootOnMain(ctx);
+  // Never pushed: pushing main would also push a person's own unpushed commits.
   await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], `loopstra(${ctx.slug}): ${what}`);
-  if (await ctx.git.hasRemote()) {
-    try { await ctx.git.pushCurrent(); } catch (e) { ctx.trace.event(ctx.slug, "error", { where: "push", error: (e as Error).message }); }
-  }
 }
 
 export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {

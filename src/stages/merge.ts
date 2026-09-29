@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { blockWith, blockWithDetail, clearMarker, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { blockWith, blockWithDetail, clearMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git } from "../git";
+import { GitHub, type PrInfo } from "../github";
 import { codePhase } from "../phases";
+import { pushBranch, syncMain } from "../remote";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
@@ -12,6 +14,18 @@ import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRo
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
 export const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
+
+/** Notes for the pull request path (a remote exists). */
+export const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
+export const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
+export const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
+export const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
+export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
+
+/** How a person asks the merge step to look again: the status that is runnable for this gate. */
+function mergeRetry(ctx: StepContext): string {
+  return `To try again, set status to ${ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review"}.`;
+}
 
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
 export type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fail" } & Failure);
@@ -71,21 +85,133 @@ export async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
 }
 
 /**
- * The merge gate after its automated checks passed (the gate timing rule): no person → merge now;
- * a person → merge-review with a note; a pull request → not wired yet, so block plainly.
+ * The merge gate after its automated checks passed (the gate timing rule). With a remote: push the
+ * branch, open its pull request, and wait in merge-review (the merge step watches the pull request
+ * unless a person decides on the status line). Without one: no person → merge now; a person →
+ * merge-review with a note; a pull request → block plainly (there is nowhere to open one).
  */
 export async function passMergeGate(ctx: StepContext): Promise<StepResult> {
   const human = ctx.cfg.gates.merge.human;
+  if ((await ctx.git.remoteName()) !== null) {
+    const opened = await openPullRequest(ctx, true);
+    if (!opened.ok) return blockWith(ctx, opened);
+    await setStatus(ctx, "merge-review", human === "none" ? PR_CHECKS_NOTE : human === "pr" ? PR_APPROVE_NOTE : MERGE_WAIT_NOTE);
+    return { ok: true };
+  }
   if (human === "none") return mergeNow(ctx);
   if (human === "status") {
     await setStatus(ctx, "merge-review", MERGE_WAIT_NOTE);
     return { ok: true };
   }
-  return blockWithDetail(
-    ctx,
-    "This change passed its checks, but approving merges through a pull request is not set up yet. To merge it here instead, set status to merge-approved.",
-    "gates.merge.human is pr; the pull request path is not wired yet",
-  );
+  return blockWithDetail(ctx, NO_REMOTE_PR_NOTE, "gates.merge.human is pr and the repository has no remote");
+}
+
+/**
+ * Pushes the branch and makes sure it has an open pull request (title `<slug>: <title>`, a body
+ * naming the artifacts and the review summary). The review goes on it as a comment when the pull
+ * request is new or `newReview` says a review just passed. The number and link go to the trace.
+ */
+async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
+  const r = await codePhase(ctx, "pull-request", async () => {
+    const pushed = await pushBranch(ctx.git, ctx.branch);
+    if (!pushed.ok) throw new Error(pushed.detail);
+    const gh = new GitHub(ctx.root);
+    const found = await gh.lookupPr(ctx.branch);
+    if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
+    let pr: { number: number; url: string } | null = found.pr?.state === "OPEN" ? found.pr : null;
+    const created = !pr;
+    if (!pr) {
+      const dir = `intent/${ctx.slug}`;
+      const body = [
+        `Loopstra change \`${ctx.slug}\`.`,
+        "",
+        `- Intent: \`${dir}/intent.md\``,
+        `- Spec: \`${dir}/spec.md\``,
+        `- Plan: \`${dir}/plan.md\``,
+        `- Review: \`${dir}/review.md\``,
+        "",
+        "## Review summary",
+        "",
+        ctx.trace.lastGate(ctx.slug, "review", "findings")?.evidence ?? "No review recorded.",
+      ].join("\n");
+      pr = await gh.createPr({ head: ctx.branch, base: ctx.cfg.main_branch, title: `${ctx.slug}: ${ctx.intent.file.title || ctx.slug}`, body });
+    }
+    const review = await readArtifact(ctx, "review.md");
+    if (review && (created || newReview)) {
+      // The comment is a courtesy: a failure is traced and does not stop the pull request.
+      try { await gh.comment(pr.number, review); } catch (e) { ctx.trace.event(ctx.slug, "error", { where: "pull request comment", error: (e as Error).message }); }
+    }
+    ctx.trace.event(ctx.slug, "command", { command: "pull request", number: pr.number, url: pr.url, created });
+    return { ok: true as const };
+  });
+  if (r.ok) return { ok: true };
+  return {
+    ok: false,
+    note: `The pull request for this change could not be opened on GitHub. An engineer should check that GitHub can be reached. ${mergeRetry(ctx)}`,
+    detail: r.note,
+  };
+}
+
+/**
+ * The merge step with a remote: watch the pull request. Merged (on GitHub, or by an earlier step
+ * that stopped before recording it) → sync main and record it. Closed → block. Checks pending, gh
+ * not answering, or (merge.human pr) not approved yet → wait, changing nothing. Checks failed →
+ * block. Otherwise merge through gh.
+ */
+async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
+  const gh = new GitHub(ctx.root);
+  const found = await gh.lookupPr(ctx.branch);
+  if ("error" in found) {
+    ctx.trace.event(ctx.slug, "error", { where: "pull request", error: found.error, note: "will look again on the next tick" });
+    return { ok: true, waiting: true };
+  }
+  const pr = found.pr;
+  if (pr?.merged) return finishRemoteMerge(ctx);
+  if (pr?.state === "CLOSED") return blockWithDetail(ctx, PR_CLOSED_NOTE, { pr: pr.number, url: pr.url });
+  if (!pr) {
+    // No pull request yet (for example GitHub could not be reached when the review passed): open it.
+    if (!(await ctx.git.branchExists(ctx.branch))) {
+      return blockWithDetail(ctx, "The work for this change is missing. To build it again, set status to plan-approved.", `branch ${ctx.branch} does not exist`);
+    }
+    const opened = await openPullRequest(ctx, false);
+    if (!opened.ok) return blockWith(ctx, opened);
+    return { ok: true, waiting: true };
+  }
+
+  const checks = await gh.checks(pr.number);
+  if (checks === "pending" || checks === "unknown") return { ok: true, waiting: true };
+  const where = `pull request #${pr.number} ${pr.url}`;
+  if (checks === "fail") {
+    ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
+    return blockWithDetail(ctx, `${PR_CHECKS_FAILED_NOTE} ${mergeRetry(ctx)}`, { pr: pr.number, url: pr.url });
+  }
+  const status = ctx.intent.file.frontmatter.status;
+  // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
+  if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
+  ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", where);
+  if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
+  return mergeOnGitHub(ctx, gh, pr);
+}
+
+async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
+  const merged = await codePhase(ctx, "merge", async () => {
+    await gh.merge(pr.number, ctx.cfg.gates.merge.method);
+    return { ok: true as const };
+  });
+  if (!merged.ok) {
+    // gh can report a problem after the merge went through (for example tidying up a local branch).
+    const again = await gh.prForBranch(ctx.branch);
+    if (!again?.merged) {
+      return blockWithDetail(ctx, `The pull request could not be merged on GitHub. An engineer should look at it. ${mergeRetry(ctx)}`, { pr: pr.number, error: merged.note });
+    }
+  }
+  return finishRemoteMerge(ctx);
+}
+
+/** The pull request is merged on GitHub: bring main up to date here, then record the merge. */
+async function finishRemoteMerge(ctx: StepContext): Promise<StepResult> {
+  await syncMain(ctx.root, ctx.cfg, ctx.trace);
+  return finishMerge(ctx);
 }
 
 /** True when the review round that just passed may be followed by one more (fixes were made after it). */
@@ -106,13 +232,17 @@ async function reviewAgain(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * The merge step. merge-review with a person on the gate waits (it is not runnable). merge-approved
- * (a person approved), or merge-review with no person on the gate: check again and merge.
+ * The merge step. merge-review with a person on the status line waits (it is not runnable). With a
+ * remote, the step watches the pull request (see runRemoteMerge). Without one: merge-approved (a
+ * person approved), or merge-review with no person on the gate: check again and merge.
  */
 export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   if (await alreadyMerged(ctx)) return finishMerge(ctx);
   const status = ctx.intent.file.frontmatter.status;
-  if (status === "merge-review" && ctx.cfg.gates.merge.human !== "none") return { ok: true };
+  const human = ctx.cfg.gates.merge.human;
+  if (status === "merge-review" && human === "status") return { ok: true };
+  if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
+  if (status === "merge-review" && human !== "none") return { ok: true };
 
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return blockWith(ctx, open);
@@ -179,12 +309,8 @@ export async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   if (!(await ctx.git.branchExists(ctx.branch))) return true;
   const base = readFileSync(marker, "utf8").trim();
   const main = ctx.cfg.main_branch;
-  const changed = await ctx.git.run(["diff", "--name-only", `${base}...${ctx.branch}`], true);
   const moved = (await ctx.git.run(["rev-parse", main], true)).out.trim() !== base;
-  if (changed.code === 0 && moved) {
-    const files = changed.out.trim().split(/\r?\n/).filter(Boolean);
-    if (await ctx.git.sameContent(main, ctx.branch, files)) return true;
-  }
+  if (moved && (await ctx.git.containsChanges(main, ctx.branch))) return true;
   clearMarker(ctx, MERGING);
   return false;
 }

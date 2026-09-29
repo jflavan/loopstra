@@ -1,5 +1,9 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { killTree, within } from "./shell";
+
+/** How long one bounded git call (see Git.runBounded) may take before it is stopped. */
+export const GIT_TIMEOUT_MS = 2 * 60_000;
 
 /** The last non-empty line of some git output, or "" when there is none. */
 function lastNonEmptyLine(s: string): string {
@@ -99,6 +103,25 @@ export class Git {
     return (await this.run(["diff", "--quiet", a, b, "--", ...paths], true)).code === 0;
   }
   async isAncestor(ancestor: string, descendant: string): Promise<boolean> { return (await this.run(["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0; }
+
+  /**
+   * True when `target` already has `branch`'s changes: the branch is part of its history, or it has
+   * the branch's version of every file the branch changed since the two diverged (a squash merge).
+   */
+  async containsChanges(target: string, branch: string): Promise<boolean> {
+    if ((await this.runBounded(["merge-base", "--is-ancestor", branch, target])).code === 0) return true;
+    const changed = await this.runBounded(["diff", "--name-only", `${target}...${branch}`]);
+    if (changed.code !== 0) return false;
+    const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!files.length) return true;
+    return (await this.runBounded(["diff", "--quiet", target, branch, "--", ...files])).code === 0;
+  }
+
+  /** Commits on `a` that `b` does not have (0 when either cannot be read). */
+  async countAhead(a: string, b: string): Promise<number> {
+    const r = await this.runBounded(["rev-list", "--count", `${b}..${a}`]);
+    return r.code === 0 ? Number.parseInt(r.out.trim(), 10) || 0 : 0;
+  }
   async log(n: number): Promise<string[]> { return (await this.run(["log", `-${n}`, "--format=%h %s"])).out.trim().split("\n").filter(Boolean); }
 
   async commitAll(message: string): Promise<boolean> {
@@ -147,9 +170,35 @@ export class Git {
     }
   }
 
-  async push(branch: string): Promise<void> { await this.run(["push", "-u", "origin", branch]); }
-  async pushCurrent(): Promise<void> { await this.run(["push"]); }
-  async fetch(): Promise<void> { await this.run(["fetch", "--quiet"], true); }
+  /** The remote Loopstra works with: origin when there is one, else the first; null without a remote. */
+  async remoteName(): Promise<string | null> {
+    const names = (await this.runBounded(["remote"])).out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!names.length) return null;
+    return names.includes("origin") ? "origin" : names[0]!;
+  }
+
+  /**
+   * One git call that is stopped after `timeoutMs` (code 124) and never asks for credentials on
+   * the terminal, so it cannot hang the loop (fetch and push talk to a remote). Never throws.
+   */
+  async runBounded(args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<{ code: number; out: string; err: string }> {
+    let proc: ReturnType<typeof Bun.spawn>;
+    try {
+      proc = Bun.spawn({ cmd: ["git", ...args], cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    } catch (e) {
+      return { code: 127, out: "", err: e instanceof Error ? e.message : String(e) };
+    }
+    const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
+    const outP = read(proc.stdout as ReadableStream<Uint8Array>);
+    const errP = read(proc.stderr as ReadableStream<Uint8Array>);
+    const code = await within(proc.exited, timeoutMs, null);
+    if (code === null) {
+      await killTree(proc);
+      return { code: 124, out: await within(outP, 250, ""), err: `git ${args[0]} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped.` };
+    }
+    const [out, err] = await Promise.all([within(outP, 2_000, ""), within(errP, 2_000, "")]);
+    return { code, out, err };
+  }
 }
 
 /** Removes a worktree directory however it can: git first, then the file system, then prunes git's record of it. */
