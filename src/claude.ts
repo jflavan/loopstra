@@ -58,3 +58,111 @@ export class StreamCollector {
     };
   }
 }
+
+export const FAKE_CLAUDE_ENV = "LOOPSTRA_CLAUDE_EXECUTABLE";
+
+export type PermissionMode = "default" | "plan" | "acceptEdits" | "dontAsk" | "auto";
+
+export interface RunPhaseInput {
+  cwd: string;
+  prompt: string;
+  schema: object;
+  model: string;
+  permissionMode: PermissionMode;
+  allowedTools: string[];
+  timeoutMs: number;
+  maxBudgetUsd: number;
+  resume?: string;
+  env?: Record<string, string>;
+  /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
+  executable?: string;
+  onEvent?: (e: StreamEvent) => void;
+}
+
+export interface RunPhaseResult extends Collected {
+  ok: boolean;
+  reason: string;
+  exitCode: number | null;
+  durationMs: number;
+  stderr: string;
+}
+
+export function resolveClaude(override?: string): string | null {
+  if (override) return override;
+  const fromEnv = process.env[FAKE_CLAUDE_ENV];
+  if (fromEnv) return fromEnv;
+  return Bun.which("claude");
+}
+
+export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
+  const started = Date.now();
+  const collector = new StreamCollector();
+  const fail = (reason: string, exitCode: number | null = null, stderr = ""): RunPhaseResult => ({
+    ...collector.finish(), ok: false, reason, exitCode, durationMs: Date.now() - started, stderr,
+  });
+
+  const exe = resolveClaude(input.executable);
+  if (!exe) return fail("could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
+
+  const args = [
+    "-p", "--output-format", "stream-json", "--verbose",
+    "--json-schema", JSON.stringify(input.schema),
+    "--model", input.model,
+    "--permission-mode", input.permissionMode,
+    "--max-budget-usd", String(input.maxBudgetUsd),
+  ];
+  if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
+  if (input.resume) args.push("--resume", input.resume);
+
+  // A .ts fake must be run through bun; the real CLI is a native executable.
+  const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
+
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn({
+      cmd, cwd: input.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, ...(input.env ?? {}) },
+    });
+  } catch (e) {
+    return fail(`could not start claude: ${(e as Error).message}`);
+  }
+
+  proc.stdin.write(input.prompt);
+  proc.stdin.end();
+
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, input.timeoutMs);
+
+  const stderrPromise = new Response(proc.stderr).text();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of proc.stdout) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      const e = collector.push(line);
+      if (e && input.onEvent) input.onEvent(e);
+    }
+  }
+  if (buffer.trim()) { const e = collector.push(buffer); if (e && input.onEvent) input.onEvent(e); }
+
+  const exitCode = await proc.exited;
+  clearTimeout(timer);
+  const stderr = await stderrPromise;
+  const collected = collector.finish();
+  const durationMs = Date.now() - started;
+
+  if (timedOut) return { ...collected, ok: false, reason: `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, durationMs, stderr };
+  if (collected.subtype === "missing_result") {
+    return { ...collected, ok: false, reason: `claude exited ${exitCode} without a result: ${stderr.trim().split("\n").pop() ?? ""}`.trim(), exitCode, durationMs, stderr };
+  }
+  if (collected.subtype !== "success" || collected.isError) {
+    return { ...collected, ok: false, reason: `claude ended with ${collected.subtype}`, exitCode, durationMs, stderr };
+  }
+  if (collected.structuredOutput === undefined) {
+    return { ...collected, ok: false, reason: "claude finished without structured output", exitCode, durationMs, stderr };
+  }
+  return { ...collected, ok: true, reason: "", exitCode, durationMs, stderr };
+}
