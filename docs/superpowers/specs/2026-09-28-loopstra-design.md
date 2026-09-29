@@ -338,11 +338,17 @@ stepping it never advances.)
       `merge-review` with a plain note, and the person sets
       `merge-approved`, whose step re-checks and merges. `human: pr` blocks
       plainly (there is nowhere to open a pull request; `merge-approved`
-      merges locally instead). Merging requires the root checkout on
-      `main_branch` with no staged or unstaged changes to tracked files;
-      otherwise block. A `merging` marker in the run folder makes a merge
-      interrupted after it landed finish as merged instead of merging twice.
-      Merge with `gates.merge.method`.
+      merges locally instead). The merge step first commits the change's
+      own `intent/<slug>/` folder, so a person's uncommitted
+      `merge-approved` counts. Merging then requires the root checkout on
+      `main_branch` with nothing staged and no unsaved changes to tracked
+      files outside `intent/` (a person's unsaved edits to other intents
+      never block it); otherwise block. A `merging` marker in the run
+      folder makes a merge interrupted after it landed finish as merged
+      instead of merging twice. Merge with `gates.merge.method`: `squash`
+      is a commit with the branch's tree on top of main
+      (`commit-tree`) and a fast-forward to it, so it lands whole or not
+      at all; `merge` is `merge --no-ff`.
     - **With a remote (the PR gate).** Push the branch
       (`--force-with-lease`, since the checks may have rebased it), open a
       PR titled `<slug>: <intent title>` if none is open (body: the artifact

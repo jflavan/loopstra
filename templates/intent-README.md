@@ -31,6 +31,8 @@ The `status` line at the top of `intent.md` says where the change is, and the `n
 
 To stop a change at any point, set `status: closed`.
 
+Your changes to `intent.md` are picked up whether or not you commit them; saving the file is enough. The system never writes over what you wrote: if you change the status while it is working on that change, it stops that step and goes with your status.
+
 When a change is finished, `outcome.md` may have a section called "For a person to confirm". These are things the system could not check for itself. They never hold the change up; look at them when you can.
 
 ## Template

@@ -206,6 +206,54 @@ describe("merge", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a person sets merge-approved without committing: the merge proceeds, and main gets one commit with the branch's tree", async () => {
+    const { repo, ctx, trace } = await built(PERSON_MERGES);
+    await runReviewStep(ctx);
+    const git = new Git(repo.path);
+    // The owner edits the status line and saves, but never commits.
+    const path = join(repo.path, "intent", "add-numbers", "intent.md");
+    await Bun.write(path, (await Bun.file(path).text()).replace("status: merge-review", "status: merge-approved"));
+    // An unsaved edit to another change's intent.md does not stand in the way either.
+    mkdirSync(join(repo.path, "intent", "other"), { recursive: true });
+    const other = join(repo.path, "intent", "other", "intent.md");
+    await Bun.write(other, "---\nstatus: draft\n---\n# Intent: other\n");
+    await git.commitPaths(["intent/other"], "other change");
+    await Bun.write(other, "---\nstatus: draft\n---\n# Intent: other\n\nStill thinking.\n");
+    await ctx.reload();
+    const r = await runMergeStep(ctx);
+    expect(r.ok).toBe(true);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
+    // The person's status edit is on main, and the other change's unsaved edit is still unsaved.
+    const log = (await git.run(["log", "--format=%s", "main"])).out.split(/\r?\n/);
+    expect(log).toContain("loopstra(add-numbers): record edits made by a person");
+    expect(await Bun.file(other).text()).toContain("Still thinking.");
+    expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("M intent/other/intent.md");
+    // The merge itself is one commit whose tree is the branch's (as it was when merged).
+    const mergeCommit = (await git.run(["log", "--format=%H", "--grep", "^add-numbers: add numbers$", "main"])).out.trim().split(/\r?\n/);
+    expect(mergeCommit).toHaveLength(1);
+    expect((await git.run(["diff", "--name-only", `${mergeCommit[0]}^`, mergeCommit[0]!])).out.trim().split(/\r?\n/).sort()).toEqual(["src/add.ts", "tests/add.test.ts"]);
+    expect((await git.run(["diff", "--cached", "--name-only"])).out.trim()).toBe("");
+    trace.close(); repo.cleanup();
+  });
+
+  test("an unsaved edit to a tracked source file outside intent/ still blocks the merge, and stays as it was", async () => {
+    const { repo, ctx, trace } = await built(PERSON_MERGES);
+    await runReviewStep(ctx);
+    await personSets(ctx, "merge-approved");
+    await Bun.write(join(repo.path, "README.md"), "# test repo\n\nunsaved\n");
+    const head = await new Git(repo.path).headSha();
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toBe(DIRTY_ROOT_NOTE);
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+    expect(await Bun.file(join(repo.path, "README.md")).text()).toContain("unsaved");
+    // Only the blocked status was recorded on main.
+    expect((await new Git(repo.path).run(["diff", "--name-only", head, "main"])).out.trim()).toBe("intent/add-numbers/intent.md");
+    trace.close(); repo.cleanup();
+  });
+
   test("merge-approved reads the newest review verdict", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     await runReviewStep(ctx);
@@ -240,7 +288,12 @@ describe("merge", () => {
     await personSets(ctx, "merge-approved");
     // An untracked file on main that the merge would overwrite makes git refuse the merge itself.
     await Bun.write(join(repo.path, "src", "add.ts"), "// someone's scratch file\n");
+    const git = new Git(repo.path);
+    const head = await git.headSha();
     await runMergeStep(ctx);
+    // Nothing landed: main only gained the blocked status, and nothing is staged.
+    expect((await git.run(["diff", "--name-only", head, "main"])).out.trim()).toBe("intent/add-numbers/intent.md");
+    expect((await git.run(["diff", "--cached", "--name-only"])).out.trim()).toBe("");
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
     expect(i.file.frontmatter.note).toContain("could not be merged");

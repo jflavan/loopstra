@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { blockWith, blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
+import { assertRootOnMain, blockWith, blockWithDetail, clearMarker, onceMarker, readArtifact, setStatus, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
-import { Git } from "../git";
+import { Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
 import { codePhase } from "../phases";
 import { pushBranch, syncMain } from "../remote";
@@ -13,6 +13,7 @@ import { MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRo
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
+const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
 export const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
@@ -51,7 +52,7 @@ export async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         if (await wt.rebaseOnto(main)) return { result: "pass", evidence: "rebased onto main" };
         failure = {
           ok: false,
-          note: "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.",
+          note: UPDATE_FAILED_NOTE,
           detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted`,
         };
         return { result: "fail", evidence: "rebase onto main hit conflicts" };
@@ -247,6 +248,9 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
   if (status === "merge-review" && human !== "none") return { ok: true };
 
+  // A person may have set merge-approved (or edited the change's other files) without committing:
+  // record the change's own folder first, so their edit is part of main before the checks run.
+  await recordPersonEdits(ctx);
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return blockWith(ctx, open);
   const wt = new Git(ctx.worktreeDir);
@@ -262,13 +266,27 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   return mergeNow(ctx);
 }
 
+/** Commits the change's own folder on main (a person's uncommitted edits to it). Nothing else is touched. */
+async function recordPersonEdits(ctx: StepContext): Promise<void> {
+  await assertRootOnMain(ctx);
+  await ctx.git.commitPaths([`intent/${ctx.slug}`], `loopstra(${ctx.slug}): record edits made by a person`);
+}
+
 /**
- * Merges the intent branch into main in the root checkout. Only when the root is on main with no
- * staged or unstaged changes to tracked files, so a person's work there is never touched.
+ * Merges the intent branch into main in the root checkout, in one step that either lands whole or
+ * not at all (see Git.merge). Only when the root is on main, nothing is staged, and no tracked file
+ * outside intent/ has unsaved changes, so a person's work there is never touched. Unsaved edits
+ * inside intent/ (an owner's status lines) never block it; the merge takes only the branch.
  */
 async function mergeNow(ctx: StepContext): Promise<StepResult> {
   const root = await rootReady(ctx);
   if (!root.ok) return blockWithDetail(ctx, DIRTY_ROOT_NOTE, root.detail);
+
+  // The checks brought the branch up to date; if main moved since (bookkeeping), catch up again.
+  const main = ctx.cfg.main_branch;
+  if (!(await ctx.git.isAncestor(main, ctx.branch)) && !(await new Git(ctx.worktreeDir).rebaseOnto(main))) {
+    return blockWithDetail(ctx, UPDATE_FAILED_NOTE, `rebase of ${ctx.branch} onto ${main} before the merge hit conflicts and was aborted`);
+  }
 
   mkdirSync(ctx.runDir, { recursive: true });
   writeFileSync(join(ctx.runDir, MERGING), await ctx.git.headSha());
@@ -277,27 +295,36 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
     try {
       await ctx.git.merge(ctx.branch, ctx.cfg.gates.merge.method, `${ctx.slug}: ${title}`);
     } catch (e) {
-      // git.merge has already aborted, so main is clean. Keep the technical detail in the trace.
+      passOn(e);
+      // Nothing landed: main, the index, and the files are as they were. The detail goes to the trace.
       ctx.trace.event(ctx.slug, "error", { where: "merge", error: (e as Error).message });
-      return { ok: true as const, conflict: true };
+      return { ok: true as const, landed: false };
     }
-    return { ok: true as const, conflict: false };
+    return { ok: true as const, landed: true };
   });
-  if (!merged.ok || merged.conflict) {
+  if (!merged.ok || !merged.landed) {
     clearMarker(ctx, MERGING);
     return blockWithDetail(
       ctx,
-      "The change could not be merged because it overlaps with other recent changes. Main was left untouched. An engineer needs to look at it.",
-      merged.ok ? `merge of ${ctx.branch} into ${ctx.cfg.main_branch} refused` : merged.note,
+      "The change could not be merged; main was left untouched. An engineer needs to look at it.",
+      merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.note,
     );
   }
   return finishMerge(ctx);
 }
 
+/**
+ * The root checkout may take a merge: it is on main, nothing is staged (anywhere), and no tracked
+ * file outside intent/ has unsaved changes. Untracked files are left to git, which refuses a merge
+ * that would overwrite one.
+ */
 async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; detail: string }> {
   const branch = (await ctx.git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
   if (branch !== ctx.cfg.main_branch) return { ok: false, detail: `root checkout is on ${branch || "(unknown)"}, not ${ctx.cfg.main_branch}` };
-  if (await ctx.git.hasTrackedChanges()) return { ok: false, detail: "root checkout has staged or unstaged changes to tracked files" };
+  const staged = (await ctx.git.run(["diff", "--cached", "--name-only"])).out.trim();
+  if (staged) return { ok: false, detail: `root checkout has staged changes: ${staged.split(/\r?\n/).join(", ")}` };
+  const unsaved = (await ctx.git.run(["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)intent"])).out.trim();
+  if (unsaved) return { ok: false, detail: `root checkout has unsaved changes to tracked files outside intent/: ${unsaved.split(/\r?\n/).map((l) => l.slice(3)).join(", ")}` };
   return { ok: true };
 }
 
