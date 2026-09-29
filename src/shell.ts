@@ -7,6 +7,12 @@ export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Prom
   try { return await Promise.race([p, late]); } finally { clearTimeout(timer); }
 }
 
+/**
+ * Children are spawned in their own process group on POSIX (a new session), so killTree can stop
+ * the whole group with one signal. Windows kills the tree with taskkill instead.
+ */
+export const DETACHED = process.platform !== "win32";
+
 /** Kills a process and everything it started. Best effort; never throws, never waits more than a few seconds. */
 export async function killTree(proc: { pid: number; kill: (signal?: number | NodeJS.Signals) => void }): Promise<void> {
   try {
@@ -59,6 +65,8 @@ export async function runCommand(command: string, cwd: string, opts: RunCommandO
     cmd: [process.execPath, "exec", command],
     cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: { ...process.env, ...(opts.env ?? {}) },
+    // Its own process group on POSIX, so killTree reaches everything it started.
+    detached: DETACHED,
   });
   let stdout = "";
   let stderr = "";

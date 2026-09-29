@@ -5,7 +5,7 @@ import {
 } from "../context";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Git } from "../git";
+import { Git, passOn } from "../git";
 import { agentPhase, codePhase, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Check } from "../gates";
 import { headingsPresent } from "../checks";
@@ -119,6 +119,7 @@ export async function saveWork(ctx: StepContext, wt: Git, message: string): Prom
     await wt.commitAll(message);
     return { ok: true };
   } catch (e) {
+    passOn(e);
     return {
       ok: false,
       note: "The work could not be saved to this change's own branch. An engineer needs to look at it.",
@@ -179,6 +180,7 @@ export async function openBranchWorktree(ctx: StepContext): Promise<{ ok: true }
     await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
     await new Git(ctx.worktreeDir).assertBranch(ctx.branch);
   } catch (e) {
+    passOn(e);
     return { ok: false, note: "The workspace for this change could not be prepared. An engineer needs to look at it.", detail: e instanceof Error ? e.message : String(e) };
   }
   return { ok: true };

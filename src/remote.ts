@@ -1,5 +1,5 @@
 import type { Config } from "./config";
-import { Git } from "./git";
+import { Git, RUNTIME_COMMIT_CONFIG } from "./git";
 import type { Trace } from "./trace";
 
 function lastLine(s: string): string {
@@ -21,17 +21,17 @@ export async function syncMain(root: string, cfg: Config, trace: Trace): Promise
   try {
     const remote = await git.remoteName();
     if (!remote) return;
-    const branch = (await git.runBounded(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim();
+    const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
     if (branch !== main) return problem("skipped: the root checkout is not on main", { branch });
-    const status = await git.runBounded(["status", "--porcelain", "--untracked-files=no"]);
+    const status = await git.run(["status", "--porcelain", "--untracked-files=no"], true);
     if (status.code !== 0) return problem("skipped: git status failed", { error: lastLine(status.err) || `exit ${status.code}` });
     if (status.out.trim()) return problem("skipped: the root checkout has changes to tracked files");
 
-    const fetched = await git.runBounded(["fetch", "--quiet", remote]);
+    const fetched = await git.run(["fetch", "--quiet", remote], true);
     if (fetched.code !== 0) return problem("fetch failed", { remote, error: lastLine(fetched.err) || `exit ${fetched.code}` });
 
     const upstream = `${remote}/${main}`;
-    if ((await git.runBounded(["rev-parse", "--verify", "--quiet", `refs/remotes/${upstream}`])).code !== 0) return;
+    if ((await git.run(["rev-parse", "--verify", "--quiet", `refs/remotes/${upstream}`], true)).code !== 0) return;
     const behind = await git.countAhead(upstream, main);
     if (behind === 0) return;
     const rebased = await rebaseMain(git, upstream);
@@ -49,25 +49,35 @@ export async function syncMain(root: string, cfg: Config, trace: Trace): Promise
  * write on top of it. Any other conflict aborts the rebase and leaves main exactly as it was.
  */
 async function rebaseMain(git: Git, upstream: string): Promise<{ ok: true; tookRemote: string[] } | { ok: false; error: string }> {
+  try {
+    return await replayMain(git, upstream);
+  } catch (e) {
+    // A stop or a hung command part-way: never leave the checkout in the middle of a rebase.
+    await git.run(["rebase", "--abort"], { allowFail: true, cleanup: true });
+    throw e;
+  }
+}
+
+async function replayMain(git: Git, upstream: string): Promise<{ ok: true; tookRemote: string[] } | { ok: false; error: string }> {
   const tookRemote = new Set<string>();
-  let r = await git.runBounded(["rebase", upstream]);
+  let r = await git.runtime("rebase", ["-q", upstream], true);
   for (let step = 0; r.code !== 0 && step < 500; step++) {
-    const conflicted = (await git.runBounded(["diff", "--name-only", "--diff-filter=U"])).out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const conflicted = (await git.run(["diff", "--name-only", "--diff-filter=U"], true)).out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!conflicted.length || conflicted.some((p) => !p.startsWith("intent/"))) break;
     for (const p of conflicted) {
       // During a rebase HEAD is the remote side plus what has been replayed so far.
-      const there = (await git.runBounded(["cat-file", "-e", `HEAD:${p}`])).code === 0;
-      await git.runBounded(there ? ["checkout", "HEAD", "--", p] : ["rm", "-q", "-f", "--", p]);
+      const there = (await git.run(["cat-file", "-e", `HEAD:${p}`], true)).code === 0;
+      await git.run(there ? ["checkout", "HEAD", "--", p] : ["rm", "-q", "-f", "--", p], true);
       tookRemote.add(p);
     }
-    r = await git.runBounded(["-c", "core.editor=true", "rebase", "--continue"]);
+    r = await git.run([...RUNTIME_COMMIT_CONFIG, "-c", "core.editor=true", "rebase", "--continue"], true);
     // A commit left with nothing of its own (the remote already had it all) is skipped.
-    const unmerged = (await git.runBounded(["diff", "--name-only", "--diff-filter=U"])).out.trim();
-    const empty = (await git.runBounded(["diff", "--cached", "--quiet"])).code === 0;
-    if (r.code !== 0 && !unmerged && empty) r = await git.runBounded(["rebase", "--skip"]);
+    const unmerged = (await git.run(["diff", "--name-only", "--diff-filter=U"], true)).out.trim();
+    const empty = (await git.run(["diff", "--cached", "--quiet"], true)).code === 0;
+    if (r.code !== 0 && !unmerged && empty) r = await git.run([...RUNTIME_COMMIT_CONFIG, "rebase", "--skip"], true);
   }
   if (r.code === 0) return { ok: true, tookRemote: [...tookRemote] };
-  await git.runBounded(["rebase", "--abort"]);
+  await git.run(["rebase", "--abort"], { allowFail: true, cleanup: true });
   return { ok: false, error: lastLine(r.err) || lastLine(r.out) || `exit ${r.code}` };
 }
 
@@ -79,6 +89,6 @@ async function rebaseMain(git: Git, upstream: string): Promise<{ ok: true; tookR
 export async function pushBranch(git: Git, branch: string): Promise<{ ok: true } | { ok: false; detail: string }> {
   const remote = await git.remoteName();
   if (!remote) return { ok: false, detail: "no remote" };
-  const r = await git.runBounded(["push", "--quiet", "--force-with-lease", "-u", remote, `${branch}:${branch}`]);
+  const r = await git.run(["push", "--quiet", "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
   return r.code === 0 ? { ok: true } : { ok: false, detail: `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}` };
 }

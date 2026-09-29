@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { Git, samePath } from "../../src/git";
+import { Git, GIT_TIMEOUT_NOTE, samePath } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
+import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import type { Trace } from "../../src/trace";
 import { setupRepo, withEnv } from "../helpers";
@@ -138,4 +139,21 @@ describe("build stage", () => {
     expect(phaseNames(trace).at(-1)).toBe("build-after");
     trace.close(); repo.cleanup();
   });
+
+  test("a git command that hangs inside the step blocks with a plain note instead of stopping the loop", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    // Checking out the worktree runs this hook; it never finishes.
+    const hook = join(repo.path, ".git", "hooks", "post-checkout");
+    await Bun.write(hook, "#!/bin/sh\nsleep 30\n");
+    chmodSync(hook, 0o755);
+    (ctx as { git: Git }).git = new Git(repo.path, { timeoutMs: 3_000 });
+    const r = await runStepGuarded(ctx);
+    expect(r.ok).toBe(false);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toStartWith(GIT_TIMEOUT_NOTE);
+    expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("did not finish within"))).toBe(true);
+    rmSync(hook, { force: true });
+    trace.close(); repo.cleanup();
+  }, 60_000);
 });

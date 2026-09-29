@@ -47,6 +47,12 @@ async function status(repo: string): Promise<string> {
   return (await readIntent(repo, "add-numbers")).file.frontmatter.status;
 }
 
+/** A squash merge that landed on main (main may have moved past the branch's base since). */
+async function landSquash(git: Git, branch: string, message: string): Promise<void> {
+  await git.run(["merge", "--squash", branch]);
+  await git.run(["commit", "-q", "-m", message]);
+}
+
 /** A person edits the status line by hand and commits it. */
 async function personSets(ctx: StepContext, to: "merge-approved" | "done"): Promise<void> {
   await ctx.reload();
@@ -285,7 +291,7 @@ describe("merge", () => {
     const git = new Git(repo.path);
     mkdirSync(ctx.runDir, { recursive: true });
     writeFileSync(join(ctx.runDir, "merging"), await git.headSha());
-    await git.merge(ctx.branch, "squash", "add-numbers: add numbers");
+    await landSquash(git, ctx.branch, "add-numbers: add numbers");
     const merges = (await git.run(["log", "--format=%s", "main"])).out.split("\n").filter((l) => l.startsWith("add-numbers:")).length;
     await runMergeStep(ctx);
     expect(await status(repo.path)).toBe("merged");
@@ -300,7 +306,7 @@ describe("merge", () => {
     const git = new Git(repo.path);
     mkdirSync(ctx.runDir, { recursive: true });
     writeFileSync(join(ctx.runDir, "merging"), await git.headSha());
-    await git.merge(ctx.branch, "squash", "add-numbers: add numbers");
+    await landSquash(git, ctx.branch, "add-numbers: add numbers");
     const before = phaseNames(trace).length;
     await runReviewStep(ctx);
     expect(await status(repo.path)).toBe("merged");

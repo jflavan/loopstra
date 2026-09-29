@@ -1,4 +1,4 @@
-import { killTree, within } from "./shell";
+import { DETACHED, killTree, within } from "./shell";
 import { onStop, StopRequested, throwIfStopping } from "./stop";
 
 export interface StreamEvent {
@@ -149,7 +149,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   try {
     proc = Bun.spawn({
       cmd, cwd: input.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe",
-      env: { ...process.env, ...(input.env ?? {}) },
+      env: { ...process.env, ...(input.env ?? {}) }, detached: DETACHED,
     });
   } catch (e) {
     return fail("not-started", `could not start claude: ${e instanceof Error ? e.message : String(e)}`);

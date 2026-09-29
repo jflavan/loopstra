@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { loadConfig, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, StepContext, block, type StepResult } from "./context";
-import { Git } from "./git";
+import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "./git";
 import { GitHub } from "./github";
 import { heartbeatWorkingOn, startHeartbeat } from "./heartbeat";
 import { syncMain } from "./remote";
@@ -83,14 +83,7 @@ export async function tick(root: string): Promise<TickResult> {
     for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote))) {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
-      const ctx = new StepContext(root, cfg, trace, next);
-      try {
-        out.result = await runStep(ctx);
-      } catch (e) {
-        if (e instanceof StopRequested) throw e;
-        trace.event(next.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
-        out.result = await blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx));
-      }
+      out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
       if (!(out.result.ok && out.result.waiting)) break;
     }
     return out;
@@ -113,9 +106,24 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function unexpectedNote(ctx: StepContext): string {
+/**
+ * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
+ * plain note (the detail goes to the trace); only a stop request passes through.
+ */
+export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
+  try {
+    return await runStep(ctx);
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
+    return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(ctx, e));
+  }
+}
+
+function unexpectedNote(ctx: StepContext, e: unknown): string {
   const from = ctx.intent.file.frontmatter.resume_from;
   const retry = from ? ` To try again, set status to ${from}.` : "";
+  if (e instanceof GitTimeout) return `${GIT_TIMEOUT_NOTE}${retry}`;
   return `Something unexpected went wrong in this step. An engineer can find the details in the trace.${retry}`;
 }
 
@@ -187,7 +195,7 @@ export async function preflight(root: string, env: Record<string, string | undef
   let cfg: Config;
   try { cfg = await loadConfig(root); } catch { return null; }
   const git = new Git(root);
-  const branch = (await git.runBounded(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim();
+  const branch = (await git.run(["rev-parse", "--abbrev-ref", "HEAD"], true)).out.trim();
   if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
   if ((await git.remoteName()) && !(await new GitHub(root).available())) {
     return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";

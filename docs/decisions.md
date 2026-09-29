@@ -179,6 +179,13 @@ Sources of truth, in order of precedence when they conflict:
   remote's version (an owner's edit wins); any other conflict aborts and
   is traced. `start` refuses a checkout off main, or a remote without gh.
 
+## Batch 4 hardening (2026-09-28)
+
+- **Git runner (H3).** Every git call goes through one runner: bounded (5 min default), killed with its whole tree past the limit (`GitTimeout`), never prompting (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, empty `GIT_ASKPASS`, no `SSH_ASKPASS`, `ssh -o BatchMode=yes` unless the repo or environment sets its own ssh command), stop-aware (no git starts after a stop; a running one gets 2 s, then is killed; aborts that put a checkout back always run). A git timeout inside a step blocks with "A version-control command did not finish in time; an engineer should look."
+- **Runtime commits (H3, H24).** Every commit the runtime makes (bookkeeping on main, worktree saves, merges, rebases) is authored `Loopstra <loopstra@localhost>`, uses `--no-verify` where the command has it and `-c commit.gpgsign=false`; one constant in `src/git.ts`. The gates run the configured checks instead of the owner's hooks.
+- **commitPaths (H11).** Checks staged changes only for its own paths; other staged files stay staged and out of the commit. Git error messages skip git's `warning:` lines.
+- **Process groups (H15).** On POSIX every child (claude, git, gh, project commands) starts in its own process group, so a timeout or stop kills everything it started; Windows keeps `taskkill /T`.
+
 ## Open
 
 - None. Remaining details are settled in the design spec.

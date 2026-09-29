@@ -1,4 +1,4 @@
-import { killTree, within } from "./shell";
+import { DETACHED, killTree, within } from "./shell";
 
 export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
@@ -21,7 +21,7 @@ export class GitHub {
     if (!this.exe) return { code: 127, out: "", err: "gh not found" };
     const cmd = this.exe.endsWith(".ts") ? [process.execPath, this.exe, ...args] : [this.exe, ...args];
     let proc: ReturnType<typeof Bun.spawn>;
-    try { proc = Bun.spawn({ cmd, cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...this.env } }); }
+    try { proc = Bun.spawn({ cmd, cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...this.env }, detached: DETACHED }); }
     catch (e) { return { code: 127, out: "", err: (e as Error).message }; }
     const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
     const outP = read(proc.stdout as ReadableStream<Uint8Array>);

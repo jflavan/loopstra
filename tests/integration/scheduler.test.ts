@@ -15,9 +15,20 @@ afterEach(() => resetStop());
 
 const SLUG = "add-numbers";
 
-/** A commit-msg hook that refuses commits whose message matches `pattern` (a grep pattern). */
+/**
+ * A reference-transaction hook that refuses to move a branch to a commit whose message matches
+ * `pattern` (a grep pattern). Runtime commits skip the commit hooks, but not this one.
+ */
 async function refuseCommits(repo: string, pattern: string): Promise<void> {
-  await Bun.write(join(repo, ".git", "hooks", "commit-msg"), `#!/bin/sh\nif grep -q "${pattern}" "$1"; then exit 1; fi\nexit 0\n`);
+  await Bun.write(join(repo, ".git", "hooks", "reference-transaction"), [
+    "#!/bin/sh",
+    '[ "$1" = prepared ] || exit 0',
+    "while read old new ref; do",
+    `  if git log -1 --format=%s "$new" 2>/dev/null | grep -q "${pattern}"; then exit 1; fi`,
+    "done",
+    "exit 0",
+    "",
+  ].join("\n"));
 }
 
 describe("scheduler resilience", () => {
@@ -129,7 +140,8 @@ describe("scheduler resilience", () => {
     const kept = trace.events(SLUG).filter((e) => e.type === "command" && e.payload.includes("\"kept\""));
     expect(kept).toHaveLength(1);
     // Once main has the change (merged by hand), the next tick tidies up.
-    await git.merge(ctx.branch, "squash", "merged by hand");
+    await git.run(["merge", "--squash", ctx.branch]);
+    await git.run(["commit", "-q", "-m", "merged by hand"]);
     await tick(repo.path);
     expect(await git.branchExists(ctx.branch)).toBe(false);
     expect(existsSync(ctx.worktreeDir)).toBe(false);

@@ -1,5 +1,5 @@
-import { StopRequested } from "./stop";
 import type { StepContext } from "./context";
+import { passOn } from "./git";
 
 export type CheckResult = { result: "pass" | "fail" | "waiting"; evidence: string };
 export interface Check { name: string; run: () => Promise<CheckResult> }
@@ -13,7 +13,7 @@ export async function evaluateGate(ctx: StepContext, gate: GateName, checks: Che
     try {
       r = await check.run();
     } catch (e) {
-      if (e instanceof StopRequested) throw e;
+      passOn(e);
       r = { result: "fail", evidence: `check crashed: ${(e as Error).message}` };
     }
     ctx.trace.gate(ctx.slug, gate, check.name, r.result, r.evidence);

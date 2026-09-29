@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runPhase, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor } from "./config";
+import { GitTimeout } from "./git";
 import type { StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
@@ -177,6 +178,8 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     }
     const msg = errorText(e);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
+    // A hung git command is reported the same way wherever it happens (see the scheduler).
+    if (e instanceof GitTimeout) throw e;
     return { ok: false, note: `The ${name} step failed: ${msg.split("\n")[0]}` };
   }
 }

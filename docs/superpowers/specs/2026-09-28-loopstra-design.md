@@ -423,8 +423,17 @@ The adapter is the only module that knows the CLI exists. Tests use a fake
 commit paths, diff names, merge-base, contains, rebase, merge, log.
 `src/github.ts` wraps `gh`: remote detection, PR create, PR view (state,
 reviews, checks), PR comment, PR merge. All calls are logged to the trace.
-Every `gh` call and every git call the sync and PR path make is bounded by
-a timeout and never prompts. Code never reaches `main_branch` except
+Every `gh` call and every git call is bounded by a timeout (git: 5 minutes;
+past it the call and everything it started are killed) and never prompts
+for credentials or keys. A stop request lets a running git call finish for
+a moment, then kills it; aborts that put a checkout back always run. A git
+call that times out inside a step blocks the intent with "A
+version-control command did not finish in time; an engineer should look."
+Every commit the runtime makes is authored `Loopstra <loopstra@localhost>`
+with `--no-verify` and `-c commit.gpgsign=false` (one constant in
+`src/git.ts`): the gates run the configured checks, not the owner's commit
+hooks. On POSIX every child process gets its own process group so a kill
+reaches everything it started. Code never reaches `main_branch` except
 through the merge gate.
 
 ### Main sync

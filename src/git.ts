@@ -1,21 +1,97 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { killTree, within } from "./shell";
+import { DETACHED, killTree, within } from "./shell";
+import { onStop, StopRequested, throwIfStopping } from "./stop";
 
-/** How long one bounded git call (see Git.runBounded) may take before it is stopped. */
-export const GIT_TIMEOUT_MS = 2 * 60_000;
+/** How long one git call may take before it is stopped (a Git constructor option overrides it). */
+export const GIT_TIMEOUT_MS = 5 * 60_000;
 
-/** The last non-empty line of some git output, or "" when there is none. */
+/** After a stop request, a running git call gets this long to finish on its own before it is killed. */
+const STOP_GRACE_MS = 2_000;
+
+/** The identity every commit the runtime makes is authored with. */
+export const RUNTIME_NAME = "Loopstra";
+export const RUNTIME_EMAIL = "loopstra@localhost";
+
+/**
+ * Settings for every commit the runtime makes (bookkeeping on main, saves in a worktree, merges,
+ * rebases): its own identity, and never a signing prompt. Hooks are skipped with `--no-verify`
+ * where the command has it; the gates run the configured checks instead of the owner's hooks.
+ */
+export const RUNTIME_COMMIT_CONFIG: readonly string[] = [
+  "-c", `user.name=${RUNTIME_NAME}`, "-c", `user.email=${RUNTIME_EMAIL}`, "-c", "commit.gpgsign=false",
+];
+
+/** Git's own advice lines (line-ending warnings and the like) are not the error. */
+function meaningfulLines(s: string): string[] {
+  return s.trim().split("\n").map((l) => l.trim()).filter((l) => l && !/^warning:/i.test(l));
+}
+
+/** The last meaningful line of some git output, or "" when there is none. */
 function lastNonEmptyLine(s: string): string {
-  const lines = s.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = meaningfulLines(s);
   return lines[lines.length - 1] ?? "";
 }
 
 export class GitError extends Error {
-  constructor(public readonly args: string[], public readonly stdout: string, public readonly stderr: string, public readonly code: number) {
+  constructor(public readonly args: string[], public readonly stdout: string, public readonly stderr: string, public readonly code: number, message?: string) {
     // git prints conflict text to stdout, not stderr, so fall back to stdout when stderr has nothing useful.
-    super(`git ${args.join(" ")} failed (${code}): ${lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout)}`);
+    super(message ?? `git ${args.join(" ")} failed (${code}): ${lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout)}`);
   }
+}
+
+/** A git call ran past its time limit and was stopped (with everything it started). */
+export class GitTimeout extends GitError {
+  constructor(args: string[], timeoutMs: number) {
+    super(args, "", "", 124, `git ${args.join(" ")} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped.`);
+    this.name = "GitTimeout";
+  }
+}
+
+/** The owner's note when a version-control command hung inside a step. */
+export const GIT_TIMEOUT_NOTE = "A version-control command did not finish in time; an engineer should look.";
+
+/**
+ * Rethrows a stop request or a git timeout. Code that turns errors into a failure of its own calls
+ * this first: neither is that step's failure, and the scheduler reports both the same way everywhere.
+ */
+export function passOn(e: unknown): void {
+  if (e instanceof StopRequested || e instanceof GitTimeout) throw e;
+}
+
+export interface GitRunOptions {
+  /** Return a non-zero exit instead of throwing. A timeout or a stop still throws. */
+  allowFail?: boolean;
+  timeoutMs?: number;
+  /**
+   * A call that puts things back (an abort): it runs even after a stop was requested and is not
+   * stopped by one, so a checkout is never left half-way. Still bounded by the timeout.
+   */
+  cleanup?: boolean;
+}
+
+export type GitResult = { code: number; out: string; err: string };
+
+/** Whether a repository has its own ssh command configured (then GIT_SSH_COMMAND must not override it). */
+const sshConfigured = new Map<string, boolean>();
+function hasOwnSshCommand(cwd: string): boolean {
+  let known = sshConfigured.get(cwd);
+  if (known === undefined) {
+    try {
+      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      known = r.exitCode === 0 && r.stdout.toString().trim().length > 0;
+    } catch { known = false; }
+    sshConfigured.set(cwd, known);
+  }
+  return known;
+}
+
+/** The environment of every git call: it never waits for a person to type a password or confirm a key. */
+function gitEnv(cwd: string): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "" };
+  delete env.SSH_ASKPASS;
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !hasOwnSshCommand(cwd)) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
+  return env;
 }
 
 /** The checkout is on a different branch than the caller is about to commit to. */
@@ -37,13 +113,65 @@ export function samePath(a: string, b: string): boolean {
 }
 
 export class Git {
-  constructor(public readonly cwd: string) {}
+  private readonly timeoutMs: number;
+  constructor(public readonly cwd: string, opts: { timeoutMs?: number } = {}) {
+    this.timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
+  }
 
-  async run(args: string[], allowFail = false): Promise<{ code: number; out: string; err: string }> {
-    const proc = Bun.spawn({ cmd: ["git", ...args], cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    if (code !== 0 && !allowFail) throw new GitError(args, out, err, code);
+  /**
+   * Runs one git command. Bounded: past the timeout it is stopped with everything it started and
+   * GitTimeout is thrown. It never asks for credentials. It does not start after a stop request; a
+   * stop during the call gives it a moment to finish, then kills it, and throws StopRequested.
+   * `allowFail` (or `true`) returns a non-zero exit instead of throwing.
+   */
+  async run(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
+    const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
+    if (!o.cleanup) throwIfStopping();
+    const timeoutMs = o.timeoutMs ?? this.timeoutMs;
+    let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+    try {
+      proc = Bun.spawn({
+        cmd: ["git", ...args], cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        env: gitEnv(this.cwd), detached: DETACHED,
+      });
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      if (o.allowFail) return { code: 127, out: "", err };
+      throw new GitError(args, "", err, 127);
+    }
+    const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
+    const outP = read(proc.stdout);
+    const errP = read(proc.stderr);
+
+    let stopped = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = o.cleanup ? () => {} : onStop(() => {
+      stopped = true;
+      grace = setTimeout(() => { void killTree(proc); }, STOP_GRACE_MS);
+    });
+    let code: number | null;
+    try {
+      code = await within(proc.exited, timeoutMs, null);
+    } finally {
+      unsubscribe();
+    }
+    if (code === null) {
+      clearTimeout(grace);
+      await killTree(proc);
+      await within(proc.exited, 2_000, null);
+      throw new GitTimeout(args, timeoutMs);
+    }
+    clearTimeout(grace);
+    if (stopped) throw new StopRequested();
+    const [out, err] = await Promise.all([within(outP, 2_000, ""), within(errP, 2_000, "")]);
+    if (code !== 0 && !o.allowFail) throw new GitError(args, out, err, code);
     return { code, out, err };
+  }
+
+  /** Runs a command that makes commits, as the runtime: its identity, no signing, no hooks where `--no-verify` exists. */
+  runtime(sub: "commit" | "commit-tree" | "merge" | "rebase", rest: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
+    const noVerify = sub === "commit-tree" ? [] : ["--no-verify"];
+    return this.run([...RUNTIME_COMMIT_CONFIG, sub, ...noVerify, ...rest], opts);
   }
 
   async currentBranch(): Promise<string> { return (await this.run(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim(); }
@@ -110,37 +238,42 @@ export class Git {
    * Paths under an `ignore` prefix are left out of the comparison.
    */
   async containsChanges(target: string, branch: string, ignore: string[] = []): Promise<boolean> {
-    if ((await this.runBounded(["merge-base", "--is-ancestor", branch, target])).code === 0) return true;
-    const changed = await this.runBounded(["diff", "--name-only", `${target}...${branch}`]);
+    if (await this.isAncestor(branch, target)) return true;
+    const changed = await this.run(["diff", "--name-only", `${target}...${branch}`], true);
     if (changed.code !== 0) return false;
     const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
-    return (await this.runBounded(["diff", "--quiet", target, branch, "--", ...files])).code === 0;
+    return (await this.run(["diff", "--quiet", target, branch, "--", ...files], true)).code === 0;
   }
 
   /** Commits on `a` that `b` does not have (0 when either cannot be read). */
   async countAhead(a: string, b: string): Promise<number> {
-    const r = await this.runBounded(["rev-list", "--count", `${b}..${a}`]);
+    const r = await this.run(["rev-list", "--count", `${b}..${a}`], true);
     return r.code === 0 ? Number.parseInt(r.out.trim(), 10) || 0 : 0;
   }
   async log(n: number): Promise<string[]> { return (await this.run(["log", `-${n}`, "--format=%h %s"])).out.trim().split("\n").filter(Boolean); }
 
+  /** Commits everything in the checkout, as the runtime. False when there was nothing to commit. */
   async commitAll(message: string): Promise<boolean> {
     await this.run(["add", "-A"]);
-    if (!(await this.isDirty())) return false;
-    await this.run(["commit", "-q", "-m", message]);
+    if ((await this.run(["diff", "--cached", "--quiet"], true)).code === 0) return false;
+    await this.runtime("commit", ["-q", "-m", message]);
     return true;
   }
 
+  /**
+   * Commits only the given paths, as the runtime. Anything else a person has staged stays staged
+   * and out of the commit. False when the paths have nothing to commit.
+   */
   async commitPaths(paths: string[], message: string): Promise<boolean> {
     // Skip paths that don't exist: `git add -- <missing pathspec>` errors instead of no-op-ing,
     // and callers (e.g. commitArtifacts) pass paths, like intent/queue.md, that may not exist yet.
     const existing = paths.filter((p) => existsSync(join(this.cwd, p)));
     if (!existing.length) return false;
     await this.run(["add", "-A", "--", ...existing]);
-    const staged = (await this.run(["diff", "--cached", "--name-only"])).out.trim();
+    const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...existing])).out.trim();
     if (!staged) return false;
-    await this.run(["commit", "-q", "-m", message, "--", ...existing]);
+    await this.runtime("commit", ["-q", "-m", message, "--", ...existing]);
     return true;
   }
 
@@ -148,57 +281,61 @@ export class Git {
     return (await this.run(["diff", "--name-only", `${base}...HEAD`])).out.trim().split("\n").filter(Boolean);
   }
 
+  /** True when a rebase is in progress in this checkout. */
+  async rebasing(): Promise<boolean> {
+    for (const name of ["rebase-merge", "rebase-apply"]) {
+      const p = (await this.run(["rev-parse", "--git-path", name], true)).out.trim();
+      if (p && existsSync(resolve(this.cwd, p))) return true;
+    }
+    return false;
+  }
+
+  /** Replays this checkout's branch onto `base`, as the runtime. A conflict is aborted and reported as false. */
   async rebaseOnto(base: string): Promise<boolean> {
-    const r = await this.run(["rebase", base], true);
-    if (r.code !== 0) { await this.run(["rebase", "--abort"], true); return false; }
+    // A rebase left over from an interrupted step is the runtime's own (this is its worktree).
+    if (await this.rebasing()) await this.run(["rebase", "--abort"], { allowFail: true, cleanup: true });
+    let r: GitResult;
+    try {
+      r = await this.runtime("rebase", ["-q", base], true);
+    } catch (e) {
+      await this.run(["rebase", "--abort"], { allowFail: true, cleanup: true });
+      throw e;
+    }
+    if (r.code !== 0) { await this.run(["rebase", "--abort"], { allowFail: true, cleanup: true }); return false; }
     return true;
   }
 
+  /**
+   * Merges `branch` into the checked-out branch. `squash` is one step that either lands whole or
+   * not at all: a commit with the branch's tree on top of the current commit, then a fast-forward
+   * to it. It needs the branch to contain the current commit (the merge checks make sure). A
+   * failure before the fast-forward leaves the branch, the index, and the files as they were.
+   * `merge` is a merge commit (`--no-ff`); a conflict is aborted.
+   */
   async merge(branch: string, method: "squash" | "merge", message: string): Promise<void> {
-    try {
-      if (method === "squash") {
-        await this.run(["merge", "--squash", branch]);
-        await this.run(["commit", "-q", "-m", message]);
-      } else {
-        await this.run(["merge", "--no-ff", "-m", message, branch]);
+    if (method === "squash") {
+      const head = (await this.run(["rev-parse", "HEAD"])).out.trim();
+      if (!(await this.isAncestor(head, branch))) {
+        throw new GitError(["merge", branch], "", `${branch} does not contain the current commit; bring it up to date first`, 1);
       }
+      const sha = (await this.runtime("commit-tree", [`${branch}^{tree}`, "-p", head, "-m", message])).out.trim();
+      await this.run(["merge", "--ff-only", "-q", sha]);
+      return;
+    }
+    try {
+      await this.runtime("merge", ["--no-ff", "-q", "-m", message, branch]);
     } catch (e) {
-      // Never leave the checkout half-merged: a squash conflict doesn't set MERGE_HEAD, so
-      // `merge --abort` alone can fail (harmlessly); `reset --merge` clears the working tree too.
-      await this.run(["merge", "--abort"], true);
-      if (method === "squash") await this.run(["reset", "--merge"], true);
+      // Never leave the checkout half-merged.
+      await this.run(["merge", "--abort"], { allowFail: true, cleanup: true });
       throw e;
     }
   }
 
   /** The remote Loopstra works with: origin when there is one, else the first; null without a remote. */
   async remoteName(): Promise<string | null> {
-    const names = (await this.runBounded(["remote"])).out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const names = (await this.run(["remote"])).out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!names.length) return null;
     return names.includes("origin") ? "origin" : names[0]!;
-  }
-
-  /**
-   * One git call that is stopped after `timeoutMs` (code 124) and never asks for credentials on
-   * the terminal, so it cannot hang the loop (fetch and push talk to a remote). Never throws.
-   */
-  async runBounded(args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<{ code: number; out: string; err: string }> {
-    let proc: ReturnType<typeof Bun.spawn>;
-    try {
-      proc = Bun.spawn({ cmd: ["git", ...args], cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-    } catch (e) {
-      return { code: 127, out: "", err: e instanceof Error ? e.message : String(e) };
-    }
-    const read = (s: ReadableStream<Uint8Array>) => new Response(s).text().catch(() => "");
-    const outP = read(proc.stdout as ReadableStream<Uint8Array>);
-    const errP = read(proc.stderr as ReadableStream<Uint8Array>);
-    const code = await within(proc.exited, timeoutMs, null);
-    if (code === null) {
-      await killTree(proc);
-      return { code: 124, out: await within(outP, 250, ""), err: `git ${args[0]} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped.` };
-    }
-    const [out, err] = await Promise.all([within(outP, 2_000, ""), within(errP, 2_000, "")]);
-    return { code, out, err };
   }
 }
 
