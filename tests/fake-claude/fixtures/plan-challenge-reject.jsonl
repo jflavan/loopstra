@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-plan-challenge-reject","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-plan-challenge-reject","total_cost_usd":0.03,"usage":{},"structured_output":{"status":"success","summary":"plan is unsound","notes_for_next_phase":"","approved":false,"concerns":[{"concern":"Proof does not cover add(1, 2).","blocking":true}]},"result":"ok"}

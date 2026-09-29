@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { block, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
@@ -7,10 +9,14 @@ import { artifacts, headingsCheck, humanNote, PLAN_HEADINGS, runHookCommands } f
 /** One step of the plan half of Stage 3. Called for spec-approved, planning, plan-review. */
 export async function runPlanStep(ctx: StepContext): Promise<StepResult> {
   const status = ctx.intent.file.frontmatter.status;
+  if (status === "spec-approved") rmSync(replannedMarker(ctx), { force: true });
   if (status === "spec-approved" || status === "planning") return plan(ctx, "");
   if (status === "plan-review") return planGate(ctx);
   return { ok: true };
 }
+
+/** Runtime marker (never in intent/): an automatic replan already happened for this intent. */
+function replannedMarker(ctx: StepContext): string { return join(ctx.runDir, "replanned"); }
 
 async function plan(ctx: StepContext, concerns: string): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "planning") await setStatus(ctx, "planning");
@@ -50,9 +56,11 @@ async function planGate(ctx: StepContext): Promise<StepResult> {
     });
   }
   const outcome = await evaluateGate(ctx, "plan", checks);
-  if (outcome.result === "pass") { await setStatus(ctx, "plan-approved"); return { ok: true }; }
-  if (outcome.check === "plan-challenge" && !ctx.intent.file.frontmatter.note.startsWith("replanned")) {
+  if (outcome.result === "pass") { rmSync(replannedMarker(ctx), { force: true }); await setStatus(ctx, "plan-approved"); return { ok: true }; }
+  if (outcome.check === "plan-challenge" && !existsSync(replannedMarker(ctx))) {
     // One resend of the plan with the concerns, then block if it fails again.
+    mkdirSync(ctx.runDir, { recursive: true });
+    writeFileSync(replannedMarker(ctx), "");
     await setStatus(ctx, "planning", "replanned once after review concerns");
     const again = await plan(ctx, blockingConcerns.join("\n") || outcome.evidence);
     if (!again.ok) return again;
