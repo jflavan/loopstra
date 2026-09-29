@@ -87,3 +87,9 @@ export function clearSession(ctx: StepContext, key: string): void {
   mkdirSync(ctx.runDir, { recursive: true });
   writeFileSync(join(ctx.runDir, "sessions.json"), JSON.stringify(all, null, 2));
 }
+
+export async function writeIntentPriority(ctx: StepContext, priority: Intent["file"]["frontmatter"]["priority"]): Promise<void> {
+  if (ctx.intent.file.frontmatter.priority === priority) return;
+  await writeIntent(ctx.intent, { priority });
+  ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
+}

@@ -10,6 +10,8 @@ export type ToolSet = "read" | "read+commands" | "build";
 
 export interface AgentPhaseSpec {
   name: PhaseName;
+  /** Name used in the trace and the phase directory. Defaults to `name` (e.g. fix-1 for the fix phase). */
+  traceName?: string;
   model: "default" | "cheap" | "strong";
   permissionMode: PermissionMode;
   tools: ToolSet;
@@ -45,8 +47,8 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
   const prompt = skillsLine + renderPrompt(await Bun.file(promptPath).text(), { slug: ctx.slug, ...spec.vars });
 
-  const seq = ctx.trace.phaseStart(ctx.slug, spec.name, "agent");
-  const dir = join(ctx.runDir, "phases", `${seq}-${spec.name}`);
+  const seq = ctx.trace.phaseStart(ctx.slug, spec.traceName ?? spec.name, "agent");
+  const dir = join(ctx.runDir, "phases", `${seq}-${spec.traceName ?? spec.name}`);
   mkdirSync(dir, { recursive: true });
   await Bun.write(join(dir, "prompt.md"), prompt);
   const raw = Bun.file(join(dir, "raw.jsonl")).writer();
