@@ -247,17 +247,14 @@ describe("the loop with a GitHub remote", () => {
       expect((await intentOf(s.repo)).status).toBe("merge-review");
       expect((await s.pr()).merged).toBe(false);
 
-      // Opened long ago, but its branch gained a commit moments ago (a reworked change): still waits.
+      // Opened long ago, but Loopstra pushed to it moments ago (a reworked change): still waits.
       const old = new Date(Date.now() - 10 * 60_000).toISOString();
       await s.setPr({ createdAt: old });
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merge-review");
 
       // Both long ago, and still no checks: merges.
-      const wt = join(s.repo, ".loopstra", "worktrees", SLUG);
-      const amend = Bun.spawnSync({ cmd: ["git", "commit", "-q", "--amend", "--no-edit", "--no-verify"], cwd: wt, env: { ...process.env, GIT_COMMITTER_DATE: old } });
-      expect(amend.exitCode).toBe(0);
-      expect((await run(["git", "push", "-q", "-f", "origin", BRANCH], wt)).code).toBe(0);
+      await Bun.write(join(s.repo, ".loopstra", "runs", SLUG, "pr-pushed"), old);
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merged");
       expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);

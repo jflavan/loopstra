@@ -25,11 +25,13 @@ const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An enginee
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
- * How long after a pull request opens, or its branch last gained a commit, "no checks reported" still
+ * How long after a pull request opens, or Loopstra last pushed its branch, "no checks reported" still
  * means "not registered yet", when the branch has GitHub Actions workflows. After that, a pull request
  * with no checks merges.
  */
 export const CHECKS_GRACE_MS = 5 * 60_000;
+/** Run-folder marker: when Loopstra last pushed the branch for its pull request (an ISO time). */
+export const PR_PUSHED = "pr-pushed";
 
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
 const BRANCH_KEPT = "branch-kept";
@@ -131,6 +133,7 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const pushed = await pushBranch(ctx.git, ctx.branch);
     if (!pushed.ok) throw new Error(pushed.detail);
+    writeMarker(ctx, PR_PUSHED, new Date().toISOString());
     const gh = new GitHub(ctx.root);
     const found = await gh.lookupPr(ctx.branch);
     if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
@@ -217,12 +220,10 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
 async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolean> {
-  const ref = `refs/heads/${ctx.branch}`;
-  const head = await ctx.git.run(["log", "-1", "--format=%cI", ref, "--"], true);
-  const since = Math.max(0, ...[Date.parse(pr.createdAt), Date.parse(head.out.trim())].filter(Number.isFinite));
+  const since = Math.max(0, ...[Date.parse(pr.createdAt), Date.parse(readMarker(ctx, PR_PUSHED) ?? "")].filter(Number.isFinite));
   if (!(Date.now() - since < CHECKS_GRACE_MS)) return false;
-  const r = await ctx.git.run(["ls-tree", "--name-only", ref, ".github/workflows/"], true);
-  return r.code === 0 && r.out.split(/\r?\n/).some((f) => /\.ya?ml$/i.test(f.trim()));
+  const r = await ctx.git.run(["ls-tree", "-z", "--name-only", `refs/heads/${ctx.branch}`, ".github/workflows/"], true);
+  return r.code === 0 && r.out.split("\0").some((f) => /\.ya?ml$/i.test(f));
 }
 
 async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
