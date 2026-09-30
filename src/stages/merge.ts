@@ -24,6 +24,15 @@ const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status 
 const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
+/**
+ * How long after a pull request opens, or Loopstra last pushed its branch, "no checks reported" still
+ * means "not registered yet", when the branch has GitHub Actions workflows. After that, a pull request
+ * with no checks merges.
+ */
+export const CHECKS_GRACE_MS = 5 * 60_000;
+/** Run-folder marker: when Loopstra last pushed the branch for its pull request (an ISO time). */
+export const PR_PUSHED = "pr-pushed";
+
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
 const BRANCH_KEPT = "branch-kept";
 /** Run-folder marker: the pull request merged, but main here does not have it yet (traced once). */
@@ -126,6 +135,7 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const pushed = await pushBranch(ctx.git, ctx.branch);
     if (!pushed.ok) throw new Error(pushed.detail);
+    writeMarker(ctx, PR_PUSHED, new Date().toISOString());
     const gh = new GitHub(ctx.root);
     const found = await gh.lookupPr(ctx.branch);
     if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
@@ -167,9 +177,10 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
 /**
  * The merge step with a remote, for every merge.human mode: watch the pull request. Merged (on
  * GitHub, or by an earlier step that stopped before recording it) → sync main and record it.
- * Closed → block. A person on the status line who has not set merge-approved, checks pending, gh
- * not answering, or (merge.human pr) not approved yet → wait, changing nothing. Checks failed →
- * block. Otherwise merge through gh.
+ * Closed → block. A person on the status line who has not set merge-approved, checks pending (or
+ * not reported yet on a new pull request whose branch has workflows), gh not answering, or
+ * (merge.human pr) not approved yet → wait, changing nothing. Checks failed → block. Otherwise
+ * merge through gh.
  */
 async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const gh = new GitHub(ctx.root);
@@ -194,8 +205,9 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const status = ctx.intent.file.frontmatter.status;
   // A person decides on the status line and has not yet: only a merge or close on GitHub counts.
   if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return { ok: true, waiting: true };
-  const checks = await gh.checks(pr.number);
+  const checks = await gh.checks(pr.number, (error) => ctx.trace.event(ctx.slug, "error", { where: "pull request checks", error, note: "will look again on the next tick" }));
   if (checks === "pending" || checks === "unknown") return { ok: true, waiting: true };
+  if (checks === "none" && (await checksMayStillStart(ctx, pr))) return { ok: true, waiting: true };
   const where = `pull request #${pr.number} ${pr.url}`;
   if (checks === "fail") {
     ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
@@ -203,9 +215,17 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   }
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
-  ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", where);
+  ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
   return mergeOnGitHub(ctx, gh, pr);
+}
+
+/** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
+async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolean> {
+  const since = Math.max(0, ...[Date.parse(pr.createdAt), Date.parse(readMarker(ctx, PR_PUSHED) ?? "")].filter(Number.isFinite));
+  if (!(Date.now() - since < CHECKS_GRACE_MS)) return false;
+  const r = await ctx.git.run(["ls-tree", "-z", "--name-only", `refs/heads/${ctx.branch}`, ".github/workflows/"], true);
+  return r.code === 0 && r.out.split("\0").some((f) => /\.ya?ml$/i.test(f));
 }
 
 async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {

@@ -14,7 +14,7 @@ const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; mergeCommit?: string; title?: string; body?: string; comments: string[] }
+interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
 
 /**
  * A bare "GitHub" remote and a clone of it with Loopstra set up and one intent at plan-approved.
@@ -329,6 +329,48 @@ describe("the loop with a GitHub remote", () => {
       expect((await intentOf(s.repo)).status).toBe("merged");
       expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
       expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("no checks reported yet on a new pull request whose branch has workflows: waits, then merges once the grace period is over", async () => {
+    const s = await remoteSetup();
+    await Bun.write(join(s.repo, ".github", "workflows", "ci.yml"), "on: pull_request\njobs: {}\n");
+    await new Git(s.repo).commitAll("ci");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      await s.setPr({ checks: "none" });
+      const r = await tick(s.repo);
+      expect(r.result).toEqual({ ok: true, waiting: true });
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect((await s.pr()).merged).toBe(false);
+
+      // Opened long ago, but Loopstra pushed to it moments ago (a reworked change): still waits.
+      const old = new Date(Date.now() - 10 * 60_000).toISOString();
+      await s.setPr({ createdAt: old });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+
+      // Both long ago, and still no checks: merges.
+      await Bun.write(join(s.repo, ".loopstra", "runs", SLUG, "pr-pushed"), old);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a pull request with no checks, on a branch without workflows, merges", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      await s.setPr({ checks: "none" });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
     });
     s.cleanup();
   }, 180_000);
