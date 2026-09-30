@@ -42,7 +42,7 @@ describe("scan and queue", () => {
     const t = tempDir();
     await mk(t.path, "add-numbers", "status: accepted");
     await Bun.write(join(t.path, "intent", "intent.md"), "---\nstatus: accepted\n---\n# Intent: first\n");
-    await Bun.write(join(t.path, "intent", "README.md"), "guide");
+    await Bun.write(join(t.path, "intent", "Readme.md"), "guide");
     await Bun.write(join(t.path, "intent", "queue.md"), "queue");
     await Bun.write(join(t.path, "intent", ".gitkeep"), "");
     await Bun.write(join(t.path, "intent", "notes.txt"), "not markdown");

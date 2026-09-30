@@ -157,7 +157,7 @@ describe("needs attention", () => {
       const s = await buildState(t.path, 0);
       expect(s.attention).toHaveLength(1);
       expect(s.attention[0]).toMatchObject({ kind: "health", slug: null });
-      expect(s.attention[0]?.what).toMatch(/^The tests on main have not passed yet \(expected before the first change merges; checked .* ago\)\.$/);
+      expect(s.attention[0]?.what).toMatch(/^The tests on main have not passed yet \(checked .* ago\)\. On a new repository that is expected until the first change merges\.$/);
       expect(s.health?.text).toBe(s.attention[0]?.what);
 
       // Once main has passed, red is a real failure again.
