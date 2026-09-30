@@ -51,17 +51,43 @@ const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
  */
 const NO_POWERSHELL = ["PowerShell"];
 
+/**
+ * The parts of a chained command (`a && b || c; d`), split outside quotes. A command without a
+ * chain operator is its own single part. Pipes are not split: a pipe's right side (`| tee out.log`)
+ * would let judges, which are read-only, write files.
+ */
+export function commandParts(cmd: string): string[] {
+  const parts: string[] = [];
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i]!;
+    if (ch === "\\" && quote !== "'") { i++; continue; }
+    if (quote) { if (ch === quote) quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    const op = ["&&", "||", ";"].find((o) => cmd.startsWith(o, i));
+    if (!op) continue;
+    parts.push(cmd.slice(start, i));
+    i += op.length - 1;
+    start = i + 1;
+  }
+  parts.push(cmd.slice(start));
+  return parts.map((p) => p.trim()).filter((p) => p);
+}
+
 /** Tools a session may use without asking. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
   const { test, lint, build, run, install } = ctx.cfg.commands;
-  // `Bash(<cmd> *)` matches the command alone and with arguments.
-  const rules = (cmds: Array<string | undefined>) => cmds.filter((c): c is string => !!c).map((c) => `Bash(${c} *)`);
+  // `Bash(<cmd> *)` matches the command alone and with arguments. Claude Code checks each part of
+  // `a && b` against the rules on its own, so a chained command also allows each of its parts.
+  const rules = (cmds: Array<string | undefined>) =>
+    cmds.filter((c): c is string => !!c).flatMap((c) => [...new Set([c, ...commandParts(c)])]).map((c) => `Bash(${c} *)`);
   // A build session runs the project's own commands (tests, install) whatever the allow list says.
   if (set === "build") return [...new Set([...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])])];
   // The install command is not for judges.
-  return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
+  return [...new Set([...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ])];
 }
 
 /**

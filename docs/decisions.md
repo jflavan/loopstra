@@ -261,6 +261,7 @@ Sources of truth, in order of precedence when they conflict:
 - **WAL fallback.** When SQLite cannot put the trace in WAL mode (some network drives), it uses `journal_mode=DELETE` and traces one `_loop` error event (`where: trace`) per process. A lock is still thrown.
 - **Claude override checked.** `start`'s preflight refuses a `LOOPSTRA_CLAUDE_EXECUTABLE` that is not found (as a path, or on PATH for a bare name) or, on POSIX, not executable; a `.ts` override only has to exist.
 - **Test pid.** The heartbeat test's "dead process" is a process that was spawned and has exited, not a made-up pid that may be in use.
+- **Chained commands allowed part by part.** Claude Code checks each part of `a && b` against the allow rules on its own, so `toolsFor` adds `Bash(<part> *)` for each part of a configured command (split on `&&`, `||` and `;` outside quotes and escapes) next to the whole-chain rule. Without it judges, which never see `claude.allowed_tools`, were refused a chained test or build command outright. Pipes are not split: each part is allowed with any arguments, and a `| tee out.log` part would let read-only judges write files; a piped command belongs in a script.
 
 ## Background tasks (2026-09-30)
 

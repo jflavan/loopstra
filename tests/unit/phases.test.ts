@@ -117,6 +117,33 @@ describe("agentPhase tools and prompt", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a chained command also allows each of its parts, since Claude Code checks each part on its own", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.commands.test = "dotnet test api/App.sln && npm --prefix web test || echo failed; npm --prefix e2e test";
+    // A pipe is not split: its right side (tee) would let a read-only judge write files.
+    ctx.cfg.commands.build = "npm run build 2>&1 | tee build.log";
+    // Operators inside quotes, or escaped, are part of an argument, not a chain.
+    ctx.cfg.commands.lint = `bun -e "a && b; c \\" ;" && echo 'x || y' && echo a\\;b`;
+    const judge = toolsFor(ctx, "read+commands");
+    expect(judge).toEqual(expect.arrayContaining([
+      `Bash(${ctx.cfg.commands.test} *)`,
+      "Bash(dotnet test api/App.sln *)", "Bash(npm --prefix web test *)", "Bash(echo failed *)", "Bash(npm --prefix e2e test *)",
+      "Bash(npm run build 2>&1 | tee build.log *)",
+      `Bash(bun -e "a && b; c \\" ;" *)`, "Bash(echo 'x || y' *)", "Bash(echo a\\;b *)",
+    ]));
+    expect(judge).not.toContain("Bash(b *)");
+    expect(judge).not.toContain("Bash(tee build.log *)");
+    expect(commandsFor(ctx, "read+commands")).toContain("`dotnet test api/App.sln`, `npm --prefix web test`, `echo failed`, `npm --prefix e2e test`");
+    expect(new Set(judge).size).toBe(judge.length);
+    expect(toolsFor(ctx, "build")).toEqual(expect.arrayContaining(["Bash(dotnet test api/App.sln *)", "Bash(npm --prefix e2e test *)"]));
+    // A plain command gets just its one rule.
+    ctx.cfg.commands.test = "echo ok";
+    ctx.cfg.commands.build = undefined;
+    ctx.cfg.commands.lint = undefined;
+    expect(toolsFor(ctx, "read+commands")).toEqual(["Read", "Glob", "Grep", "Bash(echo ok *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]);
+    trace.close(); repo.cleanup();
+  });
+
   test("skills are prepended as one line; slug, main_branch and commands are always set; the contract ends every prompt", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "slug={{slug}} main={{main_branch}} commands={{commands}}\n");
