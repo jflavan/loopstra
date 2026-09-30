@@ -209,9 +209,10 @@ export class Trace {
   }
 
   /** The newest result of one signal, optionally skipping errors (a check that could not run). */
-  lastSignal(name: string, opts: { excludeErrors?: boolean } = {}): { ts: string; result: string; output: string } | null {
-    const sql = `SELECT ts, result, output FROM signals WHERE name = ?${opts.excludeErrors ? " AND result != 'error'" : ""} ORDER BY id DESC LIMIT 1`;
-    return this.db.query<{ ts: string; result: string; output: string }, [string]>(sql).get(name) ?? null;
+  lastSignal(name: string, opts: { excludeErrors?: boolean; result?: string } = {}): { ts: string; result: string; output: string } | null {
+    const where = `name = ?${opts.excludeErrors ? " AND result != 'error'" : ""}${opts.result ? " AND result = ?" : ""}`;
+    const args: [string] | [string, string] = opts.result ? [name, opts.result] : [name];
+    return this.db.query<{ ts: string; result: string; output: string }, typeof args>(`SELECT ts, result, output FROM signals WHERE ${where} ORDER BY id DESC LIMIT 1`).get(...args) ?? null;
   }
 
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {

@@ -28,7 +28,10 @@ export function healthView(trace: Trace, now: Date): { result: string; ts: strin
   if (!newest) return null;
   const red = trace.lastSignal("main_health", { excludeErrors: true })?.result === "fail";
   const when = `${agoText(now.getTime() - Date.parse(newest.ts))} ago`;
+  // Before main has ever passed (a new repo with no code yet), red is expected, not a breakage.
+  const everPassed = trace.lastSignal("main_health", { result: "pass" }) !== null;
   const text = newest.result === "pass" ? `The tests on main pass (checked ${when}).`
+    : red && !everPassed ? `The tests on main have not passed yet (expected before the first change merges; checked ${when}).`
     : red ? `The tests on main are failing (checked ${when}).`
     : `The last check of main could not run (${when}). An engineer can find the details in the trace.`;
   return { result: red ? "fail" : newest.result, ts: newest.ts, text };

@@ -38,6 +38,24 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("a loose Markdown file in intent/ is listed for a person, with how to fix it", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: accepted");
+    await Bun.write(join(t.path, "intent", "intent.md"), "---\nstatus: accepted\n---\n# Intent: first\n");
+    await Bun.write(join(t.path, "intent", "README.md"), "guide");
+    await Bun.write(join(t.path, "intent", "queue.md"), "queue");
+    await Bun.write(join(t.path, "intent", ".gitkeep"), "");
+    await Bun.write(join(t.path, "intent", "notes.txt"), "not markdown");
+    const scan = await scanRepo(t.path);
+    expect(scan.intents.map((i) => i.slug)).toEqual(["add-numbers"]);
+    expect(scan.unreadable).toEqual([{
+      slug: "intent.md",
+      problem: "Move this into a folder named after the change, for example intent/add-numbers/intent.md.",
+      detail: "intent/intent.md is not inside a change folder",
+    }]);
+    t.cleanup();
+  });
+
   test("a line in intent.md that Loopstra does not know is named, with how to fix it", async () => {
     const t = tempDir();
     await mk(t.path, "one", "status: accepted\ncolour: blue");

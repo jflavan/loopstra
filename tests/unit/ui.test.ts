@@ -145,6 +145,32 @@ describe("needs attention", () => {
     }
   });
 
+  test("before main has ever passed, red tests say so instead of calling main failing", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      const trace = Trace.open(t.path);
+      trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
+      trace.signal("main_health", "error", "install failed");
+      trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
+      trace.close();
+      const s = await buildState(t.path, 0);
+      expect(s.attention).toHaveLength(1);
+      expect(s.attention[0]).toMatchObject({ kind: "health", slug: null });
+      expect(s.attention[0]?.what).toMatch(/^The tests on main have not passed yet \(expected before the first change merges; checked .* ago\)\.$/);
+      expect(s.health?.text).toBe(s.attention[0]?.what);
+
+      // Once main has passed, red is a real failure again.
+      const t2 = Trace.open(t.path);
+      t2.signal("main_health", "pass", "");
+      t2.signal("main_health", "fail", "1 failing");
+      t2.close();
+      expect((await buildState(t.path, 0)).attention[0]?.what).toContain("The tests on main are failing");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a check that could not run, and a config problem, need a person too; green main does not", async () => {
     const t = tempDir();
     try {
