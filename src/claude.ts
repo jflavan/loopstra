@@ -216,7 +216,9 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     if (r.stopped || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || sends >= NOTIFICATION_RESENDS) break;
-    earlierCostUsd += c.events.filter(answersNotification).reduce((sum, e) => sum + (typeof e.total_cost_usd === "number" ? e.total_cost_usd : 0), 0);
+    // A result's total_cost_usd is the run's running total, so the last one is what the run cost.
+    const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
+    earlierCostUsd += typeof cost === "number" ? cost : 0;
     resume = c.sessionId;
     collector = new StreamCollector();
   }
