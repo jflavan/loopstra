@@ -50,6 +50,8 @@ if (cmd === "view") {
   console.log(JSON.stringify(rows));
   process.exit(pr.checks === "pass" ? 0 : pr.checks === "fail" ? 1 : 8);
 } else if (cmd === "merge") {
+  // Test knob: behave like a base branch with a merge queue (gh queues the pull request and exits 0).
+  if (process.env.LOOPSTRA_FAKE_GH_QUEUE === "1") process.exit(0);
   const number = Number(args[2]);
   const [branch, pr] = Object.entries(state.prs).find(([, p]) => p.number === number)!;
   // Test knob: with a bare repository as the remote, merge on it for real, the way GitHub would.
