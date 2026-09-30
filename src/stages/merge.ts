@@ -25,8 +25,9 @@ const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An enginee
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
- * How long after a pull request opens "no checks reported" still means "not registered yet", when the
- * branch has GitHub Actions workflows. After that, a pull request with no checks merges.
+ * How long after a pull request opens, or its branch last gained a commit, "no checks reported" still
+ * means "not registered yet", when the branch has GitHub Actions workflows. After that, a pull request
+ * with no checks merges.
  */
 export const CHECKS_GRACE_MS = 5 * 60_000;
 
@@ -199,7 +200,7 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const status = ctx.intent.file.frontmatter.status;
   // A person decides on the status line and has not yet: only a merge or close on GitHub counts.
   if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return { ok: true, waiting: true };
-  const checks = await gh.checks(pr.number);
+  const checks = await gh.checks(pr.number, (error) => ctx.trace.event(ctx.slug, "error", { where: "pull request checks", error, note: "will look again on the next tick" }));
   if (checks === "pending" || checks === "unknown") return { ok: true, waiting: true };
   if (checks === "none" && (await checksMayStillStart(ctx, pr))) return { ok: true, waiting: true };
   const where = `pull request #${pr.number} ${pr.url}`;
@@ -214,11 +215,14 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   return mergeOnGitHub(ctx, gh, pr);
 }
 
-/** GitHub may not have registered the workflow runs of a pull request opened moments ago. */
+/** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
 async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolean> {
-  if (!(Date.now() - Date.parse(pr.createdAt) < CHECKS_GRACE_MS)) return false;
-  const r = await ctx.git.run(["ls-tree", "--name-only", ctx.branch, ".github/workflows/"], true);
-  return r.code === 0 && r.out.trim() !== "";
+  const ref = `refs/heads/${ctx.branch}`;
+  const head = await ctx.git.run(["log", "-1", "--format=%cI", ref, "--"], true);
+  const since = Math.max(0, ...[Date.parse(pr.createdAt), Date.parse(head.out.trim())].filter(Number.isFinite));
+  if (!(Date.now() - since < CHECKS_GRACE_MS)) return false;
+  const r = await ctx.git.run(["ls-tree", "--name-only", ref, ".github/workflows/"], true);
+  return r.code === 0 && r.out.split(/\r?\n/).some((f) => /\.ya?ml$/i.test(f.trim()));
 }
 
 async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {

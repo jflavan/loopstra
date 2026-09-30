@@ -8,14 +8,17 @@ export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; a
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
 export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
-/** Check states (gh's `state`, used when it prints no `bucket`) that fail or are still running. */
+/**
+ * Check states that fail or are still running. A failed state wins over gh's `bucket`, which puts
+ * STARTUP_FAILURE (a workflow that could not start) with the pending ones; `bucket` decides the rest.
+ */
 const FAILED_STATES = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const PENDING_STATES = new Set(["PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"]);
 
 /** The pull request's checks as a whole, from the rows gh pr checks --json prints: any failure wins, then any pending. */
 export function checksFromRows(rows: { state?: string; bucket?: string }[]): ChecksState {
   if (rows.length === 0) return "none";
-  const buckets = rows.map((r) => r.bucket || (FAILED_STATES.has(r.state ?? "") ? "fail" : PENDING_STATES.has(r.state ?? "") ? "pending" : "pass"));
+  const buckets = rows.map((r) => FAILED_STATES.has(r.state ?? "") ? "fail" : r.bucket || (PENDING_STATES.has(r.state ?? "") ? "pending" : "pass"));
   if (buckets.some((b) => b === "fail" || b === "cancel")) return "fail";
   if (buckets.includes("pending")) return "pending";
   return "pass";
@@ -87,16 +90,17 @@ export class GitHub {
   /**
    * Reads the check states gh prints: with --json, gh exits 0 whatever they are. A call that timed
    * out, could not start, or printed no rows is `unknown` (ask again later), never read as a pass
-   * or a failure.
+   * or a failure; `onError` gets what gh said.
    */
-  async checks(number: number): Promise<ChecksState> {
+  async checks(number: number, onError?: (error: string) => void): Promise<ChecksState> {
     const r = await this.run(["pr", "checks", String(number), "--json", "name,state,bucket"]);
-    if (r.code === 124 || r.code === 127) return "unknown";
+    if (r.code === 124 || r.code === 127) { onError?.(lastLine(r.err)); return "unknown"; }
     try {
       const rows = JSON.parse(r.out) as unknown;
       if (Array.isArray(rows)) return checksFromRows(rows);
     } catch { /* not JSON: gh reported an error */ }
     if (/no checks reported/i.test(r.err)) return "none";
+    onError?.(lastLine(r.err) || `gh exited ${r.code}`);
     return "unknown";
   }
 

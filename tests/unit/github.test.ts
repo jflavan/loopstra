@@ -61,6 +61,8 @@ describe("GitHub", () => {
     expect(checksFromRows([{ bucket: "pending" }, { bucket: "fail" }])).toBe("fail");
     expect(checksFromRows([{ bucket: "cancel" }])).toBe("fail");
     for (const state of ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]) expect(checksFromRows([{ state: "SUCCESS" }, { state }])).toBe("fail");
+    // gh buckets a workflow that could not start with the pending ones; it never will start.
+    expect(checksFromRows([{ state: "STARTUP_FAILURE", bucket: "pending" }])).toBe("fail");
     for (const state of ["PENDING", "QUEUED", "IN_PROGRESS"]) expect(checksFromRows([{ state: "SUCCESS" }, { state }])).toBe("pending");
     expect(checksFromRows([{ state: "SUCCESS" }, { state: "SKIPPED" }, { state: "NEUTRAL" }])).toBe("pass");
   });
@@ -100,7 +102,9 @@ describe("GitHub", () => {
     expect(Date.now() - started).toBeLessThan(8_000);
     // A caller can tell "gh did not answer" from "there is no pull request", and waits.
     expect(await gh.lookupPr("intent/x")).toMatchObject({ error: expect.stringContaining("was stopped") });
-    expect(await gh.checks(1)).toBe("unknown");
+    const errors: string[] = [];
+    expect(await gh.checks(1, (e) => errors.push(e))).toBe("unknown");
+    expect(errors).toEqual([expect.stringContaining("was stopped")]);
     expect(await gh.available()).toBe(false);
     await expect(gh.comment(1, "x")).rejects.toThrow();
     t.cleanup();
