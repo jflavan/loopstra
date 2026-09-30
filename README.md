@@ -150,7 +150,7 @@ With a remote, the approving review pushes the change's branch and opens a pull 
 - `pr`: also needs an approval on the PR (or a person setting `merge-approved`).
 - `status`: a person sets `merge-approved`, and the PR's checks must pass.
 
-Merges go through `gh pr merge`, never twice. A PR that is merged or closed on GitHub is noticed in any mode. Without a remote the same checks run and Loopstra merges locally.
+Merges go through `gh pr merge`, never twice. A PR that is merged or closed on GitHub is noticed in any mode. Loopstra waits while any check is still running, and blocks when any fails or is cancelled. A PR with no checks at all merges; if the branch has workflows under `.github/workflows/`, it first waits up to 5 minutes after the PR opens for GitHub to start them. Without a remote the same checks run and Loopstra merges locally.
 
 Each tick, Loopstra fetches and rebases local `main` onto the remote's. It shares `main` once, at the end of the tick (and just before it pushes a change's branch for its pull request), and only when every unpushed commit is its own (bookkeeping under `intent/`). Your own unpushed commits are never pushed for you; it waits until you push them. In `intent/`, the remote's version wins.
 

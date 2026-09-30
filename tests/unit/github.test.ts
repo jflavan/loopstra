@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GitHub } from "../../src/github";
+import { checksFromRows, GitHub } from "../../src/github";
 import { tempDir } from "../helpers";
 
 const FAKE = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -30,6 +30,39 @@ describe("GitHub", () => {
     pr = await gh.prForBranch("intent/x");
     expect(pr?.merged).toBe(true);
     t.cleanup();
+  });
+
+  test("checks read the states gh prints, since gh pr checks --json exits 0 whatever they are", async () => {
+    const t = tempDir();
+    try {
+      const statePath = join(t.path, "gh.json");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath } });
+      await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" });
+      const setChecks = async (checks: string) => {
+        const s = JSON.parse(await Bun.file(statePath).text());
+        s.prs["intent/x"].checks = checks;
+        await Bun.write(statePath, JSON.stringify(s));
+      };
+      expect(await gh.checks(1)).toBe("pending");
+      await setChecks("fail");
+      expect(await gh.checks(1)).toBe("fail");
+      await setChecks("none");
+      expect(await gh.checks(1)).toBe("none");
+      await setChecks("pass");
+      expect(await gh.checks(1)).toBe("pass");
+      expect((await gh.prForBranch("intent/x"))?.createdAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    } finally { t.cleanup(); }
+  });
+
+  test("any failed or cancelled check fails, then any running one is pending; gh's state is used without a bucket", () => {
+    expect(checksFromRows([])).toBe("none");
+    expect(checksFromRows([{ bucket: "pass" }, { bucket: "skipping" }])).toBe("pass");
+    expect(checksFromRows([{ bucket: "pass" }, { bucket: "pending" }])).toBe("pending");
+    expect(checksFromRows([{ bucket: "pending" }, { bucket: "fail" }])).toBe("fail");
+    expect(checksFromRows([{ bucket: "cancel" }])).toBe("fail");
+    for (const state of ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]) expect(checksFromRows([{ state: "SUCCESS" }, { state }])).toBe("fail");
+    for (const state of ["PENDING", "QUEUED", "IN_PROGRESS"]) expect(checksFromRows([{ state: "SUCCESS" }, { state }])).toBe("pending");
+    expect(checksFromRows([{ state: "SUCCESS" }, { state: "SKIPPED" }, { state: "NEUTRAL" }])).toBe("pass");
   });
 
   test("bodies go to gh on standard input, so a long one never reaches the command line", async () => {
