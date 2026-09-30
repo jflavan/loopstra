@@ -9,6 +9,8 @@
 // "notification-only" answers a background task's notification and exits without reading the prompt,
 // the way a resumed session with a pending notification does; resumed as "notified-session" it has
 // nothing pending and answers the prompt. "notification-forever" never gets past the notification.
+// "no-envelope" finishes with its report as text and no structured output; resumed, it returns one.
+// "no-envelope-forever" never does; "no-envelope-stuck" hangs when resumed.
 // $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
 // Like the real CLI, the process exits 1 after a result event with is_error.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
@@ -38,6 +40,10 @@ const candidates = [
 let fixture = candidates[0]!;
 const resumeAt = args.indexOf("--resume");
 if (fixture.endsWith("notification-only.jsonl") && args[resumeAt + 1] === "notified-session") fixture = join(here, "simple-success.jsonl");
+// Asked again on the same session (no fixture name in the nudge), "no-envelope" returns its structured output.
+if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-session") fixture = join(here, "simple-success.jsonl");
+if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-forever") fixture = join(here, "no-envelope-forever.jsonl");
+if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-stuck") fixture = join(here, "hang.jsonl");
 
 if (fixture.endsWith("hang.jsonl")) {
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "hang-session" }));

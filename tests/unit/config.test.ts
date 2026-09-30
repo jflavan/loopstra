@@ -22,6 +22,8 @@ describe("loadConfig", () => {
     expect(cfg.claude.allowed_tools).toEqual(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]);
     expect(cfg.stages.build.max_fix_loops).toBe(3);
     expect(cfg.claude.models.cheap).toBe("haiku");
+    // The cheap model often ends a verify session without calling the structured-output tool (#7).
+    expect(cfg.stages.verify.model).toBe("default");
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     t.cleanup();
   });
