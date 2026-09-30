@@ -43,6 +43,13 @@ describe("prompt templates", () => {
     expect(guide).toContain("Design and Affected code");
   });
 
+  test("the plan says generated files are new too, and that a wrong path fails the files check", async () => {
+    const text = await Bun.file(join(ROOT, "plan.md")).text();
+    expect(text).toContain("Every path that does not exist in the repository yet must carry `(new)`");
+    expect(text).toMatch(/generated files \(migrations and their designer files, lockfiles\)/);
+    expect(text).toMatch(/fails the plan's files check/);
+  });
+
   test("the done-check asks for the outcome's exact headings and plain-words evidence", async () => {
     const text = await Bun.file(join(ROOT, "done-check.md")).text();
     expect(text).toContain("`## Outcome`");
