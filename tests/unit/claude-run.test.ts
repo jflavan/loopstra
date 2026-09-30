@@ -220,6 +220,38 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("a session that finishes without structured output is asked once, on the same session, to return it", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    const callsFile = join(t.path, "calls.jsonl");
+    const r = await runPhase({ cwd: t.path, prompt: "Verify. FIXTURE:no-envelope", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile, LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+    expect(r.ok).toBe(true);
+    expect(r.structuredOutput).toMatchObject({ status: "success" });
+    // Both sends are paid for.
+    expect(r.costUsd).toBeCloseTo(0.03);
+    const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+    expect(calls.length).toBe(2);
+    expect(calls[0]).not.toContain("--resume");
+    expect(calls[1]).toEqual(expect.arrayContaining(["--resume", "no-envelope-session"]));
+    const nudge = (await Bun.file(argsFile).json()).prompt as string;
+    expect(nudge).toMatch(/structured.output tool/i);
+    expect(nudge).not.toContain("Verify.");
+    t.cleanup();
+  });
+
+  test("a session that still returns no structured output after the nudge fails as an unreadable report", async () => {
+    const t = tempDir();
+    const callsFile = join(t.path, "calls.jsonl");
+    const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:no-envelope-forever", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid-envelope");
+    expect(r.detail).toMatch(/without structured output/);
+    expect((await Bun.file(callsFile).text()).trim().split("\n").length).toBe(2);
+    t.cleanup();
+  });
+
   test("FAKE_CLAUDE_ENV names the override variable", () => {
     expect(FAKE_CLAUDE_ENV).toBe("LOOPSTRA_CLAUDE_EXECUTABLE");
   });

@@ -36,7 +36,7 @@ stages:
   plan:   { model: strong,  skills: [], before: [], after: [] }
   build:  { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
   review: { model: strong,  skills: [], before: [], after: [], max_rounds: 2 }
-  verify: { model: cheap,   skills: [], before: [], after: [] }
+  verify: { model: default, skills: [], before: [], after: [] }
 
 signals:
   main_health: { every_minutes: 30 }

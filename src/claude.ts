@@ -151,6 +151,11 @@ export type RunPhaseResult = Collected & {
 const EXIT_GRACE_MS = 2_000;
 /** How many times a session that ended having answered only notifications gets the prompt again. */
 const NOTIFICATION_RESENDS = 2;
+/**
+ * Sent once, on the same session, when a session finishes without structured output (for example
+ * it wrote its report as text). Cheaper than a new session, which would redo the whole phase.
+ */
+export const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the structured-output tool with the result you reached; do not redo the work.";
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -198,13 +203,16 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const env = withBunOnPath({ ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
 
   // A session that ended having answered only notifications (one started before background tasks
-  // were turned off) gets the prompt again on the same session, within the same deadline.
+  // were turned off) gets the prompt again on the same session, within the same deadline. A session
+  // that finished without structured output is asked for it once, the same way.
   let resume = input.resume;
+  let stdin = input.prompt;
+  let nudged = false;
   let r: Awaited<ReturnType<typeof spawnBounded>>;
-  for (let sends = 0; ; sends++) {
+  for (let resends = 0; ; resends++) {
     const resumeArgs = resume ? ["--resume", resume] : [];
     r = await spawnBounded({
-      cmd: [...cmd, ...resumeArgs], cwd: input.cwd, env, stdin: input.prompt,
+      cmd: [...cmd, ...resumeArgs], cwd: input.cwd, env, stdin,
       timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
       // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
       onLine: (line) => {
@@ -215,7 +223,16 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     });
     if (r.stopped || !r.started || r.timedOut) break;
     const c = collector.finish();
-    if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || sends >= NOTIFICATION_RESENDS) break;
+    if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
+      nudged = true;
+      earlierCostUsd += c.costUsd;
+      resume = c.sessionId;
+      stdin = ENVELOPE_NUDGE;
+      collector = new StreamCollector();
+      resends--; // the nudge is not a notification resend
+      continue;
+    }
+    if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || resends >= NOTIFICATION_RESENDS) break;
     // A result's total_cost_usd is the run's running total, so the last one is what the run cost.
     const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
     earlierCostUsd += typeof cost === "number" ? cost : 0;

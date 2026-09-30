@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"no-envelope-forever","cwd":"/","tools":[],"model":"fake"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"<StructuredOutput>\n<parameter name=\"status\">success</parameter>\n</StructuredOutput>"}]},"session_id":"no-envelope-forever"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"no-envelope-forever","num_turns":3,"total_cost_usd":0.02,"usage":{},"result":"<StructuredOutput>\n<parameter name=\"status\">success</parameter>\n</StructuredOutput>"}
