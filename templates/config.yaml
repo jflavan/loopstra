@@ -6,7 +6,8 @@ main_branch: __MAIN_BRANCH__
 poll_seconds: 60
 
 commands:
-  # The single command that runs your tests and exits non-zero on failure.
+  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:
+  # sessions may run the whole chain and each part of it.
 __COMMANDS__
 
 claude:
