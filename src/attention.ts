@@ -77,7 +77,10 @@ export async function attention(root: string, config: Config | { problem: string
     const fm = i.file.frontmatter;
     // A depends_on only a person can untangle (a name that matches no change, a closed one, a loop).
     const wait = dependencyWait(i, intents);
-    if (wait?.needsPerson) add("waiting", i.slug, i.file.title || i.slug, wait.note);
+    if (wait?.needsPerson) {
+      add("waiting", i.slug, i.file.title || i.slug, wait.note);
+      continue;
+    }
     if (fm.status === "blocked" || !waitsForPerson(i, human)) continue;
     const title = i.file.title || i.slug;
     if (fm.status === "draft") {

@@ -22,7 +22,7 @@ When a change needs another one to be in the main code first, name that change i
 depends_on: [01-foundation, 02-accounts]
 ```
 
-The change waits until every change it names is `merged` (or later). If one of them is blocked, it keeps waiting, and its note in `queue.md` says which change it waits for and where that one is. Without `depends_on`, changes run in order of priority and date, but a blocked change does not hold up the ones after it.
+The change waits until every change it names is `merged`, `verifying` or `done`. If one of them is blocked, it keeps waiting, and its note in `queue.md` says which change it waits for and where that one is. Without `depends_on`, changes run in order of priority and date, but a blocked change does not hold up the ones after it.
 
 ## Where a change is
 

@@ -31,8 +31,9 @@ export const Frontmatter = z.object({
    * Optional: changes that must be merged before this one runs. One name or a list; blank reads
    * as absent. Written by a person, never by the runtime.
    */
-  depends_on: z.union([z.string(), z.array(z.string())]).nullish().transform((v) => {
-    const names = (typeof v === "string" ? [v] : v ?? []).map((n) => n.trim()).filter(Boolean);
+  depends_on: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).nullish().transform((v) => {
+    // A bare number (a change named 42) is a name too; `a, b` without brackets is two names.
+    const names = (Array.isArray(v) ? v.map(String) : v == null ? [] : String(v).split(",")).map((n) => n.trim()).filter(Boolean);
     return names.length ? [...new Set(names)] : undefined;
   }),
   /** The last approved status, so a person can retry from it. Runtime-managed. */
@@ -345,14 +346,27 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
   return true;
 }
 
-/** A dependency counts as met once its code is in main. */
+/** Statuses whose code is in main. */
 const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
 
-/** The changes named in `depends_on` that are not merged yet (or cannot be found), in the order written. */
+/**
+ * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
+ * (for example at verify; `resume_from` then still says merged).
+ */
+function inMain(fm: Frontmatter): boolean {
+  if (MERGED.has(fm.status)) return true;
+  return (fm.status === "blocked" || fm.status === "closed") && fm.resume_from !== undefined && MERGED.has(fm.resume_from);
+}
+
+/**
+ * The changes named in `depends_on` whose code is not in main yet (or that cannot be found), in
+ * the order written. A change whose own code is already in main waits for nothing.
+ */
 export function waitingOn(intent: Intent, intents: Intent[]): string[] {
+  if (inMain(intent.file.frontmatter)) return [];
   return (intent.file.frontmatter.depends_on ?? []).filter((slug) => {
     const dep = intents.find((i) => i.slug === slug);
-    return !dep || !MERGED.has(dep.file.frontmatter.status);
+    return !dep || !inMain(dep.file.frontmatter);
   });
 }
 
@@ -377,6 +391,10 @@ export function dependencyWait(intent: Intent, intents: Intent[]): { note: strin
     if (dep.file.frontmatter.status === "closed") {
       needsPerson = true;
       return `Waits for ${slug}, which was closed. Remove it from depends_on to go ahead.`;
+    }
+    if (slug === intent.slug) {
+      needsPerson = true;
+      return `Waits for itself. Remove ${slug} from depends_on.`;
     }
     if (dependsOn(dep, intent.slug, intents)) {
       needsPerson = true;

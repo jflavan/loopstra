@@ -186,8 +186,16 @@ describe("scan and queue", () => {
     await mk(t.path, "single", "status: accepted\ndepends_on: one");
     await mk(t.path, "blank", "status: accepted\ndepends_on:");
     await mk(t.path, "none", "status: accepted");
-    const by = Object.fromEntries((await scanRepo(t.path)).intents.map((i) => [i.slug, i.file.frontmatter.depends_on]));
-    expect(by).toEqual({ list: ["one", "two"], "block-list": ["one", "two"], single: ["one"], blank: undefined, none: undefined });
+    await mk(t.path, "commas", "status: accepted\ndepends_on: one, two");
+    await mk(t.path, "numbers", "status: accepted\ndepends_on: [42, one]");
+    await mk(t.path, "number", "status: accepted\ndepends_on: 7");
+    const scan = await scanRepo(t.path);
+    expect(scan.unreadable).toEqual([]);
+    const by = Object.fromEntries(scan.intents.map((i) => [i.slug, i.file.frontmatter.depends_on]));
+    expect(by).toEqual({
+      list: ["one", "two"], "block-list": ["one", "two"], single: ["one"], blank: undefined, none: undefined,
+      commas: ["one", "two"], numbers: ["42", "one"], number: ["7"],
+    });
     t.cleanup();
   });
 
@@ -228,7 +236,7 @@ describe("scan and queue", () => {
     expect(note("on-typo")).toBe("Waits for publc-web, which Loopstra cannot find or read in intent/. Fix the name in depends_on, or remove it.");
     expect(note("on-closed")).toBe("Waits for gone, which was closed. Remove it from depends_on to go ahead.");
     expect(note("a")).toBe("Waits for b, which waits for this change too. Remove one of them from depends_on.");
-    expect(note("self")).toBe("Waits for self, which waits for this change too. Remove one of them from depends_on.");
+    expect(note("self")).toBe("Waits for itself. Remove self from depends_on.");
     t.cleanup();
   });
 
@@ -239,6 +247,23 @@ describe("scan and queue", () => {
     const md = renderQueue(orderQueue((await scanRepo(t.path)).intents));
     const row = md.split("\n").find((l) => l.startsWith("| second |"));
     expect(row).toContain("Waits for first to be merged (now: needs a person).");
+    t.cleanup();
+  });
+  test("a change that merged and then blocked or closed at verify no longer holds the ones after it; a change already merged waits for nothing", async () => {
+    const t = tempDir();
+    const both = { "spec.md": "s", "plan.md": "p" };
+    await mk(t.path, "verify-blocked", "status: blocked\nresume_from: merged\nnote: Not done yet.", both);
+    await mk(t.path, "verify-closed", "status: closed\nresume_from: merged", both);
+    await mk(t.path, "build-blocked", "status: blocked\nresume_from: plan-approved", both);
+    await mk(t.path, "after-verify", "status: accepted\ndepends_on: [verify-blocked, verify-closed]");
+    await mk(t.path, "after-build", "status: accepted\ndepends_on: [build-blocked]");
+    await mk(t.path, "already-merged", "status: merged\ndepends_on: [build-blocked]", both);
+    const intents = (await scanRepo(t.path)).intents;
+    const by = (slug: string) => intents.find((i) => i.slug === slug)!;
+    expect(waitingOn(by("after-verify"), intents)).toEqual([]);
+    expect(waitingOn(by("after-build"), intents)).toEqual(["build-blocked"]);
+    expect(waitingOn(by("already-merged"), intents)).toEqual([]);
+    expect(dependencyNote(by("already-merged"), intents)).toBeNull();
     t.cleanup();
   });
 });
