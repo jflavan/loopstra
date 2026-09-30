@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanRepo, writeIntent,
+  checkConsistency, dependencyNote, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
   type Intent,
 } from "../../src/intents";
 import { tempDir } from "../helpers";
@@ -177,6 +177,93 @@ describe("scan and queue", () => {
     expect(row).toBeDefined();
     expect(row).toContain("Need an answer about adjusters. Waiting since Monday.");
     expect(row?.split("\n").length ?? 0).toBe(1);
+    t.cleanup();
+  });
+  test("depends_on takes a list, a single name, or nothing", async () => {
+    const t = tempDir();
+    await mk(t.path, "list", "status: accepted\ndepends_on: [one, two]");
+    await mk(t.path, "block-list", "status: accepted\ndepends_on:\n  - one\n  - two");
+    await mk(t.path, "single", "status: accepted\ndepends_on: one");
+    await mk(t.path, "blank", "status: accepted\ndepends_on:");
+    await mk(t.path, "none", "status: accepted");
+    await mk(t.path, "commas", "status: accepted\ndepends_on: one, two");
+    await mk(t.path, "numbers", "status: accepted\ndepends_on: [42, one]");
+    await mk(t.path, "number", "status: accepted\ndepends_on: 7");
+    const scan = await scanRepo(t.path);
+    expect(scan.unreadable).toEqual([]);
+    const by = Object.fromEntries(scan.intents.map((i) => [i.slug, i.file.frontmatter.depends_on]));
+    expect(by).toEqual({
+      list: ["one", "two"], "block-list": ["one", "two"], single: ["one"], blank: undefined, none: undefined,
+      commas: ["one", "two"], numbers: ["42", "one"], number: ["7"],
+    });
+    t.cleanup();
+  });
+
+  test("a change waits until every change it depends on is merged; a blocked one keeps it waiting, with why", async () => {
+    const t = tempDir();
+    const both = { "spec.md": "s", "plan.md": "p" };
+    await mk(t.path, "05-public-web", "status: blocked\nnote: The tests failed.");
+    await mk(t.path, "04-api", "status: merged", both);
+    await mk(t.path, "03-data", "status: done", { ...both, "outcome.md": "o" });
+    await mk(t.path, "06-admin", "status: accepted\ndepends_on: [03-data, 04-api, 05-public-web]");
+    await mk(t.path, "07-launch", "status: accepted\ndepends_on: [06-admin]");
+    await mk(t.path, "08-extra", "status: accepted\ndepends_on: [03-data, 04-api]");
+    const intents = (await scanRepo(t.path)).intents;
+    const by = (slug: string) => intents.find((i) => i.slug === slug)!;
+    expect(waitingOn(by("06-admin"), intents)).toEqual(["05-public-web"]);
+    expect(waitingOn(by("07-launch"), intents)).toEqual(["06-admin"]);
+    expect(waitingOn(by("08-extra"), intents)).toEqual([]);
+    expect(dependencyNote(by("06-admin"), intents)).toBe("Waits for 05-public-web to be merged (now: needs a person).");
+    expect(dependencyNote(by("07-launch"), intents)).toBe("Waits for 06-admin to be merged (now: waiting to be designed).");
+    expect(dependencyNote(by("08-extra"), intents)).toBeNull();
+    // Only a change that would otherwise go on waits: a draft or a finished change has nothing to hold up.
+    await mk(t.path, "09-draft", "status: draft\ndepends_on: [05-public-web]");
+    const again = (await scanRepo(t.path)).intents;
+    expect(dependencyNote(again.find((i) => i.slug === "09-draft")!, again)).toBeNull();
+    t.cleanup();
+  });
+
+  test("a dependency that is missing, closed, or waits back on the change says what a person can do", async () => {
+    const t = tempDir();
+    await mk(t.path, "gone", "status: closed");
+    await mk(t.path, "on-typo", "status: accepted\ndepends_on: [publc-web]");
+    await mk(t.path, "on-closed", "status: accepted\ndepends_on: [gone]");
+    await mk(t.path, "a", "status: accepted\ndepends_on: [b]");
+    await mk(t.path, "b", "status: accepted\ndepends_on: [a]");
+    await mk(t.path, "self", "status: accepted\ndepends_on: [self]");
+    const intents = (await scanRepo(t.path)).intents;
+    const note = (slug: string) => dependencyNote(intents.find((i) => i.slug === slug)!, intents);
+    expect(note("on-typo")).toBe("Waits for publc-web, which Loopstra cannot find or read in intent/. Fix the name in depends_on, or remove it.");
+    expect(note("on-closed")).toBe("Waits for gone, which was closed. Remove it from depends_on to go ahead.");
+    expect(note("a")).toBe("Waits for b, which waits for this change too. Remove one of them from depends_on.");
+    expect(note("self")).toBe("Waits for itself. Remove self from depends_on.");
+    t.cleanup();
+  });
+
+  test("renderQueue shows why a change waits for another", async () => {
+    const t = tempDir();
+    await mk(t.path, "first", "status: blocked\nnote: The tests failed.");
+    await mk(t.path, "second", "status: accepted\ndepends_on: [first]");
+    const md = renderQueue(orderQueue((await scanRepo(t.path)).intents));
+    const row = md.split("\n").find((l) => l.startsWith("| second |"));
+    expect(row).toContain("Waits for first to be merged (now: needs a person).");
+    t.cleanup();
+  });
+  test("a change that merged and then blocked or closed at verify no longer holds the ones after it; a change already merged waits for nothing", async () => {
+    const t = tempDir();
+    const both = { "spec.md": "s", "plan.md": "p" };
+    await mk(t.path, "verify-blocked", "status: blocked\nresume_from: merged\nnote: Not done yet.", both);
+    await mk(t.path, "verify-closed", "status: closed\nresume_from: merged", both);
+    await mk(t.path, "build-blocked", "status: blocked\nresume_from: plan-approved", both);
+    await mk(t.path, "after-verify", "status: accepted\ndepends_on: [verify-blocked, verify-closed]");
+    await mk(t.path, "after-build", "status: accepted\ndepends_on: [build-blocked]");
+    await mk(t.path, "already-merged", "status: merged\ndepends_on: [build-blocked]", both);
+    const intents = (await scanRepo(t.path)).intents;
+    const by = (slug: string) => intents.find((i) => i.slug === slug)!;
+    expect(waitingOn(by("after-verify"), intents)).toEqual([]);
+    expect(waitingOn(by("after-build"), intents)).toEqual(["build-blocked"]);
+    expect(waitingOn(by("already-merged"), intents)).toEqual([]);
+    expect(dependencyNote(by("already-merged"), intents)).toBeNull();
     t.cleanup();
   });
 });

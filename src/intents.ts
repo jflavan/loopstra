@@ -27,6 +27,15 @@ export const Frontmatter = z.object({
   author: blankableString,
   opened: blankableString,
   note: blankableString,
+  /**
+   * Optional: changes that must be merged before this one runs. One name or a list; blank reads
+   * as absent. Written by a person, never by the runtime.
+   */
+  depends_on: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).nullish().transform((v) => {
+    // A bare number (a change named 42) is a name too; `a, b` without brackets is two names.
+    const names = (Array.isArray(v) ? v.map(String) : v == null ? [] : String(v).split(",")).map((n) => n.trim()).filter(Boolean);
+    return names.length ? [...new Set(names)] : undefined;
+  }),
   /** The last approved status, so a person can retry from it. Runtime-managed. */
   resume_from: z.enum(STATUSES).optional(),
 }).strict();
@@ -337,6 +346,86 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
   return true;
 }
 
+/** Statuses whose code is in main. */
+const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
+
+/**
+ * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
+ * (for example at verify; `resume_from` then still says merged).
+ */
+function inMain(fm: Frontmatter): boolean {
+  if (MERGED.has(fm.status)) return true;
+  return (fm.status === "blocked" || fm.status === "closed") && fm.resume_from !== undefined && MERGED.has(fm.resume_from);
+}
+
+/**
+ * The changes named in `depends_on` whose code is not in main yet (or that cannot be found), in
+ * the order written. A change whose own code is already in main waits for nothing.
+ */
+export function waitingOn(intent: Intent, intents: Intent[]): string[] {
+  if (inMain(intent.file.frontmatter)) return [];
+  return (intent.file.frontmatter.depends_on ?? []).filter((slug) => {
+    const dep = intents.find((i) => i.slug === slug);
+    return !dep || !inMain(dep.file.frontmatter);
+  });
+}
+
+/**
+ * Why a change waits for others, or null when it does not. `needsPerson` is set when only a person
+ * can end the wait (a name that matches no change, a closed change, or changes waiting for each
+ * other); otherwise the change goes on by itself once the others merge. Drafts, blocked, and
+ * finished changes have nothing to hold up, so none of them gets a note.
+ */
+export function dependencyWait(intent: Intent, intents: Intent[]): { note: string; needsPerson: boolean } | null {
+  const s = intent.file.frontmatter.status;
+  if (s === "draft" || s === "blocked" || s === "done" || s === "closed") return null;
+  const waits = waitingOn(intent, intents);
+  if (!waits.length) return null;
+  let needsPerson = false;
+  const notes = waits.map((slug) => {
+    const dep = intents.find((i) => i.slug === slug);
+    if (!dep) {
+      needsPerson = true;
+      return `Waits for ${slug}, which Loopstra cannot find or read in intent/. Fix the name in depends_on, or remove it.`;
+    }
+    if (dep.file.frontmatter.status === "closed") {
+      needsPerson = true;
+      return `Waits for ${slug}, which was closed. Remove it from depends_on to go ahead.`;
+    }
+    if (slug === intent.slug) {
+      needsPerson = true;
+      return `Waits for itself. Remove ${slug} from depends_on.`;
+    }
+    if (dependsOn(dep, intent.slug, intents)) {
+      needsPerson = true;
+      return `Waits for ${slug}, which waits for this change too. Remove one of them from depends_on.`;
+    }
+    return `Waits for ${slug} to be merged (now: ${plainStatus(dep.file.frontmatter.status)}).`;
+  });
+  return { note: notes.join(" "), needsPerson };
+}
+
+/** dependencyWait's note alone. */
+export function dependencyNote(intent: Intent, intents: Intent[]): string | null {
+  return dependencyWait(intent, intents)?.note ?? null;
+}
+
+/** True when `from` is `target`, or reaches it through depends_on. */
+function dependsOn(from: Intent, target: string, intents: Intent[], seen = new Set<string>()): boolean {
+  if (from.slug === target) return true;
+  if (seen.has(from.slug)) return false;
+  seen.add(from.slug);
+  return (from.file.frontmatter.depends_on ?? []).some((slug) => {
+    const next = intents.find((i) => i.slug === slug);
+    return !!next && dependsOn(next, target, intents, seen);
+  });
+}
+
+/** The note shown for a change: why it waits for others, if it does, then its own note. */
+export function shownNote(intent: Intent, intents: Intent[]): string {
+  return [dependencyNote(intent, intents), intent.file.frontmatter.note].filter(Boolean).join(" ");
+}
+
 const STATUS_CLASS: Record<Status, number> = {
   designing: 0, planning: 0, building: 0, reviewing: 0, verifying: 0,
   "spec-review": 0, "plan-review": 0, "merge-review": 0,
@@ -384,7 +473,7 @@ export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], hu
   const waiting = ordered.filter((i) => waitsForPerson(i, human));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
-  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(i.file.frontmatter.note)} |`;
+  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered))} |`;
   const badRow = (u: Unreadable) => `| ${u.slug} | - | ${plainStatus("blocked")} | ${cell(u.problem)} |`;
   const table = (rows: string[]) => rows.length
     ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows].join("\n")

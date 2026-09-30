@@ -10,6 +10,20 @@ This folder is the queue of changes for this repository. Each change is a folder
 
 The system takes it from there. Check `queue.md` in this folder to see where every change is; its "Needs a person" list is everything waiting for someone.
 
+## How big a change should be
+
+One change is designed, planned, and built in one go, by one working session with a time and cost limit. A change the size of a whole product will not fit: it stops partway and waits for a person. Keep each change to something one person could build in a day or two. Split larger work into several changes, and say which ones must go into the main code first with `depends_on`.
+
+## One change after another
+
+When a change needs another one to be in the main code first, name that change in a `depends_on` line at the top of its `intent.md`:
+
+```
+depends_on: [01-foundation, 02-accounts]
+```
+
+The change waits until every change it names is `merged`, `verifying` or `done`. If one of them is blocked, it keeps waiting, and its note in `queue.md` says which change it waits for and where that one is. Without `depends_on`, changes run in order of priority and date, but a blocked change does not hold up the ones after it.
+
 ## Where a change is
 
 The `status` line at the top of `intent.md` says where the change is, and the `note` line says what to do, if anything. Most of the time the system is working and you do nothing.
@@ -45,6 +59,7 @@ When a change is finished, `outcome.md` may have a section called "For a person 
 ---
 status: draft
 # priority: low, normal, high or urgent. Leave it out and Loopstra fills it in.
+# depends_on: [another-change] (optional: changes that must be merged first)
 author: Your name
 opened: 2026-01-01
 note: ""

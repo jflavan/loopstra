@@ -84,6 +84,19 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a change that depends on a blocked one is not started, and the queue says why", async () => {
+    const { repo, trace } = await setupRepo("blocked");
+    mkdirSync(join(repo.path, "intent", "show-sums"), { recursive: true });
+    await Bun.write(join(repo.path, "intent", "show-sums", "intent.md"), `---\nstatus: accepted\ndepends_on: [${SLUG}]\n---\n# Intent: show sums\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n`);
+    await new Git(repo.path).commitAll("a dependent intent");
+    const r = await tick(repo.path);
+    expect(r.picked).toBeNull();
+    expect((await readIntent(repo.path, "show-sums")).file.frontmatter.status).toBe("accepted");
+    const queue = await Bun.file(join(repo.path, "intent", "queue.md")).text();
+    expect(queue).toContain(`Waits for ${SLUG} to be merged (now: needs a person).`);
+    trace.close(); repo.cleanup();
+  });
+
   test("a stop during a step interrupts it without blocking, and the next tick resumes it", async () => {
     const { repo, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:hang");

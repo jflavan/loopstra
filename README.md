@@ -71,6 +71,7 @@ Make `intent/<slug>/`, where the slug is lowercase words joined by dashes, like 
 ---
 status: draft
 # priority: low, normal, high or urgent. Leave it out and Loopstra fills it in.
+# depends_on: [another-change] (optional: changes that must be merged first)
 author: Your name
 opened: 2026-01-01
 note: ""
@@ -86,6 +87,8 @@ note: ""
 ```
 
 Write it in your own words. "Done when" is a list someone could check. When it is ready, change `status: draft` to `status: accepted`. That is the only step a person must always take. Saving the file is enough; you do not need to commit it.
+
+One change gets one spec, one plan and one build session, within `timeout_minutes` and `max_budget_usd`. Split larger work into several changes. When a change needs another to be in main first, list it under `depends_on`: the change is not started (or continued) until each one it names is in main: `merged`, `verifying` or `done`, or blocked or closed after it merged. A blocked dependency keeps it waiting, and `status`, `queue.md` and the dashboard say which change it waits for. A name that matches no change, a change closed before it merged, or two changes that wait for each other shows under "Needs attention".
 
 Problem, Proposed outcome and Done when are required. An accepted request without them is blocked at once with a note like "This request is missing a Proposed outcome and a Done when section. Add them to intent.md, then set status to accepted."
 

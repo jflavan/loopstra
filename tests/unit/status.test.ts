@@ -76,6 +76,26 @@ describe("renderStatus", () => {
     }
   });
 
+  test("a change waiting for another says why in its note; a wait only a person can end needs attention", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "first", "status: accepted");
+      await intent(t.path, "second", "status: accepted\ndepends_on: first");
+      await intent(t.path, "third", "status: accepted\ndepends_on: [frist]");
+      await intent(t.path, "gone", "status: closed");
+      await intent(t.path, "fourth", "status: accepted\ndepends_on: gone");
+      const text = await renderStatus(t.path, 200);
+      expect(text).toContain("Waits for first to be merged (now: waiting to be designed).");
+      const block = text.slice(0, text.indexOf("\n\nChange"));
+      expect(block).not.toContain("(second)");
+      expect(block).toContain("- Waiting for you (third): Waits for frist, which Loopstra cannot find or read in intent/. Fix the name in depends_on, or remove it.");
+      expect(block).toContain("- Waiting for you (fourth): Waits for gone, which was closed. Remove it from depends_on to go ahead.");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("never pads the last column, and wraps long notes to the width", async () => {
     const t = tempDir();
     try {

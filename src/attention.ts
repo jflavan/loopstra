@@ -1,6 +1,6 @@
 import type { Config } from "./config";
 import { activePause, agoText } from "./heartbeat";
-import { orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Status } from "./intents";
+import { dependencyWait, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Status } from "./intents";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
 import type { Trace } from "./trace";
@@ -75,6 +75,12 @@ export async function attention(root: string, config: Config | { problem: string
     : { spec: "none", plan: "none", merge: "none", done: "none" };
   for (const i of intents) {
     const fm = i.file.frontmatter;
+    // A depends_on only a person can untangle (a name that matches no change, a closed one, a loop).
+    const wait = dependencyWait(i, intents);
+    if (wait?.needsPerson) {
+      add("waiting", i.slug, i.file.title || i.slug, wait.note);
+      continue;
+    }
     if (fm.status === "blocked" || !waitsForPerson(i, human)) continue;
     const title = i.file.title || i.slug;
     if (fm.status === "draft") {

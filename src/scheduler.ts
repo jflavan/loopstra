@@ -9,7 +9,7 @@ import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, sta
 import { ownerNote, probeAssistant } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
@@ -103,9 +103,10 @@ export async function tick(root: string): Promise<TickResult> {
     }
 
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
-    // still waiting on GitHub) does not hold up the next change: it runs in the same tick.
+    // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
+    // whose depends_on names one not merged yet waits, so it is never built on a main without it.
     const human = humanGates(cfg);
-    for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote))) {
+    for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length)) {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
       out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));

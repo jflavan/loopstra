@@ -1,7 +1,7 @@
 import { attention, type AttentionItem } from "../attention";
 import { loadConfig, type Config } from "../config";
 import { loopStatusLine } from "../heartbeat";
-import { effectivePriority, orderQueue, plainStatus, scanRepo } from "../intents";
+import { effectivePriority, orderQueue, plainStatus, scanRepo, shownNote } from "../intents";
 import { Trace } from "../trace";
 import { errorText } from "../shell";
 
@@ -44,7 +44,7 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
     const s = trace.intentSummary(i.slug);
     const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus})` : "-";
     const cost = `$${(s?.costUsd ?? 0).toFixed(2)}`;
-    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, i.file.frontmatter.note];
+    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents)];
   });
   // An intent.md that cannot be read still shows, with what to fix.
   for (const u of scan.unreadable) rows.push([u.slug, "-", plainStatus("blocked"), "-", "-", u.problem]);
