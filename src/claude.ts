@@ -161,15 +161,21 @@ export function resolveClaude(override?: string): string | null {
 
 /**
  * Runs one `claude -p` session. Everything it awaits is bounded by the deadline (`timeoutMs`)
- * plus a short grace: it stops reading stdout at the result event, never waits on pipes a
+ * plus a short grace: it stops reading stdout at the prompt's result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
  * After a stop request it does not start, or it kills the running session, and throws StopRequested.
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
   let collector = new StreamCollector();
+  // What earlier sends of the prompt cost (see the resend below).
+  let earlierCostUsd = 0;
+  const finish = (): Collected => {
+    const c = collector.finish();
+    return { ...c, costUsd: c.costUsd + earlierCostUsd };
+  };
   const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => ({
-    ...collector.finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
+    ...finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
   });
 
   const exe = resolveClaude(input.executable);
@@ -209,7 +215,8 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     });
     if (r.stopped || !r.started || r.timedOut) break;
     const c = collector.finish();
-    if (c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || sends >= NOTIFICATION_RESENDS) break;
+    if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || sends >= NOTIFICATION_RESENDS) break;
+    earlierCostUsd += c.events.filter(answersNotification).reduce((sum, e) => sum + (typeof e.total_cost_usd === "number" ? e.total_cost_usd : 0), 0);
     resume = c.sessionId;
     collector = new StreamCollector();
   }
@@ -217,7 +224,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
   const { code: exitCode, err: stderr, timedOut } = r;
 
-  const collected = collector.finish();
+  const collected = finish();
   if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
   const lastErr = lastLine(stderr);
   // Before any subtype check: the CLI reports a missing session with an error result as well.
@@ -229,7 +236,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
   }
   if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {
-    return fail("crash", "claude answered only background task notifications and never the prompt", exitCode, stderr);
+    return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   }
   if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
