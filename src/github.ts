@@ -4,8 +4,25 @@ import { StopRequested } from "./stop";
 export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
-export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; url: string }
-export type ChecksState = "pass" | "fail" | "pending" | "unknown";
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; url: string; createdAt: string }
+/** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
+export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
+
+/**
+ * Check states that fail or are still running. A failed state wins over gh's `bucket`, which puts
+ * STARTUP_FAILURE (a workflow that could not start) with the pending ones; `bucket` decides the rest.
+ */
+const FAILED_STATES = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
+const PENDING_STATES = new Set(["PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"]);
+
+/** The pull request's checks as a whole, from the rows gh pr checks --json prints: any failure wins, then any pending. */
+export function checksFromRows(rows: { state?: string; bucket?: string }[]): ChecksState {
+  if (rows.length === 0) return "none";
+  const buckets = rows.map((r) => FAILED_STATES.has(r.state ?? "") ? "fail" : r.bucket || (PENDING_STATES.has(r.state ?? "") ? "pending" : "pass"));
+  if (buckets.some((b) => b === "fail" || b === "cancel")) return "fail";
+  if (buckets.includes("pending")) return "pending";
+  return "pass";
+}
 
 export class GitHub {
   private readonly exe: string | null;
@@ -46,14 +63,14 @@ export class GitHub {
    * when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
   async lookupPr(branch: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,url"]);
+    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,url,createdAt"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };
     }
     try {
-      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; url: string };
-      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url } };
+      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; url: string; createdAt: string };
+      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url, createdAt: j.createdAt } };
     } catch { return { error: "gh pr view printed something that is not JSON" }; }
   }
 
@@ -71,16 +88,20 @@ export class GitHub {
   }
 
   /**
-   * gh pr checks exits 0 when all pass, 1 when any fail, 8 when pending. A call that timed out or
-   * could not start is `unknown` (ask again later), never read as a failure.
+   * Reads the check states gh prints: with --json, gh exits 0 whatever they are. A call that timed
+   * out, could not start, or printed no rows is `unknown` (ask again later), never read as a pass
+   * or a failure; `onError` gets what gh said.
    */
-  async checks(number: number): Promise<ChecksState> {
-    const r = await this.run(["pr", "checks", String(number), "--json", "name,state"]);
-    if (r.code === 0) return "pass";
-    if (r.code === 8) return "pending";
-    if (r.code === 124 || r.code === 127) return "unknown";
-    if (/no checks reported/i.test(r.err)) return "pass";
-    return "fail";
+  async checks(number: number, onError?: (error: string) => void): Promise<ChecksState> {
+    const r = await this.run(["pr", "checks", String(number), "--json", "name,state,bucket"]);
+    if (r.code === 124 || r.code === 127) { onError?.(lastLine(r.err)); return "unknown"; }
+    try {
+      const rows = JSON.parse(r.out) as unknown;
+      if (Array.isArray(rows)) return checksFromRows(rows);
+    } catch { /* not JSON: gh reported an error */ }
+    if (/no checks reported/i.test(r.err)) return "none";
+    onError?.(lastLine(r.err) || `gh exited ${r.code}`);
+    return "unknown";
   }
 
   async merge(number: number, method: "squash" | "merge"): Promise<void> {
