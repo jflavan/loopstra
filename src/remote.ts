@@ -184,3 +184,15 @@ export async function pushBranch(git: Git, branch: string): Promise<{ ok: true }
   const r = await git.run(["push", "--quiet", "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
   return r.code === 0 ? { ok: true } : { ok: false, detail: `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}` };
 }
+
+/**
+ * Deletes an intent branch on the remote once its pull request is merged. Best effort: the remote
+ * may have deleted it already (GitHub's "automatically delete head branches"), and a branch left
+ * there does no harm. The local branch is cleanup's to delete.
+ */
+export async function deleteRemoteBranch(git: Git, branch: string): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const remote = await git.remoteName();
+  if (!remote) return { ok: false, detail: "no remote" };
+  const r = await git.run(["push", "--quiet", remote, "--delete", branch], true);
+  return r.code === 0 ? { ok: true } : { ok: false, detail: `delete of ${branch} on ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}` };
+}

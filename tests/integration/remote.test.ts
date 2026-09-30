@@ -174,6 +174,47 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("merged through gh while main here cannot be brought up to date: waits, and finishes once main has the merged commit", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      await s.setPr({ checks: "pass" });
+      // A person is editing a tracked file in the main checkout, so the sync leaves main alone.
+      const smoke = join(s.repo, "tests", "smoke.test.ts");
+      const original = await Bun.file(smoke).text();
+      await Bun.write(smoke, `${original}// editing\n`);
+      const r = await tick(s.repo);
+      expect(r.picked).toBe(SLUG);
+      expect(r.result).toEqual({ ok: true, waiting: true });
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+      // Not recorded as merged against a stale main, so the done-check does not run on it yet.
+      const git = new Git(s.repo);
+      expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect(existsSync(join(s.repo, ".loopstra", "health-pending"))).toBe(false);
+      // gh is not asked to delete the branch (the worktree still has it checked out); Loopstra
+      // deletes the remote branch itself and keeps the local one until main has its changes.
+      const merges = (await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge");
+      expect(merges).toHaveLength(1);
+      expect(merges[0]).not.toContain("--delete-branch");
+      expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code).not.toBe(0);
+      expect(await git.branchExists(BRANCH)).toBe(true);
+
+      // The person puts the file back: the next tick brings main up to date and finishes, without merging again.
+      await Bun.write(smoke, original);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
+      expect(await git.branchExists(BRANCH)).toBe(false);
+      expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge")).toHaveLength(1);
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a person on the status line: merge-approved waits for GitHub's checks, then merges", async () => {
     const s = await remoteSetup("gates:\n  merge:\n    human: status\n");
     await withEnv(s.env, async () => {

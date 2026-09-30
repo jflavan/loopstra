@@ -17,7 +17,7 @@ describe("GitHub", () => {
     const created = await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" });
     expect(created.number).toBe(1);
     let pr = await gh.prForBranch("intent/x");
-    expect(pr).toMatchObject({ number: 1, state: "OPEN", approved: false, merged: false });
+    expect(pr).toMatchObject({ number: 1, state: "OPEN", approved: false, merged: false, mergeCommit: null });
     await gh.comment(1, "findings");
     expect(await gh.checks(1)).toBe("pending");
     const s = JSON.parse(await Bun.file(statePath).text());
@@ -29,6 +29,11 @@ describe("GitHub", () => {
     await gh.merge(1, "squash");
     pr = await gh.prForBranch("intent/x");
     expect(pr?.merged).toBe(true);
+    // The commit the merge made on main, as gh names it (the fake records one when it merges on a real remote).
+    const m = JSON.parse(await Bun.file(statePath).text());
+    m.prs["intent/x"].mergeCommit = "abc123";
+    await Bun.write(statePath, JSON.stringify(m));
+    expect((await gh.prForBranch("intent/x"))?.mergeCommit).toBe("abc123");
     t.cleanup();
   });
 
