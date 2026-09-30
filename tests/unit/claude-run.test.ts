@@ -230,12 +230,14 @@ describe("runPhase", () => {
     expect(r.structuredOutput).toMatchObject({ status: "success" });
     // Both sends are paid for.
     expect(r.costUsd).toBeCloseTo(0.03);
+    // What the working session was refused is kept, so the trace can name the allow rule to add.
+    expect(r.denied).toEqual(["Bash(dotnet ef database update)"]);
     const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
     expect(calls.length).toBe(2);
     expect(calls[0]).not.toContain("--resume");
     expect(calls[1]).toEqual(expect.arrayContaining(["--resume", "no-envelope-session"]));
     const nudge = (await Bun.file(argsFile).json()).prompt as string;
-    expect(nudge).toMatch(/structured.output tool/i);
+    expect(nudge).toMatch(/StructuredOutput tool/);
     expect(nudge).not.toContain("Verify.");
     t.cleanup();
   });
@@ -249,6 +251,16 @@ describe("runPhase", () => {
     expect(r.reason).toBe("invalid-envelope");
     expect(r.detail).toMatch(/without structured output/);
     expect((await Bun.file(callsFile).text()).trim().split("\n").length).toBe(2);
+    t.cleanup();
+  });
+
+  test("a nudge that times out is still an unreadable report, not a timeout to rerun", async () => {
+    const t = tempDir();
+    const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:no-envelope-stuck", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 2_000, maxBudgetUsd: 1, executable: FAKE, exitGraceMs: 100 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid-envelope");
+    expect(r.detail).toMatch(/without structured output, and asking again failed: .*timed out/);
     t.cleanup();
   });
 

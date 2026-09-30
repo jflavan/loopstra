@@ -155,7 +155,7 @@ const NOTIFICATION_RESENDS = 2;
  * Sent once, on the same session, when a session finishes without structured output (for example
  * it wrote its report as text). Cheaper than a new session, which would redo the whole phase.
  */
-export const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the structured-output tool with the result you reached; do not redo the work.";
+export const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the StructuredOutput tool (a tool call, not text) with the result you reached; do not redo the work.";
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -173,15 +173,23 @@ export function resolveClaude(override?: string): string | null {
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
   let collector = new StreamCollector();
-  // What earlier sends of the prompt cost (see the resend below).
+  // What earlier sends of the prompt cost, and what they were refused (see the resends below).
   let earlierCostUsd = 0;
+  let earlierDenied: string[] = [];
+  // Whether the session was asked again for its missing structured output.
+  let nudged = false;
   const finish = (): Collected => {
     const c = collector.finish();
-    return { ...c, costUsd: c.costUsd + earlierCostUsd };
+    return { ...c, costUsd: c.costUsd + earlierCostUsd, denied: [...new Set([...earlierDenied, ...c.denied])] };
   };
-  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => ({
-    ...finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
-  });
+  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => {
+    // The work was done; only the report is missing. A nudge that times out or breaks does not make it a crash to rerun.
+    if (nudged && (reason === "timeout" || reason === "crash" || reason === "no-session")) {
+      detail = `claude finished without structured output, and asking again failed: ${detail}`;
+      reason = "invalid-envelope";
+    }
+    return { ...finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched };
+  };
 
   const exe = resolveClaude(input.executable);
   if (!exe) return fail("not-started", "could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
@@ -207,7 +215,6 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   // that finished without structured output is asked for it once, the same way.
   let resume = input.resume;
   let stdin = input.prompt;
-  let nudged = false;
   let r: Awaited<ReturnType<typeof spawnBounded>>;
   for (let resends = 0; ; resends++) {
     const resumeArgs = resume ? ["--resume", resume] : [];
@@ -226,6 +233,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
       nudged = true;
       earlierCostUsd += c.costUsd;
+      earlierDenied = c.denied;
       resume = c.sessionId;
       stdin = ENVELOPE_NUDGE;
       collector = new StreamCollector();
