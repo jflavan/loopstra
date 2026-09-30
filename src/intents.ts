@@ -121,7 +121,7 @@ export async function readIntent(root: string, slug: string): Promise<Intent> {
   return { slug, dir, file: parseIntentFile(text), artifacts };
 }
 
-/** An intent folder whose intent.md could not be read. `problem` is plain; `detail` is for the trace. */
+/** An intent folder whose intent.md could not be read, or a Markdown file loose in intent/. `problem` is plain; `detail` is for the trace. */
 export interface Unreadable { slug: string; problem: string; detail: string }
 
 export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
@@ -129,7 +129,10 @@ export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 /** A change's folder name: lowercase letters and digits, words joined by dashes. */
 export const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
-/** Every intent folder: the readable intents, and the ones a person needs to fix. Never throws for one bad file. */
+/** The Markdown files that belong directly in intent/: the owner guide and the generated queue. */
+const LOOSE_OK = new Set(["readme.md", "queue.md"]);
+
+/** Every intent folder: the readable intents, and the ones (or loose files) a person needs to fix. Never throws for one bad file. */
 export async function scanRepo(root: string): Promise<Scan> {
   const base = intentRoot(root);
   const scan: Scan = { intents: [], unreadable: [] };
@@ -137,7 +140,13 @@ export async function scanRepo(root: string): Promise<Scan> {
   for (const name of readdirSync(base)) {
     const dir = join(base, name);
     try {
-      if (!statSync(dir).isDirectory()) continue;
+      if (!statSync(dir).isDirectory()) {
+        // A first intent written straight into intent/ would otherwise be skipped without a word.
+        if (/\.md$/i.test(name) && !LOOSE_OK.has(name.toLowerCase())) {
+          scan.unreadable.push({ slug: name, problem: "Move this into a folder named after the change, for example intent/add-numbers/intent.md.", detail: `intent/${name} is not inside a change folder` });
+        }
+        continue;
+      }
       if (!existsSync(join(dir, "intent.md"))) continue;
       // The folder name is also the branch name and the pull request's title: keep it plain.
       if (!SLUG.test(name)) {
