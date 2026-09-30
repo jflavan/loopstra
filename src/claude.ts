@@ -29,7 +29,15 @@ function deniedText(d: { tool_name?: string; tool_input?: Record<string, unknown
   return typeof what === "string" && what ? `${d.tool_name ?? "?"}(${what})` : d.tool_name ?? "?";
 }
 
-/** Accumulates `--output-format stream-json` lines into one result. */
+/**
+ * A result event that answers a background task's notification, not the prompt. A resumed session
+ * with a task still pending delivers the notification first and answers it with a turn of its own.
+ */
+export function answersNotification(e: StreamEvent): boolean {
+  return e.type === "result" && (e as { origin?: { kind?: unknown } }).origin?.kind === "task-notification";
+}
+
+/** Accumulates `--output-format stream-json` lines into one result. A notification's result is not the result. */
 export class StreamCollector {
   private sessionId: string | null = null;
   private result: StreamEvent | null = null;
@@ -42,7 +50,7 @@ export class StreamCollector {
     try { e = JSON.parse(trimmed) as StreamEvent; } catch { return null; }
     this.events.push(e);
     if (e.session_id && !this.sessionId) this.sessionId = e.session_id;
-    if (e.type === "result") this.result = e;
+    if (e.type === "result" && !answersNotification(e)) this.result = e;
     return e;
   }
 
@@ -141,6 +149,8 @@ export type RunPhaseResult = Collected & {
 
 /** After the result event, how long the process gets to exit on its own before its tree is killed. */
 const EXIT_GRACE_MS = 2_000;
+/** How many times a session that ended having answered only notifications gets the prompt again. */
+const NOTIFICATION_RESENDS = 2;
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -151,15 +161,21 @@ export function resolveClaude(override?: string): string | null {
 
 /**
  * Runs one `claude -p` session. Everything it awaits is bounded by the deadline (`timeoutMs`)
- * plus a short grace: it stops reading stdout at the result event, never waits on pipes a
+ * plus a short grace: it stops reading stdout at the prompt's result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
  * After a stop request it does not start, or it kills the running session, and throws StopRequested.
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
-  const collector = new StreamCollector();
+  let collector = new StreamCollector();
+  // What earlier sends of the prompt cost (see the resend below).
+  let earlierCostUsd = 0;
+  const finish = (): Collected => {
+    const c = collector.finish();
+    return { ...c, costUsd: c.costUsd + earlierCostUsd };
+  };
   const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => ({
-    ...collector.finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
+    ...finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched,
   });
 
   const exe = resolveClaude(input.executable);
@@ -174,35 +190,55 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
-  if (input.resume) args.push("--resume", input.resume);
 
   // A .ts fake must be run through bun; the real CLI is a native executable.
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
+  // No background tasks: one left pending when a session ends is delivered first when it is
+  // resumed, and that session may then end without reading the prompt.
+  const env = withBunOnPath({ ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
 
-  const r = await spawnBounded({
-    cmd, cwd: input.cwd, env: withBunOnPath({ ...process.env, ...input.env }), stdin: input.prompt,
-    timeoutMs: input.timeoutMs, onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
-    // Reading ends at the result event; the process then gets the grace to exit before it is killed.
-    onLine: (line) => {
-      const e = collector.push(line);
-      if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
-      return e?.type === "result";
-    },
-  });
+  // A session that ended having answered only notifications (one started before background tasks
+  // were turned off) gets the prompt again on the same session, within the same deadline.
+  let resume = input.resume;
+  let r: Awaited<ReturnType<typeof spawnBounded>>;
+  for (let sends = 0; ; sends++) {
+    const resumeArgs = resume ? ["--resume", resume] : [];
+    r = await spawnBounded({
+      cmd: [...cmd, ...resumeArgs], cwd: input.cwd, env, stdin: input.prompt,
+      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
+      // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
+      onLine: (line) => {
+        const e = collector.push(line);
+        if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
+        return e?.type === "result" && !answersNotification(e);
+      },
+    });
+    if (r.stopped || !r.started || r.timedOut) break;
+    const c = collector.finish();
+    if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || sends >= NOTIFICATION_RESENDS) break;
+    // A result's total_cost_usd is the run's running total, so the last one is what the run cost.
+    const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
+    earlierCostUsd += typeof cost === "number" ? cost : 0;
+    resume = c.sessionId;
+    collector = new StreamCollector();
+  }
   if (r.stopped) throw new StopRequested();
   if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
   const { code: exitCode, err: stderr, timedOut } = r;
 
-  const collected = collector.finish();
+  const collected = finish();
   if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
   const lastErr = lastLine(stderr);
   // Before any subtype check: the CLI reports a missing session with an error result as well.
-  if (input.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
+  if (resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
     const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr));
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
+  }
+  if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {
+    return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   }
   if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);

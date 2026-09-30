@@ -173,6 +173,53 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("sessions run with background tasks turned off", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+    const recorded = await Bun.file(argsFile).json();
+    expect(recorded.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
+    t.cleanup();
+  });
+
+  test("a turn that answers a background task's notification is not the prompt's result: reading goes on", async () => {
+    const t = tempDir();
+    const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:notification-then-result", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, resume: "fake-notified", executable: FAKE });
+    expect(r.ok).toBe(true);
+    expect(r.structuredOutput).toMatchObject({ status: "success", summary: "answered the prompt" });
+    t.cleanup();
+  });
+
+  test("a resumed session that only answers a pending notification gets the prompt again on the same session", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    const callsFile = join(t.path, "calls.jsonl");
+    const r = await runPhase({ cwd: t.path, prompt: "Reconcile. FIXTURE:notification-only", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, resume: "build-session", env: { LOOPSTRA_FAKE_ARGS: argsFile, LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+    expect(r.ok).toBe(true);
+    expect(r.structuredOutput).toMatchObject({ status: "success" });
+    const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+    expect(calls.length).toBe(2);
+    expect(calls[0]).toEqual(expect.arrayContaining(["--resume", "build-session"]));
+    expect(calls[1]).toEqual(expect.arrayContaining(["--resume", "notified-session"]));
+    expect((await Bun.file(argsFile).json()).prompt).toContain("Reconcile.");
+    t.cleanup();
+  });
+
+  test("a session that never gets past notifications is resent a bounded number of times, then fails", async () => {
+    const t = tempDir();
+    const callsFile = join(t.path, "calls.jsonl");
+    const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:notification-forever", schema: {}, model: "haiku", permissionMode: "default",
+      allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("crash");
+    expect(r.detail).toMatch(/notification/);
+    expect((await Bun.file(callsFile).text()).trim().split("\n").length).toBe(3);
+    t.cleanup();
+  });
+
   test("FAKE_CLAUDE_ENV names the override variable", () => {
     expect(FAKE_CLAUDE_ENV).toBe("LOOPSTRA_CLAUDE_EXECUTABLE");
   });

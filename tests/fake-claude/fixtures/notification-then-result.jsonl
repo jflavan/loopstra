@@ -1,0 +1,5 @@
+{"type":"system","subtype":"task_notification","session_id":"fake-notified","task_id":"bg-1","status":"completed"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-notified","num_turns":0,"total_cost_usd":0,"usage":{},"result":"","origin":{"kind":"task-notification"}}
+{"type":"system","subtype":"init","session_id":"fake-notified","cwd":"/","tools":[],"model":"fake"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"StructuredOutput","input":{"status":"success","summary":"answered the prompt","priority":"normal","question":""}}]},"session_id":"fake-notified"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-notified","num_turns":1,"total_cost_usd":0.01,"usage":{},"structured_output":{"status":"success","summary":"answered the prompt","priority":"normal","question":""},"result":"ok"}
