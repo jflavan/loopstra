@@ -56,7 +56,7 @@ export const ConfigSchema = z.object({
     plan: stage.extend({ model: modelRef.default("strong") }).prefault({}),
     build: stage.extend({ model: modelRef.default("default"), max_fix_loops: z.number().int().min(1).default(3) }).prefault({}),
     review: stage.extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
-    verify: stage.extend({ model: modelRef.default("cheap") }).prefault({}),
+    verify: stage.extend({ model: modelRef.default("default") }).prefault({}),
   }).strict().prefault({}),
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),
