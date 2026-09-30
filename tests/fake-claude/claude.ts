@@ -6,8 +6,12 @@
 // under the current directory before the remaining lines are emitted, so a fake "build" can change code.
 // A fixture line {"type":"fake_exit","code":1,"stderr":"..."} writes that line to stderr and exits
 // with that code at once (an outage: the CLI gives up without a result).
+// "notification-only" answers a background task's notification and exits without reading the prompt,
+// the way a resumed session with a pending notification does; resumed as "notified-session" it has
+// nothing pending and answers the prompt. "notification-forever" never gets past the notification.
+// $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
 // Like the real CLI, the process exits 1 after a result event with is_error.
-import { existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const args = Bun.argv.slice(2);
@@ -15,8 +19,12 @@ const prompt = await Bun.stdin.text();
 const phase = process.env.LOOPSTRA_PHASE ?? "";
 
 if (process.env.LOOPSTRA_FAKE_ARGS) {
-  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, prompt, cwd: process.cwd(), env: { LOOPSTRA_PHASE: phase || null } }));
+  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, prompt, cwd: process.cwd(), env: {
+    LOOPSTRA_PHASE: phase || null,
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
+  } }));
 }
+if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
 
 const here = join(dirname(Bun.main), "fixtures");
 const named = /FIXTURE:([a-z0-9-]+)/.exec(prompt)?.[1];
@@ -27,7 +35,9 @@ const candidates = [
   phase ? join(here, `${phase}.jsonl`) : undefined,
   join(here, "simple-success.jsonl"),
 ].filter((p): p is string => !!p && existsSync(p));
-const fixture = candidates[0]!;
+let fixture = candidates[0]!;
+const resumeAt = args.indexOf("--resume");
+if (fixture.endsWith("notification-only.jsonl") && args[resumeAt + 1] === "notified-session") fixture = join(here, "simple-success.jsonl");
 
 if (fixture.endsWith("hang.jsonl")) {
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "hang-session" }));
@@ -36,7 +46,6 @@ if (fixture.endsWith("hang.jsonl")) {
 
 // Like the real CLI (2.1.x) when a resumed session no longer exists: an error result on stdout,
 // the reason on stderr, exit 1.
-const resumeAt = args.indexOf("--resume");
 if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
   console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "fresh-after-missing", total_cost_usd: 0, usage: {} }));
   console.error("No conversation found with session ID: missing-session");
