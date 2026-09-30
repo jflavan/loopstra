@@ -5,7 +5,7 @@ import { bookkeeping, Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
-import { pushBranch, shareMain, syncMain } from "../remote";
+import { deleteRemoteBranch, pushBranch, shareMain, syncMain } from "../remote";
 import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
@@ -35,6 +35,8 @@ export const PR_PUSHED = "pr-pushed";
 
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
 const BRANCH_KEPT = "branch-kept";
+/** Run-folder marker: the pull request merged, but main here does not have it yet (traced once). */
+const MAIN_BEHIND = "main-behind";
 
 /** How a person asks the merge step to look again without a rebuild: the status that is runnable for this gate. */
 function mergeRetry(ctx: StepContext): Status {
@@ -188,7 +190,7 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
     return { ok: true, waiting: true };
   }
   const pr = found.pr;
-  if (pr?.merged) return finishRemoteMerge(ctx);
+  if (pr?.merged) return finishRemoteMerge(ctx, pr);
   if (pr?.state === "CLOSED") return block(ctx, PR_CLOSED_NOTE, { detail: { pr: pr.number, url: pr.url } });
   if (!pr) {
     // No pull request yet (for example GitHub could not be reached when the review passed): open it.
@@ -231,19 +233,43 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     await gh.merge(pr.number, ctx.cfg.gates.merge.method);
     return { ok: true as const };
   });
-  if (!merged.ok) {
-    // gh can report a problem after the merge went through (for example tidying up a local branch).
-    const again = await gh.prForBranch(ctx.branch);
-    if (!again?.merged) {
-      return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
-    }
+  // Asked again either way: gh can report a problem after the merge went through, and the merged
+  // pull request names the commit main must have before the merge is recorded.
+  const after = await gh.prForBranch(ctx.branch);
+  if (!after?.merged) {
+    if (!merged.ok) return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
+    // gh accepted the merge but it has not happened yet (a merge queue, or GitHub not answering):
+    // the branch stays, since deleting it would close the pull request, and the next tick looks again.
+    return { ok: true, waiting: true };
   }
-  return finishRemoteMerge(ctx);
+  const deleted = await deleteRemoteBranch(ctx.git, ctx.branch);
+  if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
+  return finishRemoteMerge(ctx, after);
 }
 
-/** The pull request is merged on GitHub: bring main up to date here, then record the merge. */
-async function finishRemoteMerge(ctx: StepContext): Promise<StepResult> {
+/**
+ * The pull request is merged on GitHub: bring main up to date here, then record the merge. When
+ * main still does not have it (the sync was skipped or failed: unsaved changes in the main
+ * checkout, GitHub out of reach, a clash; the `main_sync` signal says which), wait and try again
+ * on the next tick, so the done-check never judges a main without the change. Main has it when it
+ * contains the pull request's merge commit, or the branch's changes when gh does not name one.
+ */
+async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
+  // A status a person saved without committing would keep the sync from touching main. Off main,
+  // the sync is skipped anyway and says so.
+  if ((await ctx.git.currentBranch()) === ctx.cfg.main_branch) await recordPersonEdits(ctx);
   await syncMain(ctx.root, ctx.cfg, ctx.trace);
+  const main = ctx.cfg.main_branch;
+  const hasIt = pr.mergeCommit
+    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
+    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+  if (!hasIt) {
+    if (onceMarker(ctx, MAIN_BEHIND)) {
+      ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting: `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`, pr: pr.number, mergeCommit: pr.mergeCommit });
+    }
+    return { ok: true, waiting: true };
+  }
+  clearMarker(ctx, MAIN_BEHIND);
   return finishMerge(ctx);
 }
 

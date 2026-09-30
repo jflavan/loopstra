@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending" | "none"; merged: boolean; createdAt?: string; title?: string; body?: string; comments: string[] };
+type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending" | "none"; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
 type State = { prs: Record<string, Pr>; next: number };
 
 // Test knob: behave like a gh that never answers.
@@ -33,7 +33,7 @@ if (cmd === "view") {
   const branch = args[2]!;
   const pr = state.prs[branch];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
-  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}` }));
+  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}` }));
 } else if (cmd === "create") {
   const branch = flag("--head")!;
   const pr: Pr = { number: state.next++, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, createdAt: new Date().toISOString(), title: flag("--title"), body: await body(), comments: [] };
@@ -61,6 +61,8 @@ if (cmd === "view") {
   console.log(`ci\t${bucket}`);
   process.exit(pr.checks === "pass" ? 0 : pr.checks === "fail" ? 1 : 8);
 } else if (cmd === "merge") {
+  // Test knob: behave like a base branch with a merge queue (gh queues the pull request and exits 0).
+  if (process.env.LOOPSTRA_FAKE_GH_QUEUE === "1") process.exit(0);
   const number = Number(args[2]);
   const [branch, pr] = Object.entries(state.prs).find(([, p]) => p.number === number)!;
   // Test knob: with a bare repository as the remote, merge on it for real, the way GitHub would.
@@ -70,11 +72,13 @@ if (cmd === "view") {
     const git = (...a: string[]) => {
       const r = Bun.spawnSync({ cmd: ["git", "-c", "user.name=GitHub", "-c", "user.email=github@example.test", ...a], cwd: dir, stdout: "pipe", stderr: "pipe" });
       if (r.exitCode !== 0) { console.error(`fake gh: git ${a.join(" ")} failed: ${r.stderr.toString()}`); rmSync(dir, { recursive: true, force: true }); process.exit(1); }
+      return r.stdout.toString().trim();
     };
     git("clone", "-q", remote, ".");
     if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
     else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
     git("push", "-q", "origin", "HEAD");
+    pr.mergeCommit = git("rev-parse", "HEAD");
     if (args.includes("--delete-branch")) git("push", "-q", "origin", "--delete", branch);
     rmSync(dir, { recursive: true, force: true });
   }

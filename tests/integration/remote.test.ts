@@ -14,7 +14,7 @@ const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; createdAt?: string; title?: string; body?: string; comments: string[] }
+interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
 
 /**
  * A bare "GitHub" remote and a clone of it with Loopstra set up and one intent at plan-approved.
@@ -174,6 +174,89 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("merged through gh while main here cannot be brought up to date: waits, and finishes once main has the merged commit", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      await s.setPr({ checks: "pass" });
+      // A person is editing a tracked file in the main checkout, so the sync leaves main alone.
+      const smoke = join(s.repo, "tests", "smoke.test.ts");
+      const original = await Bun.file(smoke).text();
+      await Bun.write(smoke, `${original}// editing\n`);
+      const r = await tick(s.repo);
+      expect(r.picked).toBe(SLUG);
+      expect(r.result).toEqual({ ok: true, waiting: true });
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+      // Not recorded as merged against a stale main, so the done-check does not run on it yet.
+      const git = new Git(s.repo);
+      expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect(existsSync(join(s.repo, ".loopstra", "health-pending"))).toBe(false);
+      // gh is not asked to delete the branch (the worktree still has it checked out); Loopstra
+      // deletes the remote branch itself and keeps the local one until main has its changes.
+      const merges = (await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge");
+      expect(merges).toHaveLength(1);
+      expect(merges[0]).not.toContain("--delete-branch");
+      expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code).not.toBe(0);
+      expect(await git.branchExists(BRANCH)).toBe(true);
+
+      // The person puts the file back: the next tick brings main up to date and finishes, without merging again.
+      await Bun.write(smoke, original);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
+      expect(await git.branchExists(BRANCH)).toBe(false);
+      expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge")).toHaveLength(1);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a merge gh only queued waits with the branch kept, and is recorded once it merges", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      await s.setPr({ checks: "pass" });
+      await withEnv({ LOOPSTRA_FAKE_GH_QUEUE: "1" }, async () => {
+        const r = await tick(s.repo);
+        expect(r.result).toEqual({ ok: true, waiting: true });
+      });
+      // Deleting the branch would close the pull request and drop it from the queue.
+      expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code).toBe(0);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("merged on GitHub, then main moved on in the same files: main has the merge commit, so the merge is recorded", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      const mergeCommit = (await run(["git", "rev-parse", "HEAD"], other.path)).out.trim();
+      await Bun.write(join(other.path, "src", "add.ts"), "export const add = (a: number, b: number) => b + a;\n");
+      await run(["git", "commit", "-q", "-am", "later edit"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true, mergeCommit });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await new Git(s.repo).run(["merge-base", "--is-ancestor", mergeCommit, "main"], true)).code).toBe(0);
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a person on the status line: merge-approved waits for GitHub's checks, then merges", async () => {
     const s = await remoteSetup("gates:\n  merge:\n    human: status\n");
     await withEnv(s.env, async () => {
@@ -199,6 +282,24 @@ describe("the loop with a GitHub remote", () => {
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merged");
       expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a person on the status line who saves merge-approved without committing it: merges and records it in one tick", async () => {
+    const s = await remoteSetup("gates:\n  merge:\n    human: status\n");
+    await withEnv(s.env, async () => {
+      await tick(s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      await s.setPr({ checks: "pass" });
+      // Saved, not committed: the sync skips a main checkout with unsaved tracked files, so the
+      // merge step commits the change's own folder before it brings main up to date.
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "merge-approved", note: "" });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
     });
     s.cleanup();
   }, 180_000);

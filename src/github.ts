@@ -4,7 +4,8 @@ import { StopRequested } from "./stop";
 export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
-export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; url: string; createdAt: string }
+/** `mergeCommit`: the commit the merge made on the base branch (null until merged, or when gh does not say). */
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string }
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
 export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
@@ -63,14 +64,14 @@ export class GitHub {
    * when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
   async lookupPr(branch: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,url,createdAt"]);
+    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,mergeCommit,url,createdAt"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };
     }
     try {
-      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; url: string; createdAt: string };
-      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, url: j.url, createdAt: j.createdAt } };
+      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string };
+      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt } };
     } catch { return { error: "gh pr view printed something that is not JSON" }; }
   }
 
@@ -104,8 +105,13 @@ export class GitHub {
     return "unknown";
   }
 
+  /**
+   * Merges on GitHub. Without `--delete-branch`: gh would also delete the local branch, which fails
+   * while the change's worktree has it checked out (after the merge went through). The caller
+   * deletes the remote branch itself, and cleanup deletes the local one once main has its changes.
+   */
   async merge(number: number, method: "squash" | "merge"): Promise<void> {
-    const r = await this.run(["pr", "merge", String(number), method === "squash" ? "--squash" : "--merge", "--delete-branch"]);
+    const r = await this.run(["pr", "merge", String(number), method === "squash" ? "--squash" : "--merge"]);
     if (r.code !== 0) throw new Error(`gh pr merge failed: ${lastLine(r.err)}`);
   }
 }
