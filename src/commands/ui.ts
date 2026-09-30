@@ -3,7 +3,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { attention, healthView, type AttentionItem } from "../attention";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } from "../heartbeat";
-import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, SLUG, type Intent, type Unreadable } from "../intents";
+import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
 import { Trace } from "../trace";
 import { errorText } from "../shell";
 
@@ -52,7 +52,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
   const ordered = orderQueue(scan.intents);
   const trace = Trace.open(root);
   try {
-    const intents = ordered.map((i) => intentView(root, trace, i, now));
+    const intents = ordered.map((i) => intentView(root, trace, i, ordered, now));
     const hb = heartbeatState(readHeartbeat(root), "problem" in config ? 60 : config.poll_seconds, now, { pause: readPause(root) });
     const loop: LoopStatus = hb.current
       ? { ...hb, current: { slug: hb.current.slug, phase: runningPhase(intents, hb.current.slug) } }
@@ -77,7 +77,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
   }
 }
 
-function intentView(root: string, trace: Trace, i: Intent, now: Date): IntentView {
+function intentView(root: string, trace: Trace, i: Intent, all: Intent[], now: Date): IntentView {
   const fm = i.file.frontmatter;
   const denied = trace.deniedCommands(i.slug);
   const phases: PhaseView[] = trace.phases(i.slug).map((p) => {
@@ -96,7 +96,7 @@ function intentView(root: string, trace: Trace, i: Intent, now: Date): IntentVie
   const documents = ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${i.slug}/${a}` }));
   return {
     slug: i.slug, title: i.file.title || i.slug, status: fm.status, plain: plainStatus(fm.status),
-    priority: effectivePriority(fm), note: fm.note, costUsd: phases.reduce((n, p) => n + p.costUsd, 0),
+    priority: effectivePriority(fm), note: shownNote(i, all), costUsd: phases.reduce((n, p) => n + p.costUsd, 0),
     since, inStatus: since ? agoText(now.getTime() - Date.parse(since)) : null,
     documents, phases, gates: trace.gates(i.slug),
   };
