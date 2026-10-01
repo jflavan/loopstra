@@ -20,7 +20,7 @@ const HELP = `loopstra <command>
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
 `;
 
-/** status, tail, and ui read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, ui, and chat read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);

@@ -2,12 +2,12 @@
 
 An unattended development loop built on Claude Code. Code owns the loop; agents own bounded phases; people own the decisions they choose to keep.
 
-A product owner writes a plain-language `intent/<slug>/intent.md` and sets its status to `accepted`. Loopstra then designs, plans, builds, tests, reviews, merges and verifies the change, one step at a time, with a gate at every stage boundary. Every artifact is a Markdown file in git, and every step is recorded in a trace you can read from a terminal or a local dashboard.
+A product owner writes a plain-language `intent/<slug>/intent.md` and sets its status to `accepted`. Loopstra then designs, plans, builds, tests, reviews, merges and verifies the change, one step at a time, with a gate at every stage boundary. Every artifact is a Markdown file in git, and every step is recorded in a trace you can read from a terminal or a local dashboard. Instead of writing the intent by hand, you can also talk a change through with Loopstra's orchestrator in the terminal, the dashboard, Slack or Discord; it writes the intent up for you as a draft (see Chat).
 
 There are two audiences and two surfaces:
 
 - **Engineers** configure the machinery once: test command, gates, prompts, limits. All of it is in `loopstra/config.yaml` and `loopstra/prompts/`.
-- **Product owners** only write plain markdown (the intent) and a status line. Notes addressed to them are plain sentences with retry advice, never commands, branch names or raw output.
+- **Product owners** only write plain markdown (the intent) and a status line, or talk to the orchestrator in chat. Notes addressed to them are plain sentences with retry advice, never commands, branch names or raw output.
 
 ## Requirements
 
@@ -15,6 +15,7 @@ There are two audiences and two surfaces:
 - git 2.28 or later
 - Claude Code CLI (`claude` on PATH), signed in with a subscription. Loopstra drives the CLI, not the API, so no API key is needed.
 - GitHub CLI (`gh`), signed in, when the repo has a remote. `loopstra start` refuses to run otherwise.
+- Optional, for chat on Slack or Discord: a Slack app or a Discord bot of your own (see Chat).
 
 Windows, macOS and Linux are all supported; see Platforms.
 
@@ -46,7 +47,7 @@ loopstra init
 
 `init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands and writes:
 
-- `loopstra/config.yaml` and `loopstra/prompts/*.md`
+- `loopstra/config.yaml` and `loopstra/prompts/*.md` (one prompt per phase, including `orchestrator.md` and `write-intent.md` for chat)
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
 - `REVIEW.md` (what the reviewer looks for) and a Commands block in `CLAUDE.md`
 - `.claude/skills/loopstra/` (an operator skill for drafting intents, reading status and unblocking)
@@ -63,7 +64,11 @@ Then:
 
 You can also open Claude Code in the repo and ask the `loopstra` skill to walk you through this. The skill never runs the loop.
 
+If you set the repo up before chat existed, run `loopstra init` again to stamp the two chat prompts (it keeps every file that exists), and commit them. Until then chat uses the shipped copies.
+
 ## Ask for a change
+
+Either talk it through in chat (see Chat), which writes the intent for you, or write it yourself:
 
 Make `intent/<slug>/`, where the slug is lowercase words joined by dashes, like `add-numbers`. Copy the template from `intent/README.md` into `intent.md` inside that folder (a Markdown file loose in `intent/` is listed as unreadable, with how to fix it):
 
@@ -99,7 +104,7 @@ loopstra start          # the loop; one step per tick, sleeps poll_seconds betwe
 loopstra start --once   # one tick, then exit (for cron or a scheduler)
 ```
 
-`start` checks that the folder is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail` and `ui` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
+`start` checks that the folder is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail`, `ui` and `chat` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time.
 
@@ -127,7 +132,7 @@ The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not 
 
 Under it, `status` prints a "Needs attention" block, or "Nothing needs you right now.": a pause, failing tests on main (before main has ever passed, that they have not passed yet), main out of step with GitHub, a settings problem, blocked changes, unreadable intents, and changes waiting for a person (drafts, and reviews with a person on the gate). The dashboard shows the same list, labelled "Blocked" or "Waiting for you". Long notes wrap to the terminal's width.
 
-The dashboard is one local page, polling every couple of seconds. It shows the loop's heartbeat, the needs-attention list, costs for today, this week and all time, the queue, and per-change drill-down: the change's own documents (intent.md, spec.md, plan.md, review.md, outcome.md, lessons.md, read-only), each phase with duration, cost and any commands the session was refused, gate results with evidence, and the event log. `queue.md` in `intent/` is a generated view of the same queue; its "Needs a person" list matches.
+The dashboard is one local page, polling every couple of seconds. It shows the loop's heartbeat, the needs-attention list, costs for today, this week and all time, the queue, and per-change drill-down: the change's own documents (intent.md, spec.md, plan.md, review.md, outcome.md, lessons.md, read-only), each phase with duration, cost and any commands the session was refused, gate results with evidence, and the event log. The costs include what chat spent. It also has the chat panel (see Chat); apart from posting chat messages, it is read-only. `queue.md` in `intent/` is a generated view of the same queue; its "Needs a person" list matches.
 
 ## Chat
 
@@ -208,9 +213,10 @@ any status -> blocked | closed
 - **Merge checks** bring the branch up to date with `main`, make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), and read the newest review.
 - **Gates** sit at every boundary. Each is a list of checks: deterministic code, a fresh-context agent reviewer, or a person. A gate's checks run in the step that produced the artifact; a pass goes straight to the approved status, or to the review status if a person is set. A failure gets one automatic rewrite with the findings, then blocks.
 - **After a merge**, the done-when criteria are checked, `outcome.md` and `lessons.md` are written, and main's tests are run. If main goes from green to red, a new draft intent describing the breach is opened.
-- **The trace** is in `.loopstra/` (gitignored): `trace.db` (SQLite), and per change `runs/<slug>/events.jsonl` plus a folder per phase holding the prompt, the result envelope and the raw session. `status`, `tail` and `ui` read it; nothing leaves your machine.
+- **The trace** is in `.loopstra/` (gitignored): `trace.db` (SQLite), and per change `runs/<slug>/events.jsonl` plus a folder per phase holding the prompt, the result envelope and the raw session. `status`, `tail` and `ui` read it, and it stays on your machine. Chat sessions are traced there too, under `_chat`, with their state in `.loopstra/chat/`. The only things that leave it are what you set up: pull requests on GitHub, and chat messages and announcements posted to Slack or Discord.
+- **Chat** is a separate process (`loopstra chat`, or the dashboard). It never runs a stage or writes the main checkout: what it needs there (starting a draft, or adding written intents when there is no remote) it leaves as a request the loop applies right after syncing main at the start of a tick.
 
-The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`; `docs/decisions.md` records why.
+The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`; `docs/decisions.md` records why.
 
 ## Configuration
 
@@ -242,4 +248,4 @@ bun run test        # the suite in four parallel shards; bun run test:serial run
 bun run typecheck
 ```
 
-Tests run the whole loop in a temporary git repo against a fake `claude` executable, so they do not call Claude.
+Tests run the whole loop in a temporary git repo against a fake `claude` executable (and a fake `gh` with a bare repository as the remote), so they do not call Claude or GitHub. The fake `claude` can answer a phase differently on each call (`<phase>-<n>.jsonl` in `LOOPSTRA_FAKE_FIXTURE_DIR`), which the chat tests use for conversations. The Slack and Discord bots are tested against stub servers, through `LOOPSTRA_SLACK_API` and `LOOPSTRA_DISCORD_API`.
