@@ -18,10 +18,12 @@ const stage = z.object({
   after: z.array(z.string()).default([]),
 }).strict();
 
+/** A platform id (user or channel). Long numeric ids (Discord's) lose digits as YAML numbers, so those must be quoted. */
+const platformId = z.union([z.string().min(1), z.number().refine(Number.isSafeInteger, "is too long to be read as a number: put it in quotes")]).transform(String);
 /** Platform user ids. Empty `allow`: anyone in the channel may chat. Empty `acceptors`: nobody may accept from there. */
-const ids = z.array(z.union([z.string(), z.number()]).transform(String)).default([]);
+const ids = z.array(platformId).default([]);
 const envName = (fallback: string) => z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be the name of an environment variable").default(fallback);
-const channelId = z.union([z.string().min(1), z.number()]).transform(String);
+const channelId = platformId;
 
 const slackTransport = z.object({
   /** The app-level token (xapp-...) for Socket Mode. */

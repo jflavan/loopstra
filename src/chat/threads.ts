@@ -68,6 +68,11 @@ export function writeJson(path: string, value: unknown): void {
   try { renameSync(tmp, path); } catch { writeFileSync(path, JSON.stringify(value, null, 2)); }
 }
 
+/** Text on one line, at most `max` characters: for commit subjects and pull request titles. */
+export function oneLine(s: string, max: number): string {
+  return s.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 export function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }
 }

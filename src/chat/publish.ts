@@ -9,7 +9,7 @@ import type { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { submitRequest } from "./requests";
 import type { Handoff } from "./schemas";
-import { chatDir } from "./threads";
+import { chatDir, oneLine } from "./threads";
 import { writeIntents, type WrittenIntent } from "./writer";
 
 export type HandoffOutcome =
@@ -83,12 +83,12 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       }
       const there = new Git(wt);
       const first = w.intents[0]!.slug;
-      const subject = w.intents.length === 1 ? `intent(${first}): propose ${oneLine(w.intents[0]!.title)}` : `intent: propose ${oneLine(o.handoff.title)} (${w.intents.map((i) => i.slug).join(", ")})`;
+      const subject = w.intents.length === 1 ? `intent(${first}): propose ${oneLine(w.intents[0]!.title, 100)}` : `intent: propose ${oneLine(o.handoff.title, 100)} (${w.intents.map((i) => i.slug).join(", ")})`;
       await there.run(["add", "-A", "--", ...w.intents.map((i) => `intent/${i.slug}`)]);
       await there.runtime("commit", ["-q", "-m", subject]);
       const branch = await freeBranch(git, remote, first);
       await there.run(["push", "-q", remote, `HEAD:refs/heads/${branch}`]);
-      const pr = await new GitHub(wt).createPr({ head: branch, base: main, title: oneLine(o.handoff.title) || subject, body: prBody(o.handoff, w.intents, w.summary, o.author, o.via) });
+      const pr = await new GitHub(wt).createPr({ head: branch, base: main, title: oneLine(o.handoff.title, 100) || subject, body: prBody(o.handoff, w.intents, w.summary, o.author, o.via) });
       o.trace.event(CHAT_SLUG, "chat-pr", { number: pr.number, url: pr.url, branch, slugs: w.intents.map((i) => i.slug), by: o.author });
       return { kind: "pr", number: pr.number, url: pr.url, branch, intents: w.intents };
     });
@@ -97,8 +97,4 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
     o.trace.event(CHAT_SLUG, "error", { where: "handoff", error: errorText(e) });
     return { kind: "failed", problem: `Something went wrong while opening the pull request (${errorText(e).split("\n")[0]}). An engineer can find the details in the trace.` };
   }
-}
-
-function oneLine(s: string): string {
-  return s.replace(/\s+/g, " ").trim().slice(0, 100);
 }

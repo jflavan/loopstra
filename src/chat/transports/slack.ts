@@ -74,7 +74,7 @@ export class SlackTransport implements Transport {
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", () => reject(new Error("the Socket Mode connection failed")), { once: true });
     });
-    ws.addEventListener("message", (ev) => { void this.onFrame(ws, String(ev.data)); });
+    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e) => this.log(`Slack message failed: ${e instanceof Error ? e.message : String(e)}`)); });
     ws.addEventListener("close", () => { if (this.ws === ws && this.onMessage) this.reconnect.schedule(); });
     this.reconnect.succeeded();
   }

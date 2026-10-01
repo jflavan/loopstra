@@ -103,7 +103,9 @@ export async function writeIntents(o: {
   if (notDraft.length) {
     return { ok: false, costUsd: 0, problem: `Only drafts can be changed this way, and ${notDraft.map((s) => `"${s}"`).join(", ")} ${notDraft.length > 1 ? "are not drafts (or do not exist)" : "is not a draft (or does not exist)"}.` };
   }
-  const updateTexts = await Promise.all(o.handoff.updates.map(async (s) => `### ${s}\n\n${await Bun.file(join(o.source, "intent", s, "intent.md")).text()}`));
+  const updateFiles = await Promise.all(o.handoff.updates.map(async (s) => [s, await Bun.file(join(o.source, "intent", s, "intent.md")).text()] as const));
+  const updateTexts = updateFiles.map(([s, text]) => `### ${s}\n\n${text}`);
+  const old = new Map(updateFiles.map(([s, text]) => [s, parseIntentFile(text).frontmatter] as const));
   const guidePath = join(o.root, "intent", "README.md");
   const template = existsSync(guidePath) ? await Bun.file(guidePath).text() : await Bun.file(join(import.meta.dir, "..", "..", "templates", "intent-README.md")).text();
   const base = await chatTemplate(o.root, "write-intent");
@@ -121,7 +123,6 @@ export async function writeIntents(o: {
     cost += r.costUsd;
     if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };
-    const old = new Map(await Promise.all(o.handoff.updates.map(async (s) => [s, parseIntentFile(await Bun.file(join(o.source, "intent", s, "intent.md")).text()).frontmatter] as const)));
     const rendered = r.value.intents.map((d) => {
       const before = old.get(d.slug);
       return renderDraft(d, { author: before?.author || o.author, opened: before?.opened || undefined, via: o.via });

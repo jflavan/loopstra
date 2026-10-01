@@ -38,7 +38,15 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
 
 /** Read-only tools for both chat agents: look at the repository and the trace, run `loopstra status`, read git history. */
 export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)", "Bash(git log *)", "Bash(git show *)"];
-const CHAT_DENIED = ["Edit", "Write", "NotebookEdit", "PowerShell"];
+/**
+ * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools:
+ * `git log`/`git show --output=<file>` (it writes a file), and reading the usual places secrets are
+ * kept (Read rules also cover Grep and Glob). This is a guard, not a sandbox: keep `allow` lists tight.
+ */
+export const CHAT_DENIED = [
+  "Edit", "Write", "NotebookEdit", "PowerShell", "Bash(git log *--output*)", "Bash(git show *--output*)",
+  ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
+];
 
 export type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }

@@ -82,7 +82,7 @@ export class DiscordTransport implements Transport {
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", () => reject(new Error("the gateway connection failed")), { once: true });
     });
-    ws.addEventListener("message", (ev) => { void this.onFrame(ws, String(ev.data)); });
+    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e) => this.log(`Discord message failed: ${e instanceof Error ? e.message : String(e)}`)); });
     ws.addEventListener("close", () => {
       if (this.ws !== ws) return;
       this.stopBeat();

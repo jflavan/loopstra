@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { attention } from "../attention";
 import { loadConfig, type Config } from "../config";
@@ -9,6 +9,9 @@ import { chatDir, readJson, writeJson } from "./threads";
 
 /** One announcement: what Loopstra told people without being asked. */
 export interface Announcement { id: number; ts: string; text: string; slug: string | null }
+
+/** The log as last read, by path: the dashboard asks for it every couple of seconds. */
+const cache = new Map<string, { size: number; mtimeMs: number; items: Announcement[] }>();
 
 /**
  * The shared log of announcements, `.loopstra/chat/announcements.jsonl`. One process writes it (the
@@ -21,14 +24,20 @@ export class AnnouncementLog {
 
   private path(): string { return join(chatDir(this.root), "announcements.jsonl"); }
 
+  /** Every announcement. Read again only when the file changed since the last read in this process. */
   all(): Announcement[] {
-    if (!existsSync(this.path())) return [];
-    const out: Announcement[] = [];
-    for (const line of readFileSync(this.path(), "utf8").split("\n")) {
+    const path = this.path();
+    let st: { size: number; mtimeMs: number };
+    try { st = statSync(path); } catch { return []; }
+    const hit = cache.get(path);
+    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.items;
+    const items: Announcement[] = [];
+    for (const line of readFileSync(path, "utf8").split("\n")) {
       if (!line.trim()) continue;
-      try { out.push(JSON.parse(line) as Announcement); } catch { /* a half-written last line */ }
+      try { items.push(JSON.parse(line) as Announcement); } catch { /* a half-written last line */ }
     }
-    return out;
+    cache.set(path, { size: st.size, mtimeMs: st.mtimeMs, items });
+    return items;
   }
 
   since(id: number): Announcement[] { return this.all().filter((a) => a.id > id); }

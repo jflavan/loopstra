@@ -103,18 +103,23 @@ export class ChatService {
       }
       for (const r of takeResults(this.root, new Set(this.transports.map((t) => t.name)))) {
         const t = this.transport(r.transport);
-        if (t) await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text));
+        if (!t) continue;
+        try { await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text)); } catch (e) { this.traceError("chat-result", e); }
       }
       if (Date.now() - this.lastPrCheck >= PR_CHECK_MS) {
         this.lastPrCheck = Date.now();
         await this.checkPullRequests();
       }
     } catch (e) {
-      try {
-        const trace = Trace.open(this.root, () => {});
-        try { trace.event(CHAT_SLUG, "error", { where: "chat-poll", error: errorText(e) }); } finally { trace.close(); }
-      } catch { /* nowhere to record it */ }
+      this.traceError("chat-poll", e);
     }
+  }
+
+  private traceError(where: string, e: unknown): void {
+    try {
+      const trace = Trace.open(this.root, () => {});
+      try { trace.event(CHAT_SLUG, "error", { where, error: errorText(e) }); } finally { trace.close(); }
+    } catch { /* nowhere to record it */ }
   }
 
   /** Tells each thread when a pull request it opened was merged or closed on GitHub. */

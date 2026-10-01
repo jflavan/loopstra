@@ -120,3 +120,10 @@ describe("loopstra chat", () => {
     } finally { r.cleanup(); }
   });
 });
+
+describe("platform ids (review fix)", () => {
+  test("a long numeric id must be quoted, since YAML would round it", async () => {
+    await expect(configWith("chat:\n  transports:\n    discord:\n      channel: \"1\"\n      acceptors: [123456789012345678]\n")).rejects.toThrow("is too long to be read as a number: put it in quotes");
+    expect((await configWith("chat:\n  transports:\n    discord:\n      channel: \"1\"\n      acceptors: [\"123456789012345678\"]\n")).chat.transports.discord!.acceptors).toEqual(["123456789012345678"]);
+  });
+});

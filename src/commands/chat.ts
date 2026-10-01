@@ -1,7 +1,7 @@
 import { resolveClaude } from "../claude";
 import { loadConfig } from "../config";
 import { errorText } from "../shell";
-import { installStopSignals, resetStop, stopPromise } from "../stop";
+import { installStopSignals, resetStop, stopPromise, stopRequested } from "../stop";
 import { ChatService, type Transport } from "../chat/service";
 import { DiscordTransport } from "../chat/transports/discord";
 import { SlackTransport } from "../chat/transports/slack";
@@ -44,6 +44,8 @@ export async function chat(root: string, opts: ChatOptions): Promise<number> {
     }
     const bots = transports.filter((t) => t !== terminal).map((t) => t.via);
     if (bots.length) console.error(`Listening on ${bots.join(" and ")}. Ctrl-C to stop.`);
+    // Leaving the terminal chat does not stop the bots; say so, rather than seem to hang.
+    if (terminal && bots.length) void terminal.closed.then(() => { if (!stopRequested()) console.error(`Left the terminal chat; ${bots.join(" and ")} keep running. Ctrl-C to stop.`); });
     await Promise.race([stopPromise(), ...(terminal && !bots.length ? [terminal.closed] : [])]);
     return 0;
   } finally {

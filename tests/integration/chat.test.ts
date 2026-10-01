@@ -96,6 +96,29 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a request whose commit failed is finished on the next tick, not mistaken for someone else's edit", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
+    try {
+      const { submitRequest } = await import("../../src/chat/requests");
+      const { writeJson, chatDir } = await import("../../src/chat/threads");
+      const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", transport: "terminal", thread: "local" });
+      const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", transport: "terminal", thread: "local" });
+      // As if an earlier tick wrote both files and then failed to commit.
+      await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
+      await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
+      writeJson(join(chatDir(r.root), "requests", `${accept.id}.json`), { ...accept, written: ["a"] });
+      writeJson(join(chatDir(r.root), "requests", `${added.id}.json`), { ...added, written: ["c"] });
+      await tick(r.root).catch(() => {});
+      expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
+        "Started a. I will say here when it needs anyone, and when it is done.",
+        "Added to the queue as drafts: c. Read them in intent/, then set status to accepted, or ask me to start one.",
+      ]);
+      const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
+      expect(log).toContain("loopstra(a): accepted by U from chat");
+      expect(log).toContain("loopstra(c): open intent from chat");
+    } finally { r.cleanup(); }
+  });
+
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
     try {

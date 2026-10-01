@@ -4,7 +4,7 @@ import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readPause } from "../heartbeat";
-import { parseIntentFile } from "../intents";
+import { parseIntentFile, SLUG } from "../intents";
 import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
@@ -40,8 +40,10 @@ export function isYes(text: string): boolean {
   return YES.test(text);
 }
 
-/** The words that go first on a fresh session; a resumed one already has them. */
+/** At most this many announcements go into one message's context. */
 const ANNOUNCEMENTS_IN_CONTEXT = 10;
+/** How long a proposal waits for its yes. */
+export const PENDING_TTL_MS = 24 * 60 * 60_000;
 
 export class Orchestrator {
   readonly store: ThreadStore;
@@ -93,16 +95,20 @@ export class Orchestrator {
       try {
         trace.event(CHAT_SLUG, "chat-message", { transport: m.transport, thread: m.thread, from: m.authorName, chars: m.text.length });
         let declined: string | null = null;
-        if (t.pending) {
+        // Only the person a proposal was made to can confirm it; anyone else's message is a turn.
+        if (t.pending && t.pending.by === m.authorId) {
           const pending = t.pending;
           t.pending = null;
           this.store.save(t);
-          if (isYes(m.text)) {
+          // A yes long after the question is not an answer to it: things may have moved on.
+          const expired = Date.now() - Date.parse(pending.at) > PENDING_TTL_MS;
+          if (isYes(m.text) && !expired) {
             if (pending.kind === "handoff") await this.doHandoff(cfg, trace, t, m, pending.handoff, say);
             else await this.doAccept(cfg, m, pending.slug, say);
             return;
           }
-          declined = pending.kind === "handoff" ? `You proposed handing off "${pending.handoff.title}"; the person did not say yes, so nothing was written.` : `You proposed starting ${pending.slug}; the person did not say yes, so it was not started.`;
+          const why = expired ? "the person's answer came over a day later, so it was not acted on" : "the person did not say yes";
+          declined = pending.kind === "handoff" ? `You proposed handing off "${pending.handoff.title}"; ${why}, so nothing was written. Propose it again if it still stands.` : `You proposed starting ${pending.slug}; ${why}, so it was not started. Propose it again if it still stands.`;
         }
         await this.turn(cfg, trace, t, m, say, declined);
       } catch (e) {
@@ -126,7 +132,8 @@ export class Orchestrator {
       await say(`I have used today's chat budget ($${cfg.chat.max_budget_usd_per_day.toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise chat.max_budget_usd_per_day in loopstra/config.yaml.`);
       return;
     }
-    const message = await this.messageBlock(cfg, t, m, declined);
+    const seenUpTo = new AnnouncementLog(this.root).lastId();
+    const message = await this.messageBlock(cfg, t, m, declined, seenUpTo);
     const maxBudgetUsd = Math.max(0.01, Math.min(cfg.claude.max_budget_usd, left));
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
     let r = await runChatAgent({
@@ -139,7 +146,8 @@ export class Orchestrator {
       r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, maxBudgetUsd, prompt: await fresh() });
     }
     if (r.sessionId) t.sessionId = r.sessionId;
-    t.lastAnnouncementSeen = new AnnouncementLog(this.root).lastId();
+    // Only what was in the message block counts as seen: announcements made during the turn come next time.
+    t.lastAnnouncementSeen = seenUpTo;
     if (!r.ok) {
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
@@ -155,14 +163,15 @@ export class Orchestrator {
   }
 
   /** The context Loopstra vouches for, then the person's own words, delimited. */
-  private async messageBlock(cfg: Config, t: ThreadState, m: IncomingMessage, declined: string | null): Promise<string> {
+  private async messageBlock(cfg: Config, t: ThreadState, m: IncomingMessage, declined: string | null, upTo: number): Promise<string> {
     const remote = await new Git(this.root).remoteName().catch(() => null);
     const log = new AnnouncementLog(this.root);
-    const since = t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0);
+    const since = (t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0)).filter((a) => a.id <= upTo);
     const announced = since.slice(-ANNOUNCEMENTS_IN_CONTEXT);
     const handoffs = t.handoffs.map((h) => `- "${h.title}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
     const lines = [
-      `From: ${m.authorName}, ${m.canAccept ? "who may ask you to start drafts" : `who may not start drafts (${m.acceptors} may)`}`,
+      // A display name is the person's own choice: kept to one line with no tags, so it cannot end the context block.
+      `From: ${m.authorName.replace(/[\s<>]+/g, " ").trim()}, ${m.canAccept ? "who may ask you to start drafts" : `who may not start drafts (${m.acceptors} may)`}`,
       `Where: ${m.via}`,
       `Today: ${localDate()}`,
       `Main branch: ${cfg.main_branch}; ${remote ? "intents are added through a pull request" : "no GitHub remote, so intents are added to the queue directly"}`,
@@ -176,6 +185,7 @@ export class Orchestrator {
 
   /** Drafts on the main checkout, by slug; the status of anything else. */
   private async statusOf(slug: string): Promise<string | null> {
+    if (!SLUG.test(slug)) return null;
     const path = join(this.root, "intent", slug, "intent.md");
     if (!existsSync(path)) return null;
     try { return parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { return "unreadable"; }
