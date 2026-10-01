@@ -1,6 +1,6 @@
 # Orchestrator chat: talk to Loopstra, get intents as pull requests
 
-Status: proposal, decisions recorded below. Nothing here is built yet. Replaces the earlier "intent sources" proposal (raw chat messages turned straight into draft intents).
+Status: built (see the README's Chat section, and `docs/decisions.md` for how). Replaces the earlier "intent sources" proposal (raw chat messages turned straight into draft intents).
 
 ## Problem
 
@@ -62,7 +62,7 @@ type OrchestratorTurn = {
     title: string;               // for the PR
     brief: string;               // everything agreed: problem, outcome, done-when, users, constraints,
                                  // open questions, suggested split, depends_on, priority
-    updates?: string[];          // slugs of existing draft intents this changes, if any
+    updates: string[];           // slugs of existing draft intents this changes; empty for new work
   };
   accept: null | { slug: string };  // the person asked to start this draft (see "Accepting from chat")
 };
@@ -115,8 +115,8 @@ The runtime renders each intent with `serializeIntentFile`, then runs `checkCons
 
 The runtime, not an agent:
 
-1. Fetches, then adds a worktree at `.loopstra/worktrees/_chat-<slug>` on a new branch `intent-proposal/<slug>` from `origin/<main_branch>` (the existing `Git.worktreeAdd`). The main checkout the loop uses is never touched.
-2. Writes `intent/<slug>/intent.md` for each intent, commits (`intent(<slug>): propose <title>`, no `[skip ci]`), pushes, and opens the PR with `GitHub.createPr`. The body is the writer's summary, the brief, and a link back to the conversation where the transport has one.
+1. Fetches, then adds a detached worktree under `.loopstra/chat/worktrees/` at `origin/<main_branch>` (the existing `withDetachedWorktree`) and checks the writer's work against it. The main checkout the loop uses is never touched.
+2. Writes `intent/<slug>/intent.md` for each intent, commits (`intent(<slug>): propose <title>`, no `[skip ci]`), pushes to a free branch `intent-proposal/<slug>` (`-2`, `-3` when taken), and opens the PR with `GitHub.createPr`. The body is the writer's summary, the brief, and a link back to the conversation where the transport has one.
 3. Replies in the chat with the PR link, and later announces when it merges or closes.
 4. Removes the worktree. The remote branch is GitHub's to delete on merge.
 
@@ -126,7 +126,7 @@ Decided: **merging is filing.** The PR's files carry `status: draft`. Merging pu
 
 ### Without a remote
 
-No PR is possible. Since only the loop writes the main checkout, `loopstra chat` leaves the rendered files in `.loopstra/chat/new/<slug>/`, and the loop moves them into `intent/` as `draft` at the start of its next tick and commits them as bookkeeping (the same path as accept requests). The chat says so, and the loop then treats them like any hand-written draft.
+No PR is possible. Since only the loop writes the main checkout, `loopstra chat` leaves the rendered files in a request under `.loopstra/chat/requests/`, and the loop moves them into `intent/` as `draft` at the start of its next tick and commits them as bookkeeping (the same path as accept requests). The chat says so, and the loop then treats them like any hand-written draft.
 
 ### Changing an existing intent
 
@@ -138,8 +138,8 @@ The orchestrator is read-only with one exception: moving a `draft` to `accepted`
 
 - **Who.** Only people on `chat.acceptors` (per transport, user ids). Anyone on `chat.allow` can talk to it, ask for updates and agree requirements; only acceptors can start work.
 - **How it is asked.** The orchestrator returns `accept: { slug }` in its structured output when the person asks for it. As with a hand-off, the runtime, not the agent, then asks a fixed question, "Start work on add-csv-export now?", and only a yes from an acceptor goes ahead. A person not on the list is told plainly that they cannot accept, and who can.
-- **Who writes.** Not the chat process. The loop is the only writer of the main checkout, and keeping it that way avoids two processes committing on `main` at once. `loopstra chat` drops a request in `.loopstra/chat/accept/<slug>.json` (who, when, which thread). At the start of its next tick, right after `syncMain`, the loop applies each request with `writeIntent(intent, { status: "accepted" }, { expectStatus: "draft" })`, so a person's edit in the meantime wins, commits it as bookkeeping (`loopstra(<slug>): accepted by <name> from chat [skip ci]`), traces who accepted, and deletes the request.
-- **Reporting back.** The chat process sees the request disappear and the status change, and replies "Started." in the thread. A request the loop could not apply (the status was no longer `draft`, the intent is not on main yet because its PR is unmerged) gets a plain reply saying why. If the loop is not running, the reply says the change will start when it is.
+- **Who writes.** Not the chat process. The loop is the only writer of the main checkout, and keeping it that way avoids two processes committing on `main` at once. `loopstra chat` drops a request in `.loopstra/chat/requests/` (who, when, which thread). At the start of its next tick, right after `syncMain`, the loop applies each request with `writeIntent(intent, { status: "accepted" }, { expectStatus: "draft" })`, so a person's edit in the meantime wins, commits it as bookkeeping (`loopstra(<slug>): accepted by <name> from chat [skip ci]`), traces who accepted, and deletes the request.
+- **Reporting back.** The loop leaves a result in `.loopstra/chat/results/`, and the chat process serving that thread replies "Started ..." in it. A request the loop could not apply (the status was no longer `draft`, the intent is not on main yet because its PR is unmerged) gets a plain reply saying why. If the loop is not running, the reply says the change will start when it is.
 
 ## Transports
 
@@ -157,7 +157,7 @@ interface Transport {
 All four are wanted. Built in this order, each on the same core:
 
 1. **Terminal.** `loopstra chat` with no bot transports configured is a plain REPL. Quickest place to get the orchestrator's prompt right.
-2. **Dashboard panel.** A chat box in `loopstra ui`, one thread per browser tab, posting to `/api/chat`. Local only (127.0.0.1), no credentials.
+2. **Dashboard panel.** A chat box in `loopstra ui`, one thread per browser tab, posting to `/api/chat` and reading the thread back with `GET /api/chat`. Local only (127.0.0.1), no credentials; posts only from the page's own origin.
 3. **Slack.** Bot in one channel; each top-level message starts a thread, replies continue it. Socket Mode (an outbound websocket) works without a public address, so it still runs on a laptop. Tokens in environment variables named in config, never in the file.
 4. **Discord.** Gateway connection, same thread model; needs the Message Content intent.
 

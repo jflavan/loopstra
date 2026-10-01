@@ -82,7 +82,12 @@ export interface JsonSchemaObject {
 
 /** JSON Schema for `--json-schema`, generated from the one Zod definition. */
 export function jsonSchemaFor(name: PhaseName): JsonSchemaObject {
-  const schema = z.toJSONSchema(Envelopes[name], { target: "draft-7" }) as Record<string, unknown>;
+  return jsonSchemaOf(Envelopes[name]);
+}
+
+/** JSON Schema for `--json-schema` from any Zod object (the chat's own envelopes use it too). */
+export function jsonSchemaOf(zodSchema: z.ZodType): JsonSchemaObject {
+  const schema = z.toJSONSchema(zodSchema, { target: "draft-7" }) as Record<string, unknown>;
   delete schema.$schema;
   return {
     ...(schema as object),

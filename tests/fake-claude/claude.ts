@@ -12,6 +12,9 @@
 // "no-envelope" finishes with its report as text and no structured output; resumed, it returns one.
 // "no-envelope-forever" never does; "no-envelope-stuck" hangs when resumed.
 // $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
+// A sequence: $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>-<n>.jsonl is used for the n-th call of that phase
+// (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
+// each prompt as one JSON line ({phase, args, prompt}).
 // Like the real CLI, the process exits 1 after a result event with is_error.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -28,10 +31,22 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
 
+if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt }) + "\n");
+
+let sequenced: string | undefined;
+const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
+if (fixtureDir && phase) {
+  const countPath = join(fixtureDir, `.count-${phase}`);
+  const n = (existsSync(countPath) ? Number(await Bun.file(countPath).text()) : 0) + 1;
+  await Bun.write(countPath, String(n));
+  sequenced = join(fixtureDir, `${phase}-${n}.jsonl`);
+}
+
 const here = join(dirname(Bun.main), "fixtures");
 const named = /FIXTURE:([a-z0-9-]+)/.exec(prompt)?.[1];
 const candidates = [
   process.env.LOOPSTRA_FAKE_FIXTURE,
+  sequenced,
   named ? join(here, `${named}.jsonl`) : undefined,
   process.env.LOOPSTRA_FAKE_FIXTURE_DIR && phase ? join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR, `${phase}.jsonl`) : undefined,
   phase ? join(here, `${phase}.jsonl`) : undefined,

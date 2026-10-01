@@ -40,3 +40,25 @@ stages:
 
 signals:
   main_health: { every_minutes: 30 }
+
+# Chat: `loopstra chat` (terminal, plus any bots below) and the panel in `loopstra ui`. The orchestrator
+# answers questions and works out new changes with you; agreed ones are written up as draft intents
+# (through a pull request when there is a remote). It is read-only, except that someone on a bot's
+# acceptors list (or at the terminal or dashboard) can ask it to start a draft.
+chat:
+  model: default                 # the orchestrator; the writer uses stages.design.model
+  max_budget_usd_per_day: 5      # chat turns and writer runs together
+  # transports:
+  #   slack:                       # Socket Mode; tokens are read from these environment variables
+  #     token_env: LOOPSTRA_SLACK_APP_TOKEN
+  #     bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
+  #     channel: C0123ABCD          # each top-level message starts a conversation in its thread
+  #     allow: [U01AAA, U01BBB]     # who may chat; empty means anyone in the channel
+  #     acceptors: [U01AAA]         # who may also start drafts; empty means nobody from Slack
+  #     announce_to: C0123ABCD      # where blocked / waiting / merged changes are announced
+  #   discord:                     # gateway bot with the Message Content intent on
+  #     token_env: LOOPSTRA_DISCORD_TOKEN
+  #     channel: "1234567890"
+  #     allow: []
+  #     acceptors: []
+  #     announce_to: "1234567890"

@@ -5,7 +5,8 @@ import { errorText } from "./shell";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
-  | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed";
+  | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
+  | "chat-message" | "chat-request" | "chat-pr";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -218,6 +219,11 @@ export class Trace {
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {
     return this.db.query<{ name: string; ts: string; result: string; output: string }, [number]>(
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);
+  }
+
+  /** What a slug's phases that started at or after `since` (an ISO time) cost. */
+  costSince(slug: string, since: string): number {
+    return this.db.query<{ c: number | null }, [string, string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND started >= ?").get(slug, since)?.c ?? 0;
   }
 
   intentSummary(slug: string): IntentSummary | null {

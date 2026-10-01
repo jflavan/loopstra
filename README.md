@@ -120,7 +120,7 @@ The PATH must reach `bun`, `git`, `claude` and (with a remote) `gh`. Loopstra al
 ```
 loopstra status         # loop state, what needs a person, then every change: priority, where it is, last phase, cost, note
 loopstra tail           # live events; `loopstra tail <slug>` for one change
-loopstra ui             # dashboard at http://127.0.0.1:4646 (--port <n>)
+loopstra ui             # dashboard at http://127.0.0.1:4646 (--port <n>), with a chat panel (see Chat)
 ```
 
 The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not shut down cleanly" (the loop process is gone: killed or crashed; start it again), or "Not responding" (the process is there but has not checked in: hung, or the machine slept).
@@ -128,6 +128,32 @@ The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not 
 Under it, `status` prints a "Needs attention" block, or "Nothing needs you right now.": a pause, failing tests on main (before main has ever passed, that they have not passed yet), main out of step with GitHub, a settings problem, blocked changes, unreadable intents, and changes waiting for a person (drafts, and reviews with a person on the gate). The dashboard shows the same list, labelled "Blocked" or "Waiting for you". Long notes wrap to the terminal's width.
 
 The dashboard is one local page, polling every couple of seconds. It shows the loop's heartbeat, the needs-attention list, costs for today, this week and all time, the queue, and per-change drill-down: the change's own documents (intent.md, spec.md, plan.md, review.md, outcome.md, lessons.md, read-only), each phase with duration, cost and any commands the session was refused, gate results with evidence, and the event log. `queue.md` in `intent/` is a generated view of the same queue; its "Needs a person" list matches.
+
+## Chat
+
+Instead of writing intents by hand and reading `status`, you can talk to Loopstra's orchestrator:
+
+```
+loopstra chat               # in the terminal (Ctrl-D or /quit to leave)
+loopstra chat --no-terminal # only the Slack and Discord bots, for a server or a service manager
+loopstra ui                 # the dashboard has the same chat as a panel (--no-chat to leave it out)
+```
+
+Ask it how things are going ("what's blocked?", "what merged this week?") and it answers from the intents, `loopstra status` and git. Talk through something new and it asks what done looks like, who it affects, and whether it should be split. When you agree, it proposes a brief and asks "Shall I write this up as a pull request?". Only a plain yes goes ahead; anything else carries on the conversation. A separate writer, which sees only the brief, then writes one or more intents (with `depends_on` when it splits the work), Loopstra checks them the way the loop would, and:
+
+- with a remote, they go up as a pull request on a branch `intent-proposal/<slug>`, made in a throwaway checkout (your main checkout is never touched). Merging it adds them to the queue as **drafts**, and chat says so in the conversation;
+- without one, the loop adds them to `intent/` as drafts on its next tick.
+
+Nothing starts until someone accepts a draft. You can still set `status: accepted` yourself, or ask in chat ("start csv-export"): Loopstra asks "Start work on csv-export now?" and, on a yes, leaves a request that the loop applies at the start of its next tick (`loopstra(<slug>): accepted by <name> from chat`). If you changed the status yourself meanwhile, your edit wins. Apart from that the orchestrator is read-only: for anything else (approving a spec, retrying a blocked change, closing one) it tells you what to edit.
+
+It also tells you things without being asked: each new "Needs attention" item (the same words as `status`), a change reaching the main code, a change done, and a chat pull request merged or closed. Bots post these to their `announce_to` channel; the terminal and the dashboard show them while open.
+
+One conversation goes on as long as you like and can hand off many times. Each chat turn and writer run is a Claude Code session on your subscription, traced under `_chat` (`loopstra tail _chat`); their cost counts in the dashboard's totals and is capped by `chat.max_budget_usd_per_day`. The prompts are `loopstra/prompts/orchestrator.md` and `write-intent.md` (a repository set up before chat existed uses the shipped ones).
+
+**Slack and Discord.** Set them up under `chat.transports` in `loopstra/config.yaml`; tokens are read from the environment variables the config names, never from the file. Each top-level message in the channel starts a conversation in its thread. `allow` lists who may chat (empty: anyone in the channel); `acceptors` who may also start drafts (empty: nobody from there). At the terminal and the dashboard, which only listen on this machine, you may always start drafts.
+
+- Slack uses Socket Mode, so nothing needs a public address: an app-level token with `connections:write` and a bot token with `chat:write`, `channels:history` and `users:read`, with the `message.channels` event subscribed.
+- Discord uses the gateway: a bot token, the Message Content intent turned on, and permission to read, send messages and create public threads in the channel.
 
 ## When something needs a person
 
@@ -196,6 +222,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`; `d
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, skills, `before`/`after` commands, and loop limits
 - `signals`: how often main's health check runs
+- `chat`: the orchestrator's model, a daily budget for chat, and the Slack and Discord bots (see Chat)
 
 ## Platforms
 
