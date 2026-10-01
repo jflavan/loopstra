@@ -1,7 +1,7 @@
-import { userInfo } from "node:os";
 import { createInterface, type Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { OnMessage, Transport } from "../service";
+import { localUser } from "./shared";
 
 /**
  * `loopstra chat` in a terminal: one conversation, the person at the keyboard. They run it on their
@@ -19,7 +19,7 @@ export class TerminalTransport implements Transport {
   private resolveClosed: () => void = () => {};
 
   constructor(private readonly io: { input: Readable; output: Writable; user?: string; thread?: string } = { input: process.stdin, output: process.stdout }) {
-    this.user = io.user ?? safeUser();
+    this.user = io.user ?? localUser();
     this.closed = new Promise((r) => { this.resolveClosed = r; });
   }
 
@@ -56,8 +56,4 @@ export class TerminalTransport implements Transport {
   async stop(): Promise<void> {
     this.rl?.close();
   }
-}
-
-function safeUser(): string {
-  try { return userInfo().username || "you"; } catch { return "you"; }
 }

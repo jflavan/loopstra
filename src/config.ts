@@ -49,6 +49,8 @@ const chat = z.object({
   model: modelRef.default("default"),
   /** What chat turns and writer runs may spend in a day, together. */
   max_budget_usd_per_day: z.number().positive().default(5),
+  /** What one chat turn or writer run may hold of that, so others can run at the same time. */
+  max_budget_usd_per_session: z.number().positive().default(2),
   transports: z.object({
     slack: slackTransport.optional(),
     discord: discordTransport.optional(),

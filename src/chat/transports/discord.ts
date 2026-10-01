@@ -125,9 +125,18 @@ export class DiscordTransport implements Transport {
   async onDiscordMessage(m: DiscordMessage): Promise<void> {
     if (!this.onMessage || !m?.author || m.author.bot || m.author.id === this.botUser) return;
     if (this.cfg.allow.length && !this.cfg.allow.includes(m.author.id)) return;
+    const isOurs = m.channel_id === this.cfg.channel || this.knownThreads().includes(m.channel_id);
+    if (!isOurs) return;
+    const text = this.withoutBotMention(m.content ?? "");
+    // Checked before a thread is made, so a bot without the Message Content intent does not open an empty thread per message.
+    if (!text) {
+      if (!this.warnedEmpty) this.log("Discord delivered a message with no text: turn on the Message Content intent for the bot.");
+      this.warnedEmpty = true;
+      return;
+    }
     let thread: string;
     if (m.channel_id === this.cfg.channel) {
-      const name = this.withoutBotMention(m.content ?? "").slice(0, 80) || "Loopstra chat";
+      const name = text.slice(0, 80);
       try {
         const t = await this.call("POST", `/channels/${m.channel_id}/messages/${m.id}/threads`, { name, auto_archive_duration: 1440 });
         thread = String(t.id);
@@ -136,16 +145,8 @@ export class DiscordTransport implements Transport {
         return;
       }
       this.remember(thread);
-    } else if (this.knownThreads().includes(m.channel_id)) {
-      thread = m.channel_id;
     } else {
-      return;
-    }
-    const text = this.withoutBotMention(m.content ?? "");
-    if (!text) {
-      if (!this.warnedEmpty) this.log("Discord delivered a message with no text: turn on the Message Content intent for the bot.");
-      this.warnedEmpty = true;
-      return;
+      thread = m.channel_id;
     }
     await this.onMessage({
       thread, authorId: m.author.id, authorName: m.author.global_name || m.author.username || m.author.id, text,

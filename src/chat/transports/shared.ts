@@ -1,3 +1,5 @@
+import { userInfo } from "node:os";
+
 /** Splits a message into parts of at most `max` characters, at line breaks where it can. */
 export function chunkText(text: string, max: number): string[] {
   const parts: string[] = [];
@@ -49,4 +51,9 @@ export class Reconnector {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
+}
+
+/** The person at this machine (the terminal and the dashboard), by their login name. */
+export function localUser(): string {
+  try { return userInfo().username || "you"; } catch { return "you"; }
 }

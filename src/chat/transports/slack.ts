@@ -6,6 +6,15 @@ import { chunkText, Reconnector, mentionList } from "./shared";
 export const SLACK_API_ENV = "LOOPSTRA_SLACK_API";
 const SLACK_MAX = 3500;
 
+/**
+ * Text as Slack shows it, without `<!channel>`, `<!here>`, `<!everyone>` or `<!subteam^...>` pinging
+ * anyone: replies carry the agent's words, which a person in the channel can steer. People's own
+ * mentions (`<@U...>`) stay, like Discord's, which shows them without pinging.
+ */
+export function noBroadcast(text: string): string {
+  return text.replace(/<!/g, "&lt;!");
+}
+
 interface SlackEvent { type?: string; subtype?: string; bot_id?: string; user?: string; channel?: string; text?: string; ts?: string; thread_ts?: string }
 
 /**
@@ -129,7 +138,7 @@ export class SlackTransport implements Transport {
 
   async send(thread: string, text: string): Promise<void> {
     const [channel, ts] = thread.split(":");
-    for (const part of chunkText(text, SLACK_MAX)) {
+    for (const part of chunkText(noBroadcast(text), SLACK_MAX)) {
       try { await this.call("chat.postMessage", { channel, thread_ts: ts, text: part }); } catch (e) { this.log(String(e instanceof Error ? e.message : e)); return; }
     }
   }
@@ -137,7 +146,7 @@ export class SlackTransport implements Transport {
   async announce(text: string): Promise<void> {
     if (!this.cfg.announce_to) return;
     // Long like any reply (a note can be), and a failure is thrown so the service tries it again.
-    for (const part of chunkText(text, SLACK_MAX)) await this.call("chat.postMessage", { channel: this.cfg.announce_to, text: part });
+    for (const part of chunkText(noBroadcast(text), SLACK_MAX)) await this.call("chat.postMessage", { channel: this.cfg.announce_to, text: part });
   }
 
   async stop(): Promise<void> {

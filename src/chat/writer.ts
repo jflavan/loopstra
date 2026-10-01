@@ -73,7 +73,8 @@ export function draftProblems(drafts: DraftIntent[], rendered: string[], existin
 
 export type WriteOutcome =
   | { ok: true; intents: WrittenIntent[]; summary: string; costUsd: number }
-  | { ok: false; problem: string; costUsd: number };
+  /** `budget`: stopped by the day's chat budget, so the same hand-off can be confirmed again later. */
+  | { ok: false; problem: string; costUsd: number; budget?: "today" | "held" };
 
 /** The repository's changes as `slug: status` lines, for the writer. */
 function existingList(existing: Map<string, Status | "unreadable">): string {
@@ -123,7 +124,10 @@ export async function writeIntents(o: {
       model: o.cfg.stages.design.model, capUsd: o.maxBudgetUsd - cost,
     });
     cost += r.costUsd;
-    if (!r.ok) return { ok: false, costUsd: cost, problem: r.budgetUsedUp ? "Today's chat budget is used up; say yes again tomorrow, or an engineer can raise chat.max_budget_usd_per_day." : "The writer could not finish." };
+    if (!r.ok && r.budgetUsedUp) {
+      return { ok: false, costUsd: cost, budget: r.budgetUsedUp, problem: r.budgetUsedUp === "held" ? "Other conversations are using what is left of today's chat budget right now; say yes again in a few minutes." : "Today's chat budget is used up; say yes again tomorrow, or an engineer can raise chat.max_budget_usd_per_day." };
+    }
+    if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };
     const rendered = r.value.intents.map((d) => {
       const before = old.get(d.slug);

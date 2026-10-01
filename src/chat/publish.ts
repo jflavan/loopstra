@@ -16,7 +16,7 @@ export type HandoffOutcome =
   | { kind: "pr"; number: number; url: string; branch: string; intents: WrittenIntent[] }
   | { kind: "local"; intents: WrittenIntent[] }
   /** `pushed`: a branch that went up although its pull request could not be opened. */
-  | { kind: "failed"; problem: string; pushed?: string };
+  | { kind: "failed"; problem: string; pushed?: string; budget?: "today" | "held" };
 
 export interface HandoffInput {
   root: string; cfg: Config; trace: Trace; handoff: Handoff;
@@ -72,7 +72,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
   try {
     if (!remote) {
       const w = await writeIntents({ ...o, source: o.root });
-      if (!w.ok) return { kind: "failed", problem: w.problem };
+      if (!w.ok) return { kind: "failed", problem: w.problem, budget: w.budget };
       submitRequest(o.root, {
         kind: "new", title: o.handoff.title, intents: w.intents.map((i) => ({ slug: i.slug, text: i.text, update: i.update })),
         by: o.authorId, byName: o.author, transport: o.transport, thread: o.thread,
@@ -87,7 +87,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
     mkdirSync(join(chatDir(o.root), "worktrees"), { recursive: true });
     return await withDetachedWorktree(git, dir, `${remote}/${main}`, async (wt): Promise<HandoffOutcome> => {
       const w = await writeIntents({ ...o, source: wt });
-      if (!w.ok) return { kind: "failed", problem: w.problem };
+      if (!w.ok) return { kind: "failed", problem: w.problem, budget: w.budget };
       for (const i of w.intents) {
         mkdirSync(join(wt, "intent", i.slug), { recursive: true });
         await Bun.write(join(wt, "intent", i.slug, "intent.md"), i.text);

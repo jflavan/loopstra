@@ -48,6 +48,7 @@ signals:
 chat:
   model: default                 # the orchestrator; the writer uses stages.design.model
   max_budget_usd_per_day: 5      # chat turns and writer runs together
+  max_budget_usd_per_session: 2  # what one turn or writer run may hold of it, so others can run meanwhile
   # transports:
   #   slack:                       # Socket Mode; tokens are read from these environment variables
   #     token_env: LOOPSTRA_SLACK_APP_TOKEN

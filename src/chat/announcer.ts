@@ -95,7 +95,8 @@ export function holdAnnouncerLock(root: string, pid = process.pid, now = Date.no
   const aside = `${path}.stale-${pid}-${now}`;
   try { renameSync(path, aside); } catch { return false; }
   const moved = readJson<{ pid: number; at: string }>(aside);
-  if (held && (moved?.pid !== held.pid || moved?.at !== held.at)) {
+  // What was moved must be the lock judged stale: the one read, or (when it was unreadable) one still unreadable.
+  if (held ? moved?.pid !== held.pid || moved?.at !== held.at : moved !== null) {
     // Someone took it between the read and the rename: put theirs back (unless yet another is there) and step aside.
     try { linkSync(aside, path); } catch { /* another lock is there now */ }
     rmSync(aside, { force: true });

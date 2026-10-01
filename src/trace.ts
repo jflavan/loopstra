@@ -243,9 +243,13 @@ export class Trace {
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);
   }
 
-  /** What a slug's phases that started at or after `since` (an ISO time) cost. */
-  costSince(slug: string, since: string): number {
-    return this.db.query<{ c: number | null }, [string, string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND started >= ?").get(slug, since)?.c ?? 0;
+  /**
+   * What a slug's phases that started at or after `since` (an ISO time) cost. Running phases count at
+   * what they hold, unless `endedOnly`.
+   */
+  costSince(slug: string, since: string, opts: { endedOnly?: boolean } = {}): number {
+    const running = opts.endedOnly ? " AND status != 'running'" : "";
+    return this.db.query<{ c: number | null }, [string, string]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND started >= ?${running}`).get(slug, since)?.c ?? 0;
   }
 
   intentSummary(slug: string): IntentSummary | null {

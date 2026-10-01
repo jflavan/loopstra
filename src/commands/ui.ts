@@ -37,7 +37,7 @@ export interface UiState {
   generatedAt: string;
   loop: LoopStatus;
   attention: AttentionItem[];
-  /** Includes what chat spent (turns and writer runs). */
+  /** Includes what chat spent (turns and writer runs; a running one's budget hold is not spending). */
   totals: { todayUsd: number; weekUsd: number; allUsd: number };
   /** Whether this dashboard has the chat panel. */
   chat: boolean;
@@ -69,7 +69,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
       generatedAt: now.toISOString(),
       loop,
       attention: await attention(root, config, trace, now),
-      totals: totals([...intents.flatMap((i) => i.phases), ...trace.phases(CHAT_SLUG).map((p) => ({ started: p.started, costUsd: p.cost_usd ?? 0 }))], now),
+      totals: totals([...intents.flatMap((i) => i.phases), ...trace.phases(CHAT_SLUG).map((p) => ({ started: p.started, costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0 }))], now),
       chat: opts.chat ?? false,
       intents,
       unreadable: scan.unreadable.map((u) => ({ slug: u.slug, problem: u.problem })),

@@ -132,14 +132,15 @@ export class ChatService {
       const t = this.transport(thread.transport);
       if (!t) continue;
       for (const h of thread.handoffs.filter((x) => x.pr?.state === "OPEN")) {
-        const r = await gh.lookupPr(h.pr!.branch);
+        // By number: a branch name is free again once its pull request is merged and the branch deleted.
+        const r = await gh.lookupPr(String(h.pr!.number));
         if (!("pr" in r) || !r.pr || r.pr.state === "OPEN") continue;
         const state = r.pr.state;
         const text = state === "MERGED"
           ? `The pull request for "${h.title}" was merged, so ${h.slugs.join(", ")} ${h.slugs.length > 1 ? "are" : "is"} in the queue as ${h.slugs.length > 1 ? "drafts" : "a draft"}. Ask me to start ${h.slugs.length > 1 ? "one" : "it"} when you are ready.`
           : `The pull request for "${h.title}" was closed without merging, so nothing was added.`;
         await this.orchestrator.withThread(thread.transport, thread.thread, async (cur) => {
-          const rec = cur.handoffs.find((x) => x.pr?.branch === h.pr!.branch);
+          const rec = cur.handoffs.find((x) => x.pr?.number === h.pr!.number);
           if (rec?.pr) rec.pr.state = state;
           this.orchestrator.store.save(cur);
         });

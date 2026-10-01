@@ -128,7 +128,8 @@ export class Orchestrator {
     return cfg.chat.max_budget_usd_per_day - chatSpentToday(trace);
   }
 
-  private budgetUsedUp(cfg: Config): string {
+  private budgetUsedUp(cfg: Config, why: "today" | "held" = "today"): string {
+    if (why === "held") return "Other conversations are using what is left of today's chat budget right now. Please try again in a few minutes.";
     return `I have used today's chat budget ($${cfg.chat.max_budget_usd_per_day.toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise chat.max_budget_usd_per_day in loopstra/config.yaml.`;
   }
 
@@ -152,10 +153,11 @@ export class Orchestrator {
       r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd, prompt: await fresh() });
     }
     if (r.sessionId) t.sessionId = r.sessionId;
-    // Only what was in the message block counts as seen: announcements made during the turn come next time.
-    t.lastAnnouncementSeen = seenUpTo;
+    // Only what was in the message block counts as seen, and only once the agent has had it: a failed
+    // turn shows them again next time. Announcements made during the turn come next time.
+    if (r.ok) t.lastAnnouncementSeen = seenUpTo;
     if (!r.ok && r.budgetUsedUp) {
-      await say(this.budgetUsedUp(cfg));
+      await say(this.budgetUsedUp(cfg, r.budgetUsedUp));
       return;
     }
     if (!r.ok) {
@@ -254,7 +256,12 @@ export class Orchestrator {
       root: this.root, cfg, trace, handoff: h, author: m.authorName, authorId: m.authorId, transport: m.transport, thread: m.thread, via: m.via,
       maxBudgetUsd: cfg.claude.max_budget_usd,
     });
-    if (out.kind === "failed") { await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`); return; }
+    if (out.kind === "failed") {
+      // Stopped by the budget: the proposal still stands, so a later yes writes it up.
+      if (out.budget) t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
+      await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`);
+      return;
+    }
     const slugs = out.intents.map((i) => i.slug);
     t.handoffs.push({ title: h.title.trim(), slugs, at: new Date().toISOString(), by: m.authorName, pr: out.kind === "pr" ? { number: out.number, url: out.url, branch: out.branch, state: "OPEN" } : null, local: out.kind === "local" });
     const list = out.intents.map((i) => `${i.slug}${i.update ? " (updated)" : ""}`).join(", ");

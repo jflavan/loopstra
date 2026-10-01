@@ -1,6 +1,6 @@
-import { userInfo } from "node:os";
 import { AnnouncementLog } from "../announcer";
 import type { OnMessage, Transport } from "../service";
+import { localUser } from "./shared";
 import { ThreadStore } from "../threads";
 
 /** A browser tab's thread id: made by the page, so only a plain shape is accepted. */
@@ -28,7 +28,7 @@ export class DashboardTransport implements Transport {
   constructor(root: string, user?: string) {
     this.store = new ThreadStore(root);
     this.log = new AnnouncementLog(root);
-    this.user = user ?? safeUser();
+    this.user = user ?? localUser();
   }
 
   async start(onMessage: OnMessage): Promise<void> { this.onMessage = onMessage; }
@@ -77,8 +77,4 @@ export class DashboardTransport implements Transport {
       .finally(() => this.busy.delete(thread));
     return Response.json({ accepted: true }, { status: 202 });
   }
-}
-
-function safeUser(): string {
-  try { return userInfo().username || "you"; } catch { return "you"; }
 }

@@ -50,6 +50,8 @@ export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bas
 export const CHAT_DENIED = [
   "Edit", "Write", "NotebookEdit", "PowerShell",
   ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.git/**", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
+  // Other people's conversations (other threads, other platforms) and the chat sessions' own prompts.
+  ...["**/.loopstra/chat/**", "**/.loopstra/runs/_chat/**"].map((p) => `Read(${p})`),
 ];
 
 /** The least a chat session may hold of the day's budget; with less left, it does not start. */
@@ -57,7 +59,9 @@ export const MIN_SESSION_USD = 0.01;
 
 export type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
-  | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number; budgetUsedUp?: true };
+  | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number;
+      /** Why no session started: the day's budget is spent ("today"), or what is left is held by sessions still running ("held"). */
+      budgetUsedUp?: "today" | "held" };
 
 export interface ChatAgentInput<T> {
   root: string;
@@ -81,9 +85,12 @@ export interface ChatAgentInput<T> {
  */
 export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentResult<T>> {
   const held = o.trace.phaseStartWithin(CHAT_SLUG, o.name, "agent", {
-    since: startOfToday(), limitUsd: o.cfg.chat.max_budget_usd_per_day, capUsd: Math.min(o.capUsd, o.cfg.claude.max_budget_usd), floorUsd: MIN_SESSION_USD,
+    since: startOfToday(), limitUsd: o.cfg.chat.max_budget_usd_per_day, capUsd: Math.min(o.capUsd, o.cfg.claude.max_budget_usd, o.cfg.chat.max_budget_usd_per_session), floorUsd: MIN_SESSION_USD,
   });
-  if (!held) return { ok: false, reason: "budget", detail: "the day's chat budget is used up", sessionId: null, costUsd: 0, budgetUsedUp: true };
+  if (!held) {
+    const why = o.cfg.chat.max_budget_usd_per_day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
+    return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
+  }
   const seq = held.seq;
   const dir = join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${seq}-${o.name}`);
   let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
@@ -136,7 +143,7 @@ export function startOfToday(now = new Date()): string {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
-/** What chat has spent since local midnight, with what running sessions hold. */
+/** What chat has spent since local midnight, in sessions that have ended (not what running ones hold). */
 export function chatSpentToday(trace: Trace, now = new Date()): number {
-  return trace.costSince(CHAT_SLUG, startOfToday(now));
+  return trace.costSince(CHAT_SLUG, startOfToday(now), { endedOnly: true });
 }

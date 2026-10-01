@@ -299,8 +299,39 @@ describe("the daily budget is held, not just checked (Copilot review)", () => {
       try { t.phaseStart(CHAT_SLUG, "orchestrator", "agent", 1); } finally { t.close(); }
       const out = sink();
       await new Orchestrator(r.root).handle(message("hi"), out.send);
+      // Held, not spent: the money comes back when that session ends, so it is not "until tomorrow".
+      expect(out.sent[0]).toContain("Other conversations are using what is left of today's chat budget");
+      expect(r.prompts()).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("with the day's budget spent, a turn says it cannot answer until tomorrow", async () => {
+    const r = await chatRepo({ config: "chat:\n  max_budget_usd_per_day: 1\n" });
+    try {
+      const t = Trace.open(r.root);
+      try {
+        const seq = t.phaseStart(CHAT_SLUG, "orchestrator", "agent", 1);
+        t.phaseEnd(CHAT_SLUG, seq, { status: "success", costUsd: 1 });
+      } finally { t.close(); }
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
       expect(out.sent[0]).toContain("I have used today's chat budget ($1.00)");
       expect(r.prompts()).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("with the default settings, a session holds chat.max_budget_usd_per_session, not the whole day", async () => {
+    const r = await chatRepo();
+    try {
+      // Another conversation's session is running with what a session may hold by default.
+      const t = Trace.open(r.root);
+      try { t.phaseStart(CHAT_SLUG, "orchestrator", "agent", 2); } finally { t.close(); }
+      await r.answer("orchestrator", 1, turn("answered"));
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent).toEqual(["answered"]);
+      const args = r.prompts()[0]!.args;
+      expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("2");
     } finally { r.cleanup(); }
   });
 });
