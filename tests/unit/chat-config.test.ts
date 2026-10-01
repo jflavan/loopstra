@@ -104,9 +104,26 @@ describe("loopstra chat", () => {
   test("with only bots asked for and none set up, it says there is nowhere to chat", async () => {
     const r = await chatRepo();
     try {
-      const res = await run([process.execPath, CLI, "chat", "--no-terminal"], r.root);
-      expect(res.code).toBe(1);
-      expect(res.err).toContain("There is nowhere to chat");
+      // Spawned with this process's environment, so the fake claude set up by chatRepo reaches it.
+      const proc = Bun.spawn({ cmd: [process.execPath, CLI, "chat", "--no-terminal"], cwd: r.root, env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
+      const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      expect(code).toBe(1);
+      expect(err).toContain("There is nowhere to chat");
+    } finally { r.cleanup(); }
+  });
+
+  test("without Claude Code installed it says so, once the settings are fine", async () => {
+    const r = await chatRepo();
+    try {
+      // No claude anywhere: no override, and an empty PATH (Windows spells the key Path).
+      const env: Record<string, string | undefined> = { ...process.env, LOOPSTRA_CLAUDE_EXECUTABLE: "" };
+      for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+      env.PATH = "";
+      const proc = Bun.spawn({ cmd: [process.execPath, CLI, "chat"], cwd: r.root, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+      proc.stdin.end();
+      const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      expect(code).toBe(1);
+      expect(err).toContain("Claude Code is not installed (claude is not on PATH).");
     } finally { r.cleanup(); }
   });
 

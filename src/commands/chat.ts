@@ -19,10 +19,6 @@ export interface ChatOptions {
 export async function chat(root: string, opts: ChatOptions): Promise<number> {
   let cfg;
   try { cfg = await loadConfig(root); } catch (e) { console.error(errorText(e)); return 1; }
-  if (!resolveClaude()) {
-    console.error("Claude Code is not installed (claude is not on PATH). Install it and sign in, then try again.");
-    return 1;
-  }
   const terminal = opts.terminal ? new TerminalTransport() : null;
   const transports: Transport[] = [];
   if (terminal) transports.push(terminal);
@@ -30,6 +26,11 @@ export async function chat(root: string, opts: ChatOptions): Promise<number> {
   if (cfg.chat.transports.discord) transports.push(new DiscordTransport(cfg.chat.transports.discord, { root }));
   if (!transports.length) {
     console.error("There is nowhere to chat: --no-terminal was given and no Slack or Discord bot is set up under chat.transports in loopstra/config.yaml.");
+    return 1;
+  }
+  // After the settings: a config with nowhere to chat is the problem to fix first, Claude Code or not.
+  if (!resolveClaude()) {
+    console.error("Claude Code is not installed (claude is not on PATH). Install it and sign in, then try again.");
     return 1;
   }
   resetStop();
