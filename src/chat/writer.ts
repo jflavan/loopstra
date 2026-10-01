@@ -4,7 +4,7 @@ import type { Config } from "../config";
 import { checkConsistency, parseIntentFile, scanRepo, SLUG, type Intent, type Status } from "../intents";
 import { localDate } from "../signals";
 import type { Trace } from "../trace";
-import { chatTemplate, renderChatPrompt, runChatAgent } from "./agents";
+import { chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { WriterResult, type DraftIntent, type Handoff } from "./schemas";
 
 /** A change name the writer may use: a valid slug, and short enough to be a branch name. */
@@ -116,12 +116,14 @@ export async function writeIntents(o: {
       brief: o.handoff.brief, existing: existingList(existing), template,
       updates: updateTexts.join("\n\n"), problems,
     });
+    // The writer's tries share one cap; with too little of it left, there is no second try.
+    if (o.maxBudgetUsd - cost < MIN_SESSION_USD) return { ok: false, costUsd: cost, problem: `The writer reached its spending limit before what it wrote passed the checks: ${problems.split("\n").map((l) => l.replace(/^- /, "")).join(" ")}` };
     const r = await runChatAgent({
       root: o.root, cfg: o.cfg, trace: o.trace, name: "write-intent", prompt, schema: WriterResult,
-      model: o.cfg.stages.design.model, maxBudgetUsd: Math.max(0.01, o.maxBudgetUsd - cost),
+      model: o.cfg.stages.design.model, capUsd: o.maxBudgetUsd - cost,
     });
     cost += r.costUsd;
-    if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
+    if (!r.ok) return { ok: false, costUsd: cost, problem: r.budgetUsedUp ? "Today's chat budget is used up; say yes again tomorrow, or an engineer can raise chat.max_budget_usd_per_day." : "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };
     const rendered = r.value.intents.map((d) => {
       const before = old.get(d.slug);

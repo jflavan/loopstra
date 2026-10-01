@@ -117,12 +117,17 @@ export class DiscordTransport implements Transport {
     }
   }
 
+  /** The text without mentions of this bot; other people's mentions are part of what was asked. */
+  private withoutBotMention(content: string): string {
+    return (this.botUser ? content.replace(new RegExp(`<@!?${this.botUser}>`, "g"), "") : content).trim();
+  }
+
   async onDiscordMessage(m: DiscordMessage): Promise<void> {
     if (!this.onMessage || !m?.author || m.author.bot || m.author.id === this.botUser) return;
     if (this.cfg.allow.length && !this.cfg.allow.includes(m.author.id)) return;
     let thread: string;
     if (m.channel_id === this.cfg.channel) {
-      const name = (m.content ?? "").replace(/<@!?\d+>/g, "").trim().slice(0, 80) || "Loopstra chat";
+      const name = this.withoutBotMention(m.content ?? "").slice(0, 80) || "Loopstra chat";
       try {
         const t = await this.call("POST", `/channels/${m.channel_id}/messages/${m.id}/threads`, { name, auto_archive_duration: 1440 });
         thread = String(t.id);
@@ -136,7 +141,7 @@ export class DiscordTransport implements Transport {
     } else {
       return;
     }
-    const text = (m.content ?? "").replace(/<@!?\d+>/g, "").trim();
+    const text = this.withoutBotMention(m.content ?? "");
     if (!text) {
       if (!this.warnedEmpty) this.log("Discord delivered a message with no text: turn on the Message Content intent for the bot.");
       this.warnedEmpty = true;
@@ -157,9 +162,8 @@ export class DiscordTransport implements Transport {
 
   async announce(text: string): Promise<void> {
     if (!this.cfg.announce_to) return;
-    for (const part of chunkText(text, DISCORD_MAX)) {
-      try { await this.call("POST", `/channels/${this.cfg.announce_to}/messages`, { content: part, allowed_mentions: { parse: [] } }); } catch (e) { this.log(e instanceof Error ? e.message : String(e)); return; }
-    }
+    // A failure is thrown so the service tries it again.
+    for (const part of chunkText(text, DISCORD_MAX)) await this.call("POST", `/channels/${this.cfg.announce_to}/messages`, { content: part, allowed_mentions: { parse: [] } });
   }
 
   async stop(): Promise<void> {

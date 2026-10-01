@@ -176,6 +176,10 @@ describe("Slack", () => {
       expect(service.orchestrator.store.get("slack", "C1:1.0").messages.length).toBe(4);
       await slack.announce("Blocked: x.");
       expect(stub.calls.at(-1)!.body).toEqual({ channel: "C9", text: "Blocked: x." });
+      // A long one is split like a reply, rather than refused by Slack.
+      const before = stub.calls.length;
+      await slack.announce(`Blocked: y. ${"word ".repeat(1000)}`);
+      expect(stub.calls.slice(before).filter((c) => c.method === "chat.postMessage").length).toBe(2);
     } finally {
       await service.stop();
       stub.server.stop(true);
@@ -238,7 +242,7 @@ describe("Discord", () => {
       stub.message({ id: "m2", channel_id: "500", content: "a bot", author: { id: "8", username: "b", bot: true } });
       stub.message({ id: "m3", channel_id: "999", content: "not ours", author: { id: "7", username: "ana" } });
       await until(() => stub.calls.some((c) => c.path === "/channels/100/messages"));
-      stub.message({ id: "m4", channel_id: "100", content: "with dates please", author: { id: "9", username: "bo", global_name: "Bo" } });
+      stub.message({ id: "m4", channel_id: "100", content: "<@42> with dates please, and tell <@7>", author: { id: "9", username: "bo", global_name: "Bo" } });
       await until(() => stub.calls.filter((c) => c.path === "/channels/100/messages").length === 2);
       expect(stub.calls.filter((c) => c.method === "POST").map((c) => [c.path, c.body?.name ?? c.body?.content])).toEqual([
         ["/channels/500/messages/m1/threads", "I want CSV export"],
@@ -249,6 +253,8 @@ describe("Discord", () => {
       const ps = r.prompts();
       expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts");
       expect(ps[1]!.prompt).toContain("From: Bo, who may not start drafts (<@7> may)");
+      // Only the bot's own mention is taken out; someone else's is part of what was asked.
+      expect(ps[1]!.prompt).toContain("with dates please, and tell <@7>\n</message>");
       // The thread is remembered, so a restarted bot carries on in it.
       const again = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [], announce_to: "501" }, { root: r.root, env, log: () => {} });
       let got = null as string | null;

@@ -87,3 +87,29 @@ describe("announcements", () => {
     } finally { r.cleanup(); }
   });
 });
+
+describe("announcements that fail to post (Copilot review)", () => {
+  test("are tried again next poll, in order, and the kept cursor only moves past what was posted", async () => {
+    const r = await chatRepo();
+    try {
+      const log = new AnnouncementLog(r.root);
+      const posted: string[] = [];
+      let down = true;
+      const flaky: Transport = {
+        name: "slack", via: "Slack", announceFrom: "kept", start: async () => {}, stop: async () => {}, send: async () => {},
+        announce: async (t) => { if (down && t === "second") throw new Error("Slack is down"); posted.push(t); },
+      };
+      const s = new ChatService(r.root, [flaky], { announce: false, pollMs: 60_000 });
+      await s.start();
+      log.append("first", null);
+      log.append("second", null);
+      log.append("third", null);
+      await s.poll();
+      expect(posted).toEqual(["first"]);
+      down = false;
+      await s.poll();
+      await s.stop();
+      expect(posted).toEqual(["first", "second", "third"]);
+    } finally { r.cleanup(); }
+  });
+});

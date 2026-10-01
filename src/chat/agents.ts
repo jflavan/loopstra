@@ -36,21 +36,28 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
   });
 }
 
-/** Read-only tools for both chat agents: look at the repository and the trace, run `loopstra status`, read git history. */
-export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)", "Bash(git log *)", "Bash(git show *)"];
 /**
- * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools:
- * `git log`/`git show --output=<file>` (it writes a file), and reading the usual places secrets are
- * kept (Read rules also cover Grep and Glob). This is a guard, not a sandbox: keep `allow` lists tight.
+ * Read-only tools for both chat agents: look at the repository and the trace, and run `loopstra
+ * status`. No git: `git show <rev>:<path>` and `git log -p` would read any file's content, past or
+ * present, around the Read rules below; the runtime puts recent history in the context instead.
+ */
+export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
+/**
+ * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools,
+ * reading the usual places secrets are kept is denied (Read rules also cover Grep and Glob), and so
+ * is git's own folder. This is a guard, not a sandbox: keep `allow` lists tight.
  */
 export const CHAT_DENIED = [
-  "Edit", "Write", "NotebookEdit", "PowerShell", "Bash(git log *--output*)", "Bash(git show *--output*)",
-  ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
+  "Edit", "Write", "NotebookEdit", "PowerShell",
+  ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.git/**", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
 ];
+
+/** The least a chat session may hold of the day's budget; with less left, it does not start. */
+export const MIN_SESSION_USD = 0.01;
 
 export type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
-  | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number };
+  | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number; budgetUsedUp?: true };
 
 export interface ChatAgentInput<T> {
   root: string;
@@ -60,17 +67,24 @@ export interface ChatAgentInput<T> {
   prompt: string;
   schema: z.ZodType<T>;
   model: ModelRef;
-  maxBudgetUsd: number;
+  /** The most this one session may spend; it also never holds more than is left of the day's chat budget. */
+  capUsd: number;
   resume?: string | null;
 }
 
 /**
  * One traced chat session (a turn or a writer run), under the `_chat` slug: its cost counts in the
- * dashboard and `loopstra tail _chat` shows it. Never throws for the session's own failure; a stop
- * request is passed on.
+ * dashboard and `loopstra tail _chat` shows it. Before it starts, it holds its share of the day's chat
+ * budget in the trace, so sessions running at once (other threads, other processes) never spend
+ * more than the day allows together. Never throws for the session's own failure; a stop request is
+ * passed on.
  */
 export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentResult<T>> {
-  const seq = o.trace.phaseStart(CHAT_SLUG, o.name, "agent");
+  const held = o.trace.phaseStartWithin(CHAT_SLUG, o.name, "agent", {
+    since: startOfToday(), limitUsd: o.cfg.chat.max_budget_usd_per_day, capUsd: Math.min(o.capUsd, o.cfg.claude.max_budget_usd), floorUsd: MIN_SESSION_USD,
+  });
+  if (!held) return { ok: false, reason: "budget", detail: "the day's chat budget is used up", sessionId: null, costUsd: 0, budgetUsedUp: true };
+  const seq = held.seq;
   const dir = join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${seq}-${o.name}`);
   let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
   try {
@@ -87,7 +101,7 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       allowedTools: CHAT_TOOLS,
       disallowedTools: CHAT_DENIED,
       timeoutMs: o.cfg.claude.timeout_minutes * 60_000,
-      maxBudgetUsd: o.maxBudgetUsd,
+      maxBudgetUsd: held.heldUsd,
       resume: o.resume ?? undefined,
       env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
       onEvent: (e) => { raw.write(JSON.stringify(e) + "\n"); },
@@ -122,7 +136,7 @@ export function startOfToday(now = new Date()): string {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
-/** What chat has spent since local midnight. */
+/** What chat has spent since local midnight, with what running sessions hold. */
 export function chatSpentToday(trace: Trace, now = new Date()): number {
   return trace.costSince(CHAT_SLUG, startOfToday(now));
 }

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { attention } from "../attention";
 import { loadConfig, type Config } from "../config";
@@ -68,17 +68,41 @@ function alive(pid: number): boolean {
 
 /**
  * Takes or keeps the announcer lock, `.loopstra/chat/announcer.lock`: true when this process is the
- * one that writes announcements. A holder that died, or stopped polling, loses it.
+ * one that writes announcements. Taking it is atomic: the file is created only if it does not exist.
+ * A holder that died, or stopped polling, loses it: its lock is first moved aside (a rename only one
+ * process can win), checked to be the stale one it read, and only then is a new one created.
  */
 export function holdAnnouncerLock(root: string, pid = process.pid, now = Date.now()): boolean {
   mkdirSync(chatDir(root), { recursive: true });
   const path = join(chatDir(root), "announcer.lock");
+  const text = JSON.stringify({ pid, at: new Date(now).toISOString() });
+  const create = (): boolean => {
+    try { writeFileSync(path, text, { flag: "wx" }); return true; } catch { return false; }
+  };
+  if (create()) return true;
   const held = readJson<{ pid: number; at: string }>(path);
-  const free = !held || held.pid === pid || !alive(held.pid) || now - Date.parse(held.at) > LOCK_STALE_MS;
-  if (!free) return false;
-  writeJson(path, { pid, at: new Date(now).toISOString() });
-  // Two processes may have taken it at once: whoever's write stands holds it.
-  return readJson<{ pid: number }>(path)?.pid === pid;
+  if (held?.pid === pid) {
+    // Ours: refreshed whole (temp file, then rename), so a reader never sees half of it.
+    writeJson(path, JSON.parse(text));
+    return true;
+  }
+  if (!held) {
+    // Being written this moment, or damaged: damaged only once it has stayed unreadable a while.
+    try { if (now - statSync(path).mtimeMs < LOCK_STALE_MS) return false; } catch { return create(); }
+  } else if (alive(held.pid) && now - Date.parse(held.at) <= LOCK_STALE_MS) {
+    return false;
+  }
+  const aside = `${path}.stale-${pid}-${now}`;
+  try { renameSync(path, aside); } catch { return false; }
+  const moved = readJson<{ pid: number; at: string }>(aside);
+  if (held && (moved?.pid !== held.pid || moved?.at !== held.at)) {
+    // Someone took it between the read and the rename: put theirs back (unless yet another is there) and step aside.
+    try { linkSync(aside, path); } catch { /* another lock is there now */ }
+    rmSync(aside, { force: true });
+    return false;
+  }
+  rmSync(aside, { force: true });
+  return create();
 }
 
 const IN_MAIN: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);

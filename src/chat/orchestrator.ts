@@ -10,7 +10,7 @@ import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import { Trace } from "../trace";
 import { AnnouncementLog } from "./announcer";
-import { CHAT_SLUG, chatSpentToday, chatTemplate, renderChatPrompt, runChatAgent } from "./agents";
+import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest } from "./requests";
 import { OrchestratorTurn, type Handoff } from "./schemas";
@@ -42,6 +42,8 @@ export function isYes(text: string): boolean {
 
 /** At most this many announcements go into one message's context. */
 const ANNOUNCEMENTS_IN_CONTEXT = 10;
+/** How many of the main branch's newest commits go into each message's context. */
+const HISTORY_IN_CONTEXT = 30;
 /** How long a proposal waits for its yes. */
 export const PENDING_TTL_MS = 24 * 60 * 60_000;
 
@@ -126,28 +128,36 @@ export class Orchestrator {
     return cfg.chat.max_budget_usd_per_day - chatSpentToday(trace);
   }
 
+  private budgetUsedUp(cfg: Config): string {
+    return `I have used today's chat budget ($${cfg.chat.max_budget_usd_per_day.toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise chat.max_budget_usd_per_day in loopstra/config.yaml.`;
+  }
+
   private async turn(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, say: Send, declined: string | null): Promise<void> {
-    const left = this.budgetLeft(cfg, trace);
-    if (left <= 0) {
-      await say(`I have used today's chat budget ($${cfg.chat.max_budget_usd_per_day.toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise chat.max_budget_usd_per_day in loopstra/config.yaml.`);
+    // A quick answer without building the message; the session itself holds its share of what is left (runChatAgent).
+    if (this.budgetLeft(cfg, trace) < MIN_SESSION_USD) {
+      await say(this.budgetUsedUp(cfg));
       return;
     }
     const seenUpTo = new AnnouncementLog(this.root).lastId();
     const message = await this.messageBlock(cfg, t, m, declined, seenUpTo);
-    const maxBudgetUsd = Math.max(0.01, Math.min(cfg.claude.max_budget_usd, left));
+    const capUsd = cfg.claude.max_budget_usd;
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
     let r = await runChatAgent({
-      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, maxBudgetUsd,
+      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd,
       prompt: t.sessionId ? message : await fresh(), resume: t.sessionId,
     });
     // The session is gone (cleared, or another machine): start a new one; this thread's record of its hand-offs carries over.
     if (!r.ok && r.reason === "no-session") {
       t.sessionId = null;
-      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, maxBudgetUsd, prompt: await fresh() });
+      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd, prompt: await fresh() });
     }
     if (r.sessionId) t.sessionId = r.sessionId;
     // Only what was in the message block counts as seen: announcements made during the turn come next time.
     t.lastAnnouncementSeen = seenUpTo;
+    if (!r.ok && r.budgetUsedUp) {
+      await say(this.budgetUsedUp(cfg));
+      return;
+    }
     if (!r.ok) {
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
@@ -169,18 +179,31 @@ export class Orchestrator {
     const since = (t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0)).filter((a) => a.id <= upTo);
     const announced = since.slice(-ANNOUNCEMENTS_IN_CONTEXT);
     const handoffs = t.handoffs.map((h) => `- "${h.title}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
+    // A display name is the person's own choice: kept to one line with no tags, wherever it goes, so it
+    // cannot end the context block or open another.
+    const name = m.authorName.replace(/[\s<>"]+/g, " ").trim() || "someone";
+    const history = await this.recentHistory(cfg);
     const lines = [
-      // A display name is the person's own choice: kept to one line with no tags, so it cannot end the context block.
-      `From: ${m.authorName.replace(/[\s<>]+/g, " ").trim()}, ${m.canAccept ? "who may ask you to start drafts" : `who may not start drafts (${m.acceptors} may)`}`,
+      `From: ${name}, ${m.canAccept ? "who may ask you to start drafts" : `who may not start drafts (${m.acceptors} may)`}`,
       `Where: ${m.via}`,
       `Today: ${localDate()}`,
       `Main branch: ${cfg.main_branch}; ${remote ? "intents are added through a pull request" : "no GitHub remote, so intents are added to the queue directly"}`,
       `Handed off from this conversation so far:${handoffs.length ? `\n${handoffs.join("\n")}` : " nothing yet"}`,
+      `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
     ];
     if (declined) lines.push(declined);
     const text = m.text.replace(/<\/?(message|context)\b/gi, (s) => s.replace("<", "&lt;"));
-    return `<context>\n${lines.join("\n")}\n</context>\n<message from=${JSON.stringify(m.authorName)}>\n${text}\n</message>`;
+    return `<context>\n${lines.join("\n")}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
+  }
+
+  /**
+   * The newest commits on the main branch, one line each (date and subject), read by the runtime.
+   * The agents have no git of their own: `git show` and `git log -p` could read any file's content.
+   */
+  private async recentHistory(cfg: Config): Promise<string[]> {
+    const r = await new Git(this.root).run(["log", `-${HISTORY_IN_CONTEXT}`, "--format=- %ad %s", "--date=short", cfg.main_branch, "--"], true).catch(() => null);
+    return r && r.code === 0 ? r.out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
   }
 
   /** Drafts on the main checkout, by slug; the status of anything else. */
@@ -221,8 +244,7 @@ export class Orchestrator {
   }
 
   private async doHandoff(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, h: Handoff, say: Send): Promise<void> {
-    const left = this.budgetLeft(cfg, trace);
-    if (left <= 0) {
+    if (this.budgetLeft(cfg, trace) < MIN_SESSION_USD) {
       await say(`I have used today's chat budget, so I cannot write this up until tomorrow. Say yes again then, or an engineer can raise chat.max_budget_usd_per_day.`);
       t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
       return;
@@ -230,9 +252,9 @@ export class Orchestrator {
     await say("Writing it up now. This can take a few minutes.");
     const out: HandoffOutcome = await handOff({
       root: this.root, cfg, trace, handoff: h, author: m.authorName, authorId: m.authorId, transport: m.transport, thread: m.thread, via: m.via,
-      maxBudgetUsd: Math.min(cfg.claude.max_budget_usd, left),
+      maxBudgetUsd: cfg.claude.max_budget_usd,
     });
-    if (out.kind === "failed") { await say(`I could not write that up: ${out.problem} Nothing was opened.`); return; }
+    if (out.kind === "failed") { await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`); return; }
     const slugs = out.intents.map((i) => i.slug);
     t.handoffs.push({ title: h.title.trim(), slugs, at: new Date().toISOString(), by: m.authorName, pr: out.kind === "pr" ? { number: out.number, url: out.url, branch: out.branch, state: "OPEN" } : null, local: out.kind === "local" });
     const list = out.intents.map((i) => `${i.slug}${i.update ? " (updated)" : ""}`).join(", ");

@@ -20,7 +20,7 @@ export interface Transport {
   readonly via: string;
   start(onMessage: OnMessage): Promise<void>;
   send(thread: string, text: string): Promise<void>;
-  /** Posts an announcement where this transport shows them; absent when it shows none. */
+  /** Posts an announcement where this transport shows them; absent when it shows none. Throws when it could not, so it is tried again. */
   announce?(text: string): Promise<void>;
   /**
    * Where announcements start for this transport: "now" (only while it is open; the terminal and
@@ -94,12 +94,15 @@ export class ChatService {
     try {
       if (this.opts.announce !== false) await announce(this.root, this.log);
       for (const t of this.transports) {
-        const from = this.cursors.get(t.name) ?? 0;
-        const fresh = this.log.since(from);
-        if (!fresh.length) continue;
-        this.cursors.set(t.name, fresh.at(-1)!.id);
-        if (t.announceFrom === "kept") writeJson(this.cursorPath(t.name), { id: fresh.at(-1)!.id });
-        if (t.announce) for (const a of fresh) { try { await t.announce(a.text); } catch { /* the transport says why */ } }
+        // The cursor moves past an announcement only once it is posted: one that fails is tried again
+        // next poll (it and everything after it), never skipped.
+        for (const a of this.log.since(this.cursors.get(t.name) ?? 0)) {
+          if (t.announce) {
+            try { await t.announce(a.text); } catch (e) { this.traceError(`announce-${t.name}`, e); break; }
+          }
+          this.cursors.set(t.name, a.id);
+          if (t.announceFrom === "kept") writeJson(this.cursorPath(t.name), { id: a.id });
+        }
       }
       for (const r of takeResults(this.root, new Set(this.transports.map((t) => t.name)))) {
         const t = this.transport(r.transport);

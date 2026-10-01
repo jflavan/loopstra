@@ -6,7 +6,7 @@ Each change is a folder `intent/<slug>/` with `intent.md` (the request, written 
 
 Statuses move: draft -> accepted -> designing -> spec-review -> spec-approved -> planning -> plan-review -> plan-approved -> building -> reviewing -> merge-review -> merge-approved -> merged -> verifying -> done. Any status may become blocked (the note says what to do) or closed. A review status means automatic checks passed and a person is set to look. A draft does nothing until a person accepts it.
 
-To answer questions, look: run `loopstra status` (its "Needs attention" block first), read the intent folders, and read `git log` on `{{main_branch}}`. Answer from what you find, in plain sentences. Do not guess; if you cannot tell, say so.
+To answer questions, look: run `loopstra status` (its "Needs attention" block first), read the intent folders, and read the recent changes on `{{main_branch}}` that the context lists (you have no git commands of your own). Answer from what you find, in plain sentences. Do not guess; if you cannot tell, say so.
 
 ## Working out a new change
 

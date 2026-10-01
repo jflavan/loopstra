@@ -136,7 +136,8 @@ export class SlackTransport implements Transport {
 
   async announce(text: string): Promise<void> {
     if (!this.cfg.announce_to) return;
-    try { await this.call("chat.postMessage", { channel: this.cfg.announce_to, text }); } catch (e) { this.log(String(e instanceof Error ? e.message : e)); }
+    // Long like any reply (a note can be), and a failure is thrown so the service tries it again.
+    for (const part of chunkText(text, SLACK_MAX)) await this.call("chat.postMessage", { channel: this.cfg.announce_to, text: part });
   }
 
   async stop(): Promise<void> {

@@ -139,12 +139,34 @@ export class Trace {
     this.event(slug, "status_change", { from, to, note });
   }
 
-  phaseStart(slug: string, name: string, kind: "agent" | "code" | "human"): number {
-    const row = this.db.query<{ m: number | null }, [string]>("SELECT MAX(seq) AS m FROM phases WHERE slug = ?").get(slug);
-    const seq = (row?.m ?? 0) + 1;
-    this.db.run("INSERT INTO phases (slug, seq, name, kind, status, started) VALUES (?, ?, ?, ?, 'running', ?)", [slug, seq, name, kind, now()]);
+  /**
+   * Starts a phase. The sequence number is chosen and the row inserted in one statement, so two
+   * processes starting phases of the same slug at once (chat in the dashboard and in `loopstra chat`)
+   * never pick the same number.
+   */
+  phaseStart(slug: string, name: string, kind: "agent" | "code" | "human", costUsd = 0): number {
+    const seq = this.db.query<{ seq: number }, [string, string, string, string, number, string]>(
+      "INSERT INTO phases (slug, seq, name, kind, status, started, cost_usd) SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, 'running', ?4, ?5 FROM phases WHERE slug = ?6 RETURNING seq",
+    ).get(slug, name, kind, now(), costUsd, slug)!.seq;
     this.event(slug, "phase_start", { name, kind }, seq);
     return seq;
+  }
+
+  /**
+   * Starts a phase that holds part of a daily budget until it ends: in one transaction, works out
+   * what is left of `limitUsd` since `since` (phases still running count at what they hold), and,
+   * when at least `floorUsd` is, starts the phase holding up to `capUsd` of it. `phaseEnd` then
+   * records what it really cost. Null when too little is left. Safe across processes.
+   */
+  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number }): { seq: number; heldUsd: number } | null {
+    const reserve = this.db.transaction(() => {
+      const spent = this.costSince(slug, budget.since);
+      const left = budget.limitUsd - spent;
+      if (left < budget.floorUsd) return null;
+      const heldUsd = Math.min(budget.capUsd, left);
+      return { seq: this.phaseStart(slug, name, kind, heldUsd), heldUsd };
+    });
+    return reserve.immediate();
   }
 
   /** Ends a phase. `denied`: commands the session was not allowed to run, kept on the phase_end event. */

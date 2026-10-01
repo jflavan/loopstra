@@ -51,7 +51,7 @@ A new command, `loopstra chat`, runs separately from `loopstra start`. The loop 
 Each user message is one headless `claude -p` call, using the runner that already exists in `src/claude.ts`:
 
 - `--resume <session id>` for that thread, so the conversation carries over. Session ids are kept with each thread's state in `.loopstra/chat/threads/`. Subscription auth, no API key, as everywhere else.
-- `cwd` is the repo root, read-only tools: `Read`, `Glob`, `Grep`, `Bash(loopstra status)` (with or without arguments), `Bash(git log *)`, `Bash(git show *)`. No `Edit`, no `Write`.
+- `cwd` is the repo root, read-only tools: `Read`, `Glob`, `Grep`, `Bash(loopstra status)` (with or without arguments). No `Edit`, no `Write`, and no git: `git show <rev>:<path>` and `git log -p` would read any file's past content around the read rules, so the runtime puts the main branch's newest commit subjects in each message's context instead.
 - A new `loopstra/prompts/orchestrator.md` system prompt carrying what the operator skill already knows: the state machine, what each status means for a person, how big one intent can be, when to split and use `depends_on`, plain language for owners.
 - `--json-schema` so the turn returns structured output, like every phase:
 

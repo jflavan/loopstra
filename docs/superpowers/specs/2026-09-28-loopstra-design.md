@@ -322,7 +322,7 @@ slug, and fall back to the shipped template when the repository has none.
 
 | Phase | Session | Tools | Output |
 |---|---|---|---|
-| orchestrator | one per chat thread, resumed each message; `chat.model` | read-only plus `loopstra status` and read-only git | `reply`, `handoff` (title, brief, updates) or null, `accept` (slug) or null |
+| orchestrator | one per chat thread, resumed each message; `chat.model` | read-only plus `loopstra status`; no git (the runtime puts the newest commit subjects in each message's context) | `reply`, `handoff` (title, brief, updates) or null, `accept` (slug) or null |
 | write-intent | fresh per hand-off, `stages.design.model` | the same | `status`, `summary`, `intents[{slug, title, priority, depends_on, problem, proposed_outcome, done_when, affected_users_and_systems, constraints, open_questions}]` |
 
 ## 8. Stage flows
@@ -846,7 +846,9 @@ decisions are in `docs/decisions.md` ("Orchestrator chat").
 
 - `loopstra chat` and the `loopstra ui` panel run the orchestrator, one
   resumed session per thread. It answers from the intents, `loopstra status`
-  and git, and works out new changes with people. It cannot write files.
+  and the main branch's newest commit subjects (put in its context by the
+  runtime; it has no git of its own), and works out new changes with people.
+  It cannot write files.
 - When it proposes a hand-off or a start, code asks a fixed question and
   acts only on a plain yes. A hand-off goes to a fresh writer that sees only
   the brief; its intents are rendered by code, checked (slugs, clashes,

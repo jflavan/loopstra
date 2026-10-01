@@ -15,7 +15,8 @@ import { writeIntents, type WrittenIntent } from "./writer";
 export type HandoffOutcome =
   | { kind: "pr"; number: number; url: string; branch: string; intents: WrittenIntent[] }
   | { kind: "local"; intents: WrittenIntent[] }
-  | { kind: "failed"; problem: string };
+  /** `pushed`: a branch that went up although its pull request could not be opened. */
+  | { kind: "failed"; problem: string; pushed?: string };
 
 export interface HandoffInput {
   root: string; cfg: Config; trace: Trace; handoff: Handoff;
@@ -59,6 +60,15 @@ export function prBody(h: Handoff, intents: WrittenIntent[], summary: string, au
 export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
   const git = new Git(o.root);
   const remote = await git.remoteName();
+  // Once the request is left or the pull request exists, the hand-off has happened: a later problem
+  // (tracing, removing the throwaway checkout) is recorded, never reported as nothing being opened,
+  // which would invite a second, duplicate hand-off.
+  let done: HandoffOutcome | null = null;
+  // A branch pushed without its pull request: said, so nobody is told nothing happened.
+  let pushed: string | null = null;
+  const note = (what: Record<string, unknown>) => {
+    try { o.trace.event(CHAT_SLUG, what.error ? "error" : what.kind === "new" ? "chat-request" : "chat-pr", what); } catch { /* the outcome stands without its trace line */ }
+  };
   try {
     if (!remote) {
       const w = await writeIntents({ ...o, source: o.root });
@@ -67,8 +77,9 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
         kind: "new", title: o.handoff.title, intents: w.intents.map((i) => ({ slug: i.slug, text: i.text, update: i.update })),
         by: o.authorId, byName: o.author, transport: o.transport, thread: o.thread,
       });
-      o.trace.event(CHAT_SLUG, "chat-request", { kind: "new", slugs: w.intents.map((i) => i.slug), by: o.author });
-      return { kind: "local", intents: w.intents };
+      done = { kind: "local", intents: w.intents };
+      note({ kind: "new", slugs: w.intents.map((i) => i.slug), by: o.author });
+      return done;
     }
     const main = o.cfg.main_branch;
     await git.run(["fetch", "-q", remote, main]);
@@ -88,13 +99,17 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       await there.runtime("commit", ["-q", "-m", subject]);
       const branch = await freeBranch(git, remote, first);
       await there.run(["push", "-q", remote, `HEAD:refs/heads/${branch}`]);
+      pushed = branch;
       const pr = await new GitHub(wt).createPr({ head: branch, base: main, title: oneLine(o.handoff.title, 100) || subject, body: prBody(o.handoff, w.intents, w.summary, o.author, o.via) });
-      o.trace.event(CHAT_SLUG, "chat-pr", { number: pr.number, url: pr.url, branch, slugs: w.intents.map((i) => i.slug), by: o.author });
-      return { kind: "pr", number: pr.number, url: pr.url, branch, intents: w.intents };
+      done = { kind: "pr", number: pr.number, url: pr.url, branch, intents: w.intents };
+      note({ kind: "pr", number: pr.number, url: pr.url, branch, slugs: w.intents.map((i) => i.slug), by: o.author });
+      return done;
     });
   } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    o.trace.event(CHAT_SLUG, "error", { where: "handoff", error: errorText(e) });
+    if (e instanceof StopRequested && !done) throw e;
+    note({ where: "handoff", error: errorText(e), afterPublishing: done !== null, pushed });
+    if (done) return done;
+    if (pushed) return { kind: "failed", pushed, problem: `The intents were pushed to the branch ${pushed}, but the pull request could not be opened (${errorText(e).split("\n")[0]}). An engineer can open it from that branch, or delete the branch.` };
     return { kind: "failed", problem: `Something went wrong while opening the pull request (${errorText(e).split("\n")[0]}). An engineer can find the details in the trace.` };
   }
 }

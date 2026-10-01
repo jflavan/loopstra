@@ -181,6 +181,23 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
+  test("with a remote: a branch that went up without its pull request is named, not reported as nothing opened", async () => {
+    const r = await chatRepo({ remote: true });
+    try {
+      await r.answer("orchestrator", 1, turn("Agreed.", { handoff: HANDOFF }));
+      await r.answer("write-intent", 1, { status: "success", summary: "s", intents: [draft("csv-export")] });
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("write it"), out.send);
+      // gh is gone by the time the pull request is opened.
+      process.env.LOOPSTRA_GH_EXECUTABLE = join(r.root, "no-such-gh");
+      await o.handle(message("yes"), out.send);
+      expect(out.sent.at(-1)).toMatch(/^I could not write that up: The intents were pushed to the branch intent-proposal\/csv-export, but the pull request could not be opened .*An engineer can open it from that branch, or delete the branch\.$/);
+      expect(out.sent.at(-1)).not.toContain("Nothing was opened");
+      expect((await run(["git", "branch", "--list", "intent-proposal/*"], r.remote!)).out.trim()).toBe("intent-proposal/csv-export");
+    } finally { r.cleanup(); }
+  });
+
   test("with a remote: a writer that fails twice opens nothing", async () => {
     const r = await chatRepo({ remote: true });
     try {
