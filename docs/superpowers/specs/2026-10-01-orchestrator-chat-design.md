@@ -1,6 +1,6 @@
 # Orchestrator chat: talk to Loopstra, get intents as pull requests
 
-Status: proposal. Nothing here is built yet. Replaces the earlier "intent sources" proposal (raw chat messages turned straight into draft intents).
+Status: proposal, decisions recorded below. Nothing here is built yet. Replaces the earlier "intent sources" proposal (raw chat messages turned straight into draft intents).
 
 ## Problem
 
@@ -34,7 +34,7 @@ What we want instead is one agent to talk to, from wherever we are:
 
 Three roles, each kept to what it is good at, the same split the loop already uses:
 
-1. **Orchestrator (agent).** Converses. Reads; never writes. Decides when a conversation has produced something worth handing off, and says so.
+1. **Orchestrator (agent).** Converses. Reads; never writes. Decides when a conversation has produced something worth handing off, and says so. Its one action is asking the runtime to accept a draft, for a named acceptor (see "Accepting from chat").
 2. **Writer (agent).** Turns an agreed brief into intents that pass the loop's own consistency check. Fresh context, so it writes from the brief alone and the brief has to be complete (the same reason gates use fresh-context reviewers).
 3. **Runtime (code).** Holds conversations, runs both agents, asks for confirmation, writes the files, makes the branch, commit and pull request, and posts announcements. Agents propose, the runtime writes.
 
@@ -64,8 +64,11 @@ type OrchestratorTurn = {
                                  // open questions, suggested split, depends_on, priority
     updates?: string[];          // slugs of existing draft intents this changes, if any
   };
+  accept: null | { slug: string };  // the person asked to start this draft (see "Accepting from chat")
 };
 ```
+
+**A running thread.** A thread is not finished by a hand-off. The same conversation can go on to the next feature, refine something already handed off, or accept it once its PR merges. The thread's state file keeps, besides the session id, the hand-offs made from it (title, slugs, PR link and state), and each turn's prompt is prefixed with that list, so the orchestrator knows what this thread has already produced even after its context is compacted.
 
 Each turn is traced as a phase under the `_chat` slug, so its cost shows in the dashboard's totals and `loopstra tail _chat` shows the conversation's activity.
 
@@ -75,7 +78,9 @@ The orchestrator can only propose a hand-off; it never triggers one on its own s
 
 ### Announcements
 
-The orchestrator should tell us things, not only answer. `src/attention.ts` already computes the "Needs attention" list for `status` and the dashboard. `loopstra chat` re-reads it every `poll_seconds` and, for items that are new since the last announcement (kept in `.loopstra/chat/announced.json`), posts one plain message to the configured announcement thread: blocked with its note, waiting for a person, main's tests failing, the loop paused. Plus two events people care about that are not "attention": a change merged, and an intent PR the writer opened was merged (so its work is now queued).
+The orchestrator should tell us things, not only answer. `src/attention.ts` already computes the "Needs attention" list for `status` and the dashboard. `loopstra chat` re-reads it every `poll_seconds` and, for items that are new since the last announcement (kept in `.loopstra/chat/announced.json`), posts one plain message: blocked with its note, waiting for a person, main's tests failing, the loop paused. Plus two events people care about that are not "attention": a change merged, and an intent PR the writer opened was merged (so its work is now queued).
+
+Announcements go only where configured: each bot transport posts to its `announce_to` channel. The terminal and the dashboard panel show them while they are open; they do not queue up for later.
 
 Announcements are code, not agent turns: no cost, and the wording is the same as `status`. They are also appended to the thread's session as context, so "why?" after an announcement works.
 
@@ -117,20 +122,24 @@ The runtime, not an agent:
 
 ### What status the files carry
 
-Two options; this is the main decision to make.
-
-- **A. Merging is accepting.** Files are written with `status: accepted`. Reviewing and merging the PR is the person's acceptance, so the change starts on the next tick after the merge reaches main. One step for the person, and the review happens in the place engineers already review. The rule "a person always accepts" still holds; the act just moves from editing a status line to approving a PR. Branch protection decides who may accept.
-- **B. Merging is filing.** Files are written as `status: draft`. Merging only puts them in the queue; someone still sets `accepted`. Two steps, but nothing starts without the status line, exactly as today.
-
-Recommendation: A, with a config switch (`chat.pr_status: accepted | draft`, default `accepted`) for teams that want B.
+Decided: **merging is filing.** The PR's files carry `status: draft`. Merging puts them in the queue and nothing starts until someone accepts, either by editing the status line as today or by telling the orchestrator (next section).
 
 ### Without a remote
 
-No PR is possible. The runtime writes the files as `draft` straight into `intent/` on the main checkout's working tree (not committed, as a person would) and says so in the chat. The loop treats them like any hand-written draft.
+No PR is possible. Since only the loop writes the main checkout, `loopstra chat` leaves the rendered files in `.loopstra/chat/new/<slug>/`, and the loop moves them into `intent/` as `draft` at the start of its next tick and commits them as bookkeeping (the same path as accept requests). The chat says so, and the loop then treats them like any hand-written draft.
 
 ### Changing an existing intent
 
-When the brief names `updates`, the writer returns the new text for those slugs and the PR edits them. Only intents still in `draft` (or `accepted` with A, before the loop has started them) may be changed this way; for anything further along, the orchestrator explains that the change should be closed and a new one written, or a person should edit it. The runtime enforces this, not the prompt.
+When the brief names `updates`, the writer returns the new text for those slugs and the PR edits them. Only intents still in `draft` may be changed this way; for anything further along, the orchestrator explains that the change should be closed and a new one written, or a person should edit it. The runtime enforces this, not the prompt.
+
+## Accepting from chat
+
+The orchestrator is read-only with one exception: moving a `draft` to `accepted` when an acceptor asks.
+
+- **Who.** Only people on `chat.acceptors` (per transport, user ids). Anyone on `chat.allow` can talk to it, ask for updates and agree requirements; only acceptors can start work.
+- **How it is asked.** The orchestrator returns `accept: { slug }` in its structured output when the person asks for it. As with a hand-off, the runtime, not the agent, then asks a fixed question, "Start work on add-csv-export now?", and only a yes from an acceptor goes ahead. A person not on the list is told plainly that they cannot accept, and who can.
+- **Who writes.** Not the chat process. The loop is the only writer of the main checkout, and keeping it that way avoids two processes committing on `main` at once. `loopstra chat` drops a request in `.loopstra/chat/accept/<slug>.json` (who, when, which thread). At the start of its next tick, right after `syncMain`, the loop applies each request with `writeIntent(intent, { status: "accepted" }, { expectStatus: "draft" })`, so a person's edit in the meantime wins, commits it as bookkeeping (`loopstra(<slug>): accepted by <name> from chat [skip ci]`), traces who accepted, and deletes the request.
+- **Reporting back.** The chat process sees the request disappear and the status change, and replies "Started." in the thread. A request the loop could not apply (the status was no longer `draft`, the intent is not on main yet because its PR is unmerged) gets a plain reply saying why. If the loop is not running, the reply says the change will start when it is.
 
 ## Transports
 
@@ -145,55 +154,66 @@ interface Transport {
 }
 ```
 
-Proposed order:
+All four are wanted. Built in this order, each on the same core:
 
-1. **Dashboard panel.** A chat box in `loopstra ui`, one thread per browser tab, posting to `/api/chat`. Local only (127.0.0.1), no credentials, easiest to test. Good place to get the orchestrator's prompt right.
-2. **Terminal.** `loopstra chat` with no transports configured is a plain REPL. Nearly free once 1 exists.
-3. **Slack.** Bot in one channel; each top-level message starts a thread, replies continue it. Socket Mode (an outbound websocket) works without a public address, so it still runs on a laptop. Token in an environment variable named in config, never in the file.
+1. **Terminal.** `loopstra chat` with no bot transports configured is a plain REPL. Quickest place to get the orchestrator's prompt right.
+2. **Dashboard panel.** A chat box in `loopstra ui`, one thread per browser tab, posting to `/api/chat`. Local only (127.0.0.1), no credentials.
+3. **Slack.** Bot in one channel; each top-level message starts a thread, replies continue it. Socket Mode (an outbound websocket) works without a public address, so it still runs on a laptop. Tokens in environment variables named in config, never in the file.
 4. **Discord.** Gateway connection, same thread model; needs the Message Content intent.
 
-Only people on `chat.allow` (per transport, user ids) can talk to it; others are ignored. Announcements go to `chat.announce_to` (a channel or thread per transport).
+Only people on `allow` (per transport, user ids) can talk to it; others are ignored. Terminal and dashboard are local, so whoever runs them is allowed and is an acceptor.
 
 ## Config
 
 ```yaml
 chat:
   model: default                  # orchestrator; writer uses stages.design.model
-  pr_status: accepted             # or draft; see "What status the files carry"
   max_budget_usd_per_day: 5       # chat turns + writer runs; past it the orchestrator replies that it is out for today
   transports:
     slack:
       token_env: LOOPSTRA_SLACK_APP_TOKEN
       bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
       channel: C0123ABCD
-      allow: [U01AAA, U01BBB]
+      allow: [U01AAA, U01BBB, U01CCC]   # may chat
+      acceptors: [U01AAA]               # may also accept drafts
       announce_to: C0123ABCD
+    discord:
+      token_env: LOOPSTRA_DISCORD_TOKEN
+      channel: "1234567890"
+      allow: []
+      acceptors: []
+      announce_to: "1234567890"
 ```
 
-The block is optional; without it, `loopstra chat` is the terminal REPL and `loopstra ui` gets the panel.
+The block is optional; without it, `loopstra chat` is the terminal REPL and `loopstra ui` gets the panel. Validated on load like the rest of the file; unknown keys are errors.
 
 ## Safety
 
-- The orchestrator cannot write files or change statuses. Its only lever is proposing a hand-off, which code shows to a person and waits for a yes on.
+- The orchestrator cannot write files. Its levers are proposing a hand-off and asking to accept a draft; code shows each to a person and waits for a yes, and acceptance needs a person on `acceptors`.
 - The writer cannot write files either; the runtime checks slugs, renders the template and runs the consistency check.
-- Every intent reaches the loop through a reviewed, merged PR (with a remote). Chat text never becomes build instructions without a person approving it twice: once in the chat, once on the PR.
+- Every intent reaches the loop through a reviewed, merged PR (with a remote), and still starts only when a person accepts it. Chat text never becomes build instructions without a person approving it in chat, on the PR, and again by accepting.
+- Only the loop writes the main checkout; the chat process only leaves requests for it.
 - `allow` lists gate who can talk to it at all; Slack and Discord messages are untrusted text and are delimited as such in prompts.
 - A daily budget caps what chat can spend, separate from the loop's per-session budget.
 
 ## Testing
 
-The fake `claude` and fake `gh` executables the suite already uses cover both agents and the PR. New cases: a hand-off is never acted on without a yes; a writer result that fails `checkConsistency` gets one rewrite, then a chat message and no PR; slug clashes; updates refused for intents past `accepted`; announcements once per new attention item; a dashboard `/api/chat` round trip; the loop and `loopstra chat` running together without touching each other's checkout. Slack and Discord adapters get a stub server via a base-URL environment variable.
+The fake `claude` and fake `gh` executables the suite already uses cover both agents and the PR. New cases: a hand-off is never acted on without a yes; a writer result that fails `checkConsistency` gets one rewrite, then a chat message and no PR; slug clashes; updates refused for intents past `draft`; announcements once per new attention item; a dashboard `/api/chat` round trip; accept requests from a non-acceptor refused, from an acceptor applied once by the next tick, and lost to a person's edit when the status already moved; the loop and `loopstra chat` running together without touching each other's checkout. Slack and Discord adapters get a stub server via a base-URL environment variable.
 
 ## Rollout
 
-1. Orchestrator turn + prompt, terminal REPL, read-only Q&A about status. (Useful on its own.)
-2. Hand-off, confirmation, writer, PR. Option A for status.
-3. Announcements.
-4. Dashboard panel.
-5. Slack, then Discord.
+1. Orchestrator turn + prompt, terminal REPL, read-only Q&A about status. Useful on its own.
+2. Hand-off, confirmation, writer, PR with `draft` files. Running threads.
+3. Accepting from chat: request files, the loop applying them, acceptors.
+4. Announcements.
+5. Dashboard panel.
+6. Slack, then Discord.
 
-## Open questions
+## Decisions
 
-- A or B for the status the PR's files carry?
-- Should one conversation be able to hand off more than once (a running "product thread"), or does a hand-off end the thread?
-- Should the orchestrator be able to do the small owner actions it can see the need for (set `closed`, retry a blocked change from its `resume_from`) behind the same yes-confirmation, or stay strictly read-only and tell the person what to edit?
+- **PR files are drafts.** Merging an intent PR files the intents; it does not start them.
+- **Accepting from chat** is allowed, for people on `acceptors`, confirmed with a yes, applied by the loop.
+- **Otherwise read-only.** No retrying, closing or other status changes from chat; it tells the person what to edit.
+- **Running threads.** One conversation can hand off many times.
+- **All four surfaces**, built terminal, dashboard, Slack, Discord.
+- **Announcements** go to each bot's configured channel, and show in the terminal and dashboard while open.
