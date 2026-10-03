@@ -320,10 +320,10 @@ describe("the daily budget is held, not just checked (Copilot review)", () => {
     } finally { r.cleanup(); }
   });
 
-  test("with the default settings, a session holds chat.max_budget_usd_per_session, not the whole day", async () => {
-    const r = await chatRepo();
+  test("a session holds at most chat.max_budget_usd_per_session of the day", async () => {
+    const r = await chatRepo({ config: "chat:\n  max_budget_usd_per_day: 5\n  max_budget_usd_per_session: 2\n" });
     try {
-      // Another conversation's session is running with what a session may hold by default.
+      // Another conversation's session is running with what a session may hold.
       const t = Trace.open(r.root);
       try { t.phaseStart(CHAT_SLUG, "orchestrator", "agent", 2); } finally { t.close(); }
       await r.answer("orchestrator", 1, turn("answered"));
@@ -332,6 +332,19 @@ describe("the daily budget is held, not just checked (Copilot review)", () => {
       expect(out.sent).toEqual(["answered"]);
       const args = r.prompts()[0]!.args;
       expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("2");
+    } finally { r.cleanup(); }
+  });
+
+  test("with no budgets set, a session has no cap and nothing is held", async () => {
+    const r = await chatRepo();
+    try {
+      await r.answer("orchestrator", 1, turn("answered"));
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent).toEqual(["answered"]);
+      expect(r.prompts()[0]!.args).not.toContain("--max-budget-usd");
+      const t = Trace.open(r.root);
+      try { expect(t.phases(CHAT_SLUG).map((p) => p.status)).toEqual(["success"]); } finally { t.close(); }
     } finally { r.cleanup(); }
   });
 });

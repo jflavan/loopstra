@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { limitOf } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -132,8 +133,8 @@ type BlockingReason = Exclude<FailureReason, "environment" | "not-started">;
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
 export function ownerNote(reason: BlockingReason): string {
   switch (reason) {
-    case "timeout": return TIMEOUT_NOTE;
-    case "budget": return "This step hit its spending limit. An engineer may need to raise the limit.";
+    case "timeout": return `${TIMEOUT_NOTE} An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.`;
+    case "budget": return "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
     case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "invalid-envelope": return "The assistant's report could not be read.";
@@ -191,7 +192,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
-      maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
+      maxBudgetUsd: limitOf(ctx.cfg.claude.max_budget_usd),
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
       onEvent: (e) => {

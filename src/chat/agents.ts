@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
-import { CHAT_SLUG, MIN_SESSION_USD, startOfToday } from "../budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
 import { runPhase, type FailureReason } from "../claude";
 import { modelFor, type Config, type ModelRef } from "../config";
 import { jsonSchemaOf } from "../envelopes";
@@ -68,7 +68,7 @@ export interface ChatAgentInput<T> {
   prompt: string;
   schema: z.ZodType<T>;
   model: ModelRef;
-  /** The most this one session may spend; it also never holds more than is left of the day's chat budget. */
+  /** The most this one session may spend (Infinity: no cap of its own); it also never holds more than is left of the day's chat budget. */
   capUsd: number;
   resume?: string | null;
 }
@@ -81,11 +81,15 @@ export interface ChatAgentInput<T> {
  * passed on.
  */
 export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentResult<T>> {
+  const day = limitOf(o.cfg.chat.max_budget_usd_per_day);
   const held = o.trace.phaseStartWithin(CHAT_SLUG, o.name, "agent", {
-    since: startOfToday(), limitUsd: o.cfg.chat.max_budget_usd_per_day, capUsd: Math.min(o.capUsd, o.cfg.claude.max_budget_usd, o.cfg.chat.max_budget_usd_per_session), floorUsd: MIN_SESSION_USD,
+    since: startOfToday(), limitUsd: day,
+    capUsd: Math.min(o.capUsd, limitOf(o.cfg.claude.max_budget_usd), limitOf(o.cfg.chat.max_budget_usd_per_session)), floorUsd: MIN_SESSION_USD,
+    // A chat process killed mid-turn leaves its row running; its hold stops counting once stale.
+    runningSince: staleBefore(o.cfg),
   });
   if (!held) {
-    const why = o.cfg.chat.max_budget_usd_per_day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
+    const why = day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
   const seq = held.seq;

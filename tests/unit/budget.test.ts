@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHAT_SLUG, limitOf, staleBefore } from "../../src/budget";
-import { ConfigSchema } from "../../src/config";
+import { validateConfig } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -39,7 +39,7 @@ describe("budget pools", () => {
   });
 
   test("a hold goes stale after the session timeout and a grace period", () => {
-    const cfg = ConfigSchema.parse({ version: 1, commands: { test: "x" }, claude: { timeout_minutes: 30 } });
+    const cfg = validateConfig({ version: 1, commands: { test: "x" }, claude: { timeout_minutes: 30 } });
     const now = new Date("2026-10-02T12:00:00Z");
     expect(staleBefore(cfg, now)).toBe("2026-10-02T11:20:00.000Z");
   });

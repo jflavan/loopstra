@@ -47,10 +47,10 @@ const discordTransport = z.object({
 const chat = z.object({
   /** The orchestrator's model; the writer uses stages.design.model. */
   model: modelRef.default("default"),
-  /** What chat turns and writer runs may spend in a day, together. */
-  max_budget_usd_per_day: z.number().positive().default(5),
-  /** What one chat turn or writer run may hold of that, so others can run at the same time. */
-  max_budget_usd_per_session: z.number().positive().default(2),
+  /** What chat turns and writer runs may spend in a day, together. Unset: no limit. */
+  max_budget_usd_per_day: z.number().positive().optional(),
+  /** What one chat turn or writer run may hold of that, so others can run at the same time. Unset: no limit. */
+  max_budget_usd_per_session: z.number().positive().optional(),
   transports: z.object({
     slack: slackTransport.optional(),
     discord: discordTransport.optional(),
@@ -81,7 +81,10 @@ export const ConfigSchema = z.object({
       strong: z.string().default("opus"),
     }).strict().prefault({}),
     timeout_minutes: z.number().positive().default(30),
-    max_budget_usd: z.number().positive().default(5),
+    /** What one session may spend. Unset: no limit (timeout_minutes still ends a session). */
+    max_budget_usd: z.number().positive().optional(),
+    /** What the loop's sessions (every change's, not chat's) may spend together since local midnight. Unset: no limit. */
+    max_budget_usd_per_day: z.number().positive().optional(),
     // Git that only reads: the runtime makes every commit, branch, and merge itself.
     allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
   }).strict().prefault({}),
@@ -126,6 +129,11 @@ export async function loadConfig(root: string): Promise<Config> {
   } catch (e) {
     throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${errorText(e)}`);
   }
+  return validateConfig(raw);
+}
+
+/** Checks a parsed config against the schema. Throws a ConfigError listing every problem in plain words. */
+export function validateConfig(raw: unknown): Config {
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     const lines = result.error.issues.map((i) => {
