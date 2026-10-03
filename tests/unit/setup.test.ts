@@ -140,7 +140,34 @@ describe("loopstra setup", () => {
       const checks: Check[] = [{ level: "ok", text: "fine" }, { level: "warn", text: "hmm" }, { level: "fail", text: "broken" }];
       expect(await setup(r.root, { output: o.output, defaults: true, sections: [fake({ checks })] })).toBe(0);
       expect(o.text()).toContain("Checks:\n  ok    fine\n  warn  hmm\n  FAIL  broken\n");
-      expect(o.text()).toContain("To fix: 2 items above.");
+      expect(o.text()).toContain("To fix: 2 items above. Run loopstra setup fake again once fixed, or loopstra setup --check.");
+    } finally { r.cleanup(); }
+  });
+
+  test("To fix names the sections whose checks are not ok", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      const sections = [
+        fake({ name: "one", checks: [{ level: "warn", text: "hmm" }] }),
+        fake({ name: "two", checks: [{ level: "ok", text: "fine" }] }),
+        fake({ name: "three", checks: [{ level: "fail", text: "broken" }, { level: "fail", text: "also broken" }] }),
+      ];
+      expect(await setup(r.root, { output: o.output, check: true, sections })).toBe(1);
+      expect(o.text()).toContain("To fix: 3 items above. Run loopstra setup one or loopstra setup three again once fixed, or loopstra setup --check.");
+    } finally { r.cleanup(); }
+  });
+
+  test("the sections' checks run at the same time, and are listed in section order", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      let secondStarted!: () => void;
+      const started = new Promise<void>((resolve) => { secondStarted = resolve; });
+      const first = fake({ name: "first", check: async () => { await started; return [{ level: "ok", text: "first" }]; } });
+      const second = fake({ name: "second", check: async () => { secondStarted(); return [{ level: "ok", text: "second" }]; } });
+      expect(await setup(r.root, { output: o.output, check: true, sections: [first, second], checkMs: 2000 })).toBe(0);
+      expect(o.text()).toContain("Checks:\n  ok    first\n  ok    second\n");
     } finally { r.cleanup(); }
   });
 

@@ -125,18 +125,19 @@ function duration(ms: number): string {
   return ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`;
 }
 
+/** Every section's checks at the same time, each under the time limit, listed in section order and marked with their section. */
 async function runChecks(sections: Section[], ctx: SetupContext, cfg: Config, checkMs?: number): Promise<Check[]> {
   const limit = checkMs ?? (cfg.claude.timeout_minutes + 1) * 60_000;
   const late = Symbol("late");
-  const all: Check[] = [];
-  for (const s of sections) {
+  const one = async (s: Section): Promise<Check[]> => {
     try {
       const checks = await within(s.check(ctx, cfg), limit, late);
-      if (checks === late) all.push({ level: "fail", text: `${s.title}: the check did not finish in ${duration(limit)}` });
-      else all.push(...checks);
-    } catch (e) { all.push({ level: "fail", text: `${s.title}: the check could not run: ${errorText(e)}` }); }
-  }
-  return all;
+      if (checks === late) return [{ level: "fail", text: `${s.title}: the check did not finish in ${duration(limit)}` }];
+      return checks;
+    } catch (e) { return [{ level: "fail", text: `${s.title}: the check could not run: ${errorText(e)}` }]; }
+  };
+  const all = await Promise.all(sections.map(async (s) => (await one(s)).map((c) => ({ ...c, section: s.name }))));
+  return all.flat();
 }
 
 const MARK: Record<Check["level"], string> = { ok: "ok  ", warn: "warn", fail: "FAIL" };
@@ -145,6 +146,10 @@ function report(checks: Check[], out: (line: string) => void): void {
   if (!checks.length) return;
   out("\nChecks:");
   for (const c of checks) out(`  ${MARK[c.level]}  ${c.text}`);
-  const toFix = checks.filter((c) => c.level !== "ok").length;
-  if (toFix) out(`\nTo fix: ${toFix} item${toFix > 1 ? "s" : ""} above. Run loopstra setup <section> again once fixed, or loopstra setup --check.`);
+  const toFix = checks.filter((c) => c.level !== "ok");
+  if (!toFix.length) return;
+  // The command takes one section at a time, so each is named as its own command.
+  const runs = [...new Set(toFix.map((c) => c.section))].map((name) => (name ? `loopstra setup ${name}` : "loopstra setup"));
+  const which = runs.length > 1 ? `${runs.slice(0, -1).join(", ")} or ${runs.at(-1)}` : runs[0];
+  out(`\nTo fix: ${toFix.length} item${toFix.length > 1 ? "s" : ""} above. Run ${which} again once fixed, or loopstra setup --check.`);
 }

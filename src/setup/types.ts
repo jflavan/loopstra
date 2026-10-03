@@ -17,6 +17,8 @@ export interface SetupContext {
 export interface Check {
   level: "ok" | "warn" | "fail";
   text: string;
+  /** The section whose check this is; the setup runner sets it. */
+  section?: string;
 }
 
 /** A part of setup. Sections do not depend on each other. */
