@@ -1,22 +1,25 @@
 import { DISCORD_API_ENV } from "../../chat/transports/discord";
 import { SLACK_API_ENV } from "../../chat/transports/slack";
+import { ENV_NAME } from "../../config";
 import { errorText } from "../../shell";
+import { DEFAULTS } from "../defaults";
 import type { Check, Section, SetupContext } from "../types";
 
 const PLACES = ["terminal", "dashboard", "slack", "discord"] as const;
 const BOTS = ["slack", "discord"] as const;
 type Bot = (typeof BOTS)[number];
 
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const envName = (s: string) => (ENV_NAME.test(s) ? null : "Answer the name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN, not the token itself.");
+
+const { slack: SLACK, discord: DISCORD } = DEFAULTS.chat.transports;
 
 /** Each bot's token variables: [key, question, default]. */
 const TOKENS: Record<Bot, [string, string, string][]> = {
   slack: [
-    ["token_env", "Variable that holds the app-level token (xapp-...)", "LOOPSTRA_SLACK_APP_TOKEN"],
-    ["bot_token_env", "Variable that holds the bot token (xoxb-...)", "LOOPSTRA_SLACK_BOT_TOKEN"],
+    ["token_env", "Variable that holds the app-level token (xapp-...)", SLACK!.token_env],
+    ["bot_token_env", "Variable that holds the bot token (xoxb-...)", SLACK!.bot_token_env],
   ],
-  discord: [["token_env", "Variable that holds the bot token", "LOOPSTRA_DISCORD_TOKEN"]],
+  discord: [["token_env", "Variable that holds the bot token", DISCORD!.token_env]],
 };
 
 const LABEL: Record<Bot, string> = { slack: "Slack", discord: "Discord" };

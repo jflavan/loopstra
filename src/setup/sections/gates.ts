@@ -1,3 +1,4 @@
+import { DEFAULTS } from "../defaults";
 import type { Section } from "../types";
 
 const STATUS = "they set its status in intent/<change>/intent.md";
@@ -15,10 +16,12 @@ export const gates: Section = {
   async ask(ctx) {
     ctx.ask.say("A person always accepts a change (draft to accepted). After that, each step can wait for a person or go on by itself. The merge gate is under github.");
     for (const { gate, what, person } of GATES) {
-      const wait = await ctx.ask.yesNo(person, ctx.doc.get(["gates", gate, "human"]) === "status");
-      ctx.doc.put(["gates", gate, "human"], wait ? "status" : "none", "none");
-      const agent = await ctx.ask.yesNo(`Does an independent agent review ${what}?`, ctx.doc.get(["gates", gate, "agent"]) !== false);
-      ctx.doc.put(["gates", gate, "agent"], agent, true);
+      const fallback = DEFAULTS.gates[gate];
+      const human = ctx.doc.get(["gates", gate, "human"]) ?? fallback.human;
+      const wait = await ctx.ask.yesNo(person, human === "status");
+      ctx.doc.put(["gates", gate, "human"], wait ? "status" : "none", fallback.human);
+      const agent = await ctx.ask.yesNo(`Does an independent agent review ${what}?`, (ctx.doc.get(["gates", gate, "agent"]) ?? fallback.agent) !== false);
+      ctx.doc.put(["gates", gate, "agent"], agent, fallback.agent);
     }
   },
 

@@ -22,7 +22,9 @@ const stage = z.object({
 const platformId = z.union([z.string().min(1), z.number().refine(Number.isSafeInteger, "is too long to be read as a number: put it in quotes")]).transform(String);
 /** Platform user ids. Empty `allow`: anyone in the channel may chat. Empty `acceptors`: nobody may accept from there. */
 const ids = z.array(platformId).default([]);
-const envName = (fallback: string) => z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be the name of an environment variable").default(fallback);
+/** The name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN. */
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const envName = (fallback: string) => z.string().regex(ENV_NAME, "must be the name of an environment variable").default(fallback);
 const channelId = platformId;
 
 const slackTransport = z.object({

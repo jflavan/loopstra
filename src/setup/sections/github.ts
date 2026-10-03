@@ -1,6 +1,7 @@
 import { Git } from "../../git";
 import { GitHub } from "../../github";
 import { errorText } from "../../shell";
+import { DEFAULTS } from "../defaults";
 import type { Check, Section } from "../types";
 
 /** How long the remote and gh each get to answer during a check. */
@@ -20,12 +21,13 @@ export const github: Section = {
     ctx.ask.say("  status: after a person sets its status to merge-approved in intent/<change>/intent.md;");
     ctx.ask.say("  pr: after a person approves its pull request on GitHub, or sets merge-approved (needs a remote).");
     const current = ctx.doc.get(["gates", "merge", "human"]);
-    const human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, current === "pr" || current === "status" ? current : "none");
+    const human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, current === "pr" || current === "status" || current === "none" ? current : DEFAULTS.gates.merge.human);
     if (human === "pr" && !remote) ctx.ask.say("  Pull requests need a git remote on GitHub: add one before starting the loop.");
-    ctx.doc.put(["gates", "merge", "human"], human, "none");
+    ctx.doc.put(["gates", "merge", "human"], human, DEFAULTS.gates.merge.human);
     ctx.ask.say("squash: each change lands on the main branch as one commit; merge: its commits are kept, with a merge commit.");
-    const method = await ctx.ask.pick("Merge method", ["squash", "merge"] as const, ctx.doc.get(["gates", "merge", "method"]) === "merge" ? "merge" : "squash");
-    ctx.doc.put(["gates", "merge", "method"], method, "squash");
+    const currentMethod = ctx.doc.get(["gates", "merge", "method"]);
+    const method = await ctx.ask.pick("Merge method", ["squash", "merge"] as const, currentMethod === "merge" || currentMethod === "squash" ? currentMethod : DEFAULTS.gates.merge.method);
+    ctx.doc.put(["gates", "merge", "method"], method, DEFAULTS.gates.merge.method);
   },
 
   async check(ctx, cfg) {

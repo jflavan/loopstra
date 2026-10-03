@@ -1,4 +1,5 @@
 import { amountText, DEFAULT_RATE_PER_MINUTE, parseAmount } from "../prompt";
+import { DEFAULTS } from "../defaults";
 import type { Section, SetupContext } from "../types";
 
 interface Limit {
@@ -49,7 +50,7 @@ export const budgets: Section = {
       suggestion: String(DEFAULT_RATE_PER_MINUTE),
       check: (s) => (dollars(s) > 0 ? null : "Answer a number of dollars, like 0.2."),
     }));
-    const timeout = Number(ctx.doc.get(["claude", "timeout_minutes"]) ?? 30);
+    const timeout = Number(ctx.doc.get(["claude", "timeout_minutes"]) ?? DEFAULTS.claude.timeout_minutes);
     for (const l of LIMITS) {
       const hint = l.suggest(timeout);
       const usd = parseAmount(hint, rate);
