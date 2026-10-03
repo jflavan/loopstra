@@ -58,6 +58,39 @@ describe("the loop's daily budget", () => {
     } finally { trace.close(); repo.cleanup(); }
   });
 
+  test("a session whose cap came from the day ends interrupted with its cost, and the loop pauses instead of blocking", async () => {
+    // No claude.max_budget_usd: the session's cap is what is left of the day.
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 10\n" });
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:budget");
+      await expect(agentPhase(ctx, INTAKE)).rejects.toBeInstanceOf(LoopBudgetReached);
+      expect(trace.phases(SLUG)).toMatchObject([
+        { name: "intake", status: "interrupted", cost_usd: 5.01, error: "budget: the loop's daily budget ran out during this session" },
+      ]);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a session capped by less of the day than claude.max_budget_usd also pauses", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd: 5\n  max_budget_usd_per_day: 6\n" });
+    try {
+      spent(trace, "other", 4);
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:budget");
+      await expect(agentPhase(ctx, INTAKE)).rejects.toBeInstanceOf(LoopBudgetReached);
+      expect(trace.phases(SLUG)[0]).toMatchObject({ status: "interrupted", cost_usd: 5.01 });
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a session capped by claude.max_budget_usd itself still blocks the step", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd: 5\n  max_budget_usd_per_day: 50\n" });
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:budget");
+      const r = await agentPhase(ctx, INTAKE);
+      expect(r).toMatchObject({ ok: false, reason: "budget" });
+      expect(!r.ok && r.note).toContain("claude.max_budget_usd");
+      expect(trace.phases(SLUG)[0]).toMatchObject({ status: "fail", cost_usd: 5.01 });
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
   test("the tick waits without picking a change, traces the pause once, and the attention list says why", async () => {
     const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     try {
