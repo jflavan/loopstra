@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { limitOf } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -10,7 +10,7 @@ import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envel
 import { renderPrompt, type PromptVars } from "./prompts";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { AssistantUnavailable, StopRequested, throwIfStopping } from "./stop";
+import { AssistantUnavailable, LoopBudgetReached, StopRequested, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -164,10 +164,26 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }
 
+/**
+ * Starts a loop phase's row. With claude.max_budget_usd_per_day set, the phase holds what it may
+ * spend of what is left of the loop's day (every change together, not chat), and does not start when
+ * too little is left. `capUsd` is the session's cap (Infinity: none).
+ */
+function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd: number } {
+  const c = ctx.cfg.claude;
+  if (c.max_budget_usd_per_day === undefined) return { seq: ctx.trace.phaseStart(ctx.slug, traceName, "agent"), capUsd: limitOf(c.max_budget_usd) };
+  const held = ctx.trace.phaseStartWithin(ctx.slug, traceName, "agent", {
+    since: startOfToday(), limitUsd: c.max_budget_usd_per_day, capUsd: limitOf(c.max_budget_usd), floorUsd: MIN_SESSION_USD,
+    pool: { except: CHAT_SLUG }, runningSince: staleBefore(ctx.cfg),
+  });
+  if (!held) throw new LoopBudgetReached();
+  return { seq: held.seq, capUsd: held.heldUsd };
+}
+
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   throwIfStopping();
-  const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
+  const { seq, capUsd } = startPhase(ctx, traceName);
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];
   const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
@@ -192,7 +208,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
-      maxBudgetUsd: limitOf(ctx.cfg.claude.max_budget_usd),
+      maxBudgetUsd: capUsd,
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
       onEvent: (e) => {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { lastLine, spawnBounded } from "./shell";
-import { AssistantUnavailable, StopRequested } from "./stop";
+import { AssistantUnavailable, LoopBudgetReached, StopRequested } from "./stop";
 
 /** How long one git call may take before it is stopped (a Git constructor option overrides it). */
 export const GIT_TIMEOUT_MS = 5 * 60_000;
@@ -52,12 +52,12 @@ export class GitTimeout extends GitError {
 export const GIT_TIMEOUT_NOTE = "A version-control command did not finish in time; an engineer should look.";
 
 /**
- * Rethrows a stop request, an unavailable assistant, or a git timeout. Code that turns errors into a
- * failure of its own calls this first: none is that step's failure, and the scheduler handles each
- * the same way everywhere.
+ * Rethrows a stop request, an unavailable assistant, the loop's used-up day, or a git timeout. Code
+ * that turns errors into a failure of its own calls this first: none is that step's failure, and
+ * the scheduler handles each the same way everywhere.
  */
 export function passOn(e: unknown): void {
-  if (e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof GitTimeout) throw e;
+  if (e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached || e instanceof GitTimeout) throw e;
 }
 
 export interface GitRunOptions {

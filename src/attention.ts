@@ -1,3 +1,4 @@
+import { loopDayNote, loopDayUsedUp } from "./budget";
 import type { Config } from "./config";
 import { activePause, agoText } from "./heartbeat";
 import { dependencyWait, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Status } from "./intents";
@@ -60,6 +61,7 @@ export async function attention(root: string, config: Config | { problem: string
 
   const pause = activePause(root, now);
   if (pause) add("paused", null, "Loopstra is paused", pause.reason);
+  if (cfg && loopDayUsedUp(cfg, trace, now)) add("paused", null, "Loopstra is paused", loopDayNote(cfg));
   const health = healthView(trace, now);
   if (health && health.result !== "pass") add("health", null, "Main branch", health.text);
   // Main and GitHub out of step (waiting on a person's own commits, or failing): the newest outcome only.

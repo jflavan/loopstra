@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
+import { loopDayNote, loopDayUsedUp } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
@@ -18,7 +19,7 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
-import { AssistantUnavailable, installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace } from "./trace";
 
 export interface TickResult {
@@ -106,6 +107,12 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
+    // The loop's day is spent (claude.max_budget_usd_per_day): nothing starts until midnight.
+    if (loopDayUsedUp(cfg, trace)) {
+      out.paused = loopDayNote(cfg);
+      return out;
+    }
+
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
     // whose depends_on names one not merged yet waits, so it is never built on a main without it.
@@ -125,6 +132,12 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
     if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
+    if (e instanceof LoopBudgetReached) {
+      // Reached partway through a step: it keeps its status and resumes when there is budget again.
+      trace.event(out.picked ?? "_loop", "pause", { reason: loopDayNote(cfg) });
+      out.paused = loopDayNote(cfg);
+      return out;
+    }
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
@@ -218,7 +231,7 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     return await runStep(ctx);
   } catch (e) {
-    if (e instanceof StopRequested || e instanceof AssistantUnavailable) throw e;
+    if (e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
@@ -392,16 +405,19 @@ export async function start(root: string, opts: { once: boolean; installSignals?
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
   const beat = startHeartbeat(root);
   try {
+    // The last pause logged: a pause that lasts (the loop's day, until midnight) is logged once, not every poll.
+    let lastPaused = "";
     for (;;) {
       try {
         beat.tickStarted();
         const r = await tick(root);
         if (r.error) console.error(`Config problem, will retry next tick:\n${r.error}`);
-        else if (r.paused) log(`paused: ${r.paused}`);
+        else if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
         else if (r.stopped) log(`stopped${r.picked ? ` during ${r.picked}; it resumes on the next start` : ""}`);
         else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
         else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : r.result.personChanged ? "a person changed the status; it is picked up next" : "step done") : r.result?.note}`);
         else log("idle");
+        lastPaused = r.paused ?? "";
       } catch (e) {
         log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);
         try {
