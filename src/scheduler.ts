@@ -20,7 +20,7 @@ import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
-import { Trace } from "./trace";
+import { Trace, type EventType } from "./trace";
 
 export interface TickResult {
   picked: string | null; result?: StepResult; signal?: string;
@@ -239,10 +239,19 @@ function dayPaused(root: string, cfg: Config, spent: boolean): string {
 }
 
 /**
+ * Of the day's budget, the share a change must have spent itself, on both days, before running out
+ * partway twice means its step cannot fit in a day. Not all of it: another change's short session
+ * may take a little of a day. A change that others left less than this only pauses.
+ */
+const HAD_THE_DAY = 0.9;
+
+/**
  * The loop's day ran out partway through a step: the change keeps its status and the step resumes
  * when there is budget again. When the day is spent (not only held by others), the pause records
- * that status. A step that spent the day at the same status on an earlier day as well never got past
- * that point and would start over and run out every day: it is blocked instead, with a note that says so.
+ * that status, what the change itself spent today, and the day's limit. The step is blocked instead,
+ * with a note that says so, when it would start over and run out every day: the change's previous
+ * such pause was on an earlier day at the same status, its status has not changed since (no status
+ * change in the trace after it), and on both days the change itself spent at least HAD_THE_DAY of the day.
  */
 async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult): Promise<TickResult> {
   const spent = loopDaySpent(cfg, trace);
@@ -250,17 +259,22 @@ async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: Tick
   let intent: Intent | null = null;
   if (slug && spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
   const status = intent?.file.frontmatter.status;
-  if (slug && intent) {
+  const dayUsd = cfg.claude.max_budget_usd_per_day ?? 0;
+  const spentUsd = slug ? trace.costSince(slug, startOfToday(), { endedOnly: true }) : 0;
+  const hadTheDay = (usd: number | undefined, limit: number | undefined) => usd !== undefined && limit !== undefined && usd >= HAD_THE_DAY * limit;
+  if (slug && intent && hadTheDay(spentUsd, dayUsd)) {
     const last = trace.lastEvent(slug, "pause", '"dayBudget":true');
-    const lastStatus = last ? (JSON.parse(last.payload) as { status?: string }).status : undefined;
-    if (last && last.ts < startOfToday() && lastStatus === status) {
+    const earlier = last ? (JSON.parse(last.payload) as { status?: string; spentUsd?: number; dayUsd?: number }) : null;
+    const moves: EventType[] = ["status_change", "person-changed-status"];
+    const movedSince = !!last && moves.some((t) => (trace.lastEvent(slug, t)?.id ?? 0) > last.id);
+    if (last && earlier && last.ts < startOfToday() && earlier.status === status && !movedSince && hadTheDay(earlier.spentUsd, earlier.dayUsd)) {
       const ctx = new StepContext(root, cfg, trace, intent);
-      out.result = await blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, earlierPause: last.ts } });
+      out.result = await blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, spentUsd, dayUsd, earlierPause: last.ts, earlierSpentUsd: earlier.spentUsd } });
       return out;
     }
   }
   const reason = out.paused = dayPaused(root, cfg, spent);
-  trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status } : { reason });
+  trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status, spentUsd, dayUsd } : { reason });
   return out;
 }
 
