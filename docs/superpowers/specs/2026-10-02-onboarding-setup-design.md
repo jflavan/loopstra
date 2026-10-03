@@ -133,8 +133,10 @@ with its real cost and the loop pauses. A session stopped by `claude.max_budget_
 blocks. Both trace a `pause` event (under `_loop` once per new reason a day, or under the change).
 
 A step that cannot fit in a day would start over and run out every day. So a day-budget pause
-records the change's status, and when the change's previous such pause was on an earlier day at the
-same status, the change is blocked instead: "This step needs more than the loop's daily budget
+records the change's status, what the change itself spent today, and the limit. The change is
+blocked instead when its previous such pause was on an earlier day at the same status, no status
+change is traced for it since, and on both days the change itself spent at least 90% of the limit
+(`HAD_THE_DAY`; a change that other changes left less of the day only waits): "This step needs more than the loop's daily budget
 (claude.max_budget_usd_per_day, $X.XX): it ran out partway again at the same point as on an earlier
 day. Raise or remove the limit with `loopstra setup budgets`.", plus the status to set to resume.
 
@@ -196,7 +198,8 @@ The notes for a phase stopped by a limit name the setting and the command:
 
 - budget: "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or
   remove it with `loopstra setup budgets`."
-- the loop's day, twice at the same status: the note above ("This step needs more than the loop's
+- the loop's day, used (90% or more) by the change itself and run out on two days at the same
+  status: the note above ("This step needs more than the loop's
   daily budget ...").
 - timeout: the existing note, plus "An engineer can allow longer with claude.timeout_minutes in
   loopstra/config.yaml."
