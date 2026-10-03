@@ -84,6 +84,15 @@ describe("init", () => {
     } finally { t.cleanup(); }
   });
 
+  test("the next steps point to loopstra setup", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const report = await init(repo.path);
+      expect(report.next).toContain("Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.");
+      expect(report.next.join(" ")).not.toContain("gates.*.human");
+    } finally { repo.cleanup(); }
+  });
+
   test("a repository with no commits yet gets its unborn branch", async () => {
     const t = tempDir();
     try {

@@ -42,7 +42,16 @@ async function main(): Promise<number> {
       for (const f of r.kept) console.log(`kept   ${f}`);
       for (const w of r.warnings) console.log(`warning: ${w}`);
       console.log(["", "Next:", ...r.next.map((n) => `  - ${n}`)].join("\n"));
-      return 0;
+      // In a terminal, offer the walkthrough now; elsewhere the next steps name it. One prompt reads
+      // stdin for both: a second reader after the first closes would lose input (or hang).
+      if (!process.stdin.isTTY) return 0;
+      const { StreamPrompt } = await import("./setup/prompt");
+      const ask = new StreamPrompt(process.stdin, process.stdout);
+      let walk = false;
+      try { walk = await ask.yesNo("\nWalk through the settings now?", true); } catch { /* input ended */ }
+      if (!walk) { ask.close(); return 0; }
+      const { setup } = await import("./setup");
+      return setup(root, { interactive: true, prompt: ask });
     }
     case "setup": {
       if (!setUp()) return 1;

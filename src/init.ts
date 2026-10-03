@@ -138,8 +138,7 @@ export async function init(root: string): Promise<InitReport> {
 
   report.next.push(
     `Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on ${branch}. The loop works in its own checkouts, which only see what is committed.`,
-    "Open loopstra/config.yaml and confirm commands.test.",
-    "Decide which gates get a person (gates.*.human).",
+    "Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.",
     "Start the loop with `loopstra start`; watch it with `loopstra status` or `loopstra ui`.",
   );
   return report;
