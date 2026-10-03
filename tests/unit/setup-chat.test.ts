@@ -12,8 +12,9 @@ import { askSection, checkSection, configRepo } from "../setup-helpers";
 
 const BASE = "version: 1\ncommands:\n  test: echo ok\n";
 
-// A Slack and Discord that accept the token "good" only.
+// A Slack and Discord that accept the token "good" only, and ones having trouble.
 let server: ReturnType<typeof Bun.serve>;
+let deadPort = 0;
 beforeAll(() => {
   server = Bun.serve({
     port: 0,
@@ -22,12 +23,20 @@ beforeAll(() => {
       const url = new URL(req.url);
       if (url.pathname === "/slack/auth.test") return Response.json(auth === "Bearer good" ? { ok: true, user: "loopstra", team: "Acme" } : { ok: false, error: "invalid_auth" });
       if (url.pathname === "/discord/users/@me") return auth === "Bot good" ? Response.json({ username: "loopstra" }) : new Response("401: Unauthorized", { status: 401 });
+      if (url.pathname === "/slack-busy/auth.test") return Response.json({ ok: false, error: "ratelimited" }, { status: 429 });
+      if (url.pathname === "/slack-down/auth.test") return new Response("<html>oops</html>", { status: 500 });
+      if (url.pathname === "/discord-busy/users/@me") return new Response("slow down", { status: 429 });
+      if (url.pathname === "/discord-forbidden/users/@me") return new Response("403: Forbidden", { status: 403 });
       return new Response("not found", { status: 404 });
     },
   });
+  const dead = Bun.serve({ port: 0, fetch: () => new Response() });
+  deadPort = dead.port!;
+  dead.stop(true);
 });
 afterAll(() => server.stop(true));
-const api = () => ({ [SLACK_API_ENV]: `http://127.0.0.1:${server.port}/slack`, [DISCORD_API_ENV]: `http://127.0.0.1:${server.port}/discord` });
+const api = (slack = "slack", discord = "discord", port = server.port) => ({ [SLACK_API_ENV]: `http://127.0.0.1:${port}/${slack}`, [DISCORD_API_ENV]: `http://127.0.0.1:${port}/${discord}` });
+const TOKENS = { LOOPSTRA_SLACK_APP_TOKEN: "xapp-1", LOOPSTRA_SLACK_BOT_TOKEN: "good", LOOPSTRA_DISCORD_TOKEN: "good" };
 
 describe("the chat section", () => {
   test("only the bots chosen are asked about; one not chosen is removed", async () => {
@@ -88,10 +97,70 @@ describe("the chat section", () => {
         { level: "fail", text: "Slack: LOOPSTRA_SLACK_APP_TOKEN and LOOPSTRA_SLACK_BOT_TOKEN are not set." },
         { level: "fail", text: "Discord: LOOPSTRA_DISCORD_TOKEN is not set." },
       ]);
-      const bad = await checkSection(chat, r.root, { ...api(), LOOPSTRA_SLACK_APP_TOKEN: "x", LOOPSTRA_SLACK_BOT_TOKEN: "bad", LOOPSTRA_DISCORD_TOKEN: "bad" });
-      expect(bad.map((c) => c.text)).toEqual(["Slack: the bot token was refused (invalid_auth).", "Discord: the bot token was refused (HTTP 401)."]);
-      const good = await checkSection(chat, r.root, { ...api(), LOOPSTRA_SLACK_APP_TOKEN: "x", LOOPSTRA_SLACK_BOT_TOKEN: "good", LOOPSTRA_DISCORD_TOKEN: "good" });
+      const bad = await checkSection(chat, r.root, { ...api(), ...TOKENS, LOOPSTRA_SLACK_BOT_TOKEN: "bad", LOOPSTRA_DISCORD_TOKEN: "bad" });
+      expect(bad).toEqual([
+        { level: "fail", text: "Slack: the bot token was refused (invalid_auth)." },
+        { level: "fail", text: "Discord: the bot token was refused (HTTP 401)." },
+      ]);
+      const forbidden = await checkSection(chat, r.root, { ...api("slack", "discord-forbidden"), ...TOKENS });
+      expect(forbidden[1]).toEqual({ level: "fail", text: "Discord: the bot token was refused (HTTP 403)." });
+      const good = await checkSection(chat, r.root, { ...api(), ...TOKENS });
       expect(good).toEqual([{ level: "ok", text: "Slack: signed in as loopstra in Acme." }, { level: "ok", text: "Discord: signed in as loopstra." }]);
+    } finally { r.cleanup(); }
+  });
+
+  test("checks: one unset variable, and an app token that does not look like one", async () => {
+    const r = configRepo(`${BASE}chat:\n  transports:\n    slack:\n      channel: C1\n`);
+    try {
+      expect(await checkSection(chat, r.root, { ...api(), LOOPSTRA_SLACK_BOT_TOKEN: "good" })).toEqual([
+        { level: "fail", text: "Slack: LOOPSTRA_SLACK_APP_TOKEN is not set." },
+      ]);
+      expect(await checkSection(chat, r.root, { ...api(), ...TOKENS, LOOPSTRA_SLACK_APP_TOKEN: "xoxb-swapped" })).toEqual([
+        { level: "warn", text: "Slack: LOOPSTRA_SLACK_APP_TOKEN does not look like an app-level token (xapp-...)." },
+        { level: "ok", text: "Slack: signed in as loopstra in Acme." },
+      ]);
+    } finally { r.cleanup(); }
+  });
+
+  test("checks: a platform having trouble is a warning; one that cannot be reached fails", async () => {
+    const r = configRepo(`${BASE}chat:\n  transports:\n    slack:\n      channel: C1\n    discord:\n      channel: "1"\n`);
+    try {
+      expect(await checkSection(chat, r.root, { ...api("slack-busy", "discord-busy"), ...TOKENS })).toEqual([
+        { level: "warn", text: "Slack answered ratelimited; try loopstra setup --check again later." },
+        { level: "warn", text: "Discord answered HTTP 429; try loopstra setup --check again later." },
+      ]);
+      expect((await checkSection(chat, r.root, { ...api("slack-down"), ...TOKENS }))[0]).toEqual(
+        { level: "warn", text: "Slack answered HTTP 500; try loopstra setup --check again later." },
+      );
+      const dead = await checkSection(chat, r.root, { ...api("slack", "discord", deadPort), ...TOKENS });
+      expect(dead.map((c) => c.level)).toEqual(["fail", "fail"]);
+      expect(dead[0]!.text).toStartWith("Slack could not be reached: ");
+      expect(dead[1]!.text).toStartWith("Discord could not be reached: ");
+    } finally { r.cleanup(); }
+  });
+
+  test("editing a bot: a custom token variable is the suggestion, and - clears a list", async () => {
+    const r = configRepo(`${BASE}chat:\n  transports:\n    slack:\n      token_env: MY_APP_TOKEN\n      channel: C1\n      allow: [U1]\n`);
+    try {
+      // Places; app token var, bot token var, channel, allow, acceptors, announce_to.
+      const { text, shown } = await askSection(chat, r.root, ["", "", "", "", "-", "", ""]);
+      expect(shown).toContain("[terminal, dashboard, slack]");
+      expect(shown).toContain("(xapp-...) [MY_APP_TOKEN]");
+      expect(parse(text).chat.transports).toEqual({ slack: { token_env: "MY_APP_TOKEN", channel: "C1" } });
+    } finally { r.cleanup(); }
+  });
+
+  test("ids are checked: Slack wants ids, not names; Discord ids are numbers", async () => {
+    const r = configRepo(BASE);
+    try {
+      const slack = await askSection(chat, r.root, ["slack", "", "", "#general", "C1", "@ann", "U1", "-", "-"]);
+      expect(slack.shown).toContain("Use the channel id (C...), not its name.");
+      expect(slack.shown).toContain("Use the user id (U...), not its name.");
+      expect(parse(slack.text).chat.transports.slack).toEqual({ channel: "C1", allow: ["U1"] });
+      const discord = await askSection(chat, r.root, ["discord", "", "general", "123", "1, ann", "1", "-", "x", "456"]);
+      expect(discord.shown).toContain("Discord ids are numbers: turn on Developer Mode, then right-click the channel and choose Copy ID.");
+      expect(discord.shown).toContain("right-click the user and choose Copy ID.");
+      expect(parse(discord.text).chat.transports.discord).toEqual({ channel: "123", allow: ["1"], announce_to: "456" });
     } finally { r.cleanup(); }
   });
 

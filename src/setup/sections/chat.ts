@@ -21,6 +21,19 @@ const TOKENS: Record<Bot, [string, string, string][]> = {
 
 const LABEL: Record<Bot, string> = { slack: "Slack", discord: "Discord" };
 
+/** A problem with one channel or user id, in words, or null: Discord ids are numbers; Slack ids are not names. */
+function idProblem(bot: Bot, kind: "channel" | "user", id: string): string | null {
+  if (bot === "discord") return /^\d+$/.test(id) ? null : `Discord ids are numbers: turn on Developer Mode, then right-click the ${kind} and choose Copy ID.`;
+  return /^[#@]/.test(id) || /\s/.test(id) ? `Use the ${kind} id (${kind === "channel" ? "C..." : "U..."}), not its name.` : null;
+}
+
+/** The first problem with any id in a comma-separated answer. */
+const idList = (bot: Bot) => (answer: string) => answer.split(",").map((s) => s.trim()).filter(Boolean).map((id) => idProblem(bot, "user", id)).find(Boolean) ?? null;
+
+/** Slack errors that mean the token itself was refused; any other is Slack having trouble. */
+const SLACK_REFUSED = new Set(["invalid_auth", "not_authed", "account_inactive", "token_revoked"]);
+const LATER = "try loopstra setup --check again later.";
+
 /** Asks one bot's settings. Ids are kept as strings, so long numeric ones (Discord's) stay exact. */
 async function askBot(ctx: SetupContext, bot: Bot): Promise<void> {
   const at = (k: string) => ["chat", "transports", bot, k];
@@ -30,17 +43,18 @@ async function askBot(ctx: SetupContext, bot: Bot): Promise<void> {
   for (const [k, question, fallback] of TOKENS[bot]) {
     ctx.doc.put(at(k), await ctx.ask.text(question, { suggestion: str(k) ?? fallback, check: envName }), fallback);
   }
-  ctx.doc.set(at("channel"), await ctx.ask.text(`${LABEL[bot]} channel id where people talk to it`, { suggestion: str("channel") }));
+  const channel = (id: string) => idProblem(bot, "channel", id);
+  ctx.doc.set(at("channel"), await ctx.ask.text(`${LABEL[bot]} channel id where people talk to it`, { suggestion: str("channel"), check: channel }));
   const lists: [string, string][] = [
     ["allow", "User ids who may chat, separated by commas (- for anyone in the channel)"],
     ["acceptors", "User ids who may also start drafts, separated by commas (- for nobody)"],
   ];
   for (const [k, question] of lists) {
-    const list = (await ctx.ask.text(question, { suggestion: ids(k), optional: true })).split(",").map((s) => s.trim()).filter(Boolean);
+    const list = (await ctx.ask.text(question, { suggestion: ids(k), optional: true, check: idList(bot) })).split(",").map((s) => s.trim()).filter(Boolean);
     if (list.length) ctx.doc.set(at(k), list);
     else ctx.doc.clear(at(k));
   }
-  const announce = await ctx.ask.text("Channel id where blocked, waiting and merged changes are announced (- for none)", { suggestion: str("announce_to"), optional: true });
+  const announce = await ctx.ask.text("Channel id where blocked, waiting and merged changes are announced (- for none)", { suggestion: str("announce_to"), optional: true, check: channel });
   if (announce) ctx.doc.set(at("announce_to"), announce);
   else ctx.doc.clear(at("announce_to"));
 }
@@ -68,9 +82,13 @@ export const chat: Section = {
     const checks: Check[] = [];
     if (slack) {
       const missing = [slack.token_env, slack.bot_token_env].filter((n) => !ctx.env[n]);
-      checks.push(missing.length
-        ? { level: "fail", text: `Slack: ${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} not set.` }
-        : await slackSignIn(ctx.env, ctx.env[slack.bot_token_env]!));
+      if (missing.length) {
+        checks.push({ level: "fail", text: `Slack: ${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} not set.` });
+      } else {
+        // auth.test checks the bot token; the app-level one is only used to connect, so look at its shape.
+        if (!ctx.env[slack.token_env]!.startsWith("xapp-")) checks.push({ level: "warn", text: `Slack: ${slack.token_env} does not look like an app-level token (xapp-...).` });
+        checks.push(await slackSignIn(ctx.env, ctx.env[slack.bot_token_env]!));
+      }
     }
     if (discord) {
       checks.push(ctx.env[discord.token_env]
@@ -86,9 +104,9 @@ async function slackSignIn(env: SetupContext["env"], token: string): Promise<Che
   try {
     const res = await fetch(`${env[SLACK_API_ENV] ?? "https://slack.com/api"}/auth.test`, { method: "POST", headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
     const j = await res.json().catch(() => ({})) as { ok?: boolean; user?: string; team?: string; error?: string };
-    return j.ok
-      ? { level: "ok", text: `Slack: signed in as ${j.user ?? "the bot"}${j.team ? ` in ${j.team}` : ""}.` }
-      : { level: "fail", text: `Slack: the bot token was refused (${j.error ?? `HTTP ${res.status}`}).` };
+    if (j.ok) return { level: "ok", text: `Slack: signed in as ${j.user ?? "the bot"}${j.team ? ` in ${j.team}` : ""}.` };
+    if (j.error && SLACK_REFUSED.has(j.error)) return { level: "fail", text: `Slack: the bot token was refused (${j.error}).` };
+    return { level: "warn", text: `Slack answered ${j.error ?? `HTTP ${res.status}`}; ${LATER}` };
   } catch (e) {
     return { level: "fail", text: `Slack could not be reached: ${errorText(e)}` };
   }
@@ -100,7 +118,8 @@ async function discordSignIn(env: SetupContext["env"], token: string): Promise<C
     const res = await fetch(`${env[DISCORD_API_ENV] ?? "https://discord.com/api/v10"}/users/@me`, {
       headers: { authorization: `Bot ${token}`, "user-agent": "DiscordBot (loopstra, 1)" }, signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { level: "fail", text: `Discord: the bot token was refused (HTTP ${res.status}).` };
+    if (res.status === 401 || res.status === 403) return { level: "fail", text: `Discord: the bot token was refused (HTTP ${res.status}).` };
+    if (!res.ok) return { level: "warn", text: `Discord answered HTTP ${res.status}; ${LATER}` };
     const j = await res.json().catch(() => ({})) as { username?: string };
     return { level: "ok", text: `Discord: signed in as ${j.username ?? "the bot"}.` };
   } catch (e) {

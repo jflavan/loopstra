@@ -5,6 +5,9 @@ type Ref = (typeof REFS)[number];
 const NAMES: Record<Ref, string> = { default: "sonnet", cheap: "haiku", strong: "opus" };
 const STAGES: Record<string, Ref> = { design: "strong", plan: "strong", build: "default", review: "strong", verify: "default" };
 
+/** A model name is one word, like sonnet or claude-opus-5-5. */
+const modelName = (s: string) => (/\s/.test(s) ? "A model name has no spaces, like sonnet or claude-opus-5-5." : null);
+
 const isRef = (v: unknown): v is Ref => typeof v === "string" && (REFS as readonly string[]).includes(v);
 
 export const models: Section = {
@@ -15,7 +18,7 @@ export const models: Section = {
     ctx.ask.say("Three model names Claude Code accepts for --model (an alias like sonnet, or a full model id). Each stage, and chat, uses one of the three; the cheap one also does small jobs, like reading a new change and noting lessons.");
     for (const ref of REFS) {
       const current = ctx.doc.get(["claude", "models", ref]);
-      const name = await ctx.ask.text(`The "${ref}" model`, { suggestion: typeof current === "string" && current ? current : NAMES[ref] });
+      const name = await ctx.ask.text(`The "${ref}" model`, { suggestion: typeof current === "string" && current ? current : NAMES[ref], check: modelName });
       ctx.doc.put(["claude", "models", ref], name, NAMES[ref]);
     }
     for (const [stage, fallback] of Object.entries(STAGES)) {

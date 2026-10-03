@@ -22,6 +22,15 @@ describe("the models section", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a model name has no spaces", async () => {
+    const r = configRepo(BASE);
+    try {
+      const { text, shown } = await askSection(models, r.root, ["claude sonnet", "claude-sonnet-5", "", "", "", "", "", "", "", ""]);
+      expect(shown).toContain("A model name has no spaces, like sonnet or claude-opus-5-5.");
+      expect(parse(text).claude).toEqual({ models: { default: "claude-sonnet-5" } });
+    } finally { r.cleanup(); }
+  });
+
   test("--defaults adds nothing", async () => {
     const r = configRepo(BASE);
     try {
