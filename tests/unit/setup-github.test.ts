@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { github } from "../../src/setup/sections/github";
+import { Git, GitTimeout, type GitRunOptions } from "../../src/git";
+import { github, REMOTE_CHECK_MS } from "../../src/setup/sections/github";
 import { run, tempDir, tempGitRepo, withEnv } from "../helpers";
 import { askSection, checkSection } from "../setup-helpers";
 
@@ -50,10 +51,41 @@ describe("the github section", () => {
   test("the GitHub executable comes from the setup's environment", async () => {
     const r = await repoWithRemote();
     try {
-      await withEnv({ LOOPSTRA_FAKE_GH_SIGNED_OUT: "0" }, async () => {
+      // The process environment names a gh that is not there, so only the setup's own can pass.
+      await withEnv({ LOOPSTRA_GH_EXECUTABLE: `${r.path}/no-such-gh`, LOOPSTRA_FAKE_GH_SIGNED_OUT: "0" }, async () => {
+        expect((await checkSection(github, r.path))[1]!.level).toBe("fail");
         expect((await checkSection(github, r.path, { LOOPSTRA_GH_EXECUTABLE: FAKE_GH })).map((c) => c.level)).toEqual(["ok", "ok"]);
       });
     } finally { r.cleanup(); }
+  });
+
+  test("a remote that does not answer in time fails, and gh is still checked", async () => {
+    const r = await repoWithRemote();
+    const real = Git.prototype.run;
+    const seen: (boolean | GitRunOptions | undefined)[] = [];
+    const spy = spyOn(Git.prototype, "run").mockImplementation(function (this: Git, args: string[], opts?: boolean | GitRunOptions) {
+      if (args[0] !== "ls-remote") return real.call(this, args, opts);
+      seen.push(opts);
+      return Promise.reject(new GitTimeout(args, REMOTE_CHECK_MS));
+    });
+    try {
+      await withEnv({ LOOPSTRA_GH_EXECUTABLE: FAKE_GH, LOOPSTRA_FAKE_GH_SIGNED_OUT: "0" }, async () => {
+        expect(await checkSection(github, r.path)).toEqual([
+          { level: "fail", text: "git remote origin could not be reached: git ls-remote --heads origin did not finish within 20s and was stopped." },
+          { level: "ok", text: "gh is signed in." },
+        ]);
+      });
+      expect(seen).toEqual([{ allowFail: true, timeoutMs: REMOTE_CHECK_MS }]);
+    } finally { spy.mockRestore(); r.cleanup(); }
+  });
+
+  test("pull requests without a remote: setup says one is needed", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(`${repo.path}/loopstra/config.yaml`, CONFIG);
+      const { shown } = await askSection(github, repo.path, ["pr", ""]);
+      expect(shown).toContain("Pull requests need a git remote on GitHub: add one before starting the loop.");
+    } finally { repo.cleanup(); }
   });
 
   test("a remote that cannot be reached fails", async () => {
