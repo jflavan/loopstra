@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { amountText, DefaultsPrompt, parseAmount, SetupStopped } from "../../src/setup/prompt";
+import { Readable, Writable } from "node:stream";
+import { amountText, DefaultsPrompt, parseAmount, SetupStopped, StreamPrompt } from "../../src/setup/prompt";
 import { scripted } from "../setup-helpers";
 
 describe("amounts", () => {
@@ -86,5 +87,13 @@ describe("--defaults", () => {
   test("a question with nothing to suggest stops setup, naming it", async () => {
     const p = new DefaultsPrompt(() => {});
     await expect(p.text("Test command (commands.test)")).rejects.toThrow('--defaults has no answer for "Test command (commands.test)"');
+  });
+});
+
+describe("closing a stream prompt", () => {
+  test("twice is safe", () => {
+    const ask = new StreamPrompt(Readable.from(["y\n"]), new Writable({ write(_c, _e, done) { done(); } }));
+    ask.close();
+    expect(() => ask.close()).not.toThrow();
   });
 });

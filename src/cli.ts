@@ -50,8 +50,10 @@ async function main(): Promise<number> {
       let walk = false;
       try { walk = await ask.yesNo("\nWalk through the settings now?", true); } catch { /* input ended */ }
       if (!walk) { ask.close(); return 0; }
+      // Init succeeded: quitting the walkthrough, or a setup that saves nothing, says why and is not init failing.
       const { setup } = await import("./setup");
-      return setup(root, { interactive: true, prompt: ask });
+      await setup(root, { interactive: true, prompt: ask });
+      return 0;
     }
     case "setup": {
       if (!setUp()) return 1;

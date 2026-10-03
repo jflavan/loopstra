@@ -24,7 +24,7 @@ export interface TextOptions {
   check?: (answer: string) => string | null;
 }
 
-/** How a section asks. `close` ends the input (a terminal prompt stops reading). */
+/** How a section asks. `close` ends the input (a terminal prompt stops reading); closing again does nothing. */
 export interface Prompt {
   say(line: string): void;
   text(question: string, o?: TextOptions): Promise<string>;

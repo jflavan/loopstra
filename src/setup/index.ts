@@ -45,8 +45,17 @@ export function parseSetupArgs(args: readonly string[]): Pick<SetupOptions, "sec
  * comments), then the checks run. Quitting, a section that fails, or a config that would not load
  * saves nothing. Returns the exit code: 0 once saved (a failed check is listed, not an error), 1 when
  * nothing could be saved; with --check, 1 when the config does not load or any check fails.
+ * A prompt it is given is closed whichever way it ends.
  */
 export async function setup(root: string, o: SetupOptions = {}): Promise<number> {
+  try {
+    return await runSetup(root, o);
+  } finally {
+    o.prompt?.close();
+  }
+}
+
+async function runSetup(root: string, o: SetupOptions): Promise<number> {
   const output = o.output ?? process.stdout;
   const out = (line: string) => { output.write(`${line}\n`); };
   if (!existsSync(configPath(root))) { out(NOT_SET_UP); return 1; }

@@ -3,6 +3,7 @@ import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup } from "../../src/setup";
+import { DefaultsPrompt } from "../../src/setup/prompt";
 import type { Check, Section, SetupContext } from "../../src/setup/types";
 import { tempDir } from "../helpers";
 import { configRepo } from "../setup-helpers";
@@ -144,6 +145,30 @@ describe("loopstra setup", () => {
       expect(o.text()).toContain("claude.timeout_minutes");
       expect(o.text()).not.toContain("loads.");
     } finally { r.cleanup(); }
+  });
+
+  test("a prompt it is given is closed on every early return", async () => {
+    class Counted extends DefaultsPrompt {
+      closes = 0;
+      override close(): void { this.closes++; }
+    }
+    const t = tempDir();
+    const r = configRepo(CONFIG);
+    const bad = configRepo("version: [\n");
+    try {
+      const cases: Array<[string, string, Parameters<typeof setup>[1]]> = [
+        ["config missing", t.path, { interactive: true }],
+        ["config not YAML", bad.root, { interactive: true }],
+        ["unknown section", r.root, { interactive: true, section: "nope", sections: [fake()] }],
+        ["no terminal", r.root, { interactive: false, sections: [fake()] }],
+        ["--check", r.root, { check: true, sections: [fake()] }],
+      ];
+      for (const [what, root, opts] of cases) {
+        const prompt = new Counted(() => {});
+        expect(await setup(root, { ...opts, output: io().output, prompt })).toBeGreaterThanOrEqual(0);
+        expect({ what, closes: prompt.closes }).toEqual({ what, closes: 1 });
+      }
+    } finally { t.cleanup(); r.cleanup(); bad.cleanup(); }
   });
 
   test("input that runs out stops setup and saves nothing", async () => {
