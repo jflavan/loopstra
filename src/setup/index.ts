@@ -29,8 +29,18 @@ export interface SetupOptions {
   checkMs?: number;
 }
 
-/** The command line after `setup`: at most one section, and --defaults or --check (not both). Null when it is not that. */
-export function parseSetupArgs(args: readonly string[]): Pick<SetupOptions, "section" | "defaults" | "check"> | null {
+/** `loopstra setup --help`: the usage line, then each section's name and title. */
+export function setupHelp(sections: Section[] = SECTIONS): string {
+  const width = Math.max(...sections.map((s) => s.name.length)) + 2;
+  return `${SETUP_USAGE}\n\nSections:\n${sections.map((s) => `  ${s.name.padEnd(width)}${s.title}\n`).join("")}`;
+}
+
+/**
+ * The command line after `setup`: at most one section, and --defaults or --check (not both); with
+ * --help or -h, only { help: true }. Null when it is none of those.
+ */
+export function parseSetupArgs(args: readonly string[]): (Pick<SetupOptions, "section" | "defaults" | "check"> & { help?: true }) | null {
+  if (args.some((a) => a === "--help" || a === "-h")) return { help: true };
   const flags = args.filter((a) => a.startsWith("-"));
   const names = args.filter((a) => !a.startsWith("-"));
   if (names.length > 1 || flags.some((f) => f !== "--defaults" && f !== "--check")) return null;

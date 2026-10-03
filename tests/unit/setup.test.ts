@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
-import { NEEDS_TERMINAL, parseSetupArgs, setup } from "../../src/setup";
+import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
 import { DefaultsPrompt } from "../../src/setup/prompt";
 import { gates } from "../../src/setup/sections/gates";
 import type { Check, Section, SetupContext } from "../../src/setup/types";
@@ -246,5 +246,15 @@ describe("the setup command line", () => {
     expect(parseSetupArgs(["budgets", "--defaults"])).toEqual({ section: "budgets", defaults: true, check: false });
     expect(parseSetupArgs(["--check"])).toEqual({ section: undefined, defaults: false, check: true });
     for (const bad of [["budgets", "chat"], ["--defaults", "--check"], ["--force"], ["-d"]]) expect(parseSetupArgs(bad)).toBeNull();
+  });
+
+  test("--help or -h asks for the help, whatever else is there", () => {
+    for (const args of [["--help"], ["-h"], ["budgets", "--help"], ["--defaults", "--check", "-h"]]) expect(parseSetupArgs(args)).toEqual({ help: true });
+  });
+
+  test("the help is the usage line and one line per section, with its title", () => {
+    const help = setupHelp([fake({ name: "one" }), fake({ name: "three" })]);
+    expect(help).toBe(`${SETUP_USAGE}\n\nSections:\n  one    The one section\n  three  The three section\n`);
+    expect(setupHelp()).toContain("  github    GitHub and merging\n");
   });
 });

@@ -49,9 +49,11 @@ async function main(): Promise<number> {
       return 0;
     }
     case "setup": {
-      if (!setUp()) return 1;
-      const { parseSetupArgs, setup, SETUP_USAGE } = await import("./setup");
+      const { parseSetupArgs, setup, SETUP_USAGE, setupHelp } = await import("./setup");
       const args = parseSetupArgs(rest);
+      // The help reads no config, so it works before init too.
+      if (args?.help) { process.stdout.write(setupHelp()); return 0; }
+      if (!setUp()) return 1;
       if (!args) { console.error(SETUP_USAGE); return 1; }
       return setup(root, args);
     }
