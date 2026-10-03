@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
@@ -180,8 +180,8 @@ export function pauseAfterUnavailable(root: string, now: Date = new Date(), caus
     slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, repeats,
   };
   try {
-    mkdirSync(join(root, ".loopstra"), { recursive: true });
-    writeFileSync(pausePath(root), JSON.stringify(pause, null, 2));
+    // Whole (temp file, then rename): the tick and the dashboard read it while it is written.
+    writeFileAtomic(pausePath(root), JSON.stringify(pause, null, 2));
   } catch { /* without the file the next tick simply tries again */ }
   return pause;
 }
