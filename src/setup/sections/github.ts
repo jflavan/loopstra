@@ -22,8 +22,15 @@ export const github: Section = {
     ctx.ask.say("  status: after a person sets its status to merge-approved in intent/<change>/intent.md;");
     ctx.ask.say("  pr: after a person approves its pull request on GitHub, or sets merge-approved (needs a remote).");
     const current = ctx.doc.get(["gates", "merge", "human"]);
-    const human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, current === "pr" || current === "status" || current === "none" ? current : DEFAULTS.gates.merge.human);
-    if (human === "pr" && !remote) ctx.ask.say("  Pull requests need a git remote on GitHub: add one before starting the loop.");
+    let suggestion = current === "pr" || current === "status" || current === "none" ? current : DEFAULTS.gates.merge.human;
+    const needsRemote = "  Pull requests need a git remote on GitHub: add one, or choose none or status.";
+    // Without a remote, pr is not saved; status keeps a person approving.
+    if (suggestion === "pr" && !remote) { ctx.ask.say(needsRemote); suggestion = "status"; }
+    let human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, suggestion);
+    while (human === "pr" && !remote) {
+      ctx.ask.say(needsRemote);
+      human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, suggestion);
+    }
     ctx.doc.put(["gates", "merge", "human"], human, DEFAULTS.gates.merge.human);
     ctx.ask.say("squash: each change lands on the main branch as one commit; merge: its commits are kept, with a merge commit.");
     const currentMethod = ctx.doc.get(["gates", "merge", "method"]);

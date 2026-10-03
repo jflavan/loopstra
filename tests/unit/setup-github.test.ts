@@ -79,12 +79,24 @@ describe("the github section", () => {
     } finally { spy.mockRestore(); r.cleanup(); }
   });
 
-  test("pull requests without a remote: setup says one is needed", async () => {
+  test("pull requests without a remote: setup says one is needed and asks again", async () => {
     const repo = await tempGitRepo();
     try {
       await Bun.write(`${repo.path}/loopstra/config.yaml`, CONFIG);
-      const { shown } = await askSection(github, repo.path, ["pr", ""]);
-      expect(shown).toContain("Pull requests need a git remote on GitHub: add one before starting the loop.");
+      const { text, shown } = await askSection(github, repo.path, ["pr", "status", ""]);
+      expect(shown).toContain("Pull requests need a git remote on GitHub: add one, or choose none or status.");
+      expect(shown.match(/Who approves a merge\?/g)).toHaveLength(2);
+      expect(parse(text).gates.merge).toEqual({ human: "status" });
+    } finally { repo.cleanup(); }
+  });
+
+  test("a config set to pull requests without a remote: --defaults says so and suggests status", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(`${repo.path}/loopstra/config.yaml`, `${CONFIG}gates:\n  merge:\n    human: pr\n`);
+      const { text, shown } = await askSection(github, repo.path, "defaults");
+      expect(shown).toContain("Pull requests need a git remote on GitHub: add one, or choose none or status.");
+      expect(parse(text).gates.merge).toEqual({ human: "status" });
     } finally { repo.cleanup(); }
   });
 
