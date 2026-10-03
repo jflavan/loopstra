@@ -45,15 +45,26 @@ export const commands: Section = {
 };
 
 /**
- * The command's first word when the shell said it could not find it (bun, sh, bash, cmd and
- * PowerShell each word it their own way), or undefined.
+ * The programs a command line runs: the first word of each command in a chain (`a && b`, `a; b`,
+ * `a | b`), after any leading `VAR=value` words, without quotes.
+ */
+function programsIn(command: string): string[] {
+  return command.split(/&&|\|\||[;|&()\n]/).flatMap((part) => {
+    const word = part.trim().split(/\s+/).find((w) => w && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    const program = word?.replace(/^["']|["']$/g, "");
+    return program ? [program] : [];
+  });
+}
+
+/**
+ * The first program in the command line that the shell said it could not find (bun, sh, bash, zsh,
+ * cmd and PowerShell each word it their own way), or undefined.
  */
 export function missingProgram(command: string, output: string): string | undefined {
-  const program = command.trim().split(/\s+/)[0]?.replace(/^["']|["']$/g, "");
-  if (!program) return undefined;
-  const p = program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const said = new RegExp(`command not found: ${p}(?!\\S)|${p}: (?:command )?not found|${p}'? is not recognized as|${p}: No such file or directory`);
-  return said.test(output) ? program : undefined;
+  return programsIn(command).find((program) => {
+    const p = program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`command not found: ${p}(?!\\S)|${p}: (?:command )?not found|${p}'? is not recognized as|${p}: No such file or directory`).test(output);
+  });
 }
 
 /**

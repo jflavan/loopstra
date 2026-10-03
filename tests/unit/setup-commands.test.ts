@@ -105,6 +105,18 @@ describe("the commands section", () => {
     expect(missingProgram("make test", "make: *** No rule to make target 'test'.  Stop.")).toBeUndefined();
   });
 
+  test("a missing program is found past leading VAR=value words and in any command of a chain", () => {
+    expect(missingProgram("CI=1 cargo test", "bash: line 1: cargo: command not found")).toBe("cargo");
+    expect(missingProgram("CI=1 RUST_LOG=debug cargo test", "sh: 1: cargo: not found")).toBe("cargo");
+    expect(missingProgram("cd sub && cargo test", "sh: 1: cargo: not found")).toBe("cargo");
+    expect(missingProgram("cd sub && cargo test", "'cargo' is not recognized as an internal or external command,")).toBe("cargo");
+    expect(missingProgram("bun install; FOO=bar npx jest | tee out.txt", "zsh: command not found: npx")).toBe("npx");
+    expect(missingProgram("cd sub && ./run.sh", "bash: ./run.sh: No such file or directory")).toBe("./run.sh");
+    // Arguments are not programs.
+    expect(missingProgram("cd sub && cat missing.txt", "cat: missing.txt: No such file or directory")).toBeUndefined();
+    expect(missingProgram("CI=1 cargo test", "error: CI=1: not found")).toBeUndefined();
+  });
+
   test("an install command that fails on main is a warning naming it, and the tests do not run", async () => {
     const { repo, trace } = await setupRepo("draft", { commands: { install: "exit 4", test: "echo ok" } });
     trace.close();
