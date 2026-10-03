@@ -32,6 +32,9 @@ describe("the commands section", () => {
       const again = await askSection(commands, repo.path, "defaults");
       expect(again.text).toBe(left.text);
       expect(again.shown).toContain("Installs dependencies in a fresh checkout (commands.install): (empty)");
+      // Nobody is typing under --defaults.
+      expect(again.shown).toContain("Build sessions may always run these.");
+      expect(again.shown).not.toContain("Type -");
     } finally { repo.cleanup(); }
   });
 

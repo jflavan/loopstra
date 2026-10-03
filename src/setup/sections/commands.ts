@@ -23,7 +23,7 @@ export const commands: Section = {
 
   async ask(ctx) {
     const detected = await detectCommands(ctx.root);
-    ctx.ask.say("Build sessions may always run these. Type - to leave out an optional one.");
+    ctx.ask.say(`Build sessions may always run these.${ctx.ask.interactive ? " Type - to leave out an optional one." : ""}`);
     for (const n of NAMES) {
       const at = ["commands", n];
       const current = ctx.doc.get(at);

@@ -26,6 +26,8 @@ export interface TextOptions {
 
 /** How a section asks. `close` ends the input (a terminal prompt stops reading); closing again does nothing. */
 export interface Prompt {
+  /** Whether a person types the answers: false under --defaults, so hints about typing are left out. */
+  readonly interactive: boolean;
   say(line: string): void;
   text(question: string, o?: TextOptions): Promise<string>;
   yesNo(question: string, suggestion: boolean): Promise<boolean>;
@@ -57,6 +59,7 @@ export function amountText(a: Amount, ratePerMinute: number): string {
 
 /** Questions over a stream (a terminal): one line per answer. A bad answer is asked again. */
 export class StreamPrompt implements Prompt {
+  readonly interactive = true;
   private readonly rl: Interface;
   private readonly lines: AsyncIterator<string>;
 
@@ -148,6 +151,7 @@ export class StreamPrompt implements Prompt {
 
 /** --defaults: every question takes its suggestion, and says what it took. */
 export class DefaultsPrompt implements Prompt {
+  readonly interactive = false;
   constructor(private readonly out: (line: string) => void) {}
 
   say(line: string): void {

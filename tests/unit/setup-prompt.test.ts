@@ -84,6 +84,13 @@ describe("--defaults", () => {
     expect(lines).toEqual(["Limits?: no", "Session: $9.00 (about 45 min)", "Lint: (empty)", "Gate: none", "Where: terminal"]);
   });
 
+  test("is not interactive; a terminal prompt is", () => {
+    expect(new DefaultsPrompt(() => {}).interactive).toBe(false);
+    const { prompt } = scripted();
+    expect(prompt.interactive).toBe(true);
+    prompt.close();
+  });
+
   test("a question with nothing to suggest stops setup, naming it", async () => {
     const p = new DefaultsPrompt(() => {});
     await expect(p.text("Test command (commands.test)")).rejects.toThrow('--defaults has no answer for "Test command (commands.test)"');

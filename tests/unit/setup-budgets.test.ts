@@ -38,6 +38,9 @@ describe("the budgets section", () => {
         expect(text).toBe(`${BASE}${chosen}`);
         expect(shown).toContain("claude.max_budget_usd: $5.00\n");
         expect(shown).not.toContain("the old default");
+        // Nobody is typing under --defaults.
+        expect(shown).toContain("Minutes are turned into dollars at $0.20 a minute (about $2.00 per 10 minutes): 0.2\n");
+        expect(shown).not.toContain("press Enter");
       } finally { r.cleanup(); }
     }
   });

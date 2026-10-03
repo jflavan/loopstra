@@ -59,7 +59,8 @@ export const budgets: Section = {
       for (const l of LIMITS) ctx.doc.clear(l.path);
       return;
     }
-    const rate = dollars(await ctx.ask.text(`Minutes are turned into dollars at ${rateText(DEFAULT_RATE_PER_MINUTE)} (about ${usd(DEFAULT_RATE_PER_MINUTE * 10)} per 10 minutes); press Enter to keep it or type another rate`, {
+    const typing = ctx.ask.interactive ? "; press Enter to keep it or type another rate" : "";
+    const rate = dollars(await ctx.ask.text(`Minutes are turned into dollars at ${rateText(DEFAULT_RATE_PER_MINUTE)} (about ${usd(DEFAULT_RATE_PER_MINUTE * 10)} per 10 minutes)${typing}`, {
       suggestion: String(DEFAULT_RATE_PER_MINUTE),
       check: (s) => (dollars(s) > 0 ? null : "Answer a number of dollars, like 0.2."),
     }));
