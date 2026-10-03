@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
+import { writeFileAtomic } from "./fsutil";
 import { onStop } from "./stop";
 
 /**
@@ -44,18 +45,8 @@ export function heartbeatPath(root: string): string {
 
 /** Writes the heartbeat whole (temp file, then rename), so a reader never sees half of it. Never throws. */
 export function writeHeartbeat(root: string, hb: Heartbeat): void {
-  const path = heartbeatPath(root);
-  const text = JSON.stringify(hb, null, 2);
   try {
-    mkdirSync(join(root, ".loopstra"), { recursive: true });
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, text);
-    try {
-      renameSync(tmp, path);
-    } catch {
-      // Windows refuses the rename while a reader has the file open; a plain write is fine then.
-      writeFileSync(path, text);
-    }
+    writeFileAtomic(heartbeatPath(root), JSON.stringify(hb, null, 2));
   } catch {
     /* The heartbeat is for display only; it must never stop the loop. */
   }
