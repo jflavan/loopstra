@@ -129,7 +129,8 @@ export interface RunPhaseInput {
   /** Deny rules (--disallowedTools). A bare tool name removes the tool from the session. */
   disallowedTools?: string[];
   timeoutMs: number;
-  maxBudgetUsd: number;
+  /** The session's spending cap. Absent or Infinity: no --max-budget-usd, and the timeout is the only stop. */
+  maxBudgetUsd?: number;
   resume?: string;
   env?: Record<string, string>;
   /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
@@ -199,8 +200,8 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     "--json-schema", JSON.stringify(input.schema),
     "--model", input.model,
     "--permission-mode", input.permissionMode,
-    "--max-budget-usd", String(input.maxBudgetUsd),
   ];
+  if (input.maxBudgetUsd !== undefined && Number.isFinite(input.maxBudgetUsd)) args.push("--max-budget-usd", String(input.maxBudgetUsd));
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
 

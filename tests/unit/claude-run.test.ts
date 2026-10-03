@@ -42,6 +42,18 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("passes no --max-budget-usd when there is no cap", async () => {
+    const t = tempDir();
+    try {
+      for (const maxBudgetUsd of [undefined, Infinity]) {
+        const argsFile = join(t.path, `args-${String(maxBudgetUsd)}.json`);
+        await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+          allowedTools: [], timeoutMs: 10_000, maxBudgetUsd, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+        expect((await Bun.file(argsFile).json()).args).not.toContain("--max-budget-usd");
+      }
+    } finally { t.cleanup(); }
+  });
+
   test("kills a hung process at the timeout and reports failure", async () => {
     const t = tempDir();
     const started = Date.now();
