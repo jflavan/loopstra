@@ -50,7 +50,7 @@ suggests a value. Pressing Enter takes the suggestion, which is the current valu
 | Section | Asks | Checks |
 |---|---|---|
 | `budgets` | "Do you want spending limits? [no]". If yes: each limit, in minutes or dollars. | A limit shorter than `timeout_minutes`, in minutes, is a warning. |
-| `commands` | Confirms or edits test, lint, build, run and install, showing what `init` detected. | `commands.test` runs once in a temporary detached worktree of `main_branch`, within `timeout_minutes`, and exits 0. If it fails, that's a warning, since main may be red today. `claude --version` works. |
+| `commands` | Confirms or edits test, lint, build, run and install, showing what `init` detected. | `commands.test` runs once in a temporary detached worktree of `main_branch`, within `timeout_minutes`, and exits 0. If it fails, that's a warning, since main may be red today. `claude` is found (on PATH, or `LOOPSTRA_CLAUDE_EXECUTABLE`). |
 | `gates` | For spec, plan and done: whether a person approves (`status`) or not (`none`), and whether an agent reviewer runs. (The merge gate belongs to `github`.) | — |
 | `github` | How a change is merged: through a GitHub pull request that someone approves (`gates.merge.human: pr`), locally after a person sets the status (`status`), or locally on its own (`none`). Then the method (`squash` or `merge`). | With pull requests: `gh auth status` succeeds and `git ls-remote <remote>` answers. |
 | `chat` | Where people talk to the orchestrator: any of terminal, dashboard, Slack, Discord. Only the chosen bots are asked about: the token environment variable names, channel, `allow`, `acceptors` and `announce_to`. A bot that isn't chosen is removed. | Each chosen bot's token variable is set, and the platform accepts it: Slack `auth.test`, Discord `GET /users/@me`. |
@@ -104,8 +104,11 @@ and no retry, and the attention list shows "Paused: the loop has used today's bu
 
 ### In setup
 
-"Do you want spending limits?" Enter or "no" removes all four keys. "Yes" asks each one in turn. An
-answer can be minutes (`30m`, `2h`), dollars (`$6`, `6`) or `none`. Minutes are converted at a rate
+"Do you want spending limits?" "No" removes all four keys. Enter takes "yes" when a limit someone
+chose is set (a value other than the old template's), else "no", so `--defaults` never removes a limit
+someone chose but does remove the old template's. "Yes" asks each one in turn; Enter keeps the
+current limit (none when unset or the old template's), and the table's suggestion is shown as a hint
+in the question. An answer can be minutes (`30m`, `2h`), dollars (`$6`, `6`) or `none`. Minutes are converted at a rate
 shown at the start: "$0.20 a minute (about $2 per 10 minutes); press Enter to keep it or type
 another rate." The rate is only used during setup and is not saved. Each question shows a suggestion:
 
@@ -124,7 +127,7 @@ setup shows it as "5 (the old default; the default is now no limit)".
 
 The notes for a phase stopped by a limit name the setting and the command:
 
-- budget: "This step hit its spending limit (`claude.max_budget_usd`, $X). An engineer can raise or
+- budget: "This step hit its spending limit (`claude.max_budget_usd`). An engineer can raise or
   remove it with `loopstra setup budgets`."
 - timeout: the existing note, plus "(`claude.timeout_minutes`; change it in loopstra/config.yaml)".
 
@@ -156,8 +159,9 @@ interface Check { level: "ok" | "warn" | "fail"; text: string }
 ```
 
 - Sections are independent. Each reads current values from `ctx.doc` and writes only what the person
-  changed. Setting a value back to its default removes the key, so later default changes reach the
-  repository.
+  changed. A key that is not in the file is added only when the answer differs from its default; a key
+  that is there (the template writes many, as documentation) is updated in place. Budgets are the
+  exception: no limit is the absence of the key, so choosing none removes it.
 - `document.ts` uses `yaml`'s `parseDocument`, `getIn`, `setIn` and `deleteIn`, and `String(doc)` to
   save. Comments and key order survive.
 - At the end, the edited document is validated with `ConfigSchema`. If it is invalid, the errors are
