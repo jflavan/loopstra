@@ -42,6 +42,13 @@ describe("a prompt over streams", () => {
     expect(shown()).toContain("  An answer is needed.");
   });
 
+  test("an amount of nothing says to answer more than $0, or none", async () => {
+    const { prompt, shown } = scripted("0", "$0", "0m", "$0.001", "$3");
+    expect(await prompt.amount("Session", { suggestion: "none", ratePerMinute: 0.2 })).toBe(3);
+    expect(shown().split("Answer more than $0, or none for no limit.").length - 1).toBe(4);
+    expect(shown()).not.toContain("Answer a time");
+  });
+
   test("a bad answer is asked again, saying why", async () => {
     const { prompt, shown } = scripted("maybe", "y", "sometimes", "status", "soon", "1h", "bad name", "GOOD_NAME", "", "x");
     expect(await prompt.yesNo("Limits?", false)).toBe(true);

@@ -39,15 +39,19 @@ export interface Prompt {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/** "30m", "2h", "$6", "6", "none": dollars (times at `ratePerMinute`) or "none"; null when it is none of those. */
+/** "30m", "2h", "$6", "6", "none": dollars (times at `ratePerMinute`) or "none"; null when it is none of those, or nothing ($0). */
 export function parseAmount(answer: string, ratePerMinute: number): Amount | null {
+  const d = dollarsIn(answer, ratePerMinute);
+  return d === "none" || d > 0 ? d : null;
+}
+
+/** An answer in dollars rounded to cents (times at `ratePerMinute`), or "none"; NaN when it is not an amount. */
+function dollarsIn(answer: string, ratePerMinute: number): number | "none" {
   const a = answer.trim().toLowerCase();
   if (a === "none") return "none";
   const time = /^(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)$/.exec(a);
   const usd = /^\$?(\d+(?:\.\d+)?)$/.exec(a);
-  const dollars = time ? Number(time[1]) * (time[2]!.startsWith("h") ? 60 : 1) * ratePerMinute : usd ? Number(usd[1]) : NaN;
-  const rounded = round2(dollars);
-  return rounded > 0 ? rounded : null;
+  return round2(time ? Number(time[1]) * (time[2]!.startsWith("h") ? 60 : 1) * ratePerMinute : usd ? Number(usd[1]) : NaN);
 }
 
 /** "$9.00 (about 45 min)", "$0.10 (under 1 min)", or "no limit". */
@@ -138,9 +142,9 @@ export class StreamPrompt implements Prompt {
     for (;;) {
       const a = await this.answer(`${question} (minutes like 30m, dollars like $6, or none)`, amountText(o.suggestion, o.ratePerMinute));
       if (!a) return o.suggestion;
-      const v = parseAmount(a, o.ratePerMinute);
-      if (v !== null) return v;
-      this.say("  Answer a time (30m, 2h), an amount ($6), or none.");
+      const v = dollarsIn(a, o.ratePerMinute);
+      if (v === "none" || v > 0) return v;
+      this.say(v === 0 ? "  Answer more than $0, or none for no limit." : "  Answer a time (30m, 2h), an amount ($6), or none.");
     }
   }
 
