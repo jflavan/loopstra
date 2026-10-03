@@ -9,6 +9,8 @@ export interface SetupContext {
   ask: Prompt;
   /** Where token variables are read: process.env (tests pass their own). */
   env: Record<string, string | undefined>;
+  /** Dollars a minute the person gave in this run (the budgets section sets it); the checks use it. */
+  ratePerMinute?: number;
 }
 
 /** One line of a check's report. A failed check never undoes a save. */
