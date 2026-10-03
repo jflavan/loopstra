@@ -10,6 +10,9 @@ const root = process.cwd();
 const HELP = `loopstra <command>
 
   init      stamp Loopstra into this repo
+  setup     walk through the settings (setup <section> for one: budgets, commands,
+            gates, github, chat, models; --defaults takes every suggestion;
+            --check only checks)
   start     run the loop (--once for a single tick, e.g. from cron);
             Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
@@ -40,6 +43,11 @@ async function main(): Promise<number> {
       for (const w of r.warnings) console.log(`warning: ${w}`);
       console.log(["", "Next:", ...r.next.map((n) => `  - ${n}`)].join("\n"));
       return 0;
+    }
+    case "setup": {
+      if (!setUp()) return 1;
+      const { setup } = await import("./setup");
+      return setup(root, { section: rest.find((a) => !a.startsWith("--")), defaults: rest.includes("--defaults"), check: rest.includes("--check") });
     }
     case "status":
       if (!setUp()) return 1;
