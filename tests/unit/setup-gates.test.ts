@@ -14,7 +14,10 @@ describe("the gates section", () => {
       await init(repo.path);
       // spec: a person, no agent; plan: as is; done: a person, as is.
       const { shown } = await askSection(gates, repo.path, ["y", "n", "", "", "yes", ""]);
+      expect(shown).toContain("each step can wait for a person or go on by itself.");
       expect(shown).toContain("Should a person approve the spec (what will be built) before work goes on? (yes: they set its status in intent/<change>/intent.md; no: it goes on by itself)");
+      expect(shown).toContain("Should a person confirm the result after merging? (yes: they set its status in intent/<change>/intent.md; no: it is done by itself)");
+      expect(shown).not.toContain("result after merging before work goes on");
       const cfg = await loadConfig(repo.path);
       expect(cfg.gates.spec).toEqual({ human: "status", agent: false });
       expect(cfg.gates.plan).toEqual({ human: "none", agent: true });

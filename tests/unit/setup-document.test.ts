@@ -154,6 +154,30 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("a placeholder above a map's first key is filled too (a Cargo project's commands)", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "Cargo.toml"), "[package]\nname = \"x\"\n");
+      await init(repo.path);
+      const before = readFileSync(configPath(repo.path), "utf8");
+      const doc = ConfigDocument.load(repo.path);
+      doc.set(["commands", "install"], "cargo fetch");
+      doc.set(["commands", "lint"], "cargo clippy");
+      doc.save();
+      const after = readFileSync(configPath(repo.path), "utf8");
+      expect(after).toContain([
+        "commands:",
+        "  # Optional: leave a key out if you do not have it.",
+        "  install: cargo fetch",
+        "  lint: cargo clippy",
+        '  build: "cargo build"',
+        "  # run:",
+        "",
+      ].join("\n"));
+      expect(after.replace("  install: cargo fetch\n  lint: cargo clippy\n", "  # install:\n  # lint:\n")).toBe(before);
+    } finally { repo.cleanup(); }
+  });
+
   test("on the stamped template, a new key takes the place of its commented-out placeholder", async () => {
     const repo = await tempGitRepo();
     try {

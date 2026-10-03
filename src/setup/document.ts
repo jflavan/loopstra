@@ -66,25 +66,43 @@ export class ConfigDocument {
 
   /**
    * Adds a new key where its map has it commented out with nothing after it (the template's
-   * `# lint:`): the placeholder line goes, the comments above it go with the new key, and those
-   * below stay with the key they were on. False when there is no such line.
+   * `# lint:`): the placeholder line goes, the comments above it go with the new key (or stay above
+   * the map, for one above its first key), and those below stay with the key they were on. A
+   * placeholder after a map's last key is not filled (the template never puts one there). False
+   * when there is no such line.
    */
   private fillPlaceholder(path: Path, value: unknown): boolean {
     const key = path[path.length - 1];
     const parent = path.length > 1 ? this.doc.getIn(path.slice(0, -1), true) : this.doc.contents;
     if (typeof key !== "string" || !isMap(parent)) return false;
     const placeholder = new RegExp(`^ ?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*$`);
+    /** The comment's lines above and below the placeholder, or null when it has none. */
+    const split = (comment: string | null | undefined) => {
+      const lines = (comment ?? "").split("\n");
+      const at = lines.findIndex((l) => placeholder.test(l));
+      return at < 0 ? null : { above: lines.slice(0, at).join("\n") || undefined, below: lines.slice(at + 1).join("\n") || undefined };
+    };
+    const pair = this.doc.createPair(key, value);
+    const added = pair.key as Scalar;
+    // Comments above a map's first key belong to the map.
+    const top = split(parent.commentBefore);
+    if (top && parent.items.length) {
+      const first = parent.items[0]!;
+      if (!isScalar(first.key)) first.key = new Scalar(first.key);
+      const firstKey = first.key as Scalar;
+      parent.commentBefore = top.above;
+      firstKey.commentBefore = joined(top.below, firstKey.commentBefore);
+      parent.items.unshift(pair);
+      return true;
+    }
     for (let i = 0; i < parent.items.length; i++) {
       const after = parent.items[i]!.key;
-      if (!isScalar(after) || !after.commentBefore) continue;
-      const lines = after.commentBefore.split("\n");
-      const at = lines.findIndex((l) => placeholder.test(l));
-      if (at < 0) continue;
-      const pair = this.doc.createPair(key, value);
-      const added = pair.key as Scalar;
-      added.commentBefore = lines.slice(0, at).join("\n") || undefined;
+      if (!isScalar(after)) continue;
+      const hit = split(after.commentBefore);
+      if (!hit) continue;
+      added.commentBefore = hit.above;
       if (after.spaceBefore) { added.spaceBefore = true; after.spaceBefore = false; }
-      after.commentBefore = lines.slice(at + 1).join("\n") || undefined;
+      after.commentBefore = hit.below;
       parent.items.splice(i, 0, pair);
       return true;
     }
