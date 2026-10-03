@@ -193,6 +193,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: false, reason, note: ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+  // What the session cost, once it ended: kept if the phase fails after it.
+  let costUsd = 0;
   try {
     const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
     mkdirSync(dir, { recursive: true });
@@ -219,10 +221,11 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     });
 
     denied = r.denied;
+    costUsd = r.costUsd;
     if (!r.ok) {
       if (unavailable(r.reason)) {
         // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
         throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
       }
       if (r.reason === "budget" && fromDay) {
@@ -250,7 +253,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     }
     // Its phase row is already ended.
     if (notTheStepsFault(e)) throw e;
-    return failed("crash", `runtime error: ${errorText(e)}`, null);
+    return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd);
   } finally {
     if (raw) { try { await raw.end(); } catch { /* already closed */ } }
   }

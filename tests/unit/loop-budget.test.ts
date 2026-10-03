@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { attention } from "../../src/attention";
-import { CHAT_SLUG, loopDayNote, loopDaySpent, loopDayUsedUp } from "../../src/budget";
+import { CHAT_SLUG, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday } from "../../src/budget";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { loadConfig } from "../../src/config";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { agentPhase } from "../../src/phases";
 import { tick } from "../../src/scheduler";
-import { LoopBudgetReached } from "../../src/stop";
+import { AssistantUnavailable, LoopBudgetReached } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, setupRepo, tempDir, withEnv } from "../helpers";
 
@@ -88,6 +89,33 @@ describe("the loop's daily budget", () => {
       expect(r).toMatchObject({ ok: false, reason: "budget" });
       expect(!r.ok && r.note).toContain("claude.max_budget_usd");
       expect(trace.phases(SLUG)[0]).toMatchObject({ status: "fail", cost_usd: 5.01 });
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("an unavailable session's cost counts toward the day", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 10\n" });
+    const dir = tempDir();
+    try {
+      const fixture = join(dir.path, "limit.jsonl");
+      await Bun.write(fixture, (await Bun.file(join(FIXTURES, "usage-limit.jsonl")).text()).replace(/"total_cost_usd":[0-9.]+/, '"total_cost_usd":0.5'));
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x");
+      await expect(withEnv({ LOOPSTRA_FAKE_FIXTURE: fixture }, () => agentPhase(ctx, INTAKE))).rejects.toBeInstanceOf(AssistantUnavailable);
+      expect(trace.phases(SLUG)[0]).toMatchObject({ status: "interrupted", cost_usd: 0.5 });
+      expect(trace.costIn({ except: CHAT_SLUG }, startOfToday(), { endedOnly: true })).toBe(0.5);
+    } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+  });
+
+  test("a session that ran but whose phase then crashed keeps its cost", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 10\n" });
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:simple-success");
+      // The envelope cannot be saved: a folder is in its place.
+      mkdirSync(join(ctx.runDir, "phases", "1-intake", "envelope.json"), { recursive: true });
+      await agentPhase(ctx, INTAKE);
+      const first = trace.phases(SLUG)[0]!;
+      expect(first).toMatchObject({ status: "fail" });
+      expect(first.error).toStartWith("crash:");
+      expect(first.cost_usd).toBeGreaterThan(0);
     } finally { trace.close(); repo.cleanup(); }
   });
 
