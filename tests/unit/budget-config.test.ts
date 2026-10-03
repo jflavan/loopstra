@@ -30,13 +30,17 @@ describe("budgets", () => {
   test("init writes them only as comments", async () => {
     const repo = await tempGitRepo();
     try {
+      // A detected test command, so the stamped config is valid and loads.
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
       await init(repo.path);
       const text = readFileSync(configPath(repo.path), "utf8");
       expect(text).not.toMatch(/^\s*max_budget_usd/m);
       expect(text).toContain("max_budget_usd_per_day: what the loop's sessions may spend together in a day");
-      const cfg = await loadConfig(repo.path).catch(() => null);
-      // A repo with no detected test command has no valid config yet; when it has one, budgets are unset.
-      if (cfg) expect(cfg.claude.max_budget_usd).toBeUndefined();
+      const cfg = await loadConfig(repo.path);
+      expect(cfg.claude.max_budget_usd).toBeUndefined();
+      expect(cfg.claude.max_budget_usd_per_day).toBeUndefined();
+      expect(cfg.chat.max_budget_usd_per_session).toBeUndefined();
+      expect(cfg.chat.max_budget_usd_per_day).toBeUndefined();
     } finally { repo.cleanup(); }
   });
 });

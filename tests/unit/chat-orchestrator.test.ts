@@ -335,6 +335,25 @@ describe("the daily budget is held, not just checked (Copilot review)", () => {
     } finally { r.cleanup(); }
   });
 
+  // The backdated row must still fall after local midnight, or it would not count for today anyway.
+  const sinceMidnightMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+  test.skipIf(sinceMidnightMinutes < 21)("a hold left running by a killed process stops counting once stale", async () => {
+    const r = await chatRepo({ config: "claude:\n  timeout_minutes: 1\nchat:\n  max_budget_usd_per_day: 2\n" });
+    try {
+      // A session that holds the whole day and was never ended; stale after timeout 1 + grace 10 minutes.
+      const t = Trace.open(r.root);
+      try {
+        t.phaseStart(CHAT_SLUG, "orchestrator", "agent", 2);
+        const iso = new Date(Date.now() - 20 * 60_000).toISOString();
+        (t as unknown as { db: { run(sql: string, args: unknown[]): void } }).db.run("UPDATE phases SET started = ? WHERE slug = ?", [iso, CHAT_SLUG]);
+      } finally { t.close(); }
+      await r.answer("orchestrator", 1, turn("answered"));
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent).toEqual(["answered"]);
+    } finally { r.cleanup(); }
+  });
+
   test("with no budgets set, a session has no cap and nothing is held", async () => {
     const r = await chatRepo();
     try {

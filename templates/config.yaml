@@ -1,5 +1,5 @@
 # Loopstra configuration. Engineers edit this; product owners never need to.
-# Every key except commands.test has a default. Unknown keys are errors.
+# Every key except commands.test has a default (spending limits default to none). Unknown keys are errors.
 # Changes take effect on the next pass of the loop; no restart needed.
 # `loopstra setup` walks through these settings and keeps this file's comments.
 version: 1

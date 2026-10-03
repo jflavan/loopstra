@@ -131,7 +131,8 @@ export class Orchestrator {
 
   private budgetUsedUp(cfg: Config, why: "today" | "held" = "today"): string {
     if (why === "held") return "Other conversations are using what is left of today's chat budget right now. Please try again in a few minutes.";
-    return `I have used today's chat budget ($${(cfg.chat.max_budget_usd_per_day ?? 0).toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise or remove the limit with \`loopstra setup budgets\`.`;
+    const d = cfg.chat.max_budget_usd_per_day;
+    return `I have used today's chat budget${d === undefined ? "" : ` ($${d.toFixed(2)})`}, so I cannot answer until tomorrow. An engineer can raise or remove the limit with \`loopstra setup budgets\`.`;
   }
 
   private async turn(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, say: Send, declined: string | null): Promise<void> {
