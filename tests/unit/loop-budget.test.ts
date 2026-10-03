@@ -167,6 +167,56 @@ describe("the loop's daily budget", () => {
     }, 60_000);
   }
 
+  describe("a step that runs out partway on two days in a row", () => {
+    /** Moves today's trace (phases and the change's pauses) to yesterday, as if the step had run then. */
+    function yesterday(trace: Trace, status?: string): void {
+      const db = (trace as unknown as { db: { run(sql: string, args: unknown[]): void } }).db;
+      const iso = new Date(Date.now() - 36 * 3600_000).toISOString();
+      db.run("UPDATE phases SET started = ?, ended = ?", [iso, iso]);
+      db.run("UPDATE events SET ts = ? WHERE slug = ? AND type = 'pause'", [iso, SLUG]);
+      if (status) db.run("UPDATE events SET payload = json_set(payload, '$.status', ?) WHERE slug = ? AND type = 'pause'", [status, SLUG]);
+    }
+
+    async function designing(): Promise<Awaited<ReturnType<typeof setupRepo>>> {
+      const r = await setupRepo("designing", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+      const path = join(r.repo.path, "intent", SLUG, "intent.md");
+      await Bun.write(path, (await Bun.file(path).text()).replace("status: designing\n", "status: designing\nresume_from: accepted\n"));
+      return r;
+    }
+
+    test("the pause records the change's status; the second day blocks it with a plain note and how to resume", async () => {
+      const { repo, trace } = await designing();
+      const dir = tempDir();
+      try {
+        await costs(dir.path, { intake: 1 });
+        const run = () => withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => tick(repo.path));
+        expect((await run()).paused).toContain("resumes after midnight");
+        const pause = trace.lastEvent(SLUG, "pause")!;
+        expect(JSON.parse(pause.payload)).toMatchObject({ dayBudget: true, status: "designing" });
+        yesterday(trace);
+        const out = await run();
+        expect(out.paused).toBeUndefined();
+        const intent = (await readIntent(repo.path, SLUG)).file.frontmatter;
+        expect(intent.status).toBe("blocked");
+        expect(intent.note).toBe("This step needs more than the loop's daily budget (claude.max_budget_usd_per_day, $1.00): it ran out partway on two days in a row. Raise or remove the limit with `loopstra setup budgets`. When that is sorted out, set status to accepted to try again.");
+        expect(out.result).toMatchObject({ ok: false, note: intent.note });
+      } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+    }, 60_000);
+
+    test("a step that got further since (another status) only pauses again", async () => {
+      const { repo, trace } = await designing();
+      const dir = tempDir();
+      try {
+        await costs(dir.path, { intake: 1 });
+        const run = () => withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => tick(repo.path));
+        await run();
+        yesterday(trace, "accepted");
+        expect((await run()).paused).toContain("resumes after midnight");
+        expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+      } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+    }, 60_000);
+  });
+
   test("an outage that repeats while the day is spent keeps backing off without a probe session", async () => {
     const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     const dir = tempDir();

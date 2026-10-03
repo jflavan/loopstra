@@ -65,3 +65,11 @@ export function loopDayNote(cfg: Config, spent: boolean): string {
   }
   return `The loop has used today's budget (${setting}). It resumes after midnight, or an engineer can change it with \`loopstra setup budgets\`.`;
 }
+
+/**
+ * The owner's note when a step ran out of the loop's day partway, at the same status, on two days:
+ * it would start over and run out again every day. The block adds the status to set to resume.
+ */
+export function stepOverDayNote(cfg: Config): string {
+  return `This step needs more than the loop's daily budget (${loopDaySetting(cfg)}): it ran out partway on two days in a row. Raise or remove the limit with \`loopstra setup budgets\`.`;
+}

@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday } from "./budget";
+import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
@@ -136,12 +136,7 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
     if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
-    if (e instanceof LoopBudgetReached) {
-      // Reached partway through a step: it keeps its status and resumes when there is budget again.
-      out.paused = loopDayNote(cfg, loopDaySpent(cfg, trace));
-      trace.event(out.picked ?? "_loop", "pause", { reason: out.paused });
-      return out;
-    }
+    if (e instanceof LoopBudgetReached) return await afterDayBudget(root, cfg, trace, out);
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
@@ -230,6 +225,33 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
 }
 
 /**
+ * The loop's day ran out partway through a step: the change keeps its status and the step resumes
+ * when there is budget again. When the day is spent (not only held by others), the pause records
+ * that status. A step that spent the day at the same status on an earlier day as well never got past
+ * that point and would start over and run out every day: it is blocked instead, with a note that says so.
+ */
+async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult): Promise<TickResult> {
+  const spent = loopDaySpent(cfg, trace);
+  const reason = loopDayNote(cfg, spent);
+  const slug = out.picked;
+  let intent: Intent | null = null;
+  if (slug && spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
+  const status = intent?.file.frontmatter.status;
+  if (slug && intent) {
+    const last = trace.lastEvent(slug, "pause", '"dayBudget":true');
+    const lastStatus = last ? (JSON.parse(last.payload) as { status?: string }).status : undefined;
+    if (last && last.ts < startOfToday() && lastStatus === status) {
+      const ctx = new StepContext(root, cfg, trace, intent);
+      out.result = await blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, earlierPause: last.ts } });
+      return out;
+    }
+  }
+  out.paused = reason;
+  trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status } : { reason });
+  return out;
+}
+
+/**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
  * plain note (the detail goes to the trace); only a stop request passes through.
  */
@@ -250,9 +272,9 @@ function unexpectedNote(e: unknown): string {
 }
 
 /** Blocks with a note; if even that fails (for example a commit is refused), traces it instead of throwing. */
-async function blockSafely(ctx: StepContext, note: string): Promise<StepResult> {
+async function blockSafely(ctx: StepContext, note: string, opts: { detail?: unknown } = {}): Promise<StepResult> {
   try {
-    return await block(ctx, note);
+    return await block(ctx, note, opts);
   } catch (e) {
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "block", note, error: errorText(e) });
