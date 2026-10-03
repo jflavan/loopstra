@@ -1,13 +1,15 @@
 import { existsSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
-import { configPath, loadConfig, NOT_SET_UP, type Config } from "../config";
-import { errorText } from "../shell";
+import { configPath, NOT_SET_UP, type Config } from "../config";
+import { errorText, within } from "../shell";
 import { ConfigDocument } from "./document";
 import { DefaultsPrompt, SetupStopped, StreamPrompt, type Prompt } from "./prompt";
 import { SECTIONS } from "./sections";
 import type { Check, Section, SetupContext } from "./types";
 
 export const NEEDS_TERMINAL = "loopstra setup asks questions: run it in a terminal, or use --defaults (take every suggestion) or --check (only check).";
+
+export const SETUP_USAGE = "Usage: loopstra setup [section] [--defaults | --check]";
 
 export interface SetupOptions {
   /** One section by name; all of them when absent. */
@@ -21,29 +23,48 @@ export interface SetupOptions {
   /** A prompt already reading the input (init's offer), so the stream is read by one reader only. */
   prompt?: Prompt;
   env?: Record<string, string | undefined>;
+  /** The sections to choose from; SECTIONS when absent (tests pass their own). */
+  sections?: Section[];
+  /** How long one section's checks may take; claude.timeout_minutes plus a minute when absent. */
+  checkMs?: number;
+}
+
+/** The command line after `setup`: at most one section, and --defaults or --check (not both). Null when it is not that. */
+export function parseSetupArgs(args: readonly string[]): Pick<SetupOptions, "section" | "defaults" | "check"> | null {
+  const flags = args.filter((a) => a.startsWith("-"));
+  const names = args.filter((a) => !a.startsWith("-"));
+  if (names.length > 1 || flags.some((f) => f !== "--defaults" && f !== "--check")) return null;
+  const defaults = flags.includes("--defaults");
+  const check = flags.includes("--check");
+  if (defaults && check) return null;
+  return { section: names[0], defaults, check };
 }
 
 /**
  * `loopstra setup`: each section asks its questions, the config is checked and saved once (with its
- * comments), then the checks run. Quitting, or a config that would not load, saves nothing. Returns
- * the exit code: 0 once saved (a failed check is listed, not an error), 1 when nothing could be saved;
- * with --check, 1 when any check fails.
+ * comments), then the checks run. Quitting, a section that fails, or a config that would not load
+ * saves nothing. Returns the exit code: 0 once saved (a failed check is listed, not an error), 1 when
+ * nothing could be saved; with --check, 1 when the config does not load or any check fails.
  */
 export async function setup(root: string, o: SetupOptions = {}): Promise<number> {
   const output = o.output ?? process.stdout;
   const out = (line: string) => { output.write(`${line}\n`); };
   if (!existsSync(configPath(root))) { out(NOT_SET_UP); return 1; }
-  const sections = o.section ? SECTIONS.filter((s) => s.name === o.section) : SECTIONS;
+  const all = o.sections ?? SECTIONS;
+  const sections = o.section ? all.filter((s) => s.name === o.section) : all;
   if (o.section && !sections.length) {
-    out(`There is no setup section called ${o.section}. Sections: ${SECTIONS.map((s) => s.name).join(", ")}.`);
+    out(`There is no setup section called ${o.section}. Sections: ${all.map((s) => s.name).join(", ")}.`);
     return 1;
   }
   const env = o.env ?? process.env;
-  if (o.check) return checkOnly(root, sections, env, out);
+  if (o.check) return checkOnly(root, sections, env, out, o.checkMs);
   if (!o.defaults && !(o.interactive ?? process.stdin.isTTY)) { out(NEEDS_TERMINAL); return 1; }
 
   let doc: ConfigDocument;
   try { doc = ConfigDocument.load(root); } catch (e) { out(errorText(e)); return 1; }
+  try { doc.validate(); } catch (e) {
+    out(`Note: loopstra/config.yaml has problems now; the questions below can fix them:\n${errorText(e)}`);
+  }
   const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : o.prompt ?? new StreamPrompt(o.input ?? process.stdin, output);
   const ctx: SetupContext = { root, doc, ask, env };
   try {
@@ -52,8 +73,8 @@ export async function setup(root: string, o: SetupOptions = {}): Promise<number>
       await s.ask(ctx);
     }
   } catch (e) {
-    if (e instanceof SetupStopped) { out(e.message); return 1; }
-    throw e;
+    out(e instanceof SetupStopped ? e.message : `\nNot saved: ${errorText(e)}`);
+    return 1;
   } finally {
     ask.close();
   }
@@ -66,23 +87,38 @@ export async function setup(root: string, o: SetupOptions = {}): Promise<number>
     out(`\nNot saved: ${errorText(e)}`);
     return 1;
   }
-  report(await runChecks(sections, ctx, cfg), out);
+  report(await runChecks(sections, ctx, cfg, o.checkMs), out);
   return 0;
 }
 
-async function checkOnly(root: string, sections: Section[], env: SetupContext["env"], out: (line: string) => void): Promise<number> {
+async function checkOnly(root: string, sections: Section[], env: SetupContext["env"], out: (line: string) => void, checkMs?: number): Promise<number> {
+  let doc: ConfigDocument;
   let cfg: Config;
-  try { cfg = await loadConfig(root); } catch (e) { out(errorText(e)); return 1; }
-  const checks = await runChecks(sections, { root, doc: ConfigDocument.load(root), ask: new DefaultsPrompt(() => {}), env }, cfg);
+  try {
+    doc = ConfigDocument.load(root);
+    cfg = doc.validate();
+  } catch (e) { out(errorText(e)); return 1; }
+  out("loopstra/config.yaml loads.");
+  const checks = await runChecks(sections, { root, doc, ask: new DefaultsPrompt(() => {}), env }, cfg, checkMs);
   report(checks, out);
   return checks.some((c) => c.level === "fail") ? 1 : 0;
 }
 
-async function runChecks(sections: Section[], ctx: SetupContext, cfg: Config): Promise<Check[]> {
+/** "3 minutes", or "5 seconds" under a minute. */
+function duration(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`;
+}
+
+async function runChecks(sections: Section[], ctx: SetupContext, cfg: Config, checkMs?: number): Promise<Check[]> {
+  const limit = checkMs ?? (cfg.claude.timeout_minutes + 1) * 60_000;
+  const late = Symbol("late");
   const all: Check[] = [];
   for (const s of sections) {
-    try { all.push(...(await s.check(ctx, cfg))); }
-    catch (e) { all.push({ level: "fail", text: `${s.title}: the check could not run: ${errorText(e)}` }); }
+    try {
+      const checks = await within(s.check(ctx, cfg), limit, late);
+      if (checks === late) all.push({ level: "fail", text: `${s.title}: the check did not finish in ${duration(limit)}` });
+      else all.push(...checks);
+    } catch (e) { all.push({ level: "fail", text: `${s.title}: the check could not run: ${errorText(e)}` }); }
   }
   return all;
 }

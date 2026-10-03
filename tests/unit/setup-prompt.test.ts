@@ -16,6 +16,8 @@ describe("amounts", () => {
   test("are shown in dollars and minutes", () => {
     expect(amountText(9, 0.2)).toBe("$9.00 (about 45 min)");
     expect(amountText("none", 0.2)).toBe("no limit");
+    expect(amountText(0.1, 0.2)).toBe("$0.10 (under 1 min)");
+    expect(amountText(0.2, 0.2)).toBe("$0.20 (about 1 min)");
   });
 });
 

@@ -1,7 +1,7 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
-/** Setup ended without saving: input ran out (Ctrl-D), or --defaults had no answer to give. */
+/** Setup ended without saving: input ran out (Ctrl-D, or Ctrl-Z then Enter on Windows), or --defaults had no answer to give. */
 export class SetupStopped extends Error {
   constructor(message = "Setup stopped; nothing was saved.") {
     super(message);
@@ -48,9 +48,11 @@ export function parseAmount(answer: string, ratePerMinute: number): Amount | nul
   return rounded > 0 ? rounded : null;
 }
 
-/** "$9.00 (about 45 min)", or "no limit". */
+/** "$9.00 (about 45 min)", "$0.10 (under 1 min)", or "no limit". */
 export function amountText(a: Amount, ratePerMinute: number): string {
-  return a === "none" ? "no limit" : `$${a.toFixed(2)} (about ${Math.round(a / ratePerMinute)} min)`;
+  if (a === "none") return "no limit";
+  const minutes = a / ratePerMinute;
+  return `$${a.toFixed(2)} (${minutes < 1 ? "under 1 min" : `about ${Math.round(minutes)} min`})`;
 }
 
 /** Questions over a stream (a terminal): one line per answer. A bad answer is asked again. */

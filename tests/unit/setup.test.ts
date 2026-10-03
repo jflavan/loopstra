@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
-import { configPath, NOT_SET_UP } from "../../src/config";
-import { NEEDS_TERMINAL, setup } from "../../src/setup";
+import { parse } from "yaml";
+import { NOT_SET_UP } from "../../src/config";
+import { NEEDS_TERMINAL, parseSetupArgs, setup } from "../../src/setup";
+import type { Check, Section, SetupContext } from "../../src/setup/types";
 import { tempDir } from "../helpers";
 import { configRepo } from "../setup-helpers";
 
@@ -13,6 +14,16 @@ function io(...answers: string[]) {
 }
 
 const CONFIG = "version: 1\ncommands:\n  test: echo ok\n";
+
+/** A section that asks for the test command and sets it, and reports `checks`. */
+function fake(o: { name?: string; checks?: Check[]; ask?: (ctx: SetupContext) => Promise<void>; check?: () => Promise<Check[]> } = {}): Section {
+  return {
+    name: o.name ?? "fake",
+    title: `The ${o.name ?? "fake"} section`,
+    ask: o.ask ?? (async (ctx) => { ctx.doc.set(["commands", "test"], await ctx.ask.text("Test command", { suggestion: "echo ok" })); }),
+    check: o.check ?? (async () => o.checks ?? []),
+  };
+}
 
 describe("loopstra setup", () => {
   test("outside a set-up folder, it says so", async () => {
@@ -28,7 +39,7 @@ describe("loopstra setup", () => {
     const r = configRepo(CONFIG);
     try {
       const o = io();
-      expect(await setup(r.root, { output: o.output, interactive: false })).toBe(1);
+      expect(await setup(r.root, { output: o.output, interactive: false, sections: [fake()] })).toBe(1);
       expect(o.text()).toContain(NEEDS_TERMINAL);
       expect(r.text()).toBe(CONFIG);
     } finally { r.cleanup(); }
@@ -38,8 +49,90 @@ describe("loopstra setup", () => {
     const r = configRepo(CONFIG);
     try {
       const o = io();
-      expect(await setup(r.root, { output: o.output, section: "nope", defaults: true })).toBe(1);
-      expect(o.text()).toContain("There is no setup section called nope.");
+      expect(await setup(r.root, { output: o.output, section: "nope", defaults: true, sections: [fake({ name: "one" }), fake({ name: "two" })] })).toBe(1);
+      expect(o.text()).toContain("There is no setup section called nope. Sections: one, two.");
+    } finally { r.cleanup(); }
+  });
+
+  test("an unchanged answer says No changes; a new one is saved", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const same = io("");
+      expect(await setup(r.root, { input: same.input, output: same.output, interactive: true, sections: [fake()] })).toBe(0);
+      expect(same.text()).toContain("No changes.");
+      expect(r.text()).toBe(CONFIG);
+      const changed = io("bun test");
+      expect(await setup(r.root, { input: changed.input, output: changed.output, interactive: true, sections: [fake()] })).toBe(0);
+      expect(changed.text()).toContain("Saved loopstra/config.yaml.");
+      expect(r.text()).toBe("version: 1\ncommands:\n  test: bun test\n");
+    } finally { r.cleanup(); }
+  });
+
+  test("an answer that makes the config invalid is not saved", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      const bad = fake({ ask: async (ctx) => { ctx.doc.set(["claude", "timeout_minutes"], -1); } });
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [bad] })).toBe(1);
+      expect(o.text()).toContain("Not saved: ");
+      expect(o.text()).toContain("claude.timeout_minutes");
+      expect(r.text()).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("a section that throws saves nothing and says why, without a stack", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      const broken = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); throw new Error("the section broke"); } });
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [broken] })).toBe(1);
+      expect(o.text()).toContain("Not saved: the section broke");
+      expect(r.text()).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("a config with problems now gets a heads-up, and the questions go on", async () => {
+    const r = configRepo("version: 1\ncommands:\n  test: ''\n");
+    try {
+      const o = io();
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [fake()] })).toBe(0);
+      expect(o.text()).toContain("Note: loopstra/config.yaml has problems now; the questions below can fix them:");
+      expect(o.text()).toContain("commands.test");
+      expect(parse(r.text()).commands.test).toBe("echo ok");
+    } finally { r.cleanup(); }
+  });
+
+  test("the checks are listed after saving, with how many are left to fix", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      const checks: Check[] = [{ level: "ok", text: "fine" }, { level: "warn", text: "hmm" }, { level: "fail", text: "broken" }];
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [fake({ checks })] })).toBe(0);
+      expect(o.text()).toContain("Checks:\n  ok    fine\n  warn  hmm\n  FAIL  broken\n");
+      expect(o.text()).toContain("To fix: 2 items above.");
+    } finally { r.cleanup(); }
+  });
+
+  test("a check that does not finish in time fails, naming its section", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const o = io();
+      const slow = fake({ check: () => new Promise<Check[]>(() => {}) });
+      expect(await setup(r.root, { output: o.output, check: true, sections: [slow], checkMs: 50 })).toBe(1);
+      expect(o.text()).toContain("FAIL  The fake section: the check did not finish in 0 seconds");
+    } finally { r.cleanup(); }
+  });
+
+  test("--check fails only when a check fails, and says the config loads", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const warn = io();
+      expect(await setup(r.root, { output: warn.output, check: true, sections: [fake({ checks: [{ level: "warn", text: "hmm" }] })] })).toBe(0);
+      expect(warn.text()).toStartWith("loopstra/config.yaml loads.\n");
+      const fail = io();
+      expect(await setup(r.root, { output: fail.output, check: true, sections: [fake({ checks: [{ level: "fail", text: "broken" }] })] })).toBe(1);
+      expect(fail.text()).toContain("FAIL  broken");
+      expect(r.text()).toBe(CONFIG);
     } finally { r.cleanup(); }
   });
 
@@ -47,19 +140,29 @@ describe("loopstra setup", () => {
     const r = configRepo("version: 1\ncommands:\n  test: echo ok\nclaude:\n  timeout_minutes: -1\n");
     try {
       const o = io();
-      expect(await setup(r.root, { output: o.output, check: true })).toBe(1);
+      expect(await setup(r.root, { output: o.output, check: true, sections: [fake()] })).toBe(1);
       expect(o.text()).toContain("claude.timeout_minutes");
+      expect(o.text()).not.toContain("loads.");
     } finally { r.cleanup(); }
   });
 
-  test("input that runs out saves nothing", async () => {
+  test("input that runs out stops setup and saves nothing", async () => {
     const r = configRepo(CONFIG);
     try {
       const o = io();
-      const code = await setup(r.root, { input: o.input, output: o.output, interactive: true });
-      // With no sections yet this saves nothing either way; with sections, the first question ends it.
-      expect([0, 1]).toContain(code);
-      expect(readFileSync(configPath(r.root), "utf8")).toBe(CONFIG);
+      const first = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "lint"], "eslint"); } });
+      expect(await setup(r.root, { input: o.input, output: o.output, interactive: true, sections: [first, fake()] })).toBe(1);
+      expect(o.text()).toContain("Setup stopped; nothing was saved.");
+      expect(r.text()).toBe(CONFIG);
     } finally { r.cleanup(); }
+  });
+});
+
+describe("the setup command line", () => {
+  test("takes at most one section, and --defaults or --check but not both", () => {
+    expect(parseSetupArgs([])).toEqual({ section: undefined, defaults: false, check: false });
+    expect(parseSetupArgs(["budgets", "--defaults"])).toEqual({ section: "budgets", defaults: true, check: false });
+    expect(parseSetupArgs(["--check"])).toEqual({ section: undefined, defaults: false, check: true });
+    for (const bad of [["budgets", "chat"], ["--defaults", "--check"], ["--force"], ["-d"]]) expect(parseSetupArgs(bad)).toBeNull();
   });
 });

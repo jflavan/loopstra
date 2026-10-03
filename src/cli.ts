@@ -46,8 +46,10 @@ async function main(): Promise<number> {
     }
     case "setup": {
       if (!setUp()) return 1;
-      const { setup } = await import("./setup");
-      return setup(root, { section: rest.find((a) => !a.startsWith("--")), defaults: rest.includes("--defaults"), check: rest.includes("--check") });
+      const { parseSetupArgs, setup, SETUP_USAGE } = await import("./setup");
+      const args = parseSetupArgs(rest);
+      if (!args) { console.error(SETUP_USAGE); return 1; }
+      return setup(root, args);
     }
     case "status":
       if (!setUp()) return 1;
