@@ -211,6 +211,36 @@ describe("ConfigDocument", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("clear can leave a placeholder where the key was, and a quoted value fills it again", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+      await init(repo.path);
+      const before = readFileSync(configPath(repo.path), "utf8");
+      const doc = ConfigDocument.load(repo.path);
+      expect(doc.hasPlaceholder(["commands", "install"])).toBe(false);
+      expect(doc.hasPlaceholder(["commands", "lint"])).toBe(true);
+      doc.clear(["commands", "install"], { placeholder: true });
+      expect(doc.hasPlaceholder(["commands", "install"])).toBe(true);
+      expect(doc.text()).toBe(before.replace('  install: "bun install"\n', "  # install:\n"));
+      doc.set(["commands", "install"], "npm ci", { quote: true });
+      expect(doc.hasPlaceholder(["commands", "install"])).toBe(false);
+      expect(doc.text()).toBe(before.replace('  install: "bun install"\n', '  install: "npm ci"\n'));
+    } finally { repo.cleanup(); }
+  });
+
+  test("a placeholder after a map's last key is left at its end, and filled there", () => {
+    const { t, doc } = load("version: 1\ncommands:\n  test: echo ok\n  install: bun install\nclaude:\n  timeout_minutes: 30\n");
+    try {
+      doc.clear(["commands", "install"], { placeholder: true });
+      expect(doc.hasPlaceholder(["commands", "install"])).toBe(true);
+      expect(parse(doc.text()).commands).toEqual({ test: "echo ok" });
+      expect(doc.text()).toContain("  test: echo ok\n  # install:\nclaude:");
+      doc.set(["commands", "install"], "npm ci", { quote: true });
+      expect(doc.text()).toBe('version: 1\ncommands:\n  test: echo ok\n  install: "npm ci"\nclaude:\n  timeout_minutes: 30\n');
+    } finally { t.cleanup(); }
+  });
+
   test("one stray CRLF in a file with Unix line endings does not convert it", () => {
     const { t, doc, file } = load(TEXT.replace("version: 1\n", "version: 1\r\n"));
     try {

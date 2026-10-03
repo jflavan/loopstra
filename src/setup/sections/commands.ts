@@ -24,11 +24,13 @@ export const commands: Section = {
     const detected = await detectCommands(ctx.root);
     ctx.ask.say("Build sessions may always run these. Type - to leave out an optional one.");
     for (const n of NAMES) {
-      const current = ctx.doc.get(["commands", n]);
-      const suggestion = typeof current === "string" && current ? current : detected[n];
+      const at = ["commands", n];
+      const current = ctx.doc.get(at);
+      // A `# install:` line means it was left out (by the person, or init found none): suggest nothing.
+      const suggestion = typeof current === "string" && current ? current : ctx.doc.hasPlaceholder(at) ? undefined : detected[n];
       const answer = await ctx.ask.text(`${ABOUT[n]} (commands.${n})`, { suggestion, optional: n !== "test" });
-      if (answer) ctx.doc.set(["commands", n], answer);
-      else ctx.doc.clear(["commands", n]);
+      if (answer) ctx.doc.set(at, answer, { quote: true });
+      else ctx.doc.clear(at, { placeholder: true });
     }
   },
 

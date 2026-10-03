@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { configPath } from "../../src/config";
+import { init } from "../../src/init";
 import { commands } from "../../src/setup/sections/commands";
-import { setupRepo } from "../helpers";
+import { setupRepo, tempGitRepo } from "../helpers";
 import { askSection, checkSection, configRepo } from "../setup-helpers";
 
 describe("the commands section", () => {
@@ -15,6 +17,34 @@ describe("the commands section", () => {
       const { text } = await askSection(commands, r.root, ["", "", "-", "", ""]);
       expect(parse(text).commands).toEqual({ test: "echo ok", install: "bun install", build: "bun run build" });
     } finally { r.cleanup(); }
+  });
+
+  test("a command left out with - stays out: its placeholder stays, and --defaults does not bring it back", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+      await init(repo.path);
+      const before = readFileSync(configPath(repo.path), "utf8");
+      expect(before).toContain('  install: "bun install"\n');
+      // Order: test, install, lint, build, run.
+      const left = await askSection(commands, repo.path, ["", "-", "", "", ""]);
+      expect(left.text).toBe(before.replace('  install: "bun install"\n', "  # install:\n"));
+      const again = await askSection(commands, repo.path, "defaults");
+      expect(again.text).toBe(left.text);
+      expect(again.shown).toContain("Installs dependencies in a fresh checkout (commands.install): (empty)");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a command added again takes its placeholder's place, quoted like init's", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+      await init(repo.path);
+      const before = readFileSync(configPath(repo.path), "utf8");
+      await askSection(commands, repo.path, ["", "-", "", "", ""]);
+      const { text } = await askSection(commands, repo.path, ["", "npm ci", "eslint .", "", ""]);
+      expect(text).toBe(before.replace('  install: "bun install"\n', '  install: "npm ci"\n').replace("  # lint:\n", '  lint: "eslint ."\n'));
+    } finally { repo.cleanup(); }
   });
 
   test("- on the test command asks again instead of saving it", async () => {

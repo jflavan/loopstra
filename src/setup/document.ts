@@ -12,6 +12,11 @@ function joined(...comments: (string | null | undefined)[]): string | undefined 
   return kept.length ? kept.join("\n") : undefined;
 }
 
+/** Matches the line `# <key>:` with nothing after it, as the YAML library keeps it (without the #). */
+function placeholderLine(key: string): RegExp {
+  return new RegExp(`^ ?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*$`);
+}
+
 /** The comments inside a node, other than inline ones on values: above keys and items, and at the end of maps and lists. */
 function notesIn(node: unknown): (string | null | undefined)[] {
   if (isPair(node)) return [isScalar(node.key) ? node.key.commentBefore : undefined, ...notesIn(node.value)];
@@ -44,7 +49,8 @@ export class ConfigDocument {
     return isCollection(v) ? v.toJSON() : v;
   }
 
-  set(path: Path, value: unknown): void {
+  /** Sets a value. `quote` writes a string in double quotes, the way init writes commands. */
+  set(path: Path, value: unknown, o: { quote?: boolean } = {}): void {
     if (JSON.stringify(this.get(path)) === JSON.stringify(value)) return;
     // A parent that is not a map to write into (`chat:` on its own, `gates: none`, `gates: []`)
     // becomes an empty one, keeping its comments; validation still decides what is valid.
@@ -58,24 +64,38 @@ export class ConfigDocument {
       break;
     }
     const node = this.doc.getIn(path, true);
+    const quoted = <N>(n: N): N => { if (o.quote && isScalar(n) && typeof n.value === "string") n.type = Scalar.QUOTE_DOUBLE; return n; };
     // A scalar is changed in place, so a comment on its line stays with it.
-    if (isScalar(node) && (value === null || typeof value !== "object")) node.value = value;
-    else if (node !== undefined || !this.fillPlaceholder(path, value)) this.doc.setIn(path, this.doc.createNode(value));
+    if (isScalar(node) && (value === null || typeof value !== "object")) quoted(node).value = value;
+    else {
+      const created = quoted(this.doc.createNode(value));
+      if (node !== undefined || !this.fillPlaceholder(path, created)) this.doc.setIn(path, created);
+    }
     this.dirty = true;
+  }
+
+  /** Whether the map holding `path` has the key commented out with nothing after it (`# lint:`). */
+  hasPlaceholder(path: Path): boolean {
+    const key = path[path.length - 1];
+    const parent = path.length > 1 ? this.doc.getIn(path.slice(0, -1), true) : this.doc.contents;
+    if (typeof key !== "string" || !isMap(parent)) return false;
+    const line = placeholderLine(key);
+    const comments = [parent.commentBefore, ...parent.items.map((p) => (isScalar(p.key) ? p.key.commentBefore : undefined)), parent.comment];
+    return comments.some((c) => (c ?? "").split("\n").some((l) => line.test(l)));
   }
 
   /**
    * Adds a new key where its map has it commented out with nothing after it (the template's
    * `# lint:`): the placeholder line goes, the comments above it go with the new key (or stay above
-   * the map, for one above its first key), and those below stay with the key they were on. A
-   * placeholder after a map's last key is not filled (the template never puts one there). False
-   * when there is no such line.
+   * the map, for one above its first key), and those below stay with the key they were on. One at
+   * the end of a map (where clear leaves it after the last key) puts the key last. False when there
+   * is no such line.
    */
-  private fillPlaceholder(path: Path, value: unknown): boolean {
+  private fillPlaceholder(path: Path, value: Node): boolean {
     const key = path[path.length - 1];
     const parent = path.length > 1 ? this.doc.getIn(path.slice(0, -1), true) : this.doc.contents;
     if (typeof key !== "string" || !isMap(parent)) return false;
-    const placeholder = new RegExp(`^ ?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*$`);
+    const placeholder = placeholderLine(key);
     /** The comment's lines above and below the placeholder, or null when it has none. */
     const split = (comment: string | null | undefined) => {
       const lines = (comment ?? "").split("\n");
@@ -106,7 +126,12 @@ export class ConfigDocument {
       parent.items.splice(i, 0, pair);
       return true;
     }
-    return false;
+    const end = split(parent.comment);
+    if (!end) return false;
+    added.commentBefore = end.above;
+    parent.comment = end.below;
+    parent.items.push(pair);
+    return true;
   }
 
   /**
@@ -118,12 +143,16 @@ export class ConfigDocument {
     this.set(path, value);
   }
 
-  /** Removes a key, and any map that leaves empty above it (never the whole document). */
-  clear(path: Path): void {
+  /**
+   * Removes a key, and any map that leaves empty above it (never the whole document). With
+   * `placeholder`, the key's line becomes `# <key>:`: it says the key was left out on purpose, and a
+   * later set fills it again.
+   */
+  clear(path: Path, o: { placeholder?: boolean } = {}): void {
     if (!path.length || !this.doc.hasIn(path)) return;
     let at = path;
-    for (;;) {
-      this.remove(at);
+    for (let first = true; ; first = false) {
+      this.remove(at, first && !!o.placeholder);
       at = at.slice(0, -1);
       const parent = at.length ? this.doc.getIn(at, true) : undefined;
       if (!isMap(parent) || parent.items.length) break;
@@ -131,8 +160,11 @@ export class ConfigDocument {
     this.dirty = true;
   }
 
-  /** Deletes one key. Comments above it, or anywhere inside what it held, move to the next key (or the end of its map). */
-  private remove(path: Path): void {
+  /**
+   * Deletes one key. Comments above it, or anywhere inside what it held, move to the next key (or the
+   * end of its map), followed by `# <key>:` with `placeholder`.
+   */
+  private remove(path: Path, placeholder = false): void {
     const parentPath = path.slice(0, -1);
     const parent = parentPath.length ? this.doc.getIn(parentPath, true) : this.doc.contents;
     const key = path[path.length - 1];
@@ -140,13 +172,13 @@ export class ConfigDocument {
     if (!isMap(parent) || i < 0) { this.doc.deleteIn(path); return; }
     const pair = parent.items[i]!;
     const keyNode = isScalar(pair.key) ? pair.key : undefined;
-    const notes = joined(...notesIn(pair));
+    const notes = joined(...notesIn(pair), placeholder ? ` ${String(key)}:` : undefined);
     const next = parent.items[i + 1];
     if (notes && next) {
       if (!isScalar(next.key)) next.key = new Scalar(next.key);
       const nextKey = next.key as Scalar;
-      // An empty line keeps two comment paragraphs apart.
-      nextKey.commentBefore = nextKey.commentBefore ? `${notes}\n\n${nextKey.commentBefore}` : notes;
+      // An empty line keeps two comment paragraphs apart; a placeholder stands in the key's line, so none is added.
+      nextKey.commentBefore = nextKey.commentBefore ? `${notes}\n${placeholder ? "" : "\n"}${nextKey.commentBefore}` : notes;
       if (keyNode?.spaceBefore) nextKey.spaceBefore = true;
     } else if (notes) {
       // A leading empty line keeps the blank line that was above the key.
