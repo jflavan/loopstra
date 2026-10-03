@@ -60,8 +60,35 @@ export class ConfigDocument {
     const node = this.doc.getIn(path, true);
     // A scalar is changed in place, so a comment on its line stays with it.
     if (isScalar(node) && (value === null || typeof value !== "object")) node.value = value;
-    else this.doc.setIn(path, this.doc.createNode(value));
+    else if (node !== undefined || !this.fillPlaceholder(path, value)) this.doc.setIn(path, this.doc.createNode(value));
     this.dirty = true;
+  }
+
+  /**
+   * Adds a new key where its map has it commented out with nothing after it (the template's
+   * `# lint:`): the placeholder line goes, the comments above it go with the new key, and those
+   * below stay with the key they were on. False when there is no such line.
+   */
+  private fillPlaceholder(path: Path, value: unknown): boolean {
+    const key = path[path.length - 1];
+    const parent = path.length > 1 ? this.doc.getIn(path.slice(0, -1), true) : this.doc.contents;
+    if (typeof key !== "string" || !isMap(parent)) return false;
+    const placeholder = new RegExp(`^ ?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*$`);
+    for (let i = 0; i < parent.items.length; i++) {
+      const after = parent.items[i]!.key;
+      if (!isScalar(after) || !after.commentBefore) continue;
+      const lines = after.commentBefore.split("\n");
+      const at = lines.findIndex((l) => placeholder.test(l));
+      if (at < 0) continue;
+      const pair = this.doc.createPair(key, value);
+      const added = pair.key as Scalar;
+      added.commentBefore = lines.slice(0, at).join("\n") || undefined;
+      if (after.spaceBefore) { added.spaceBefore = true; after.spaceBefore = false; }
+      after.commentBefore = lines.slice(at + 1).join("\n") || undefined;
+      parent.items.splice(i, 0, pair);
+      return true;
+    }
+    return false;
   }
 
   /**

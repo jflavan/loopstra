@@ -3,8 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { ConfigError, configPath } from "../../src/config";
+import { init } from "../../src/init";
 import { ConfigDocument } from "../../src/setup/document";
-import { tempDir } from "../helpers";
+import { tempDir, tempGitRepo } from "../helpers";
 
 const TEXT = `# Top comment
 version: 1
@@ -151,6 +152,39 @@ describe("ConfigDocument", () => {
       expect(doc.text()).toContain("together in a day\n\n# Gates between stages");
       expect(parse(doc.text()).claude).toBeUndefined();
     } finally { t.cleanup(); }
+  });
+
+  test("on the stamped template, a new key takes the place of its commented-out placeholder", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+      await init(repo.path);
+      const before = readFileSync(configPath(repo.path), "utf8");
+      const doc = ConfigDocument.load(repo.path);
+      doc.set(["commands", "build"], "bun run build");
+      doc.set(["commands", "lint"], "bun run lint");
+      doc.set(["claude", "max_budget_usd"], 9);
+      doc.save();
+      const after = readFileSync(configPath(repo.path), "utf8");
+      expect(after).toContain([
+        "commands:",
+        "  # Optional: leave a key out if you do not have it.",
+        '  install: "bun install"',
+        "  lint: bun run lint",
+        "  build: bun run build",
+        "  # run:",
+        "  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:",
+        "  # sessions may run the whole chain and each part of it.",
+        '  test: "bun test"',
+        "",
+      ].join("\n"));
+      // A comment that only mentions a key, with words after it, is not a placeholder.
+      expect(after).toContain("  timeout_minutes: 30\n  max_budget_usd: 9\n");
+      expect(after).toContain("#   max_budget_usd: what one session may spend");
+      // Nothing else moved.
+      const without = after.replace("  lint: bun run lint\n  build: bun run build\n", "  # lint:\n  # build:\n").replace("  max_budget_usd: 9\n", "");
+      expect(without).toBe(before);
+    } finally { repo.cleanup(); }
   });
 
   test("one stray CRLF in a file with Unix line endings does not convert it", () => {
