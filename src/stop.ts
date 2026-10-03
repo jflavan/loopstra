@@ -46,6 +46,14 @@ export class LoopBudgetReached extends Error {
   }
 }
 
+/**
+ * A stop request, an unavailable assistant, or the loop's used-up day: none is the step's own
+ * failure. The step ends, the change keeps its status, and the scheduler handles each. The one list.
+ */
+export function notTheStepsFault(e: unknown): boolean {
+  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached;
+}
+
 let requested = false;
 let resolveStop: () => void = () => {};
 let stopping = new Promise<void>((resolve) => { resolveStop = resolve; });

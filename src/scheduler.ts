@@ -19,7 +19,7 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
-import { AssistantUnavailable, installStopSignals, LoopBudgetReached, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace } from "./trace";
 
 export interface TickResult {
@@ -237,7 +237,7 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     return await runStep(ctx);
   } catch (e) {
-    if (e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached) throw e;
+    if (notTheStepsFault(e)) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
