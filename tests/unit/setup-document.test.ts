@@ -117,6 +117,19 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("put writes a default value into a parent that is not a map, so the parent becomes one", () => {
+    const { t, doc } = load("version: 1\ncommands:\n  test: echo ok\ngates: none\nchat:\n");
+    try {
+      doc.put(["gates", "spec", "human"], "none", "none");
+      expect(doc.get(["gates"])).toEqual({ spec: { human: "none" } });
+      doc.put(["gates", "spec", "agent"], true, true);
+      expect(doc.get(["gates"])).toEqual({ spec: { human: "none" } });
+      doc.put(["chat", "model"], "default", "default");
+      expect(doc.get(["chat"])).toEqual({ model: "default" });
+      expect(() => doc.validate()).not.toThrow();
+    } finally { t.cleanup(); }
+  });
+
   test("clear removes a key and ignores one that is not there", () => {
     const { t, doc } = load();
     try {

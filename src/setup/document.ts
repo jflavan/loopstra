@@ -137,10 +137,23 @@ export class ConfigDocument {
   /**
    * Sets a value, except that a key that is not in the file is only added when the value differs
    * from its default: the file says what someone chose, and later default changes still reach it.
+   * Under a parent that is not a map (`gates: none`), the value is written anyway, so the parent
+   * becomes a map that loads.
    */
   put(path: Path, value: unknown, fallback: unknown): void {
-    if (this.get(path) === undefined && JSON.stringify(value) === JSON.stringify(fallback)) return;
+    const same = this.get(path) === undefined && JSON.stringify(value) === JSON.stringify(fallback);
+    if (same && !this.underNonMap(path)) return;
     this.set(path, value);
+  }
+
+  /** Whether a parent on the path is there but is not a map (a word, an empty value, a list). */
+  private underNonMap(path: Path): boolean {
+    for (let i = 1; i < path.length; i++) {
+      const parent = this.doc.getIn(path.slice(0, i), true);
+      if (parent === undefined) return false;
+      if (!isMap(parent) && !(isSeq(parent) && typeof path[i] === "number")) return true;
+    }
+    return false;
   }
 
   /**
