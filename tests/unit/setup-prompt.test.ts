@@ -35,6 +35,12 @@ describe("a prompt over streams", () => {
     expect(await prompt.text("Build", { optional: true })).toBe("");
   });
 
+  test("- on a question that needs an answer is asked again", async () => {
+    const { prompt, shown } = scripted("-", "");
+    expect(await prompt.text("Test command", { suggestion: "bun test" })).toBe("bun test");
+    expect(shown()).toContain("  An answer is needed.");
+  });
+
   test("a bad answer is asked again, saying why", async () => {
     const { prompt, shown } = scripted("maybe", "y", "sometimes", "status", "soon", "1h", "bad name", "GOOD_NAME", "", "x");
     expect(await prompt.yesNo("Limits?", false)).toBe(true);

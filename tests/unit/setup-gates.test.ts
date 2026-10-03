@@ -12,8 +12,9 @@ describe("the gates section", () => {
     try {
       await Bun.write(`${repo.path}/package.json`, JSON.stringify({ scripts: { test: "bun test" } }));
       await init(repo.path);
-      // spec: status, no agent; plan: as is; done: status, as is.
-      await askSection(gates, repo.path, ["status", "n", "", "", "status", ""]);
+      // spec: a person, no agent; plan: as is; done: a person, as is.
+      const { shown } = await askSection(gates, repo.path, ["y", "n", "", "", "yes", ""]);
+      expect(shown).toContain("Should a person approve the spec (what will be built) before work goes on? (yes: they set its status in intent/<change>/intent.md; no: it goes on by itself)");
       const cfg = await loadConfig(repo.path);
       expect(cfg.gates.spec).toEqual({ human: "status", agent: false });
       expect(cfg.gates.plan).toEqual({ human: "none", agent: true });

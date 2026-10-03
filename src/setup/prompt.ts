@@ -18,7 +18,7 @@ export const DEFAULT_RATE_PER_MINUTE = 0.2;
 export interface TextOptions {
   /** What Enter takes. */
   suggestion?: string;
-  /** May be left empty; "-" empties one that has a suggestion. */
+  /** May be left empty; "-" empties one that has a suggestion (on a question that needs an answer, it is asked again). */
   optional?: boolean;
   /** A problem with the answer, in words, or null when it is fine. */
   check?: (answer: string) => string | null;
@@ -82,7 +82,11 @@ export class StreamPrompt implements Prompt {
   async text(question: string, o: TextOptions = {}): Promise<string> {
     for (;;) {
       const a = await this.answer(question, o.suggestion);
-      if (a === "-" && o.optional) return "";
+      if (a === "-") {
+        if (o.optional) return "";
+        this.say("  An answer is needed.");
+        continue;
+      }
       const value = a || o.suggestion || "";
       if (!value) {
         if (o.optional) return "";

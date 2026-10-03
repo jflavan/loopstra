@@ -17,6 +17,12 @@ const LIMITS: Limit[] = [
   { path: ["chat", "max_budget_usd_per_day"], question: "What may chat spend in a day, everyone together?", suggest: () => "3h", oldDefault: 5 },
 ];
 
+/** A rate typed as 0.3 or $0.3 (not a positive number when the answer is not one). */
+const dollars = (s: string) => Number(s.trim().replace(/^\$/, ""));
+
+/** "$0.20 a minute". */
+const rateText = (rate: number) => `$${rate.toFixed(2)} a minute`;
+
 /** The limit someone chose, or undefined (unset, or the old template's value). */
 function chosen(ctx: SetupContext, l: Limit): number | undefined {
   const v = ctx.doc.get(l.path);
@@ -39,9 +45,9 @@ export const budgets: Section = {
       for (const l of LIMITS) ctx.doc.clear(l.path);
       return;
     }
-    const rate = Number(await ctx.ask.text("Dollars per minute of Claude work, to turn minutes into dollars (about $2 per 10 minutes is typical)", {
+    const rate = dollars(await ctx.ask.text(`Minutes are turned into dollars at ${rateText(DEFAULT_RATE_PER_MINUTE)} (about $${DEFAULT_RATE_PER_MINUTE * 10} per 10 minutes); press Enter to keep it or type another rate`, {
       suggestion: String(DEFAULT_RATE_PER_MINUTE),
-      check: (s) => (Number(s) > 0 ? null : "Answer a number of dollars, like 0.2."),
+      check: (s) => (dollars(s) > 0 ? null : "Answer a number of dollars, like 0.2."),
     }));
     const timeout = Number(ctx.doc.get(["claude", "timeout_minutes"]) ?? 30);
     for (const l of LIMITS) {
@@ -59,7 +65,7 @@ export const budgets: Section = {
     const minutes = cfg.claude.timeout_minutes;
     const timeoutUsd = minutes * DEFAULT_RATE_PER_MINUTE;
     if (session !== undefined && session < timeoutUsd) {
-      return [{ level: "warn", text: `claude.max_budget_usd ($${session}) runs out before claude.timeout_minutes (${minutes} min, about $${timeoutUsd.toFixed(2)}): a long step stops on the budget first. Raise or remove it with loopstra setup budgets.` }];
+      return [{ level: "warn", text: `claude.max_budget_usd ($${session}) runs out before claude.timeout_minutes (${minutes} min, about $${timeoutUsd.toFixed(2)} at ${rateText(DEFAULT_RATE_PER_MINUTE)}): a long step stops on the budget first. Raise or remove it with loopstra setup budgets.` }];
     }
     const set = [cfg.claude.max_budget_usd, cfg.claude.max_budget_usd_per_day, cfg.chat.max_budget_usd_per_session, cfg.chat.max_budget_usd_per_day].filter((v) => v !== undefined).length;
     return [{ level: "ok", text: set ? `Budgets: ${set} limit${set > 1 ? "s" : ""} set.` : "Budgets: no limits." }];

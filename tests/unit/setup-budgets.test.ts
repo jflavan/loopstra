@@ -43,12 +43,32 @@ describe("the budgets section", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a bad rate is asked again; $ in front of a rate is fine", async () => {
+    const r = configRepo(BASE);
+    try {
+      const { text, shown } = await askSection(budgets, r.root, ["y", "abc", "$0.3", "45m", "none", "none", "none"]);
+      expect(shown).toContain("$0.20 a minute (about $2 per 10 minutes)");
+      expect(shown).toContain("Answer a number of dollars");
+      expect(shown).toContain("Suggested: 45m ($13.50)");
+      expect(parse(text).claude).toEqual({ max_budget_usd: 13.5 });
+      expect(parse(text).chat).toBeUndefined();
+    } finally { r.cleanup(); }
+  });
+
+  test("yes, then Enter on every old-template value, ends with no limits", async () => {
+    const r = configRepo(`${BASE}claude:\n  max_budget_usd: 5\nchat:\n  max_budget_usd_per_day: 5\n  max_budget_usd_per_session: 2\n`);
+    try {
+      const { text } = await askSection(budgets, r.root, ["y", "", "", "", "", ""]);
+      expect(text).toBe(BASE);
+    } finally { r.cleanup(); }
+  });
+
   test("a session limit shorter than the timeout is a warning", async () => {
     const r = configRepo(`${BASE}claude:\n  max_budget_usd: 5\n`);
     try {
       const [c] = await checkSection(budgets, r.root);
       expect(c!.level).toBe("warn");
-      expect(c!.text).toContain("runs out before claude.timeout_minutes");
+      expect(c!.text).toContain("runs out before claude.timeout_minutes (30 min, about $6.00 at $0.20 a minute)");
     } finally { r.cleanup(); }
     const none = configRepo(BASE);
     try {

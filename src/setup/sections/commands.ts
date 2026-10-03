@@ -22,7 +22,7 @@ export const commands: Section = {
 
   async ask(ctx) {
     const detected = await detectCommands(ctx.root);
-    ctx.ask.say("Build sessions may always run these. Type - to leave one out.");
+    ctx.ask.say("Build sessions may always run these. Type - to leave out an optional one.");
     for (const n of NAMES) {
       const current = ctx.doc.get(["commands", n]);
       const suggestion = typeof current === "string" && current ? current : detected[n];
@@ -41,17 +41,21 @@ export const commands: Section = {
   },
 };
 
-/** commands.test (after commands.install) once, in a throwaway checkout of main: the working tree is never touched. */
+/**
+ * commands.test (after commands.install) once, in a throwaway checkout of main: the working tree is
+ * never touched. Both share one claude.timeout_minutes, the time the setup runner gives a section's checks.
+ */
 async function testOnMain(root: string, cfg: Config): Promise<Check> {
-  const timeoutMs = cfg.claude.timeout_minutes * 60_000;
+  const deadline = Date.now() + cfg.claude.timeout_minutes * 60_000;
+  const left = () => Math.max(1000, deadline - Date.now());
   const main = cfg.main_branch;
   try {
-    const r = await withDetachedWorktree(new Git(root), join(root, ".loopstra", "setup", "main"), main, async (cwd) => {
+    const r = await withDetachedWorktree(new Git(root), join(root, ".loopstra", "setup-main"), main, async (cwd) => {
       if (cfg.commands.install) {
-        const i = await runCommand(cfg.commands.install, cwd, { timeoutMs });
+        const i = await runCommand(cfg.commands.install, cwd, { timeoutMs: left() });
         if (i.code !== 0) return { ...i, what: "commands.install" };
       }
-      return { ...(await runCommand(cfg.commands.test, cwd, { timeoutMs })), what: "commands.test" };
+      return { ...(await runCommand(cfg.commands.test, cwd, { timeoutMs: left() })), what: "commands.test" };
     });
     if (r.code === 0) return { level: "ok", text: `commands.test passes on ${main}.` };
     const why = r.timedOut ? "timed out" : `exit ${r.code}`;

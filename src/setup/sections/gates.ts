@@ -13,8 +13,8 @@ export const gates: Section = {
   async ask(ctx) {
     ctx.ask.say("A person always accepts a change (draft to accepted). After that, a step can wait for a person (status: they set the status line) or go on by itself (none). The merge gate is under github.");
     for (const { gate, what } of GATES) {
-      const human = await ctx.ask.pick(`Does a person approve ${what}?`, ["none", "status"] as const, ctx.doc.get(["gates", gate, "human"]) === "status" ? "status" : "none");
-      ctx.doc.put(["gates", gate, "human"], human, "none");
+      const person = await ctx.ask.yesNo(`Should a person approve ${what} before work goes on? (yes: they set its status in intent/<change>/intent.md; no: it goes on by itself)`, ctx.doc.get(["gates", gate, "human"]) === "status");
+      ctx.doc.put(["gates", gate, "human"], person ? "status" : "none", "none");
       const agent = await ctx.ask.yesNo(`Does an independent agent review ${what}?`, ctx.doc.get(["gates", gate, "agent"]) !== false);
       ctx.doc.put(["gates", gate, "agent"], agent, true);
     }
