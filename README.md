@@ -66,7 +66,7 @@ Then:
 
 `loopstra setup <section>` runs one section, for example `loopstra setup budgets`; `loopstra setup --help` lists them. `loopstra setup --defaults` takes every suggestion without asking (for scripts; it never adds a spending limit). `loopstra setup --check` changes nothing: it says whether the config loads, runs the checks, and exits 1 if the config does not load or any check fails. Without a terminal, plain `loopstra setup` refuses and says to use one of the two. Setup never calls Claude.
 
-If the config has problems only under the top-level keys the sections being run edit (all but `version`, `main_branch`, `poll_seconds` and `signals` when every section runs), setup lists them in a note and the questions go on. An unknown key, or a problem anywhere else, is listed under "Fix these in loopstra/config.yaml first:", and setup asks nothing.
+If every problem in the config is in a setting the sections being run ask about (say `commands.test`, or `gates: none`, which the gates questions replace), setup lists them in a note and the questions go on. An unknown key, or a problem in a setting no question asks about (like `claude.timeout_minutes`), is listed under "Fix these in loopstra/config.yaml first:", and setup asks nothing.
 
 You can also open Claude Code in the repo and ask the `loopstra` skill to help you decide: it explains the choices and tells you which `loopstra setup` section to run. The skill never runs the loop.
 

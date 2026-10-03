@@ -29,7 +29,21 @@ export interface SetupOptions {
   checkMs?: number;
 }
 
-/** `loopstra setup --help`: the usage line, then each section's name and title. */
+/**
+ * Whether a question edits what a problem at `path` is about: the path is under a cover
+ * ("stages.build.model" under "stages.*.model"), or holds one (`gates: none` holds "gates.spec", and
+ * writing that makes `gates` a map). A problem with the whole file (an empty path) is never covered.
+ */
+export function coveredBy(path: readonly string[], covers: readonly string[]): boolean {
+  if (!path.length) return false;
+  return covers.some((cover) => {
+    const parts = cover.split(".");
+    const n = Math.min(parts.length, path.length);
+    return parts.slice(0, n).every((part, i) => part === "*" || part === path[i]);
+  });
+}
+
+/** `loopstra setup --help`:the usage line, then each section's name and title. */
 export function setupHelp(sections: Section[] = SECTIONS): string {
   const width = Math.max(...sections.map((s) => s.name.length)) + 2;
   return `${SETUP_USAGE}\n\nSections:\n${sections.map((s) => `  ${s.name.padEnd(width)}${s.title}\n`).join("")}`;
@@ -82,10 +96,10 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
   let doc: ConfigDocument;
   try { doc = ConfigDocument.load(root); } catch (e) { out(errorText(e)); return 1; }
   try { doc.validate(); } catch (e) {
-    // The questions can fix a value under a key a section edits; not an unknown key, and not the rest of the file.
-    const covered = new Set(sections.flatMap((s) => s.covers));
+    // The questions can fix a value they ask about; not an unknown key, and not the rest of the file.
+    const covers = sections.flatMap((s) => s.covers);
     const problems = e instanceof ConfigError ? e.problems : [];
-    if (!problems.length || problems.some((p) => p.unknownKey || !covered.has(p.path[0] ?? ""))) {
+    if (!problems.length || problems.some((p) => p.unknownKey || !coveredBy(p.path, covers))) {
       out(`Fix these in loopstra/config.yaml first:\n${problems.length ? problems.map((p) => `- ${p.text}`).join("\n") : errorText(e)}`);
       return 1;
     }

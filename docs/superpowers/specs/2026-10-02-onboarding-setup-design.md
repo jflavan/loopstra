@@ -226,7 +226,7 @@ interface SetupContext {
 interface Section {
   name: string;
   title: string;
-  covers: string[];       // the top-level keys its questions edit: what it can fix
+  covers: string[];       // the paths its questions edit, like "gates.merge" or "stages.*.model": what it can fix
   ask(ctx: SetupContext): Promise<void>;
   check(ctx: SetupContext, cfg: Config): Promise<Check[]>;
 }
@@ -247,9 +247,12 @@ interface Check { level: "ok" | "warn" | "fail"; text: string; section?: string 
   and moves its comments to the next key.
 - A config that does not load now gets a note before the questions ("Note: loopstra/config.yaml has
   problems now; the questions below can fix them:", then one line per problem) when every problem is
-  under a top-level key the sections being run cover. An unknown key, or a problem elsewhere, prints
+  in a setting the sections being run ask about: its path is under one of their `covers`, or holds
+  one (`gates: none` holds `gates.spec`). An unknown key, or a problem elsewhere (like
+  `claude.timeout_minutes`, which no question asks), prints
   "Fix these in loopstra/config.yaml first:" with the problems, asks nothing and exits 1. A
-  validation message that already starts with its path is not prefixed with it again. At the end, the edited document is validated with `ConfigSchema`. If it is invalid, the
+  validation message that already starts with its path is not prefixed with it again. At the end,
+  the edited document is validated with `ConfigSchema`. If it is invalid, the
   errors are printed and nothing is saved. If it is valid and changed, it is written in one atomic
   write. Quitting (end of input: Ctrl-D, or Ctrl-Z then Enter on Windows), a section that throws, or
   `--defaults` reaching a question with no suggestion saves nothing and exits 1.

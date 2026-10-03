@@ -72,7 +72,7 @@ async function askBot(ctx: SetupContext, bot: Bot): Promise<void> {
 export const chat: Section = {
   name: "chat",
   title: "Chat",
-  covers: ["chat"],
+  covers: ["chat.transports"],
 
   async ask(ctx) {
     ctx.ask.say("People talk to the orchestrator to ask about the work and to agree new changes. The terminal and the dashboard need no settings; Slack and Discord bots do.");

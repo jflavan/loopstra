@@ -41,7 +41,7 @@ function oldTemplate(doc: ConfigDocument): boolean {
 export const budgets: Section = {
   name: "budgets",
   title: "Budgets",
-  covers: ["claude", "chat"],
+  covers: ["claude.max_budget_usd", "claude.max_budget_usd_per_day", "chat.max_budget_usd_per_day", "chat.max_budget_usd_per_session"],
 
   async ask(ctx) {
     // Decided once, before any answer changes the limits.

@@ -5,6 +5,8 @@ import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
 import { DefaultsPrompt } from "../../src/setup/prompt";
 import { gates } from "../../src/setup/sections/gates";
+import { github } from "../../src/setup/sections/github";
+import { models } from "../../src/setup/sections/models";
 import type { Check, Section, SetupContext } from "../../src/setup/types";
 import { tempDir } from "../helpers";
 import { configRepo } from "../setup-helpers";
@@ -120,6 +122,36 @@ describe("loopstra setup", () => {
         expect(r.text()).toBe(yaml);
       } finally { r.cleanup(); }
     }
+  });
+
+  test("the heads-up only promises what a question asks: a setting no section asks about is fixed first, even with every section", async () => {
+    const yaml = `${CONFIG}claude:\n  timeout_minutes: -1\n`;
+    const r = configRepo(yaml);
+    try {
+      const o = io();
+      expect(await setup(r.root, { output: o.output, defaults: true })).toBe(1);
+      expect(o.text()).toContain("Fix these in loopstra/config.yaml first:\n- claude.timeout_minutes");
+      expect(o.text()).not.toContain("the questions below can fix them");
+      expect(o.text()).not.toContain("\nBudgets\n");
+      expect(r.text()).toBe(yaml);
+    } finally { r.cleanup(); }
+  });
+
+  test("a stage's model is covered by models (any stage); its skills are not, and github covers only the merge gate", async () => {
+    const model = configRepo(`${CONFIG}stages:\n  build:\n    model: huge\n`);
+    const skills = configRepo(`${CONFIG}stages:\n  build:\n    skills: 3\n`);
+    const spec = configRepo(`${CONFIG}gates:\n  spec:\n    human: pr\n`);
+    try {
+      const fixed = io();
+      expect(await setup(model.root, { output: fixed.output, defaults: true, sections: [models] })).toBe(0);
+      expect(fixed.text()).toContain("the questions below can fix them:\n- stages.build.model");
+      expect(parse(model.text()).stages.build.model).toBe("default");
+      for (const [r, sections, path] of [[skills, [models], "stages.build.skills"], [spec, [github], "gates.spec.human"]] as const) {
+        const o = io();
+        expect(await setup(r.root, { output: o.output, defaults: true, sections: [...sections] })).toBe(1);
+        expect(o.text()).toContain(`Fix these in loopstra/config.yaml first:\n- ${path}`);
+      }
+    } finally { model.cleanup(); skills.cleanup(); spec.cleanup(); }
   });
 
   test("gates: none is replaced by the gates questions, even when every answer is the default", async () => {
