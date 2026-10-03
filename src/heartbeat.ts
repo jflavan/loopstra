@@ -8,7 +8,8 @@ import { onStop } from "./stop";
  * The loop's heartbeat, `.loopstra/heartbeat.json`. The scheduler writes it on start, at the start
  * and end of every tick, when a stop is asked for, and when it stops. While the process is alive it
  * is also refreshed every few seconds (`lastBeatAt`), so a long step does not look like a dead loop.
- * Each write also carries the pause, if one is running (see Pause).
+ * Each write also carries the pause, if one is running (see Pause), or else the tick's wait for the
+ * loop's daily budget (see heartbeatDayPause).
  */
 export interface Heartbeat {
   pid: number;
@@ -21,7 +22,7 @@ export interface Heartbeat {
   current: { slug: string } | null;
   stopping: boolean;
   stopped: boolean;
-  /** While the loop waits because the assistant was unavailable: until when, and why in plain words. */
+  /** While the loop waits (the assistant was unavailable, or the day's budget): until when, and why in plain words. */
   pausedUntil?: string | null;
   pauseReason?: string | null;
 }
@@ -195,10 +196,15 @@ export function clearPause(root: string): void {
   try { rmSync(pausePath(root), { force: true }); } catch { /* nothing to clear */ }
 }
 
+/** The tick waits for the loop's daily budget: why, and until when the loop line says so. */
+export interface DayPause { until: string; reason: string }
+
 export interface LoopBeat {
   tickStarted(): void;
   tickEnded(): void;
   workingOn(slug: string): void;
+  /** The tick waits for the day's budget (null: it does not). */
+  dayPause(p: DayPause | null): void;
   stopped(): void;
 }
 
@@ -211,15 +217,25 @@ export function heartbeatWorkingOn(root: string, slug: string): void {
 }
 
 /**
+ * Records that the tick waits for the loop's daily budget (null: it does not), so the loop line says
+ * "Paused" instead of "Running". Does nothing when no loop is running for `root`.
+ */
+export function heartbeatDayPause(root: string, p: DayPause | null): void {
+  active.get(resolve(root))?.dayPause(p);
+}
+
+/**
  * Starts the heartbeat for a loop in this process: writes it now, refreshes it every `beatMs`,
  * and marks `stopping` as soon as a stop is requested. Call `stopped()` when the loop ends.
  */
 export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   const at = () => new Date().toISOString();
   const hb: Heartbeat = { pid: process.pid, startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, stopping: false, stopped: false };
+  let day: DayPause | null = null;
   const write = () => {
     hb.lastBeatAt = at();
-    const pause = activePause(root);
+    // An unavailable assistant's pause first: the tick checks it first.
+    const pause = activePause(root) ?? (day && Date.parse(day.until) > Date.now() ? day : null);
     hb.pausedUntil = pause?.until ?? null;
     hb.pauseReason = pause?.reason ?? null;
     writeHeartbeat(root, hb);
@@ -232,10 +248,13 @@ export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
     tickStarted: () => { hb.lastTickAt = at(); hb.current = null; write(); },
     tickEnded: () => { hb.lastTickAt = at(); hb.current = null; write(); },
     workingOn: (slug) => { hb.current = { slug }; write(); },
+    dayPause: (p) => { day = p; write(); },
     stopped: () => {
       clearInterval(timer);
       unsubscribe();
       active.delete(resolve(root));
+      // A stopped loop waits for nothing; its line says what the next start does (see heartbeatState).
+      day = null;
       Object.assign(hb, { current: null, stopping: false, stopped: true });
       write();
     },

@@ -6,7 +6,7 @@ import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
@@ -109,13 +109,14 @@ export async function tick(root: string): Promise<TickResult> {
 
     // The loop's day is used up or held (claude.max_budget_usd_per_day): nothing starts until there is budget again.
     if (loopDayUsedUp(cfg, trace)) {
-      out.paused = loopDayNote(cfg, loopDaySpent(cfg, trace));
+      out.paused = dayPaused(root, cfg, loopDaySpent(cfg, trace));
       // Traced when the reason is new today, not on every poll.
       const last = trace.lastEvent("_loop", "pause");
       const same = last && last.ts >= startOfToday() && (JSON.parse(last.payload) as { reason?: string }).reason === out.paused;
       if (!same) trace.event("_loop", "pause", { reason: out.paused });
       return out;
     }
+    heartbeatDayPause(root, null);
 
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
@@ -225,6 +226,19 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
 }
 
 /**
+ * The tick waits for the loop's daily budget: the day's note, which the loop line shows as well
+ * (until local midnight when the day is spent; while it is only held, for two polls, so it lasts
+ * until the next tick says again). Returns the note.
+ */
+function dayPaused(root: string, cfg: Config, spent: boolean): string {
+  const reason = loopDayNote(cfg, spent);
+  const now = new Date();
+  const until = spent ? new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) : new Date(now.getTime() + 2 * cfg.poll_seconds * 1000);
+  heartbeatDayPause(root, { reason, until: until.toISOString() });
+  return reason;
+}
+
+/**
  * The loop's day ran out partway through a step: the change keeps its status and the step resumes
  * when there is budget again. When the day is spent (not only held by others), the pause records
  * that status. A step that spent the day at the same status on an earlier day as well never got past
@@ -232,7 +246,6 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
  */
 async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult): Promise<TickResult> {
   const spent = loopDaySpent(cfg, trace);
-  const reason = loopDayNote(cfg, spent);
   const slug = out.picked;
   let intent: Intent | null = null;
   if (slug && spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
@@ -246,7 +259,7 @@ async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: Tick
       return out;
     }
   }
-  out.paused = reason;
+  const reason = out.paused = dayPaused(root, cfg, spent);
   trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status } : { reason });
   return out;
 }

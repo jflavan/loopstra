@@ -5,7 +5,7 @@ import { attention } from "../../src/attention";
 import { CHAT_SLUG, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday } from "../../src/budget";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { loadConfig } from "../../src/config";
-import { readPause } from "../../src/heartbeat";
+import { heartbeatState, readHeartbeat, readPause, startHeartbeat } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { agentPhase } from "../../src/phases";
 import { tick } from "../../src/scheduler";
@@ -215,6 +215,46 @@ describe("the loop's daily budget", () => {
         expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
       } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
     }, 60_000);
+  });
+
+  describe("the loop line", () => {
+    const line = (root: string) => heartbeatState(readHeartbeat(root), 60).text;
+
+    test("a spent day shows as paused until midnight, with the day's note", async () => {
+      const { repo, trace } = await setupRepo("draft", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+      const beat = startHeartbeat(repo.path, 60_000);
+      try {
+        const cfg = await loadConfig(repo.path);
+        spent(trace, "other", 1);
+        await tick(repo.path);
+        beat.tickEnded();
+        expect(line(repo.path)).toBe(`Paused — ${loopDayNote(cfg, true)}`);
+        const now = new Date();
+        expect(readHeartbeat(repo.path)!.pausedUntil).toBe(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString());
+      } finally { beat.stopped(); trace.close(); repo.cleanup(); }
+    });
+
+    test("a held day shows as paused for now, and running again once the day is free", async () => {
+      const { repo, trace } = await setupRepo("draft", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+      const beat = startHeartbeat(repo.path, 60_000);
+      try {
+        const cfg = await loadConfig(repo.path);
+        held(trace, "other", 1);
+        await tick(repo.path);
+        beat.tickEnded();
+        expect(line(repo.path)).toBe(`Paused — ${loopDayNote(cfg, false)}`);
+        trace.phaseEnd("other", 1, { status: "success", costUsd: 0.5 });
+        beat.tickStarted();
+        expect((await tick(repo.path)).paused).toBeUndefined();
+        beat.tickEnded();
+        expect(line(repo.path)).toMatch(/^Running — last check/);
+        // A stopped loop does not keep the day's pause on its line.
+        spent(trace, "other", 0.5);
+        expect((await tick(repo.path)).paused).toBe(loopDayNote(cfg, true));
+        beat.stopped();
+        expect(readHeartbeat(repo.path)!.pausedUntil).toBeNull();
+      } finally { beat.stopped(); trace.close(); repo.cleanup(); }
+    });
   });
 
   test("an outage that repeats while the day is spent keeps backing off without a probe session", async () => {
