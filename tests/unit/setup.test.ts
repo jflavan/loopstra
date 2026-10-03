@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup } from "../../src/setup";
 import { DefaultsPrompt } from "../../src/setup/prompt";
+import { gates } from "../../src/setup/sections/gates";
 import type { Check, Section, SetupContext } from "../../src/setup/types";
 import { tempDir } from "../helpers";
 import { configRepo } from "../setup-helpers";
@@ -17,10 +18,11 @@ function io(...answers: string[]) {
 const CONFIG = "version: 1\ncommands:\n  test: echo ok\n";
 
 /** A section that asks for the test command and sets it, and reports `checks`. */
-function fake(o: { name?: string; checks?: Check[]; ask?: (ctx: SetupContext) => Promise<void>; check?: () => Promise<Check[]> } = {}): Section {
+function fake(o: { name?: string; covers?: string[]; checks?: Check[]; ask?: (ctx: SetupContext) => Promise<void>; check?: () => Promise<Check[]> } = {}): Section {
   return {
     name: o.name ?? "fake",
     title: `The ${o.name ?? "fake"} section`,
+    covers: o.covers ?? ["commands"],
     ask: o.ask ?? (async (ctx) => { ctx.doc.set(["commands", "test"], await ctx.ask.text("Test command", { suggestion: "echo ok" })); }),
     check: o.check ?? (async () => o.checks ?? []),
   };
@@ -100,6 +102,34 @@ describe("loopstra setup", () => {
       expect(o.text()).toContain("Note: loopstra/config.yaml has problems now; the questions below can fix them:");
       expect(o.text()).toContain("commands.test");
       expect(parse(r.text()).commands.test).toBe("echo ok");
+    } finally { r.cleanup(); }
+  });
+
+  test("a problem the sections being run do not ask about: says to fix it first, asks nothing, saves nothing", async () => {
+    for (const yaml of [`${CONFIG}claude:\n  timeout_minutes: -1\n`, `${CONFIG}gates:\n  intent: { human: none }\n`]) {
+      const r = configRepo(yaml);
+      try {
+        const o = io();
+        let asked = false;
+        const section = fake({ covers: ["commands", "gates"], ask: async () => { asked = true; } });
+        expect(await setup(r.root, { output: o.output, defaults: true, sections: [section] })).toBe(1);
+        expect(o.text()).toContain("Fix these in loopstra/config.yaml first:\n- ");
+        expect(o.text()).toContain(yaml.includes("intent") ? "gates.intent: remove this line" : "claude.timeout_minutes");
+        expect(o.text()).not.toContain("the questions below can fix them");
+        expect(asked).toBe(false);
+        expect(r.text()).toBe(yaml);
+      } finally { r.cleanup(); }
+    }
+  });
+
+  test("gates: none is replaced by the gates questions, even when every answer is the default", async () => {
+    const r = configRepo(`${CONFIG}gates: none\n`);
+    try {
+      const o = io();
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [gates] })).toBe(0);
+      expect(o.text()).toContain("the questions below can fix them");
+      expect(o.text()).toContain("Saved loopstra/config.yaml.");
+      expect(parse(r.text()).gates).toEqual({ spec: { human: "none" } });
     } finally { r.cleanup(); }
   });
 

@@ -10,6 +10,7 @@ export const REMOTE_CHECK_MS = 20_000;
 export const github: Section = {
   name: "github",
   title: "GitHub and merging",
+  covers: ["gates"],
 
   async ask(ctx) {
     const remote = await new Git(ctx.root).remoteName();

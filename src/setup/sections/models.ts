@@ -15,6 +15,7 @@ const isRef = (v: unknown): v is Ref => typeof v === "string" && (REFS as readon
 export const models: Section = {
   name: "models",
   title: "Models",
+  covers: ["claude", "stages", "chat"],
 
   async ask(ctx) {
     ctx.ask.say("Three model names Claude Code accepts for --model (an alias like sonnet, or a full model id). Each stage, and chat, uses one of the three; the cheap one also does small jobs, like reading a new change and noting lessons.");

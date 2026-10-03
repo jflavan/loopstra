@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
-import { configPath, NOT_SET_UP, type Config } from "../config";
+import { ConfigError, configPath, NOT_SET_UP, type Config } from "../config";
 import { errorText, within } from "../shell";
 import { ConfigDocument } from "./document";
 import { DefaultsPrompt, SetupStopped, StreamPrompt, type Prompt } from "./prompt";
@@ -72,6 +72,13 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
   let doc: ConfigDocument;
   try { doc = ConfigDocument.load(root); } catch (e) { out(errorText(e)); return 1; }
   try { doc.validate(); } catch (e) {
+    // The questions can fix a value under a key a section edits; not an unknown key, and not the rest of the file.
+    const covered = new Set(sections.flatMap((s) => s.covers));
+    const problems = e instanceof ConfigError ? e.problems : [];
+    if (!problems.length || problems.some((p) => p.unknownKey || !covered.has(p.path[0] ?? ""))) {
+      out(`Fix these in loopstra/config.yaml first:\n${problems.length ? problems.map((p) => `- ${p.text}`).join("\n") : errorText(e)}`);
+      return 1;
+    }
     out(`Note: loopstra/config.yaml has problems now; the questions below can fix them:\n${errorText(e)}`);
   }
   const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : o.prompt ?? new StreamPrompt(o.input ?? process.stdin, output);

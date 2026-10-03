@@ -12,6 +12,7 @@ const GATES = [
 export const gates: Section = {
   name: "gates",
   title: "Gates",
+  covers: ["gates"],
 
   async ask(ctx) {
     ctx.ask.say("A person always accepts a change (draft to accepted). After that, each step can wait for a person or go on by itself. The merge gate is under github.");

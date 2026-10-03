@@ -4,7 +4,20 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { errorText } from "./shell";
 
-export class ConfigError extends Error {}
+/** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
+export interface ConfigProblem {
+  path: string[];
+  text: string;
+  /** A key the schema does not know, at `path`: only removing it fixes it. */
+  unknownKey: boolean;
+}
+
+export class ConfigError extends Error {
+  /** What is wrong, one by one, when the config was read but does not fit the schema. */
+  constructor(message: string, readonly problems: ConfigProblem[] = []) {
+    super(message);
+  }
+}
 
 const humanGate = z.enum(["status", "pr", "none"]);
 /** A person on the status line, or nobody: spec, plan, and done have no pull request to approve. */
@@ -138,15 +151,16 @@ export async function loadConfig(root: string): Promise<Config> {
 export function validateConfig(raw: unknown): Config {
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
-    const lines = result.error.issues.map((i) => {
-      const where = i.path.length ? i.path.join(".") : "(top level)";
+    const problems: ConfigProblem[] = result.error.issues.map((i) => {
+      const path = i.path.map(String);
+      const where = path.length ? path.join(".") : "(top level)";
       if (i.code === "unrecognized_keys" && where === "gates" && i.keys.includes("intent")) {
-        return "gates.intent: remove this line; a person always accepts a change by setting its status to accepted.";
+        return { path, unknownKey: true, text: "gates.intent: remove this line; a person always accepts a change by setting its status to accepted." };
       }
-      if (i.code === "unrecognized_keys") return `${where}: unknown key(s) ${i.keys.join(", ")}`;
-      return `${where}: ${i.message}`;
+      if (i.code === "unrecognized_keys") return { path, unknownKey: true, text: `${where}: unknown key(s) ${i.keys.join(", ")}` };
+      return { path, unknownKey: false, text: `${where}: ${i.message}` };
     });
-    throw new ConfigError(`loopstra/config.yaml has problems:\n- ${lines.join("\n- ")}`);
+    throw new ConfigError(`loopstra/config.yaml has problems:\n- ${problems.map((p) => p.text).join("\n- ")}`, problems);
   }
   return result.data;
 }

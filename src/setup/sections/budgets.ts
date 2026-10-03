@@ -33,6 +33,7 @@ function chosen(ctx: SetupContext, l: Limit): number | undefined {
 export const budgets: Section = {
   name: "budgets",
   title: "Budgets",
+  covers: ["claude", "chat"],
 
   async ask(ctx) {
     ctx.ask.say("Spending limits stop a session (or the loop, or chat, for the rest of the day) at an amount. Unset means no limit; claude.timeout_minutes still ends a session.");

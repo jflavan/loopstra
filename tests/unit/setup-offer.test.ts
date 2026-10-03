@@ -27,6 +27,7 @@ function section(input: Readable, readers: number[]): Section {
   return {
     name: "fake",
     title: "The fake section",
+    covers: ["commands"],
     async ask(ctx) {
       readers.push(input.listenerCount("data"));
       ctx.doc.set(["commands", "test"], await ctx.ask.text("Test command", { suggestion: "echo ok" }));

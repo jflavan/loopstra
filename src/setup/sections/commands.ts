@@ -19,6 +19,7 @@ const ABOUT: Record<(typeof NAMES)[number], string> = {
 export const commands: Section = {
   name: "commands",
   title: "Commands",
+  covers: ["commands"],
 
   async ask(ctx) {
     const detected = await detectCommands(ctx.root);

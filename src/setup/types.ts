@@ -21,6 +21,8 @@ export interface Check {
 export interface Section {
   name: string;
   title: string;
+  /** The top-level config keys its questions edit, like "claude": what it can fix. */
+  covers: string[];
   /** Asks its questions and edits ctx.doc, writing only what changed. */
   ask(ctx: SetupContext): Promise<void>;
   /** Read-only checks against the saved config. */
