@@ -28,6 +28,11 @@ export function staleBefore(cfg: Config, now = new Date()): string {
   return new Date(now.getTime() - (cfg.claude.timeout_minutes + STALE_GRACE_MINUTES) * 60_000).toISOString();
 }
 
+/** "claude.max_budget_usd_per_day, $5.00": the setting and its value, for notes. */
+export function loopDaySetting(cfg: Config): string {
+  return `claude.max_budget_usd_per_day, $${(cfg.claude.max_budget_usd_per_day ?? 0).toFixed(2)}`;
+}
+
 /** Whose spending counts against the loop's day: every change, not chat. */
 const LOOP_POOL = { except: CHAT_SLUG };
 
@@ -50,13 +55,12 @@ export function loopDaySpent(cfg: Config, trace: Trace, now = new Date()): boole
 
 /**
  * Why the loop is waiting: the tick's pause and, once the day is spent, the attention list. Asked once
- * loopDayUsedUp: unless loopDaySpent, the rest is only held by a phase still running (or by one whose
- * process was killed, until its hold goes stale).
+ * loopDayUsedUp, with `spent` from loopDaySpent (the caller has it): unless spent, the rest is only
+ * held by a phase still running (or by one whose process was killed, until its hold goes stale).
  */
-export function loopDayNote(cfg: Config, trace: Trace, now = new Date()): string {
-  const day = cfg.claude.max_budget_usd_per_day ?? 0;
-  const setting = `claude.max_budget_usd_per_day, $${day.toFixed(2)}`;
-  if (!loopDaySpent(cfg, trace, now)) {
+export function loopDayNote(cfg: Config, spent: boolean): string {
+  const setting = loopDaySetting(cfg);
+  if (!spent) {
     return `The rest of the loop's budget for today (${setting}) is held by a phase still running, or by one that stopped without ending. The loop goes on once it ends, or within ${cfg.claude.timeout_minutes + STALE_GRACE_MINUTES} minutes at the latest.`;
   }
   return `The loop has used today's budget (${setting}). It resumes after midnight, or an engineer can change it with \`loopstra setup budgets\`.`;

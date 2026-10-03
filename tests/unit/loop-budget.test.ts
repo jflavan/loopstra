@@ -125,16 +125,16 @@ describe("the loop's daily budget", () => {
       spent(trace, "other", 1);
       const cfg = await loadConfig(repo.path);
       const out = await tick(repo.path);
-      expect(out.paused).toBe(loopDayNote(cfg, trace));
+      expect(out.paused).toBe(loopDayNote(cfg, true));
       expect(out.paused).toContain("resumes after midnight");
       expect(out.picked).toBeNull();
       expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("accepted");
       const items = await attention(repo.path, cfg, trace);
-      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg, trace));
+      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg, true));
       // The next poll pauses for the same reason: `tail` shows it once.
-      expect((await tick(repo.path)).paused).toBe(loopDayNote(cfg, trace));
+      expect((await tick(repo.path)).paused).toBe(loopDayNote(cfg, true));
       const pauses = trace.events("_loop").filter((e) => e.type === "pause");
-      expect(pauses.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, trace)]);
+      expect(pauses.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, true)]);
     } finally { trace.close(); repo.cleanup(); }
   });
 
@@ -154,7 +154,7 @@ describe("the loop's daily budget", () => {
         const out = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => tick(repo.path));
         expect(out.crashed).toBeUndefined();
         expect(out.picked).toBe(SLUG);
-        expect(out.paused).toBe(loopDayNote(cfg, trace));
+        expect(out.paused).toBe(loopDayNote(cfg, true));
         expect(out.paused).toContain("resumes after midnight");
         expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
         expect(trace.phases(SLUG).some((p) => p.name === notStarted)).toBe(false);
@@ -162,7 +162,7 @@ describe("the loop's daily budget", () => {
         expect(trace.gates(SLUG).filter((g) => g.result !== "pass")).toEqual([]);
         expect(trace.phases(SLUG).filter((p) => p.name === "design")).toHaveLength(notStarted === "design" ? 0 : 1);
         const pause = trace.events(SLUG).filter((e) => e.type === "pause");
-        expect(pause.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, trace)]);
+        expect(pause.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, true)]);
       } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
     }, 60_000);
   }
@@ -204,8 +204,8 @@ describe("the loop's daily budget", () => {
       const cfg = await loadConfig(repo.path);
       held(trace, "other", 1);
       expect(loopDayUsedUp(cfg, trace)).toBe(true);
-      expect(loopDayNote(cfg, trace)).toContain("is held by a phase still running");
-      expect(loopDayNote(cfg, trace)).toContain("within 40 minutes");
+      expect(loopDayNote(cfg, false)).toContain("is held by a phase still running");
+      expect(loopDayNote(cfg, false)).toContain("within 40 minutes");
       expect(loopDaySpent(cfg, trace)).toBe(false);
       // The loop is simply working: nothing for a person on the attention list.
       expect((await attention(repo.path, cfg, trace)).filter((i) => i.kind === "paused")).toEqual([]);

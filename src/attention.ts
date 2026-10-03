@@ -62,7 +62,7 @@ export async function attention(root: string, config: Config | { problem: string
   const pause = activePause(root, now);
   if (pause) add("paused", null, "Loopstra is paused", pause.reason);
   // Only a spent day: one merely held by running phases clears by itself and needs no person.
-  if (cfg && loopDaySpent(cfg, trace, now)) add("paused", null, "Loopstra is paused", loopDayNote(cfg, trace, now));
+  if (cfg && loopDaySpent(cfg, trace, now)) add("paused", null, "Loopstra is paused", loopDayNote(cfg, true));
   const health = healthView(trace, now);
   if (health && health.result !== "pass") add("health", null, "Main branch", health.text);
   // Main and GitHub out of step (waiting on a person's own commits, or failing): the newest outcome only.
