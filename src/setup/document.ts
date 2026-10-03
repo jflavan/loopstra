@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { isCollection, isMap, isScalar, isSeq, parseDocument, Scalar, type Document, type Node } from "yaml";
+import { isCollection, isMap, isNode, isPair, isScalar, isSeq, parseDocument, Scalar, type Document, type Node } from "yaml";
 import { ConfigError, configPath, validateConfig, type Config } from "../config";
 import { writeFileAtomic } from "../fsutil";
 
@@ -10,6 +10,13 @@ export type Path = readonly (string | number)[];
 function joined(...comments: (string | null | undefined)[]): string | undefined {
   const kept = comments.filter((c): c is string => !!c);
   return kept.length ? kept.join("\n") : undefined;
+}
+
+/** The comments inside a node, other than inline ones on values: above keys and items, and at the end of maps and lists. */
+function notesIn(node: unknown): (string | null | undefined)[] {
+  if (isPair(node)) return [isScalar(node.key) ? node.key.commentBefore : undefined, ...notesIn(node.value)];
+  if (isCollection(node)) return [node.commentBefore, ...node.items.flatMap((item) => notesIn(item)), node.comment];
+  return isNode(node) ? [node.commentBefore] : [];
 }
 
 /**
@@ -26,7 +33,9 @@ export class ConfigDocument {
     const text = readFileSync(path, "utf8");
     const doc = parseDocument(text);
     if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
-    return new ConfigDocument(path, doc, text.includes("\r\n"));
+    // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.
+    const crlf = (text.match(/\r\n/g)?.length ?? 0) * 2 > (text.match(/\n/g)?.length ?? 0);
+    return new ConfigDocument(path, doc, crlf);
   }
 
   /** The value at `path` as plain data (maps and lists too), or undefined. */
@@ -77,7 +86,7 @@ export class ConfigDocument {
     this.dirty = true;
   }
 
-  /** Deletes one key. Comments above it, or inside a map it held, move to the next key (or the end of its map). */
+  /** Deletes one key. Comments above it, or anywhere inside what it held, move to the next key (or the end of its map). */
   private remove(path: Path): void {
     const parentPath = path.slice(0, -1);
     const parent = parentPath.length ? this.doc.getIn(parentPath, true) : this.doc.contents;
@@ -86,12 +95,13 @@ export class ConfigDocument {
     if (!isMap(parent) || i < 0) { this.doc.deleteIn(path); return; }
     const pair = parent.items[i]!;
     const keyNode = isScalar(pair.key) ? pair.key : undefined;
-    const notes = joined(keyNode?.commentBefore, ...(isCollection(pair.value) ? [pair.value.commentBefore, pair.value.comment] : []));
+    const notes = joined(...notesIn(pair));
     const next = parent.items[i + 1];
     if (notes && next) {
       if (!isScalar(next.key)) next.key = new Scalar(next.key);
       const nextKey = next.key as Scalar;
-      nextKey.commentBefore = joined(notes, nextKey.commentBefore);
+      // An empty line keeps two comment paragraphs apart.
+      nextKey.commentBefore = nextKey.commentBefore ? `${notes}\n\n${nextKey.commentBefore}` : notes;
       if (keyNode?.spaceBefore) nextKey.spaceBefore = true;
     } else if (notes) {
       // A leading empty line keeps the blank line that was above the key.

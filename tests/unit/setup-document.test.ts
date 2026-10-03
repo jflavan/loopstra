@@ -139,6 +139,30 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("on the stamped template, a cleared map's comments, and those on its inner keys, stay, a paragraph apart", () => {
+    const template = readFileSync(join(import.meta.dir, "../../templates/config.yaml"), "utf8")
+      .replace("__MAIN_BRANCH__", "main").replace("__COMMANDS__", "  test: bun test");
+    const { t, doc } = load(template);
+    try {
+      doc.clear(["gates"]);
+      expect(doc.text()).toContain("everything after runs on its own.\n\n# Per-stage model");
+      doc.clear(["claude"]);
+      for (const line of ["# What a build session may do", "#   max_budget_usd_per_day: what the loop's sessions"]) expect(doc.text()).toContain(line);
+      expect(doc.text()).toContain("together in a day\n\n# Gates between stages");
+      expect(parse(doc.text()).claude).toBeUndefined();
+    } finally { t.cleanup(); }
+  });
+
+  test("one stray CRLF in a file with Unix line endings does not convert it", () => {
+    const { t, doc, file } = load(TEXT.replace("version: 1\n", "version: 1\r\n"));
+    try {
+      doc.set(["claude", "timeout_minutes"], 45);
+      doc.save();
+      expect((file().match(/\r\n/g) ?? []).length).toBeLessThanOrEqual(1);
+      expect(file()).toContain("  timeout_minutes: 45\n");
+    } finally { t.cleanup(); }
+  });
+
   test("save writes only when something changed", () => {
     const { t, doc, file } = load();
     try {
