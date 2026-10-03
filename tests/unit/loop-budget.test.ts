@@ -1,21 +1,36 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { attention } from "../../src/attention";
-import { CHAT_SLUG, loopDayNote } from "../../src/budget";
+import { CHAT_SLUG, loopDayNote, loopDayUsedUp } from "../../src/budget";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
 import { agentPhase } from "../../src/phases";
 import { tick } from "../../src/scheduler";
 import { LoopBudgetReached } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { setupRepo } from "../helpers";
+import { setupRepo, tempDir, withEnv } from "../helpers";
 
 function spent(trace: Trace, slug: string, usd: number): void {
   const seq = trace.phaseStart(slug, "build", "agent");
   trace.phaseEnd(slug, seq, { status: "success", costUsd: usd });
 }
 
+/** A phase still running that holds `usd` of the loop's day. */
+function held(trace: Trace, slug: string, usd: number): void {
+  trace.phaseStartWithin(slug, "build", "agent", { since: new Date(Date.now() - 60_000).toISOString(), limitUsd: usd, capUsd: Infinity, floorUsd: 0.01, pool: { except: CHAT_SLUG } });
+}
+
 const INTAKE = { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} } as const;
+const FIXTURES = join(import.meta.dir, "..", "fake-claude", "fixtures");
+const SLUG = "add-numbers";
+
+/** A fixture folder: each named phase's own fixture, reporting the given cost. */
+async function costs(dir: string, perPhase: Record<string, number>): Promise<void> {
+  for (const [phase, usd] of Object.entries(perPhase)) {
+    const text = await Bun.file(join(FIXTURES, `${phase}.jsonl`)).text();
+    await Bun.write(join(dir, `${phase}.jsonl`), text.replace(/"total_cost_usd":[0-9.]+/, `"total_cost_usd":${usd}`));
+  }
+}
 
 describe("the loop's daily budget", () => {
   test("a phase past it does not start; chat's spending does not count", async () => {
@@ -41,40 +56,105 @@ describe("the loop's daily budget", () => {
     } finally { trace.close(); repo.cleanup(); }
   });
 
-  test("the tick waits without picking a change, and the attention list says why", async () => {
+  test("the tick waits without picking a change, traces the pause once, and the attention list says why", async () => {
     const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     try {
       spent(trace, "other", 1);
       const cfg = await loadConfig(repo.path);
       const out = await tick(repo.path);
-      expect(out.paused).toBe(loopDayNote(cfg));
+      expect(out.paused).toBe(loopDayNote(cfg, trace));
+      expect(out.paused).toContain("resumes after midnight");
       expect(out.picked).toBeNull();
-      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("accepted");
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("accepted");
       const items = await attention(repo.path, cfg, trace);
-      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg));
+      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg, trace));
+      // The next poll pauses for the same reason: `tail` shows it once.
+      expect((await tick(repo.path)).paused).toBe(loopDayNote(cfg, trace));
+      const pauses = trace.events("_loop").filter((e) => e.type === "pause");
+      expect(pauses.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, trace)]);
     } finally { trace.close(); repo.cleanup(); }
   });
 
-  test("a hold is not spending: the change's cost and the dashboard leave a running phase out", async () => {
+  // The day runs out partway through a step: its next agent phase cannot start. The step is not
+  // blocked; it keeps its status and resumes when there is budget again. The design phase is
+  // reached straight from the step; the spec check through the gate, which passes errors on.
+  for (const [what, perPhase, notStarted] of [
+    ["the step's next phase", { intake: 1 }, "design"],
+    ["a gate's judge", { design: 1 }, "spec-check"],
+  ] as const) {
+    test(`used up partway through a step, ${what} does not start and the loop pauses without blocking`, async () => {
+      const { repo, trace } = await setupRepo("designing", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+      const dir = tempDir();
+      try {
+        await costs(dir.path, perPhase);
+        const cfg = await loadConfig(repo.path);
+        const out = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => tick(repo.path));
+        expect(out.crashed).toBeUndefined();
+        expect(out.picked).toBe(SLUG);
+        expect(out.paused).toBe(loopDayNote(cfg, trace));
+        expect(out.paused).toContain("resumes after midnight");
+        expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+        expect(trace.phases(SLUG).some((p) => p.name === notStarted)).toBe(false);
+        // Not a failed check (which would rewrite the spec): the gate never recorded one.
+        expect(trace.gates(SLUG).filter((g) => g.result !== "pass")).toEqual([]);
+        expect(trace.phases(SLUG).filter((p) => p.name === "design")).toHaveLength(notStarted === "design" ? 0 : 1);
+        const pause = trace.events(SLUG).filter((e) => e.type === "pause");
+        expect(pause.map((e) => JSON.parse(e.payload).reason)).toEqual([loopDayNote(cfg, trace)]);
+      } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+    }, 60_000);
+  }
+
+  test("a day only held by a running phase says so, and the loop goes on when it ends", async () => {
+    const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+    try {
+      const cfg = await loadConfig(repo.path);
+      held(trace, "other", 1);
+      expect(loopDayUsedUp(cfg, trace)).toBe(true);
+      expect(loopDayNote(cfg, trace)).toContain("is held by a phase still running");
+      expect(loopDayNote(cfg, trace)).toContain("within 40 minutes");
+      const items = await attention(repo.path, cfg, trace);
+      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg, trace));
+      trace.phaseEnd("other", 1, { status: "success", costUsd: 0.5 });
+      expect(loopDayUsedUp(cfg, trace)).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a stale hold (a killed process's) does not count", async () => {
+    const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  timeout_minutes: 1\n  max_budget_usd_per_day: 1\n" });
+    try {
+      const cfg = await loadConfig(repo.path);
+      held(trace, "other", 1);
+      expect(loopDayUsedUp(cfg, trace)).toBe(true);
+      // timeout_minutes plus the 10-minute grace later, the hold no longer counts.
+      expect(loopDayUsedUp(cfg, trace, new Date(Date.now() + 12 * 60_000))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a hold is not spending: the change's cost leaves a running phase out", async () => {
     const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 5\n" });
     try {
-      trace.upsertIntent("add-numbers", "building", "normal");
-      spent(trace, "add-numbers", 1);
-      trace.phaseStartWithin("add-numbers", "build", "agent", { since: new Date(Date.now() - 60_000).toISOString(), limitUsd: 5, capUsd: Infinity, floorUsd: 0.01, pool: { except: CHAT_SLUG } });
-      expect(trace.intentSummary("add-numbers")!.costUsd).toBe(1);
+      trace.upsertIntent(SLUG, "building", "normal");
+      spent(trace, SLUG, 1);
+      held(trace, SLUG, 5);
+      expect(trace.intentSummary(SLUG)!.costUsd).toBe(1);
     } finally { trace.close(); repo.cleanup(); }
   });
 
   test("tomorrow it starts again", async () => {
-    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+    const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     try {
-      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:simple-success");
-      // Yesterday's spending: a phase that started before local midnight.
-      const seq = trace.phaseStart("other", "build", "agent");
-      trace.phaseEnd("other", seq, { status: "success", costUsd: 1 });
-      const yesterday = new Date(Date.now() - 36 * 3600_000).toISOString();
-      (trace as unknown as { db: { run: (sql: string, args: unknown[]) => void } }).db.run("UPDATE phases SET started = ? WHERE slug = 'other'", [yesterday]);
-      expect((await agentPhase(ctx, INTAKE)).ok).toBe(true);
+      const cfg = await loadConfig(repo.path);
+      spent(trace, "other", 1);
+      expect(loopDayUsedUp(cfg, trace)).toBe(true);
+      expect(loopDayUsedUp(cfg, trace, new Date(Date.now() + 36 * 3600_000))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("without a daily cap the day is never used up", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      spent(trace, "other", 1000);
+      expect(loopDayUsedUp(await loadConfig(repo.path), trace)).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
   });
 });

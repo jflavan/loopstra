@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loopDayNote, loopDayUsedUp } from "./budget";
+import { loopDayNote, loopDayUsedUp, startOfToday } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
@@ -109,7 +109,11 @@ export async function tick(root: string): Promise<TickResult> {
 
     // The loop's day is spent (claude.max_budget_usd_per_day): nothing starts until midnight.
     if (loopDayUsedUp(cfg, trace)) {
-      out.paused = loopDayNote(cfg);
+      out.paused = loopDayNote(cfg, trace);
+      // Traced when the reason is new today, not on every poll.
+      const last = trace.lastEvent("_loop", "pause");
+      const same = last && last.ts >= startOfToday() && (JSON.parse(last.payload) as { reason?: string }).reason === out.paused;
+      if (!same) trace.event("_loop", "pause", { reason: out.paused });
       return out;
     }
 
@@ -134,8 +138,8 @@ export async function tick(root: string): Promise<TickResult> {
     if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
     if (e instanceof LoopBudgetReached) {
       // Reached partway through a step: it keeps its status and resumes when there is budget again.
-      trace.event(out.picked ?? "_loop", "pause", { reason: loopDayNote(cfg) });
-      out.paused = loopDayNote(cfg);
+      out.paused = loopDayNote(cfg, trace);
+      trace.event(out.picked ?? "_loop", "pause", { reason: out.paused });
       return out;
     }
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
@@ -202,6 +206,8 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
   trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
   out.paused = p.reason;
   if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
+  // The probe is a session too: with the loop's day used up, keep backing off instead.
+  if (loopDayUsedUp(cfg, trace)) return out;
   try {
     const probe = await probeAssistant(root, cfg, trace, cause.slug);
     if (!probe.reached) {

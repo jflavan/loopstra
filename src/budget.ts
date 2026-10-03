@@ -28,15 +28,26 @@ export function staleBefore(cfg: Config, now = new Date()): string {
   return new Date(now.getTime() - (cfg.claude.timeout_minutes + STALE_GRACE_MINUTES) * 60_000).toISOString();
 }
 
+/** Whose spending counts against the loop's day: every change, not chat. */
+const LOOP_POOL = { except: CHAT_SLUG };
+
 /** claude.max_budget_usd_per_day is set and less than a session's floor of it is left. */
 export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): boolean {
   const day = cfg.claude.max_budget_usd_per_day;
   // Spent plus what running phases hold, as startPhase counts it, so the tick pauses instead of picking a change that cannot start.
-  return day !== undefined && day - trace.costIn({ except: CHAT_SLUG }, startOfToday(now), { runningSince: staleBefore(cfg, now) }) < MIN_SESSION_USD;
+  return day !== undefined && day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) }) < MIN_SESSION_USD;
 }
 
-/** Why the loop is waiting, for the owner: the attention list, `status`, the tick's pause. */
-export function loopDayNote(cfg: Config): string {
+/**
+ * Why the loop is waiting, for the owner: the attention list, `status`, the tick's pause. Asked once
+ * loopDayUsedUp: when what ended today still leaves enough for a session, the rest is only held by a
+ * phase still running (or by one whose process was killed, until its hold goes stale).
+ */
+export function loopDayNote(cfg: Config, trace: Trace, now = new Date()): string {
   const day = cfg.claude.max_budget_usd_per_day ?? 0;
-  return `The loop has used today's budget (claude.max_budget_usd_per_day, $${day.toFixed(2)}). It resumes after midnight, or an engineer can change it with \`loopstra setup budgets\`.`;
+  const setting = `claude.max_budget_usd_per_day, $${day.toFixed(2)}`;
+  if (day - trace.costIn(LOOP_POOL, startOfToday(now), { endedOnly: true }) >= MIN_SESSION_USD) {
+    return `The rest of the loop's budget for today (${setting}) is held by a phase still running, or by one that stopped without ending. The loop goes on once it ends, or within ${cfg.claude.timeout_minutes + STALE_GRACE_MINUTES} minutes at the latest.`;
+  }
+  return `The loop has used today's budget (${setting}). It resumes after midnight, or an engineer can change it with \`loopstra setup budgets\`.`;
 }
