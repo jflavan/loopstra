@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
+import { CHAT_SLUG, MIN_SESSION_USD, startOfToday } from "../budget";
 import { runPhase, type FailureReason } from "../claude";
 import { modelFor, type Config, type ModelRef } from "../config";
 import { jsonSchemaOf } from "../envelopes";
@@ -8,8 +9,7 @@ import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import type { Trace } from "../trace";
 
-/** The trace slug every chat turn and writer run is recorded under. */
-export const CHAT_SLUG = "_chat";
+export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
 
 export type ChatPhase = "orchestrator" | "write-intent";
 
@@ -53,9 +53,6 @@ export const CHAT_DENIED = [
   // Other people's conversations (other threads, other platforms) and the chat sessions' own prompts.
   ...["**/.loopstra/chat/**", "**/.loopstra/runs/_chat/**"].map((p) => `Read(${p})`),
 ];
-
-/** The least a chat session may hold of the day's budget; with less left, it does not start. */
-export const MIN_SESSION_USD = 0.01;
 
 export type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
@@ -136,11 +133,6 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
   } finally {
     if (writer) { try { await writer.end(); } catch { /* already closed */ } }
   }
-}
-
-/** Local midnight today, as an ISO time: the start of the chat's daily budget. */
-export function startOfToday(now = new Date()): string {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
 /** What chat has spent since local midnight, in sessions that have ended (not what running ones hold). */
