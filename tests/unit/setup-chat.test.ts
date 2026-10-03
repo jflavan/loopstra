@@ -36,6 +36,7 @@ beforeAll(() => {
 });
 afterAll(() => server.stop(true));
 const api = (slack = "slack", discord = "discord", port = server.port) => ({ [SLACK_API_ENV]: `http://127.0.0.1:${port}/${slack}`, [DISCORD_API_ENV]: `http://127.0.0.1:${port}/${discord}` });
+const SLACK_VARS = { token_env: "LOOPSTRA_SLACK_APP_TOKEN", bot_token_env: "LOOPSTRA_SLACK_BOT_TOKEN" };
 const TOKENS = { LOOPSTRA_SLACK_APP_TOKEN: "xapp-1", LOOPSTRA_SLACK_BOT_TOKEN: "good", LOOPSTRA_DISCORD_TOKEN: "good" };
 
 describe("the chat section", () => {
@@ -44,25 +45,40 @@ describe("the chat section", () => {
     try {
       // Places; Slack: app token var, bot token var, channel, allow, acceptors, announce_to.
       const { text, shown } = await askSection(chat, r.root, ["terminal, slack", "", "", "C123", "U1, U2", "-", "C999"]);
-      expect(parse(text).chat.transports).toEqual({ slack: { channel: "C123", allow: ["U1", "U2"], announce_to: "C999" } });
+      expect(parse(text).chat.transports).toEqual({ slack: { ...SLACK_VARS, channel: "C123", allow: ["U1", "U2"], announce_to: "C999" } });
+      expect(text).toContain("allow: [ U1, U2 ]");
       expect(shown).toContain("Terminal: run loopstra chat.");
       expect(shown).not.toContain("Discord channel id");
     } finally { r.cleanup(); }
   });
 
-  test("--defaults keeps the bots there are, as they are", async () => {
-    const yaml = `${BASE}chat:\n  transports:\n    discord:\n      channel: "111"\n      acceptors: ["9"]\n`;
+  test("--defaults keeps the bots there are, and names their token variables", async () => {
+    const yaml = `${BASE}chat:\n  transports:\n    discord:\n      channel: "111"\n      acceptors: [ "9" ]\n`;
     const r = configRepo(yaml);
     try {
-      expect((await askSection(chat, r.root, "defaults")).text).toBe(yaml);
+      expect((await askSection(chat, r.root, "defaults")).text).toBe(`${yaml}      token_env: LOOPSTRA_DISCORD_TOKEN\n`);
     } finally { r.cleanup(); }
   });
 
-  test("a token variable must be a variable name", async () => {
+  test("a token variable must be a variable name; the message names the one asked for", async () => {
     const r = configRepo(BASE);
     try {
-      const { shown } = await askSection(chat, r.root, ["discord", "xoxb-oops", "MY_TOKEN", "222", "", "", ""]);
-      expect(shown).toContain("Answer the name of an environment variable");
+      const discord = await askSection(chat, r.root, ["discord", "xoxb-oops", "MY_TOKEN", "222", "", "", ""]);
+      expect(discord.shown).toContain("Answer the name of an environment variable, like LOOPSTRA_DISCORD_TOKEN, not the token itself.");
+      const slack = await askSection(chat, r.root, ["slack", "xapp-oops", "", "xoxb-oops", "", "C1", "", "", ""]);
+      expect(slack.shown).toContain("Answer the name of an environment variable, like LOOPSTRA_SLACK_APP_TOKEN, not the token itself.");
+      expect(slack.shown).toContain("Answer the name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN, not the token itself.");
+    } finally { r.cleanup(); }
+  });
+
+  test("a new bot's announcements go to the channel just entered, unless the answer is -", async () => {
+    const r = configRepo(BASE);
+    try {
+      const { text, shown } = await askSection(chat, r.root, ["slack", "", "", "C123", "-", "-", ""]);
+      expect(shown).toContain("(- for none) [C123]: ");
+      expect(parse(text).chat.transports.slack.announce_to).toBe("C123");
+      const none = await askSection(chat, r.root, ["discord", "", "222", "-", "-", "-"]);
+      expect(parse(none.text).chat.transports.discord.announce_to).toBeUndefined();
     } finally { r.cleanup(); }
   });
 
@@ -70,8 +86,9 @@ describe("the chat section", () => {
     const r = configRepo(`${BASE}chat:\n  transports:\n    discord:\n      channel: 111\n`);
     try {
       const { text } = await askSection(chat, r.root, ["discord", "", "1234567890123456789", "1234567890123456780, 42", "", "222"]);
-      expect(parse(text).chat.transports.discord).toEqual({ channel: "1234567890123456789", allow: ["1234567890123456780", "42"], announce_to: "222" });
+      expect(parse(text).chat.transports.discord).toEqual({ channel: "1234567890123456789", allow: ["1234567890123456780", "42"], announce_to: "222", token_env: "LOOPSTRA_DISCORD_TOKEN" });
       expect(text).toContain('channel: "1234567890123456789"');
+      expect(text).toContain('allow: [ "1234567890123456780", "42" ]');
     } finally { r.cleanup(); }
   });
 
@@ -83,7 +100,7 @@ describe("the chat section", () => {
       const before = readFileSync(configPath(repo.path), "utf8");
       const { text } = await askSection(chat, repo.path, ["terminal, dashboard, slack", "", "", "C123", "-", "U1", "-"]);
       const model = before.match(/^ {2}model: default #.*\n/m)![0];
-      expect(text).toBe(before.replace(model, `${model}  transports:\n    slack:\n      channel: C123\n      acceptors:\n        - U1\n`));
+      expect(text).toBe(before.replace(model, `${model}  transports:\n    slack:\n      token_env: LOOPSTRA_SLACK_APP_TOKEN\n      bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN\n      channel: C123\n      acceptors: [ U1 ]\n`));
       // Leaving Slack out again gives back the file init wrote.
       expect((await askSection(chat, repo.path, ["terminal, dashboard"])).text).toBe(before);
     } finally { repo.cleanup(); }
@@ -146,7 +163,9 @@ describe("the chat section", () => {
       const { text, shown } = await askSection(chat, r.root, ["", "", "", "", "-", "", ""]);
       expect(shown).toContain("[terminal, dashboard, slack]");
       expect(shown).toContain("(xapp-...) [MY_APP_TOKEN]");
-      expect(parse(text).chat.transports).toEqual({ slack: { token_env: "MY_APP_TOKEN", channel: "C1" } });
+      expect(parse(text).chat.transports).toEqual({ slack: { token_env: "MY_APP_TOKEN", channel: "C1", bot_token_env: "LOOPSTRA_SLACK_BOT_TOKEN" } });
+      // A bot already there without announcements keeps none: Enter takes what is there.
+      expect(shown).toContain("(- for none): ");
     } finally { r.cleanup(); }
   });
 
@@ -156,11 +175,11 @@ describe("the chat section", () => {
       const slack = await askSection(chat, r.root, ["slack", "", "", "#general", "C1", "@ann", "U1", "-", "-"]);
       expect(slack.shown).toContain("Use the channel id (C...), not its name.");
       expect(slack.shown).toContain("Use the user id (U...), not its name.");
-      expect(parse(slack.text).chat.transports.slack).toEqual({ channel: "C1", allow: ["U1"] });
+      expect(parse(slack.text).chat.transports.slack).toEqual({ ...SLACK_VARS, channel: "C1", allow: ["U1"] });
       const discord = await askSection(chat, r.root, ["discord", "", "general", "123", "1, ann", "1", "-", "x", "456"]);
       expect(discord.shown).toContain("Discord ids are numbers: turn on Developer Mode, then right-click the channel and choose Copy ID.");
       expect(discord.shown).toContain("right-click the user and choose Copy ID.");
-      expect(parse(discord.text).chat.transports.discord).toEqual({ channel: "123", allow: ["1"], announce_to: "456" });
+      expect(parse(discord.text).chat.transports.discord).toEqual({ token_env: "LOOPSTRA_DISCORD_TOKEN", channel: "123", allow: ["1"], announce_to: "456" });
     } finally { r.cleanup(); }
   });
 

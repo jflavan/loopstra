@@ -49,8 +49,11 @@ export class ConfigDocument {
     return isCollection(v) ? v.toJSON() : v;
   }
 
-  /** Sets a value. `quote` writes a string in double quotes, the way init writes commands. */
-  set(path: Path, value: unknown, o: { quote?: boolean } = {}): void {
+  /**
+   * Sets a value. `quote` writes a string in double quotes, the way init writes commands; `flow`
+   * writes a list or map on one line (`[ a, b ]`).
+   */
+  set(path: Path, value: unknown, o: { quote?: boolean; flow?: boolean } = {}): void {
     if (JSON.stringify(this.get(path)) === JSON.stringify(value)) return;
     // A parent that is not a map to write into (`chat:` on its own, `gates: none`, `gates: []`)
     // becomes an empty one, keeping its comments; validation still decides what is valid.
@@ -68,7 +71,7 @@ export class ConfigDocument {
     // A scalar is changed in place, so a comment on its line stays with it.
     if (isScalar(node) && (value === null || typeof value !== "object")) quoted(node).value = value;
     else {
-      const created = quoted(this.doc.createNode(value));
+      const created = quoted(this.doc.createNode(value, { flow: !!o.flow }));
       if (node !== undefined || !this.fillPlaceholder(path, created)) this.doc.setIn(path, created);
     }
     this.dirty = true;

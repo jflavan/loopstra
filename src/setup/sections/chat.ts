@@ -9,7 +9,8 @@ const PLACES = ["terminal", "dashboard", "slack", "discord"] as const;
 const BOTS = ["slack", "discord"] as const;
 type Bot = (typeof BOTS)[number];
 
-const envName = (s: string) => (ENV_NAME.test(s) ? null : "Answer the name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN, not the token itself.");
+/** Checks an answer is a variable name, naming `example` (the question's default) when it is not. */
+const envName = (example: string) => (s: string) => (ENV_NAME.test(s) ? null : `Answer the name of an environment variable, like ${example}, not the token itself.`);
 
 const { slack: SLACK, discord: DISCORD } = DEFAULTS.chat.transports;
 
@@ -42,22 +43,28 @@ async function askBot(ctx: SetupContext, bot: Bot): Promise<void> {
   const at = (k: string) => ["chat", "transports", bot, k];
   const str = (k: string) => { const v = ctx.doc.get(at(k)); return v === undefined || v === null ? undefined : String(v); };
   const ids = (k: string) => { const v = ctx.doc.get(at(k)); return Array.isArray(v) && v.length ? v.map(String).join(", ") : undefined; };
+  const added = ctx.doc.get(["chat", "transports", bot]) === undefined;
   ctx.ask.say(`${LABEL[bot]}: the config holds only the names of the environment variables with the tokens, never the tokens.`);
+  // Always written, even as the default: the file then says which variables to set.
   for (const [k, question, fallback] of TOKENS[bot]) {
-    ctx.doc.put(at(k), await ctx.ask.text(question, { suggestion: str(k) ?? fallback, check: envName }), fallback);
+    ctx.doc.set(at(k), await ctx.ask.text(question, { suggestion: str(k) ?? fallback, check: envName(fallback) }));
   }
-  const channel = (id: string) => idProblem(bot, "channel", id);
-  ctx.doc.set(at("channel"), await ctx.ask.text(`${LABEL[bot]} channel id where people talk to it`, { suggestion: str("channel"), check: channel }));
+  const channelProblem = (id: string) => idProblem(bot, "channel", id);
+  const channel = await ctx.ask.text(`${LABEL[bot]} channel id where people talk to it`, { suggestion: str("channel"), check: channelProblem });
+  ctx.doc.set(at("channel"), channel);
   const lists: [string, string][] = [
     ["allow", "User ids who may chat, separated by commas (- for anyone in the channel)"],
     ["acceptors", "User ids who may also start drafts, separated by commas (- for nobody)"],
   ];
   for (const [k, question] of lists) {
     const list = (await ctx.ask.text(question, { suggestion: ids(k), optional: true, check: idList(bot) })).split(",").map((s) => s.trim()).filter(Boolean);
-    if (list.length) ctx.doc.set(at(k), list);
+    if (list.length) ctx.doc.set(at(k), list, { flow: true });
     else ctx.doc.clear(at(k));
   }
-  const announce = await ctx.ask.text("Channel id where blocked, waiting and merged changes are announced (- for none)", { suggestion: str("announce_to"), optional: true, check: channel });
+  // A new bot announces in its channel unless told otherwise; one already set up keeps what it has.
+  const announce = await ctx.ask.text("Channel id where blocked, waiting and merged changes are announced (- for none)", {
+    suggestion: added ? channel : str("announce_to"), optional: true, check: channelProblem,
+  });
   if (announce) ctx.doc.set(at("announce_to"), announce);
   else ctx.doc.clear(at("announce_to"));
 }
