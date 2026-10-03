@@ -83,11 +83,14 @@ With no limit:
 
 In the schema each is `z.number().positive().optional()`.
 
-`init`'s template writes them as comments, one line each, with no values:
+`init`'s template mentions them in a comment, with no values. The template is laid out so that the
+`yaml` library writes it back unchanged (no map ends in comment lines, no padding for alignment, and
+`commands.test` comes last in its block), so the first edit by setup changes only the lines it edits:
 
 ```yaml
-  # max_budget_usd: 10            # what one session may spend; no limit when unset (timeout_minutes still applies)
-  # max_budget_usd_per_day: 50    # what the loop may spend in a day; no limit when unset
+  # Spending limits, in US dollars, are off unless set (`loopstra setup budgets` sets them in minutes or dollars):
+  #   max_budget_usd: what one session may spend
+  #   max_budget_usd_per_day: what the loop's sessions may spend together in a day
 ```
 
 ### The loop's daily cap
@@ -96,6 +99,11 @@ When `claude.max_budget_usd_per_day` is set, every loop phase that runs an agent
 spend through the same hold that chat uses (`Trace.phaseStartWithin`). Phases count across every
 slug except `_chat`, since local midnight. What it holds is the smaller of `claude.max_budget_usd`
 (when set) and what is left of the day.
+
+A running phase's hold counts against the day until the phase ends, or until it is older than
+`timeout_minutes` plus 10 minutes: a process killed mid-phase leaves its row running, and its hold must
+not lock the rest of the day. (Chat's holds go stale the same way.) A hold is not spending: a
+change's cost, the dashboard and `status` leave running phases out.
 
 If nothing is left, the phase doesn't start. The change waits in its current state with no failure
 and no retry, and the attention list shows "Paused: the loop has used today's budget
@@ -129,7 +137,8 @@ The notes for a phase stopped by a limit name the setting and the command:
 
 - budget: "This step hit its spending limit (`claude.max_budget_usd`). An engineer can raise or
   remove it with `loopstra setup budgets`."
-- timeout: the existing note, plus "(`claude.timeout_minutes`; change it in loopstra/config.yaml)".
+- timeout: the existing note, plus "An engineer can allow longer with claude.timeout_minutes in
+  loopstra/config.yaml."
 
 ## How it's built
 
@@ -173,9 +182,10 @@ interface Check { level: "ok" | "warn" | "fail"; text: string }
 
 ## The skill
 
-`templates/skill/SKILL.md` gets a short "Setting up" section: when someone asks how to configure
-Loopstra or why the loop stopped on a limit, the skill explains the choice in their context and
-tells them which `loopstra setup <section>` to run. It does not edit `config.yaml`.
+`templates/skill/SKILL.md`'s Onboard steps point to `loopstra setup`, and its Status section explains
+the budget pause and a step stopped by its limit: when someone asks how to configure Loopstra or why
+the loop stopped on a limit, the skill explains the choice in their context and tells them which
+`loopstra setup <section>` to run. It does not edit `config.yaml` for anything setup asks.
 
 ## Testing
 

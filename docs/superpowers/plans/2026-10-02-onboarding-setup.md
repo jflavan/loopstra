@@ -156,7 +156,8 @@ git commit -m "refactor: one atomic file writer for heartbeat and chat state"
 ```ts
 // tests/unit/budget.test.ts
 import { describe, expect, test } from "bun:test";
-import { CHAT_SLUG, limitOf, loopSpentToday } from "../../src/budget";
+import { CHAT_SLUG, limitOf, staleBefore } from "../../src/budget";
+import { validateConfig } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -180,8 +181,24 @@ describe("budget pools", () => {
       expect(trace.costIn({ slug: "a" }, since)).toBe(1);
       expect(trace.costIn({ except: CHAT_SLUG }, since)).toBe(3);
       expect(trace.costSince("b", since)).toBe(2);
-      expect(loopSpentToday(trace)).toBe(3);
     });
+  });
+
+  test("a running hold older than runningSince does not count (a killed process left it)", () => {
+    withTrace((trace, since) => {
+      trace.phaseStart("a", "x", "agent", 2);
+      const later = new Date(Date.now() + 60_000).toISOString();
+      expect(trace.costIn({ except: CHAT_SLUG }, since)).toBe(2);
+      expect(trace.costIn({ except: CHAT_SLUG }, since, { runningSince: later })).toBe(0);
+      const day = { since, limitUsd: 3, capUsd: Infinity, floorUsd: 0.01, pool: { except: CHAT_SLUG } };
+      expect(trace.phaseStartWithin("b", "x", "agent", { ...day, runningSince: later })!.heldUsd).toBe(3);
+    });
+  });
+
+  test("a hold goes stale after the session timeout and a grace period", () => {
+    const cfg = validateConfig({ version: 1, commands: { test: "x" }, claude: { timeout_minutes: 30 } });
+    const now = new Date("2026-10-02T12:00:00Z");
+    expect(staleBefore(cfg, now)).toBe("2026-10-02T11:20:00.000Z");
   });
 
   test("with no limit and no cap, a phase starts holding nothing", () => {
@@ -217,6 +234,7 @@ Expected: FAIL, cannot find module `../../src/budget`.
 - [ ] **Step 3: Write `src/budget.ts`**
 
 ```ts
+import type { Config } from "./config";
 import type { Trace } from "./trace";
 
 /** The trace slug every chat turn and writer run is recorded under. */
@@ -235,9 +253,15 @@ export function limitOf(usd: number | undefined): number {
   return usd ?? Infinity;
 }
 
-/** What the loop's sessions (every change's, not chat's) spent since local midnight, in sessions that have ended. */
-export function loopSpentToday(trace: Trace, now = new Date()): number {
-  return trace.costIn({ except: CHAT_SLUG }, startOfToday(now), { endedOnly: true });
+/** A session ends by its timeout plus this, at the latest; a hold still "running" after that was left by a killed process. */
+export const STALE_GRACE_MINUTES = 10;
+
+/**
+ * The ISO time before which a phase still marked running no longer holds budget: its process was
+ * killed (nothing ends its row), and its hold must not lock the day.
+ */
+export function staleBefore(cfg: Config, now = new Date()): string {
+  return new Date(now.getTime() - (cfg.claude.timeout_minutes + STALE_GRACE_MINUTES) * 60_000).toISOString();
 }
 ```
 
@@ -263,12 +287,15 @@ Replace `costSince` with `costSince` plus `costIn`:
     return this.costIn({ slug }, since, opts);
   }
 
-  /** costSince over a pool of slugs. */
-  costIn(pool: BudgetPool, since: string, opts: { endedOnly?: boolean } = {}): number {
+  /**
+   * costSince over a pool of slugs. `runningSince`: a running phase that started before it no longer
+   * counts (its process was killed and nothing will end its row).
+   */
+  costIn(pool: BudgetPool, since: string, opts: { endedOnly?: boolean; runningSince?: string } = {}): number {
     const who = "slug" in pool ? "slug = ?" : "slug != ?";
-    const running = opts.endedOnly ? " AND status != 'running'" : "";
-    return this.db.query<{ c: number | null }, [string, string]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`)
-      .get("slug" in pool ? pool.slug : pool.except, since)?.c ?? 0;
+    const running = opts.endedOnly ? " AND status != 'running'" : opts.runningSince ? " AND (status != 'running' OR started >= ?)" : "";
+    const args = [("slug" in pool ? pool.slug : pool.except), since, ...(opts.runningSince && !opts.endedOnly ? [opts.runningSince] : [])];
+    return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
   }
 ```
 
@@ -277,11 +304,12 @@ Replace `phaseStartWithin` (keep its existing doc comment, adding the two senten
 ```ts
   /**
    * (existing comment...) `pool` is whose spending counts against the limit (the slug's own by
-   * default). With no limit and no cap (both Infinity) nothing is held: the row starts at 0.
+   * default); `runningSince` drops holds left by killed processes (see costIn). With no limit and no
+   * cap (both Infinity) nothing is held: the row starts at 0.
    */
-  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number; pool?: BudgetPool }): { seq: number; heldUsd: number } | null {
+  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number; pool?: BudgetPool; runningSince?: string }): { seq: number; heldUsd: number } | null {
     const reserve = this.db.transaction(() => {
-      const spent = this.costIn(budget.pool ?? { slug }, budget.since);
+      const spent = this.costIn(budget.pool ?? { slug }, budget.since, { runningSince: budget.runningSince });
       const left = budget.limitUsd - spent;
       if (left < budget.floorUsd) return null;
       const heldUsd = Math.min(budget.capUsd, left);
@@ -306,13 +334,13 @@ Keep `chatSpentToday` as it is (it still uses `trace.costSince`).
 - [ ] **Step 6: Run the tests**
 
 Run: `bun test tests/unit/budget.test.ts tests/unit/chat-orchestrator.test.ts tests/unit/trace.test.ts --timeout 30000` and `bun run typecheck`
-Expected: all pass, typecheck clean.
+Expected: all pass, typecheck clean. (`staleBefore` reads `cfg.claude.timeout_minutes`, which exists already; `bun:sqlite`'s `.get(...args)` takes the bound values as rest arguments.)
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/budget.ts src/trace.ts src/chat/agents.ts tests/unit/budget.test.ts
-git commit -m "feat(budget): budget pools in the trace and shared budget helpers"
+git commit -m "feat(budget): budget pools in the trace, stale holds, shared budget helpers"
 ```
 
 ---
@@ -376,8 +404,8 @@ git commit -m "feat(claude): a session without a cap runs without --max-budget-u
 ### Task 4: Budgets are optional in the config, unlimited by default
 
 **Files:**
-- Modify: `src/config.ts` (claude and chat schemas; `loadConfig`), `templates/config.yaml:19` and `:49-51`, `src/phases.ts:194`, `src/chat/agents.ts` (`runChatAgent`), `src/chat/orchestrator.ts` (`budgetLeft`, `budgetUsedUp`, `turn`, `doHandoff`), `src/chat/writer.ts:128`
-- Test: `tests/unit/budget-config.test.ts` (new), `tests/unit/chat-config.test.ts:22-25`, `tests/unit/chat-orchestrator.test.ts` (the test at about line 323), `tests/unit/phases.test.ts`
+- Modify: `src/config.ts` (claude and chat schemas; `loadConfig`), `templates/config.yaml` (the claude, gates, stages and chat blocks), `src/init.ts` (`commandLines`), `src/phases.ts:194` and `ownerNote`, `src/chat/agents.ts` (`runChatAgent`), `src/chat/orchestrator.ts` (`budgetLeft`, `budgetUsedUp`, `turn`, `doHandoff`), `src/chat/writer.ts:128`
+- Test: `tests/unit/budget-config.test.ts` (new), `tests/unit/templates-roundtrip.test.ts` (new), `tests/unit/chat-config.test.ts:22-25`, `tests/unit/chat-orchestrator.test.ts` (the test at about line 323), `tests/unit/phases.test.ts`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -418,7 +446,7 @@ describe("budgets", () => {
       await init(repo.path);
       const text = readFileSync(configPath(repo.path), "utf8");
       expect(text).not.toMatch(/^\s*max_budget_usd/m);
-      expect(text).toContain("# max_budget_usd_per_day:");
+      expect(text).toContain("max_budget_usd_per_day: what the loop's sessions may spend together in a day");
       const cfg = await loadConfig(repo.path).catch(() => null);
       // A repo with no detected test command has no valid config yet; when it has one, budgets are unset.
       if (cfg) expect(cfg.claude.max_budget_usd).toBeUndefined();
@@ -487,9 +515,58 @@ In `tests/unit/phases.test.ts`, the budget note expectation becomes:
       expect(r.note).toBe("This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.");
 ```
 
+and add, next to it:
+
+```ts
+  test("the timeout note names the setting", () => {
+    expect(ownerNote("timeout")).toBe("The assistant took too long on this step. An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.");
+  });
+```
+
+(import `ownerNote` from `../../src/phases` if the file does not already).
+
+The template must survive an edit by `loopstra setup`, which re-serialises the whole file with the `yaml` library. A map that ends in comment lines, a null value followed by comments, and padding for alignment do not survive. Write the test that pins this:
+
+```ts
+// tests/unit/templates-roundtrip.test.ts
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseDocument } from "yaml";
+import { configPath } from "../../src/config";
+import { init } from "../../src/init";
+import { tempGitRepo } from "../helpers";
+
+describe("the stamped config", () => {
+  for (const [name, scripts] of [["with a test command", { test: "bun test", lint: "eslint ." }], ["without one", {}]] as const) {
+    test(`reads back exactly, ${name}, and one edit changes one place`, async () => {
+      const repo = await tempGitRepo();
+      try {
+        if (Object.keys(scripts).length) await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts }));
+        await init(repo.path);
+        const text = readFileSync(configPath(repo.path), "utf8");
+        expect(String(parseDocument(text))).toBe(text);
+
+        const scalar = parseDocument(text);
+        scalar.setIn(["claude", "timeout_minutes"], 45);
+        expect(String(scalar)).toBe(text.replace("  timeout_minutes: 30\n", "  timeout_minutes: 45\n"));
+
+        const added = parseDocument(text);
+        added.setIn(["claude", "max_budget_usd"], 9);
+        expect(String(added).replace("  max_budget_usd: 9\n", "")).toBe(text);
+
+        const bot = parseDocument(text);
+        bot.setIn(["chat", "transports"], bot.createNode({ slack: { channel: "C1" } }));
+        expect(String(bot).replace("  transports:\n    slack:\n      channel: C1\n", "")).toBe(text);
+      } finally { repo.cleanup(); }
+    });
+  }
+});
+```
+
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `bun test tests/unit/budget-config.test.ts tests/unit/chat-config.test.ts tests/unit/phases.test.ts tests/unit/chat-orchestrator.test.ts --timeout 30000`
+Run: `bun test tests/unit/budget-config.test.ts tests/unit/templates-roundtrip.test.ts tests/unit/chat-config.test.ts tests/unit/phases.test.ts tests/unit/chat-orchestrator.test.ts --timeout 30000`
 Expected: FAIL (`validateConfig` not exported; defaults still 5 and 2; template still sets `max_budget_usd: 5`; old note text).
 
 - [ ] **Step 3: The schema and `validateConfig` in `src/config.ts`**
@@ -535,39 +612,115 @@ export function validateConfig(raw: unknown): Config {
 
 and the end of `loadConfig` becomes `return validateConfig(raw);`.
 
-- [ ] **Step 4: The template**
+- [ ] **Step 4: The template, and `commandLines` in `src/init.ts`**
 
-In `templates/config.yaml`, replace the line `  max_budget_usd: 5` with:
-
-```yaml
-  # Spending limits, in US dollars. Unset means no limit; timeout_minutes still ends a session.
-  # `loopstra setup budgets` sets them in minutes or dollars.
-  # max_budget_usd: 9            # what one session may spend
-  # max_budget_usd_per_day: 50   # what the loop's sessions may spend together in a day
-```
-
-and replace the two chat budget lines with:
+Replace `templates/config.yaml` with this (same settings, no budgets set; every map ends in a key, not comments; no alignment padding):
 
 ```yaml
-  # max_budget_usd_per_day: 36     # chat turns and writer runs together in a day; unset means no limit
-  # max_budget_usd_per_session: 4  # what one turn or writer run may spend; unset means no limit
+# Loopstra configuration. Engineers edit this; product owners never need to.
+# Every key except commands.test has a default. Unknown keys are errors.
+# Changes take effect on the next pass of the loop; no restart needed.
+# `loopstra setup` walks through these settings and keeps this file's comments.
+version: 1
+main_branch: __MAIN_BRANCH__
+poll_seconds: 60
+
+commands:
+__COMMANDS__
+
+claude:
+  models:
+    default: sonnet
+    cheap: haiku
+    strong: opus
+  # What a build session may do without asking. The commands above (test, lint, build, run, install)
+  # are always added. Git stays read-only: Loopstra makes every commit itself. The default:
+  # allowed_tools: [Read, Edit, Write, Glob, Grep, "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]
+  # Spending limits, in US dollars, are off unless set (`loopstra setup budgets` sets them in minutes or dollars):
+  #   max_budget_usd: what one session may spend
+  #   max_budget_usd_per_day: what the loop's sessions may spend together in a day
+  timeout_minutes: 30
+
+# Gates between stages. human: status (a person edits the status line) | none; the merge gate also
+# takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.
+# A person always accepts an intent (draft -> accepted); by default everything after runs on its own.
+gates:
+  spec: { human: none, agent: true }
+  plan: { human: none, agent: true }
+  merge: { human: none, method: squash }
+  done: { human: none, agent: true }
+
+# Per-stage model, skills to load, and deterministic commands to run before and after.
+stages:
+  design: { model: strong, skills: [], before: [], after: [] }
+  plan: { model: strong, skills: [], before: [], after: [] }
+  build: { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
+  review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
+  verify: { model: default, skills: [], before: [], after: [] }
+
+signals:
+  main_health: { every_minutes: 30 }
+
+# Chat: `loopstra chat` (terminal, plus any bots) and the panel in `loopstra ui`. The orchestrator
+# answers questions and works out new changes with you; agreed ones are written up as draft intents
+# (through a pull request when there is a remote). It is read-only, except that someone on a bot's
+# acceptors list (or at the terminal or dashboard) can ask it to start a draft.
+# `loopstra setup chat` adds Slack or Discord bots under transports, for example:
+#   transports:
+#     slack:                     # Socket Mode; tokens are read from these environment variables
+#       token_env: LOOPSTRA_SLACK_APP_TOKEN
+#       bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
+#       channel: C0123ABCD       # each top-level message starts a conversation in its thread
+#       allow: [U01AAA, U01BBB]  # who may chat; empty means anyone in the channel
+#       acceptors: [U01AAA]      # who may also start drafts; empty means nobody from Slack
+#       announce_to: C0123ABCD   # where blocked / waiting / merged changes are announced
+#     discord:                   # gateway bot with the Message Content intent on
+#       token_env: LOOPSTRA_DISCORD_TOKEN
+#       channel: "1234567890"
+# Spending limits (off unless set): max_budget_usd_per_day for chat turns and write-ups together,
+# max_budget_usd_per_session for one of them.
+chat:
+  model: default # the orchestrator; the writer uses stages.design.model
 ```
+
+In `src/init.ts`, replace `commandLines` so the optional keys and the comments come before `test`, and a missing test is `""` rather than an empty value with comments after it:
+
+```ts
+function commandLines(d: Detected): string {
+  const q = (v: string) => JSON.stringify(v);
+  const optional = ["install", "lint", "build", "run"] as const;
+  return [
+    "  # Optional: leave a key out if you do not have it.",
+    ...optional.map((k) => (d[k] ? `  ${k}: ${q(d[k]!)}` : `  # ${k}:`)),
+    "  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:",
+    "  # sessions may run the whole chain and each part of it.",
+    `  test: ${d.test ? q(d.test) : '""'}`,
+  ].join("\n");
+}
+```
+
+(`commands.test: ""` fails validation with the same message as a missing one: "commands.test is required: the single command that runs your tests".) If the round-trip test still fails, print `String(parseDocument(text))` next to `text` and adjust the template until they match; the test is the authority. Run `bun test tests/unit/init.test.ts tests/unit/templates.test.ts tests/unit/templates-roundtrip.test.ts --timeout 30000`, and update any init or template test that asserted the old line order or `test:` with no value.
 
 - [ ] **Step 5: The runtime treats unset as no limit**
 
-`src/phases.ts`: import `limitOf` from `./budget`, and in `attempt` change `maxBudgetUsd: ctx.cfg.claude.max_budget_usd,` to `maxBudgetUsd: limitOf(ctx.cfg.claude.max_budget_usd),` (Task 5 replaces this line again). Change the budget case of `ownerNote`:
+`src/phases.ts`: import `limitOf` from `./budget`, and in `attempt` change `maxBudgetUsd: ctx.cfg.claude.max_budget_usd,` to `maxBudgetUsd: limitOf(ctx.cfg.claude.max_budget_usd),` (Task 5 replaces this line again). Change the timeout and budget cases of `ownerNote`:
 
 ```ts
+    case "timeout": return `${TIMEOUT_NOTE} An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.`;
     case "budget": return "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
 ```
 
-`src/chat/agents.ts`, in `runChatAgent`, import `limitOf` from `../budget` and replace the reservation and the `why` line:
+(`blockNote` in `src/context.ts` tests `note.includes(TIMEOUT_NOTE)`, which still holds.)
+
+`src/chat/agents.ts`, in `runChatAgent`, import `limitOf` and `staleBefore` from `../budget` and replace the reservation and the `why` line:
 
 ```ts
   const day = limitOf(o.cfg.chat.max_budget_usd_per_day);
   const held = o.trace.phaseStartWithin(CHAT_SLUG, o.name, "agent", {
     since: startOfToday(), limitUsd: day,
     capUsd: Math.min(o.capUsd, limitOf(o.cfg.claude.max_budget_usd), limitOf(o.cfg.chat.max_budget_usd_per_session)), floorUsd: MIN_SESSION_USD,
+    // A chat process killed mid-turn leaves its row running; its hold stops counting once stale.
+    runningSince: staleBefore(o.cfg),
   });
   if (!held) {
     const why = day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
@@ -596,13 +749,13 @@ Search for other uses of the changed sentences in tests and update them to the n
 
 - [ ] **Step 6: Run the tests**
 
-Run: `bun test tests/unit/budget-config.test.ts tests/unit/chat-config.test.ts tests/unit/phases.test.ts tests/unit/chat-orchestrator.test.ts tests/unit/chat-writer.test.ts tests/unit/templates.test.ts tests/unit/init.test.ts --timeout 30000` then `bun run typecheck` then `bun run test`
+Run: `bun test tests/unit/budget-config.test.ts tests/unit/templates-roundtrip.test.ts tests/unit/chat-config.test.ts tests/unit/phases.test.ts tests/unit/chat-orchestrator.test.ts tests/unit/chat-writer.test.ts tests/unit/templates.test.ts tests/unit/init.test.ts --timeout 30000` then `bun run typecheck` then `bun run test`
 Expected: all pass. If `templates.test.ts` asserts on the old budget lines, update it to the new comment lines.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/config.ts src/phases.ts src/chat templates/config.yaml tests/unit
+git add src/config.ts src/init.ts src/phases.ts src/chat templates/config.yaml tests/unit
 git commit -m "feat(budget): budgets are optional and unlimited by default"
 ```
 
@@ -611,7 +764,7 @@ git commit -m "feat(budget): budgets are optional and unlimited by default"
 ### Task 5: The loop's daily cap
 
 **Files:**
-- Modify: `src/budget.ts` (the loop's day), `src/stop.ts` (new class), `src/phases.ts` (`attempt`), `src/git.ts:60`, `src/scheduler.ts` (tick: before picking, and the catch; `runStepGuarded`), `src/attention.ts` (after the pause item)
+- Modify: `src/budget.ts` (the loop's day), `src/stop.ts` (new class), `src/phases.ts` (`attempt`), `src/git.ts:60`, `src/scheduler.ts` (tick: before picking, and the catch; `runStepGuarded`; `start`'s log), `src/attention.ts` (after the pause item), `src/trace.ts` (`intentSummary`), `src/commands/ui.ts:97`
 - Test: `tests/unit/loop-budget.test.ts`
 
 - [ ] **Step 1: Write the failing tests**
@@ -675,6 +828,16 @@ describe("the loop's daily budget", () => {
     } finally { trace.close(); repo.cleanup(); }
   });
 
+  test("a hold is not spending: the change's cost and the dashboard leave a running phase out", async () => {
+    const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 5\n" });
+    try {
+      trace.upsertIntent("add-numbers", "building", "normal");
+      spent(trace, "add-numbers", 1);
+      trace.phaseStartWithin("add-numbers", "build", "agent", { since: new Date(Date.now() - 60_000).toISOString(), limitUsd: 5, capUsd: Infinity, floorUsd: 0.01, pool: { except: CHAT_SLUG } });
+      expect(trace.intentSummary("add-numbers")!.costUsd).toBe(1);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
   test("tomorrow it starts again", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     try {
@@ -705,7 +868,8 @@ Add `import type { Config } from "./config";` and, after `loopSpentToday`:
 /** claude.max_budget_usd_per_day is set and less than a session's floor of it is left. */
 export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): boolean {
   const day = cfg.claude.max_budget_usd_per_day;
-  return day !== undefined && day - loopSpentToday(trace, now) < MIN_SESSION_USD;
+  // Spent plus what running phases hold, as startPhase counts it, so the tick pauses instead of picking a change that cannot start.
+  return day !== undefined && day - trace.costIn({ except: CHAT_SLUG }, startOfToday(now), { runningSince: staleBefore(cfg, now) }) < MIN_SESSION_USD;
 }
 
 /** Why the loop is waiting, for the owner: the attention list, `status`, the tick's pause. */
@@ -733,7 +897,7 @@ export class LoopBudgetReached extends Error {
 
 - [ ] **Step 4: A loop phase holds its share of the day (`src/phases.ts`)**
 
-Import `CHAT_SLUG, limitOf, MIN_SESSION_USD, startOfToday` from `./budget` and `LoopBudgetReached` from `./stop` (with the existing `./stop` imports). Add above `attempt`:
+Import `CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday` from `./budget` and `LoopBudgetReached` from `./stop` (with the existing `./stop` imports). Add above `attempt`:
 
 ```ts
 /**
@@ -745,7 +909,8 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
   const c = ctx.cfg.claude;
   if (c.max_budget_usd_per_day === undefined) return { seq: ctx.trace.phaseStart(ctx.slug, traceName, "agent"), capUsd: limitOf(c.max_budget_usd) };
   const held = ctx.trace.phaseStartWithin(ctx.slug, traceName, "agent", {
-    since: startOfToday(), limitUsd: c.max_budget_usd_per_day, capUsd: limitOf(c.max_budget_usd), floorUsd: MIN_SESSION_USD, pool: { except: CHAT_SLUG },
+    since: startOfToday(), limitUsd: c.max_budget_usd_per_day, capUsd: limitOf(c.max_budget_usd), floorUsd: MIN_SESSION_USD,
+    pool: { except: CHAT_SLUG }, runningSince: staleBefore(ctx.cfg),
   });
   if (!held) throw new LoopBudgetReached();
   return { seq: held.seq, capUsd: held.heldUsd };
@@ -795,15 +960,28 @@ In the tick's `catch`, after the `AssistantUnavailable` line, add:
   if (cfg && loopDayUsedUp(cfg, trace, now)) add("paused", null, "Loopstra is paused", loopDayNote(cfg));
 ```
 
+A running phase's row now carries its hold in `cost_usd`. A hold is not spending, so leave running rows out where cost is shown:
+
+- `src/trace.ts`, `intentSummary`: the cost query becomes `"SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'"`.
+- `src/commands/ui.ts` (the phase mapping, about line 97): `costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0,`. The dashboard totals are built from these rows, so they follow.
+
+In `start()` (`src/scheduler.ts`), the pause line is logged on every poll while it lasts, which until midnight is a lot. Log it only when it changes: declare `let lastPaused = "";` before the `for (;;)`, and replace `else if (r.paused) log(`paused: ${r.paused}`);` with:
+
+```ts
+        else if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
+```
+
+and after the whole `if`/`else if` chain (still inside the `try`), add `lastPaused = r.paused ?? "";`.
+
 - [ ] **Step 6: Run the tests**
 
-Run: `bun test tests/unit/loop-budget.test.ts tests/unit/phases.test.ts tests/integration/scheduler.test.ts --timeout 30000`, `bun run typecheck`, then `bun run test`
+Run: `bun test tests/unit/loop-budget.test.ts tests/unit/phases.test.ts tests/unit/ui.test.ts tests/unit/status.test.ts tests/integration/scheduler.test.ts --timeout 30000`, `bun run typecheck`, then `bun run test`
 Expected: all pass.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/budget.ts src/stop.ts src/phases.ts src/git.ts src/scheduler.ts src/attention.ts tests/unit/loop-budget.test.ts
+git add src/budget.ts src/stop.ts src/phases.ts src/git.ts src/scheduler.ts src/attention.ts src/trace.ts src/commands/ui.ts tests/unit/loop-budget.test.ts
 git commit -m "feat(budget): an optional daily cap for the loop pauses it until midnight"
 ```
 
@@ -873,6 +1051,14 @@ describe("ConfigDocument", () => {
     try {
       doc.set(["chat", "transports", "discord", "channel"], "123456789012345678");
       expect(parse(doc.text()).chat.transports.discord.channel).toBe("123456789012345678");
+    } finally { t.cleanup(); }
+  });
+
+  test("set fills a parent written with no value", () => {
+    const { t, doc } = load(`${TEXT}chat:\n`);
+    try {
+      doc.set(["chat", "model"], "cheap");
+      expect(parse(doc.text()).chat).toEqual({ model: "cheap" });
     } finally { t.cleanup(); }
   });
 
@@ -969,6 +1155,15 @@ export class ConfigDocument {
 
   set(path: Path, value: unknown): void {
     if (JSON.stringify(this.get(path)) === JSON.stringify(value)) return;
+    // A parent written with no value (`chat:` on its own) is an empty map to fill, not a scalar.
+    for (let i = 1; i < path.length; i++) {
+      const parent = this.doc.getIn(path.slice(0, i), true);
+      if (parent === undefined) break;
+      if (isScalar(parent) && (parent.value === null || parent.value === undefined)) {
+        this.doc.setIn(path.slice(0, i), this.doc.createNode({}));
+        break;
+      }
+    }
     const node = this.doc.getIn(path, true);
     // A scalar is changed in place, so a comment on its line stays with it.
     if (isScalar(node) && (value === null || typeof value !== "object")) node.value = value;
@@ -1522,6 +1717,8 @@ export interface SetupOptions {
   output?: Writable;
   /** Whether a person is at the input; process.stdin.isTTY when absent. */
   interactive?: boolean;
+  /** A prompt already reading the input (init's offer), so the stream is read by one reader only. */
+  prompt?: Prompt;
   env?: Record<string, string | undefined>;
 }
 
@@ -1546,7 +1743,7 @@ export async function setup(root: string, o: SetupOptions = {}): Promise<number>
 
   let doc: ConfigDocument;
   try { doc = ConfigDocument.load(root); } catch (e) { out(errorText(e)); return 1; }
-  const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : new StreamPrompt(o.input ?? process.stdin, output);
+  const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : o.prompt ?? new StreamPrompt(o.input ?? process.stdin, output);
   const ctx: SetupContext = { root, doc, ask, env };
   try {
     for (const s of sections) {
@@ -2153,7 +2350,7 @@ export const github: Section = {
     const reach = await git.run(["ls-remote", "--heads", remote], true);
     const why = reach.err.trim().split(/\r?\n/).at(-1) ?? "";
     checks.push(reach.code === 0 ? { level: "ok", text: `git remote ${remote} answers.` } : { level: "fail", text: `git remote ${remote} could not be reached${why ? `: ${why}` : ""}.` });
-    checks.push(await new GitHub(ctx.root).signedIn()
+    checks.push(await new GitHub(ctx.root, { executable: ctx.env.LOOPSTRA_GH_EXECUTABLE || undefined }).signedIn()
       ? { level: "ok", text: "gh is signed in." }
       : { level: "fail", text: "gh is not signed in (or not installed): run gh auth login. With a remote, Loopstra merges through pull requests." });
     return checks;
@@ -2528,15 +2725,16 @@ Expected: FAIL.
 - [ ] **Step 4: The offer** in `src/cli.ts`, `init` case: after the line that prints `Next:` and before `return 0;`:
 
 ```ts
-      // In a terminal, offer the walkthrough now; elsewhere the next steps name it.
+      // In a terminal, offer the walkthrough now; elsewhere the next steps name it. One prompt reads
+      // stdin for both: a second reader after the first closes would lose input (or hang).
       if (!process.stdin.isTTY) return 0;
       const { StreamPrompt } = await import("./setup/prompt");
       const ask = new StreamPrompt(process.stdin, process.stdout);
       let walk = false;
-      try { walk = await ask.yesNo("\nWalk through the settings now?", true); } catch { /* input ended */ } finally { ask.close(); }
-      if (!walk) return 0;
+      try { walk = await ask.yesNo("\nWalk through the settings now?", true); } catch { /* input ended */ }
+      if (!walk) { ask.close(); return 0; }
       const { setup } = await import("./setup");
-      return setup(root, { interactive: true });
+      return setup(root, { interactive: true, prompt: ask });
 ```
 
 - [ ] **Step 5: Run the tests**
