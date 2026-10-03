@@ -107,7 +107,7 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
-    // The loop's day is spent (claude.max_budget_usd_per_day): nothing starts until midnight.
+    // The loop's day is used up or held (claude.max_budget_usd_per_day): nothing starts until there is budget again.
     if (loopDayUsedUp(cfg, trace)) {
       out.paused = loopDayNote(cfg, trace);
       // Traced when the reason is new today, not on every poll.
