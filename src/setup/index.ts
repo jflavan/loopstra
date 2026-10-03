@@ -79,7 +79,7 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
       out(`Fix these in loopstra/config.yaml first:\n${problems.length ? problems.map((p) => `- ${p.text}`).join("\n") : errorText(e)}`);
       return 1;
     }
-    out(`Note: loopstra/config.yaml has problems now; the questions below can fix them:\n${errorText(e)}`);
+    out(`Note: loopstra/config.yaml has problems now; the questions below can fix them:\n${problems.map((p) => `- ${p.text}`).join("\n")}`);
   }
   const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : o.prompt ?? new StreamPrompt(o.input ?? process.stdin, output);
   const ctx: SetupContext = { root, doc, ask, env };

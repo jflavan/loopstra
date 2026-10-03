@@ -158,7 +158,8 @@ export function validateConfig(raw: unknown): Config {
         return { path, unknownKey: true, text: "gates.intent: remove this line; a person always accepts a change by setting its status to accepted." };
       }
       if (i.code === "unrecognized_keys") return { path, unknownKey: true, text: `${where}: unknown key(s) ${i.keys.join(", ")}` };
-      return { path, unknownKey: false, text: `${where}: ${i.message}` };
+      // A message that already names its path ("commands.test is required: ...") is not prefixed again.
+      return { path, unknownKey: false, text: i.message.startsWith(`${where} `) ? i.message : `${where}: ${i.message}` };
     });
     throw new ConfigError(`loopstra/config.yaml has problems:\n- ${problems.map((p) => p.text).join("\n- ")}`, problems);
   }

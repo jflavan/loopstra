@@ -99,8 +99,8 @@ describe("loopstra setup", () => {
     try {
       const o = io();
       expect(await setup(r.root, { output: o.output, defaults: true, sections: [fake()] })).toBe(0);
-      expect(o.text()).toContain("Note: loopstra/config.yaml has problems now; the questions below can fix them:");
-      expect(o.text()).toContain("commands.test");
+      expect(o.text()).toContain("Note: loopstra/config.yaml has problems now; the questions below can fix them:\n- commands.test is required: the single command that runs your tests\n");
+      expect(o.text()).not.toContain("loopstra/config.yaml has problems:");
       expect(parse(r.text()).commands.test).toBe("echo ok");
     } finally { r.cleanup(); }
   });
