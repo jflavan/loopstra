@@ -14,7 +14,11 @@ export async function offerSetup(root: string, o: Pick<SetupOptions, "input" | "
   let walk = false;
   try { walk = await ask.yesNo("\nWalk through the settings now?", true); } catch { /* input ended */ }
   if (!walk) { ask.close(); return; }
-  await setup(root, { ...o, output, interactive: true, prompt: ask });
+  const saved = (await setup(root, { ...o, output, interactive: true, prompt: ask })) === 0;
   const branch = await loadConfig(root).then((c) => ` on ${c.main_branch}`, () => "");
-  output.write(`\nNext: commit what init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore)${branch}, then run \`loopstra start\`.\n`);
+  const commit = `commit what init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore)${branch}, then run \`loopstra start\`.`;
+  // Setup, then commit, then start: the same order as init's next steps.
+  output.write(saved
+    ? `\nNext: ${commit}\n`
+    : `\nNext: run \`loopstra setup\` again when you are ready (or edit loopstra/config.yaml), ${commit}\n`);
 }

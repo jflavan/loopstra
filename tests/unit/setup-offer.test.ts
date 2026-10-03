@@ -5,7 +5,10 @@ import type { Section } from "../../src/setup/types";
 import { configRepo } from "../setup-helpers";
 
 const CONFIG = "version: 1\nmain_branch: trunk\ncommands:\n  test: echo ok\n";
-const NEXT = "Next: commit what init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore)";
+const WROTE = "commit what init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore)";
+const NEXT = `Next: ${WROTE}`;
+/** After a walkthrough that saved nothing. */
+const AGAIN = `Next: run \`loopstra setup\` again when you are ready (or edit loopstra/config.yaml), ${WROTE}`;
 
 /** Answers one per line on a stream, and what was written. */
 function io(...answers: string[]) {
@@ -87,7 +90,8 @@ describe("init's offer to walk through the settings", () => {
       const o = io("y");
       await offerSetup(r.root, { input: o.input, output: o.output, interactive: true, sections: [section(o.input, [])] });
       expect(o.text()).toContain("Setup stopped; nothing was saved.");
-      expect(o.text()).toContain(`${NEXT} on trunk, then run \`loopstra start\`.`);
+      expect(o.text()).toContain(`${AGAIN} on trunk, then run \`loopstra start\`.`);
+      expect(o.text()).not.toContain(NEXT);
       expect(r.text()).toBe(CONFIG);
     } finally { r.cleanup(); }
   });
@@ -101,13 +105,13 @@ describe("init's offer to walk through the settings", () => {
     } finally { r.cleanup(); }
   });
 
-  test("a config that does not load: the last line names no branch", async () => {
+  test("a config that does not load: setup again, and the last line names no branch", async () => {
     const bad = "version: 1\ncommands:\n  test: echo ok\nclaude:\n  timeout_minutes: -1\n";
     const r = configRepo(bad);
     try {
       const o = io("y");
       await offerSetup(r.root, { input: o.input, output: o.output, interactive: true, sections: [section(o.input, [])] });
-      expect(o.text()).toContain(`${NEXT}, then run \`loopstra start\`.`);
+      expect(o.text()).toContain(`${AGAIN}, then run \`loopstra start\`.`);
     } finally { r.cleanup(); }
   });
 });
