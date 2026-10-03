@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { configPath } from "../../src/config";
 import { init } from "../../src/init";
-import { commands } from "../../src/setup/sections/commands";
+import { commands, missingProgram } from "../../src/setup/sections/commands";
 import { setupRepo, tempGitRepo } from "../helpers";
 import { askSection, checkSection, configRepo } from "../setup-helpers";
 
@@ -77,6 +77,29 @@ describe("the commands section", () => {
       expect(test!.level).toBe("warn");
       expect(test!.text).toStartWith("commands.test fails on main (exit 3)");
     } finally { repo.cleanup(); }
+  });
+
+  test("a test or install program that is not there fails, naming it", async () => {
+    const cases: Record<string, string>[] = [{ test: "loopstra-no-such-program --run" }, { install: "loopstra-no-such-installer", test: "echo ok" }];
+    for (const cmds of cases) {
+      const { repo, trace } = await setupRepo("draft", { commands: cmds });
+      trace.close();
+      try {
+        const [, check] = await checkSection(commands, repo.path);
+        const which = "install" in cmds ? "install" : "test";
+        const program = "install" in cmds ? "loopstra-no-such-installer" : "loopstra-no-such-program";
+        expect(check).toEqual({ level: "fail", text: `\`${program}\` is not installed or not on PATH (commands.${which}).` });
+      } finally { repo.cleanup(); }
+    }
+  });
+
+  test("a missing program is told apart by what each shell says, not by a file the program could not find", () => {
+    expect(missingProgram("pytest -q", "bash: line 1: pytest: command not found")).toBe("pytest");
+    expect(missingProgram("pytest -q", "sh: 1: pytest: not found")).toBe("pytest");
+    expect(missingProgram("pytest", "'pytest' is not recognized as an internal or external command,")).toBe("pytest");
+    expect(missingProgram("./run-tests.sh", "bash: ./run-tests.sh: No such file or directory")).toBe("./run-tests.sh");
+    expect(missingProgram("cat missing.txt", "cat: missing.txt: No such file or directory")).toBeUndefined();
+    expect(missingProgram("make test", "make: *** No rule to make target 'test'.  Stop.")).toBeUndefined();
   });
 
   test("an install command that fails on main is a warning naming it, and the tests do not run", async () => {
