@@ -1,13 +1,13 @@
 ---
 name: loopstra
-description: Operate the Loopstra development loop in this repo. Use when asked to set up or onboard Loopstra, draft an intent, check loop status, unblock a change, tune stages or gates, or apply lessons to CLAUDE.md. Never runs the loop itself.
+description: Operate the Loopstra development loop in this repo. Use when asked to set up or onboard Loopstra, draft an intent, check loop status, unblock a change, tune stages or gates, set up chat (terminal, dashboard, Slack or Discord), or apply lessons to CLAUDE.md. Never runs the loop itself.
 ---
 
 # Loopstra operator
 
 Loopstra is an unattended development loop. A Bun runtime (`loopstra start`) owns the loop; Claude Code sessions do bounded work inside it. You are the operator console: you help people set it up, feed it, read it, and unblock it. You never run stages by hand and never run `loopstra start`.
 
-Files that matter: `loopstra/config.yaml` (engineer settings), `loopstra/prompts/*.md` (one prompt per phase), `intent/<slug>/` (one folder per change: `intent.md`, `spec.md`, `plan.md`, `review.md`, `outcome.md` for the owner, `lessons.md` for engineers), `intent/queue.md` (generated), `.loopstra/` (runtime state and trace, gitignored). A change's folder name is lowercase words joined by dashes, like `add-numbers`.
+Files that matter: `loopstra/config.yaml` (engineer settings), `loopstra/prompts/*.md` (one prompt per phase), `intent/<slug>/` (one folder per change: `intent.md`, `spec.md`, `plan.md`, `review.md`, `outcome.md` for the owner, `lessons.md` for engineers), `intent/queue.md` (generated), `.loopstra/chat/` (chat's conversations, requests and announcements), `.loopstra/` (runtime state and trace, gitignored). A change's folder name is lowercase words joined by dashes, like `add-numbers`.
 
 ## The state machine
 Status lives in the `status` line of `intent.md`; the `note` line says what to do. The runtime writes it, except where a person is asked to.
@@ -29,10 +29,18 @@ draft -> accepted -> designing -> spec-review -> spec-approved -> planning -> pl
 3. A person always accepts an intent (draft to accepted). Ask which other gates should have a person: spec, plan, merge, done. Set `human: status` for them; the merge gate can instead use `human: pr` (approval of its GitHub pull request). The defaults are unattended after acceptance.
 4. Ask which skills in `.claude/skills/` each stage should load and list them under `stages.<stage>.skills`.
 5. Read `CLAUDE.md`; make sure its Commands block matches the config.
-6. Tell them to start the loop in a terminal with `loopstra start` and to watch it with `loopstra status` or `loopstra ui`.
+6. Tell them to start the loop in a terminal with `loopstra start` and to watch it with `loopstra status` or `loopstra ui`. Product owners can use `loopstra chat` or the dashboard's chat panel instead of writing intents by hand (see Chat).
 
 ## Draft an intent
 Interview the person in plain language: what is wrong today and for whom, what should be true when it is done, how they would check it is done, who and what it touches, any constraints, and open questions. Write `intent/<slug>/intent.md` from the template in `intent/README.md` with a short hyphenated slug they agree to. One intent is designed, planned, and built in one build session within the stage's time and budget limits, so a request the size of a whole product will block partway: split it into several intents, each something one person could build in a day or two, and give each later one a `depends_on: [<earlier slug>, ...]` line so it waits until those are merged. Leave `status: draft`. Tell them to set `accepted` when they are ready. Do not design or plan anything.
+
+## Chat
+`loopstra chat` (terminal, plus the Slack and Discord bots under `chat.transports` in the config) and the panel in `loopstra ui` are the orchestrator: people ask it for updates and work out new changes with it. An agreed change is handed to a writer and arrives as draft intents through a pull request on `intent-proposal/<slug>` (without a remote, the loop adds them on its next tick). It is read-only except that an acceptor can ask it to start a draft, which the loop applies on its next tick. Its sessions are traced under `_chat` (`loopstra tail _chat`), capped by `chat.max_budget_usd_per_day`; its prompts are `loopstra/prompts/orchestrator.md` and `write-intent.md`. Nothing in chat ever runs the loop; the loop must be running for a start or (without a remote) new drafts to take effect.
+
+To set up a bot, add it under `chat.transports` in `loopstra/config.yaml`. Each top-level message in its channel starts a conversation in a thread. `allow` lists the platform user ids that may chat (empty: anyone in the channel); `acceptors` those who may also start drafts (empty: nobody from there); `announce_to` the channel for announcements (blocked, waiting, merged, done). Tokens are never written in the config: `token_env` (and Slack's `bot_token_env`) name the environment variables that hold them, which must be set where `loopstra chat` runs. Then run `loopstra chat --no-terminal` (or plain `loopstra chat` to also chat in the terminal).
+
+- Slack: create an app with Socket Mode on; an app-level token with `connections:write`; a bot token with `chat:write`, `channels:history` and `users:read`; subscribe to the `message.channels` bot event; invite the bot to the channel. `channel` is the channel id (C...).
+- Discord: create a bot, turn on the Message Content intent, and invite it with permission to read messages, send messages, and create public threads in the channel. `channel` is the channel id.
 
 ## Status
 Run `loopstra status`. Start with its "Needs attention" block (the same list as the dashboard's): each line is something a person should do or know. Then explain each row in one sentence: what the change is, where it is, and whether anyone needs to do anything. For a blocked change, read its note aloud and offer the options below.

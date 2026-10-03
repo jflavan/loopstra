@@ -30,8 +30,9 @@ if (group === "auth" && cmd === "status") {
 if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); process.exit(1); }
 
 if (cmd === "view") {
-  const branch = args[2]!;
-  const pr = state.prs[branch];
+  // Like gh: a pull request by number, or by its branch.
+  const ref = args[2]!;
+  const pr = /^\d+$/.test(ref) ? Object.values(state.prs).find((p) => p.number === Number(ref)) : state.prs[ref];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
   console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}` }));
 } else if (cmd === "create") {

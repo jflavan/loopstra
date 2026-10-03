@@ -6,6 +6,8 @@ import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } fr
 import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
 import { Trace } from "../trace";
 import { errorText } from "../shell";
+import { CHAT_SLUG } from "../chat/agents";
+import type { DashboardTransport } from "../chat/transports/dashboard";
 
 export type { AttentionItem } from "../attention";
 
@@ -35,7 +37,10 @@ export interface UiState {
   generatedAt: string;
   loop: LoopStatus;
   attention: AttentionItem[];
+  /** Includes what chat spent (turns and writer runs; a running one's budget hold is not spending). */
   totals: { todayUsd: number; weekUsd: number; allUsd: number };
+  /** Whether this dashboard has the chat panel. */
+  chat: boolean;
   intents: IntentView[];
   unreadable: Array<Pick<Unreadable, "slug" | "problem">>;
   health: { result: string; ts: string; text: string } | null;
@@ -45,7 +50,7 @@ export interface UiState {
 }
 
 /** Everything the dashboard shows, read from the intent files, the trace, and the heartbeat. */
-export async function buildState(root: string, afterEventId: number, now: Date = new Date()): Promise<UiState> {
+export async function buildState(root: string, afterEventId: number, now: Date = new Date(), opts: { chat?: boolean } = {}): Promise<UiState> {
   let config: Config | { problem: string };
   try { config = await loadConfig(root); } catch (e) { config = { problem: errorText(e) }; }
   const scan = await scanRepo(root);
@@ -64,7 +69,8 @@ export async function buildState(root: string, afterEventId: number, now: Date =
       generatedAt: now.toISOString(),
       loop,
       attention: await attention(root, config, trace, now),
-      totals: totals(intents, now),
+      totals: totals([...intents.flatMap((i) => i.phases), ...trace.phases(CHAT_SLUG).map((p) => ({ started: p.started, costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0 }))], now),
+      chat: opts.chat ?? false,
       intents,
       unreadable: scan.unreadable.map((u) => ({ slug: u.slug, problem: u.problem })),
       health,
@@ -117,12 +123,12 @@ function runningPhase(intents: IntentView[], slug: string): string | null {
   return [...phases].reverse().find((p) => p.status === "running")?.name ?? null;
 }
 
-function totals(intents: IntentView[], now: Date): UiState["totals"] {
+function totals(phases: Array<Pick<PhaseView, "started" | "costUsd">>, now: Date): UiState["totals"] {
   const day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   // The week starts on Monday, local time.
   const week = new Date(day.getFullYear(), day.getMonth(), day.getDate() - ((day.getDay() + 6) % 7));
   let todayUsd = 0, weekUsd = 0, allUsd = 0;
-  for (const p of intents.flatMap((i) => i.phases)) {
+  for (const p of phases) {
     const t = Date.parse(p.started);
     allUsd += p.costUsd;
     if (t >= week.getTime()) weekUsd += p.costUsd;
@@ -185,19 +191,21 @@ const NOT_FOUND = () => new Response("Not found", { status: 404, headers: { "con
 
 /**
  * The dashboard: `/` is the page, `/api/state?after=<event id>` its data, `/files/...` run files,
- * `/docs/<slug>/<name>` a change's own documents. Read-only.
+ * `/docs/<slug>/<name>` a change's own documents. Read-only, except `/api/chat` when `chat` is given
+ * (the chat panel; see DashboardTransport).
  */
-export function serveUi(root: string, port = 4646): ReturnType<typeof Bun.serve> {
+export function serveUi(root: string, port = 4646, opts: { chat?: DashboardTransport } = {}): ReturnType<typeof Bun.serve> {
   const page = join(import.meta.dir, "..", "ui", "index.html");
   return Bun.serve({
     port,
     hostname: "127.0.0.1",
     async fetch(req) {
-      if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
       const url = new URL(req.url);
+      if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
+      if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
       if (url.pathname === "/api/state") {
         const after = Number(url.searchParams.get("after") ?? 0);
-        return Response.json(await buildState(root, Number.isFinite(after) && after > 0 ? after : 0));
+        return Response.json(await buildState(root, Number.isFinite(after) && after > 0 ? after : 0, new Date(), { chat: !!opts.chat }));
       }
       if (url.pathname.startsWith("/files/")) {
         let rel: string;

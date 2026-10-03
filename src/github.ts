@@ -60,11 +60,11 @@ export class GitHub {
   }
 
   /**
-   * The pull request for a branch: `{ pr: null }` when GitHub says there is none, and `{ error }`
-   * when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
+   * The pull request for a branch (or by its number): `{ pr: null }` when GitHub says there is none,
+   * and `{ error }` when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
-  async lookupPr(branch: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branch, "--json", "number,state,reviewDecision,mergedAt,mergeCommit,url,createdAt"]);
+  async lookupPr(branchOrNumber: string): Promise<{ pr: PrInfo | null } | { error: string }> {
+    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,mergedAt,mergeCommit,url,createdAt"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };

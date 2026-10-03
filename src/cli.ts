@@ -14,11 +14,13 @@ const HELP = `loopstra <command>
             Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
-  ui        local dashboard (--port <n>, default 4646)
+  ui        local dashboard with a chat panel (--port <n>, default 4646; --no-chat)
+  chat      talk to the orchestrator: updates, and new changes written up
+            as intents (--no-terminal to run only the Slack/Discord bots)
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
 `;
 
-/** status, tail, and ui read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, ui, and chat read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
@@ -61,10 +63,22 @@ async function main(): Promise<number> {
       const flag = rest.indexOf("--port");
       const port = flag >= 0 ? Number(rest[flag + 1]) : 4646;
       if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("Usage: loopstra ui [--port <number>]"); return 1; }
-      const server = serveUi(root, port);
+      let dashboard: import("./chat/transports/dashboard").DashboardTransport | undefined;
+      if (!rest.includes("--no-chat")) {
+        const { DashboardTransport } = await import("./chat/transports/dashboard");
+        const { ChatService } = await import("./chat/service");
+        dashboard = new DashboardTransport(root);
+        await new ChatService(root, [dashboard]).start();
+      }
+      const server = serveUi(root, port, { chat: dashboard });
       console.log(`Loopstra dashboard: http://127.0.0.1:${server.port}  (Ctrl-C to stop)`);
       await new Promise(() => {});
       return 0;
+    }
+    case "chat": {
+      if (!setUp()) return 1;
+      const { chat } = await import("./commands/chat");
+      return chat(root, { terminal: !rest.includes("--no-terminal") });
     }
     case "apply-lessons": {
       const { applyLessons } = await import("./commands/apply-lessons");

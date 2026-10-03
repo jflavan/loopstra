@@ -11,7 +11,7 @@ design, planning, building, testing, review, merge, and verification, using
 the six stages of Anthropic's AI-Native SDLC Playbook, and then keeps watching
 the main branch so failures become new intents.
 
-Three parts:
+Four parts:
 
 1. **The runtime**, a Bun process (`loopstra start`) that owns the loop. It
    decides what runs next, retries, gates, and records everything. Code owns
@@ -21,9 +21,14 @@ Three parts:
 3. **The operator skill**, a Claude Code skill installed into the target repo
    so an interactive session can onboard, inspect, unblock, and tune. It never
    runs the loop.
+4. **The orchestrator chat** (`loopstra chat`, and a panel in `loopstra ui`),
+   added 2026-10-01: a read-only agent people talk to for updates and to work
+   out new changes, which a writer turns into draft intents through a pull
+   request. It never runs the loop or writes the main checkout (§17).
 
 Non-goals for v1: parallel intents, custom stages, continuous production
-metrics, a hosted service, any UI beyond a local dashboard.
+metrics, a hosted service, any UI beyond a local dashboard and the chat
+surfaces of §17 (terminal, dashboard panel, Slack and Discord bots).
 
 Design constants:
 
@@ -54,7 +59,8 @@ intent/
     lessons.md                    Stage 6 lessons and proposed CLAUDE.md additions, for engineers
 loopstra/
   config.yaml                     all machinery configuration
-  prompts/<phase>.md              editable prompt per agent phase
+  prompts/<phase>.md              editable prompt per agent phase, plus
+                                  orchestrator.md and write-intent.md for chat
 REVIEW.md                         review policy read by the reviewer
 CLAUDE.md                         maintained per the course; init adds a Commands block
 .claude/
@@ -68,6 +74,8 @@ CLAUDE.md                         maintained per the course; init adds a Command
     events.jsonl                  append-only event log
     phases/<n>-<phase>/           prompt.md, raw.jsonl, envelope.json
   worktrees/<slug>/               git worktree for the intent branch
+  chat/                           chat state (§17): threads/, requests/, results/,
+                                  announcements.jsonl, announcer.lock, worktrees/
 ```
 
 Slugs are lowercase words joined by hyphens, chosen by the owner, and are the
@@ -236,6 +244,24 @@ stages:
 signals:
   main_health:
     every_minutes: 30           # also runs after every merge
+
+chat:                           # optional; see §17
+  model: default                # the orchestrator; the writer uses stages.design.model
+  max_budget_usd_per_day: 5     # chat turns and writer runs together, since local midnight
+  transports:                   # each optional
+    slack:
+      token_env: LOOPSTRA_SLACK_APP_TOKEN    # environment variable names, never tokens
+      bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
+      channel: C0123ABCD
+      allow: []                 # who may chat; empty: anyone in the channel
+      acceptors: []             # who may also start drafts; empty: nobody from here
+      announce_to: C0123ABCD    # optional
+    discord:
+      token_env: LOOPSTRA_DISCORD_TOKEN
+      channel: "1234567890"
+      allow: []
+      acceptors: []
+      announce_to: "1234567890"
 ```
 
 `before` and `after` are lists of commands. A non-zero exit from a `before`
@@ -287,6 +313,17 @@ Phases and their envelopes (all include `status: "success" | "fail"` and
 
 Envelopes are Zod schemas in `src/envelopes.ts`. The JSON Schema passed to
 `--json-schema` is generated from the Zod schema, so there is one definition.
+
+The two chat phases (§17) are not stage phases: they have their own schemas
+in `src/chat/schemas.ts`, their own variables (`CHAT_PROMPT_VARS` in
+`src/chat/agents.ts`: `{{main_branch}}`, `{{brief}}`, `{{existing}}`,
+`{{template}}`, `{{updates}}`, `{{problems}}`), are traced under the `_chat`
+slug, and fall back to the shipped template when the repository has none.
+
+| Phase | Session | Tools | Output |
+|---|---|---|---|
+| orchestrator | one per chat thread, resumed each message; `chat.model` | read-only plus `loopstra status`; no git (the runtime puts the newest commit subjects in each message's context) | `reply`, `handoff` (title, brief, updates) or null, `accept` (slug) or null |
+| write-intent | fresh per hand-off, `stages.design.model` | the same | `status`, `summary`, `intents[{slug, title, priority, depends_on, problem, proposed_outcome, done_when, affected_users_and_systems, constraints, open_questions}]` |
 
 ## 8. Stage flows
 
@@ -572,7 +609,8 @@ line and an event in the new one; the loop and the dashboard keep working.
 
 Event types: `tick`, `phase_start`, `claude_event`, `command`, `gate_check`,
 `status_change`, `phase_end`, `error`, `signal`, `stop`,
-`person-changed-status`, `pause`, `stale-lock-removed`.
+`person-changed-status`, `pause`, `stale-lock-removed`, and for chat
+`chat-message`, `chat-request`, `chat-pr`.
 
 CLI on top:
 
@@ -587,7 +625,9 @@ CLI on top:
   column is never padded; notes wrap to the terminal width.
 - `loopstra tail [slug]`: streams events as they are written (the first
   screen is the newest 50, read with a bounded query).
-- `status`, `tail`, and `ui` in a folder without `loopstra/config.yaml` say
+- `loopstra chat [--no-terminal]`: the orchestrator in the terminal and on
+  the configured bots (§17). `--no-terminal` runs only the bots.
+- `status`, `tail`, `ui` and `chat` in a folder without `loopstra/config.yaml` say
   "This folder is not set up for Loopstra. Run loopstra init first." and
   create nothing.
 - `loopstra ui`: serves a single HTML page from `Bun.serve` on
@@ -598,7 +638,10 @@ CLI on top:
   kept inside the change's folder), and the last 200 events, and a "needs
   attention" list (a pause, a red main, `main_sync` waiting or failing, a
   config problem, "Blocked" changes, unreadable intents, and changes
-  "Waiting for you"). No build step, no framework.
+  "Waiting for you"). No build step, no framework. Unless started with
+  `--no-chat` it also has the chat panel (§17): the only writes it takes are
+  `POST /api/chat` from its own origin on a local host name, and the cost
+  totals include what chat spent.
 
 ## 12. The operator skill
 
@@ -617,6 +660,8 @@ behaviors, each a short section, not a cookbook tree:
 - **Tune**: edit prompts, gates, and stage settings in `config.yaml`.
 - **Apply lessons**: copy proposed CLAUDE.md additions from a change's
   `lessons.md` into `CLAUDE.md` for review.
+- **Chat**: explain `loopstra chat`, the dashboard panel and the bots, and
+  point to the README for setting a bot up.
 
 The skill never runs `loopstra start` and never performs a stage by hand.
 
@@ -668,14 +713,16 @@ runs one tick and exits, for tests and cron. A tick:
    edit. Remove any git `index.lock` (repository or worktree) older than 10
    minutes, left by a git process that died; traced as `stale-lock-removed`.
 2. With a remote, sync main (§10).
-3. Run due signals.
-4. Scan intents, consistency-check, regenerate `queue.md`.
-5. Pick the top runnable intent and run exactly one stage step for it
+3. Apply the requests chat left (§17): start a draft someone accepted in
+   chat, or, without a remote, add the intents chat wrote.
+4. Run due signals.
+5. Scan intents, consistency-check, regenerate `queue.md`.
+6. Pick the top runnable intent and run exactly one stage step for it
    (human status changes are picked up by the scan). A step that only
    looked at a pull request and found it still waiting changes nothing and
    lets the next runnable intent run in the same tick, so a pull request
    waiting on GitHub never holds up other changes.
-6. Sleep.
+7. Sleep.
 
 One step per tick keeps the loop legible and interruptible. A step is
 bounded by its phase timeouts. The loop never dies: a tick's own problem is
@@ -741,7 +788,8 @@ the runtime starts a fresh session and records it.
 ```
 package.json              bin: loopstra → src/cli.ts; bun test; zod, yaml
 src/
-  cli.ts                  init | start | status | tail | ui | apply-lessons
+  cli.ts                  init | start | status | tail | ui | chat | apply-lessons
+  commands/               status.ts tail.ts ui.ts chat.ts apply-lessons.ts
   config.ts               schema, defaults, load
   intents.ts              frontmatter parse/write, scan, consistency, queue
   scheduler.ts            tick
@@ -756,7 +804,10 @@ src/
   trace.ts                JSONL + SQLite
   signals.ts              main_health
   init.ts                 stamping
-  ui/index.html           dashboard
+  ui/index.html           dashboard, with the chat panel
+  chat/                   orchestrator.ts writer.ts publish.ts requests.ts announcer.ts
+                          service.ts threads.ts agents.ts schemas.ts
+    transports/           terminal.ts dashboard.ts slack.ts discord.ts
 templates/                everything init stamps
 tests/
   fake-claude/            fake claude executable and fixtures
@@ -786,3 +837,37 @@ docs/
 7. GitHub: PR open, checks, approval, merge.
 8. `init` templates, skill, prompts, `tail`, `ui`.
 9. End-to-end integration test and README.
+
+## 17. Orchestrator chat
+
+Added 2026-10-01; the full design is
+`docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, and the
+decisions are in `docs/decisions.md` ("Orchestrator chat").
+
+- `loopstra chat` and the `loopstra ui` panel run the orchestrator, one
+  resumed session per thread. It answers from the intents, `loopstra status`
+  and the main branch's newest commit subjects (put in its context by the
+  runtime; it has no git of its own), and works out new changes with people.
+  It cannot write files.
+- When it proposes a hand-off or a start, code asks a fixed question and
+  acts only on a plain yes. A hand-off goes to a fresh writer that sees only
+  the brief; its intents are rendered by code, checked (slugs, clashes,
+  drafts-only updates, `depends_on`, the consistency check as if accepted),
+  rewritten once with the problems, and then, with a remote, opened as a
+  pull request of drafts on `intent-proposal/<slug>` from a throwaway
+  checkout of the remote's main.
+- Chat never writes the main checkout. Starting a draft, and without a
+  remote adding written intents, are request files the loop applies at step 3
+  of a tick (§14), a person's edit winning; the loop leaves a plain result
+  for the chat process to post in the thread.
+- Announcements are code: the process holding `announcer.lock` diffs the
+  needs-attention list (§11) and intent statuses each poll and appends new
+  items, merges and finished changes to `announcements.jsonl`; each process
+  passes them to its own surfaces. Pull requests opened from chat are checked
+  on GitHub every minute and their merge or close is told to the thread.
+- Surfaces: the terminal and the dashboard panel (local; their user may
+  start drafts), and Slack (Socket Mode) and Discord (gateway) bots, both
+  outbound connections, with `allow` and `acceptors` lists. Tokens come from
+  environment variables named in the config.
+- Chat turns and writer runs are `_chat` phases in the trace, capped by
+  `chat.max_budget_usd_per_day`.

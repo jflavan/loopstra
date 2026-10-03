@@ -11,6 +11,7 @@ import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { mainHealthDue, runMainHealth } from "./signals";
+import { applyChatRequests } from "./chat/requests";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
@@ -72,6 +73,9 @@ export async function tick(root: string): Promise<TickResult> {
     const hasRemote = (await new Git(root).remoteName()) !== null;
     // Shared at the end only after a sync that went through: a sync that waits or fails says why itself.
     share = hasRemote && (await syncMain(root, cfg, trace)) === "pass";
+
+    // What people asked for in chat (start a draft, add written intents): only the loop writes main.
+    await applyChatRequests(root, cfg, trace);
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);

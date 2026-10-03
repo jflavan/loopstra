@@ -5,7 +5,8 @@ import { errorText } from "./shell";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
-  | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed";
+  | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
+  | "chat-message" | "chat-request" | "chat-pr";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -138,12 +139,34 @@ export class Trace {
     this.event(slug, "status_change", { from, to, note });
   }
 
-  phaseStart(slug: string, name: string, kind: "agent" | "code" | "human"): number {
-    const row = this.db.query<{ m: number | null }, [string]>("SELECT MAX(seq) AS m FROM phases WHERE slug = ?").get(slug);
-    const seq = (row?.m ?? 0) + 1;
-    this.db.run("INSERT INTO phases (slug, seq, name, kind, status, started) VALUES (?, ?, ?, ?, 'running', ?)", [slug, seq, name, kind, now()]);
+  /**
+   * Starts a phase. The sequence number is chosen and the row inserted in one statement, so two
+   * processes starting phases of the same slug at once (chat in the dashboard and in `loopstra chat`)
+   * never pick the same number.
+   */
+  phaseStart(slug: string, name: string, kind: "agent" | "code" | "human", costUsd = 0): number {
+    const seq = this.db.query<{ seq: number }, [string, string, string, string, number, string]>(
+      "INSERT INTO phases (slug, seq, name, kind, status, started, cost_usd) SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, 'running', ?4, ?5 FROM phases WHERE slug = ?6 RETURNING seq",
+    ).get(slug, name, kind, now(), costUsd, slug)!.seq;
     this.event(slug, "phase_start", { name, kind }, seq);
     return seq;
+  }
+
+  /**
+   * Starts a phase that holds part of a daily budget until it ends: in one transaction, works out
+   * what is left of `limitUsd` since `since` (phases still running count at what they hold), and,
+   * when at least `floorUsd` is, starts the phase holding up to `capUsd` of it. `phaseEnd` then
+   * records what it really cost. Null when too little is left. Safe across processes.
+   */
+  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number }): { seq: number; heldUsd: number } | null {
+    const reserve = this.db.transaction(() => {
+      const spent = this.costSince(slug, budget.since);
+      const left = budget.limitUsd - spent;
+      if (left < budget.floorUsd) return null;
+      const heldUsd = Math.min(budget.capUsd, left);
+      return { seq: this.phaseStart(slug, name, kind, heldUsd), heldUsd };
+    });
+    return reserve.immediate();
   }
 
   /** Ends a phase. `denied`: commands the session was not allowed to run, kept on the phase_end event. */
@@ -218,6 +241,15 @@ export class Trace {
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {
     return this.db.query<{ name: string; ts: string; result: string; output: string }, [number]>(
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);
+  }
+
+  /**
+   * What a slug's phases that started at or after `since` (an ISO time) cost. Running phases count at
+   * what they hold, unless `endedOnly`.
+   */
+  costSince(slug: string, since: string, opts: { endedOnly?: boolean } = {}): number {
+    const running = opts.endedOnly ? " AND status != 'running'" : "";
+    return this.db.query<{ c: number | null }, [string, string]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND started >= ?${running}`).get(slug, since)?.c ?? 0;
   }
 
   intentSummary(slug: string): IntentSummary | null {

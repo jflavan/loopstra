@@ -10,6 +10,10 @@ This folder is the queue of changes for this repository. Each change is a folder
 
 The system takes it from there. Check `queue.md` in this folder to see where every change is; its "Needs a person" list is everything waiting for someone.
 
+## Or talk it through
+
+If your team has set up Loopstra's chat (in the terminal, the dashboard, Slack or Discord), you can describe what you want there instead. It asks questions until the change is clear, shows you a summary, and when you say yes, writes the change up for you as a draft (usually as a pull request for someone to review and merge). A draft still waits for someone to accept it: set `status: accepted`, or, if you are allowed to, ask in the chat to start it. You can also ask the chat how any change is going.
+
 ## How big a change should be
 
 One change is designed, planned, and built in one go, by one working session with a time and cost limit. A change the size of a whole product will not fit: it stops partway and waits for a person. Keep each change to something one person could build in a day or two. Split larger work into several changes, and say which ones must go into the main code first with `depends_on`.

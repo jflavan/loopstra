@@ -18,6 +18,48 @@ const stage = z.object({
   after: z.array(z.string()).default([]),
 }).strict();
 
+/** A platform id (user or channel). Long numeric ids (Discord's) lose digits as YAML numbers, so those must be quoted. */
+const platformId = z.union([z.string().min(1), z.number().refine(Number.isSafeInteger, "is too long to be read as a number: put it in quotes")]).transform(String);
+/** Platform user ids. Empty `allow`: anyone in the channel may chat. Empty `acceptors`: nobody may accept from there. */
+const ids = z.array(platformId).default([]);
+const envName = (fallback: string) => z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be the name of an environment variable").default(fallback);
+const channelId = platformId;
+
+const slackTransport = z.object({
+  /** The app-level token (xapp-...) for Socket Mode. */
+  token_env: envName("LOOPSTRA_SLACK_APP_TOKEN"),
+  /** The bot token (xoxb-...) for posting. */
+  bot_token_env: envName("LOOPSTRA_SLACK_BOT_TOKEN"),
+  channel: channelId,
+  allow: ids,
+  acceptors: ids,
+  announce_to: channelId.optional(),
+}).strict();
+
+const discordTransport = z.object({
+  token_env: envName("LOOPSTRA_DISCORD_TOKEN"),
+  channel: channelId,
+  allow: ids,
+  acceptors: ids,
+  announce_to: channelId.optional(),
+}).strict();
+
+const chat = z.object({
+  /** The orchestrator's model; the writer uses stages.design.model. */
+  model: modelRef.default("default"),
+  /** What chat turns and writer runs may spend in a day, together. */
+  max_budget_usd_per_day: z.number().positive().default(5),
+  /** What one chat turn or writer run may hold of that, so others can run at the same time. */
+  max_budget_usd_per_session: z.number().positive().default(2),
+  transports: z.object({
+    slack: slackTransport.optional(),
+    discord: discordTransport.optional(),
+  }).strict().prefault({}),
+}).strict();
+
+export type SlackTransportConfig = z.infer<typeof slackTransport>;
+export type DiscordTransportConfig = z.infer<typeof discordTransport>;
+
 export const ConfigSchema = z.object({
   version: z.literal(1),
   main_branch: z.string().default("main"),
@@ -61,6 +103,7 @@ export const ConfigSchema = z.object({
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),
   }).strict().prefault({}),
+  chat: chat.prefault({}),
 }).strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -99,6 +142,8 @@ export async function loadConfig(root: string): Promise<Config> {
 }
 
 /** Resolve a stage's model alias to the CLI model name. */
-export function modelFor(cfg: Config, ref: z.infer<typeof modelRef>): string {
+export type ModelRef = z.infer<typeof modelRef>;
+
+export function modelFor(cfg: Config, ref: ModelRef): string {
   return cfg.claude.models[ref];
 }

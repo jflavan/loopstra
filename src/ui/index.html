@@ -51,6 +51,15 @@
   #events { max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--panel); border-radius: 6px; padding: 8px; }
   .files a { margin-right: 8px; }
   .err { color: var(--bad); }
+  #chat { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  #chat-log { max-height: 420px; overflow: auto; padding: 10px 12px; display: grid; gap: 8px; }
+  .msg { white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; padding: 6px 10px; max-width: 85%; }
+  .msg.person { justify-self: end; background: var(--idle-bg); }
+  .msg.loopstra { justify-self: start; background: var(--bg); border: 1px solid var(--line); }
+  .msg.announce { justify-self: stretch; max-width: none; background: var(--warn-bg); color: var(--warn); font-size: 13px; }
+  #chat-form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  #chat-text { flex: 1; min-width: 0; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); resize: vertical; }
+  #chat-form button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
 </style>
 
 <header>
@@ -64,6 +73,18 @@
   <div class="stat"><span class="muted">This week</span><b id="week">–</b></div>
   <div class="stat"><span class="muted">All time</span><b id="all">–</b></div>
 </div>
+
+<section id="chat-section" hidden>
+  <h2>Chat</h2>
+  <p class="muted" style="margin:0 0 6px">Ask how things are going, or talk through a new change. When you agree on one, Loopstra writes it up as intents for you to review.</p>
+  <div id="chat">
+    <div id="chat-log" aria-live="polite"></div>
+    <form id="chat-form">
+      <textarea id="chat-text" rows="2" placeholder="Message Loopstra" aria-label="Message Loopstra"></textarea>
+      <button type="submit" id="chat-send">Send</button>
+    </form>
+  </div>
+</section>
 
 <h2>Needs attention</h2>
 <div id="attention" class="attention"></div>
@@ -180,6 +201,7 @@
     renderAttention(s.attention);
     renderIntents(s);
     renderHealth(s);
+    if (s.chat) startChat();
   }
 
   document.getElementById("intents").addEventListener("click", (ev) => {
@@ -190,6 +212,58 @@
     open.has(slug) ? open.delete(slug) : open.add(slug);
     if (last) renderIntents(last);
   });
+
+  // Chat: one conversation per tab; the thread id lives in sessionStorage so a reload keeps it.
+  let chatThread = null, chatAfter = 0, annAfter = -1, chatStarted = false, chatBusy = false;
+  function chatId() {
+    try {
+      let id = sessionStorage.getItem("loopstra-chat");
+      if (!id) { id = "tab-" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36); sessionStorage.setItem("loopstra-chat", id); }
+      return id;
+    } catch { return "tab-" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36); }
+  }
+  function addChat(cls, text) {
+    const log = document.getElementById("chat-log");
+    const div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+  async function refreshChat() {
+    try {
+      const r = await (await fetch(`/api/chat?thread=${chatThread}&after=${chatAfter}&announcementsAfter=${annAfter}`)).json();
+      for (const m of r.messages) { addChat(m.from, m.text); chatAfter = m.id; }
+      for (const a of r.announcements) addChat("announce", a.text);
+      annAfter = r.lastAnnouncementId;
+      chatBusy = r.busy;
+      document.getElementById("chat-send").textContent = r.busy ? "Thinking…" : "Send";
+      document.getElementById("chat-send").disabled = r.busy;
+    } catch { /* the next poll tries again */ }
+  }
+  function startChat() {
+    if (chatStarted) return;
+    chatStarted = true;
+    chatThread = chatId();
+    document.getElementById("chat-section").hidden = false;
+    document.getElementById("chat-form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const box = document.getElementById("chat-text");
+      const text = box.value.trim();
+      if (!text || chatBusy) return;
+      box.value = "";
+      chatBusy = true;
+      document.getElementById("chat-send").disabled = true;
+      const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread: chatThread, text }) });
+      if (!r.ok) addChat("announce", r.status === 409 ? "Still answering your last message." : "That message could not be sent.");
+      await refreshChat();
+    });
+    document.getElementById("chat-text").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); document.getElementById("chat-form").requestSubmit(); }
+    });
+    refreshChat();
+    setInterval(refreshChat, 1500);
+  }
 
   async function refresh() {
     try {
