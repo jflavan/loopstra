@@ -13,7 +13,6 @@ export function writeFileAtomic(path: string, text: string): void {
   try {
     renameSync(tmp, path);
   } catch {
-    writeFileSync(path, text);
-    rmSync(tmp, { force: true });
+    try { writeFileSync(path, text); } finally { rmSync(tmp, { force: true }); }
   }
 }

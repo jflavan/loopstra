@@ -259,12 +259,13 @@ export class Trace {
 
   /**
    * costSince over a pool of slugs. `runningSince`: a running phase that started before it no longer
-   * counts (its process was killed and nothing will end its row).
+   * counts (its process was killed and nothing will end its row); `endedOnly` takes precedence over it.
    */
   costIn(pool: BudgetPool, since: string, opts: { endedOnly?: boolean; runningSince?: string } = {}): number {
     const who = "slug" in pool ? "slug = ?" : "slug != ?";
-    const running = opts.endedOnly ? " AND status != 'running'" : opts.runningSince ? " AND (status != 'running' OR started >= ?)" : "";
-    const args = [("slug" in pool ? pool.slug : pool.except), since, ...(opts.runningSince && !opts.endedOnly ? [opts.runningSince] : [])];
+    const stale = opts.endedOnly ? undefined : opts.runningSince;
+    const running = opts.endedOnly ? " AND status != 'running'" : stale ? " AND (status != 'running' OR started >= ?)" : "";
+    const args = [("slug" in pool ? pool.slug : pool.except), since, ...(stale ? [stale] : [])];
     return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
   }
 
