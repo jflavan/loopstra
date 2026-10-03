@@ -4,7 +4,20 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { errorText } from "./shell";
 
-export class ConfigError extends Error {}
+/** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
+export interface ConfigProblem {
+  path: string[];
+  text: string;
+  /** A key the schema does not know, at `path`: only removing it fixes it. */
+  unknownKey: boolean;
+}
+
+export class ConfigError extends Error {
+  /** What is wrong, one by one, when the config was read but does not fit the schema. */
+  constructor(message: string, readonly problems: ConfigProblem[] = []) {
+    super(message);
+  }
+}
 
 const humanGate = z.enum(["status", "pr", "none"]);
 /** A person on the status line, or nobody: spec, plan, and done have no pull request to approve. */
@@ -22,7 +35,9 @@ const stage = z.object({
 const platformId = z.union([z.string().min(1), z.number().refine(Number.isSafeInteger, "is too long to be read as a number: put it in quotes")]).transform(String);
 /** Platform user ids. Empty `allow`: anyone in the channel may chat. Empty `acceptors`: nobody may accept from there. */
 const ids = z.array(platformId).default([]);
-const envName = (fallback: string) => z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be the name of an environment variable").default(fallback);
+/** The name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN. */
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const envName = (fallback: string) => z.string().regex(ENV_NAME, "must be the name of an environment variable").default(fallback);
 const channelId = platformId;
 
 const slackTransport = z.object({
@@ -47,10 +62,10 @@ const discordTransport = z.object({
 const chat = z.object({
   /** The orchestrator's model; the writer uses stages.design.model. */
   model: modelRef.default("default"),
-  /** What chat turns and writer runs may spend in a day, together. */
-  max_budget_usd_per_day: z.number().positive().default(5),
-  /** What one chat turn or writer run may hold of that, so others can run at the same time. */
-  max_budget_usd_per_session: z.number().positive().default(2),
+  /** What chat turns and writer runs may spend in a day, together. Unset: no limit. */
+  max_budget_usd_per_day: z.number().positive().optional(),
+  /** What one chat turn or writer run may hold of that, so others can run at the same time. Unset: no limit. */
+  max_budget_usd_per_session: z.number().positive().optional(),
   transports: z.object({
     slack: slackTransport.optional(),
     discord: discordTransport.optional(),
@@ -81,7 +96,10 @@ export const ConfigSchema = z.object({
       strong: z.string().default("opus"),
     }).strict().prefault({}),
     timeout_minutes: z.number().positive().default(30),
-    max_budget_usd: z.number().positive().default(5),
+    /** What one session may spend. Unset: no limit (timeout_minutes still ends a session). */
+    max_budget_usd: z.number().positive().optional(),
+    /** What the loop's sessions (every change's, not chat's) may spend together since local midnight. Unset: no limit. */
+    max_budget_usd_per_day: z.number().positive().optional(),
     // Git that only reads: the runtime makes every commit, branch, and merge itself.
     allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
   }).strict().prefault({}),
@@ -126,17 +144,24 @@ export async function loadConfig(root: string): Promise<Config> {
   } catch (e) {
     throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${errorText(e)}`);
   }
+  return validateConfig(raw);
+}
+
+/** Checks a parsed config against the schema. Throws a ConfigError listing every problem in plain words. */
+export function validateConfig(raw: unknown): Config {
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
-    const lines = result.error.issues.map((i) => {
-      const where = i.path.length ? i.path.join(".") : "(top level)";
+    const problems: ConfigProblem[] = result.error.issues.map((i) => {
+      const path = i.path.map(String);
+      const where = path.length ? path.join(".") : "(top level)";
       if (i.code === "unrecognized_keys" && where === "gates" && i.keys.includes("intent")) {
-        return "gates.intent: remove this line; a person always accepts a change by setting its status to accepted.";
+        return { path, unknownKey: true, text: "gates.intent: remove this line; a person always accepts a change by setting its status to accepted." };
       }
-      if (i.code === "unrecognized_keys") return `${where}: unknown key(s) ${i.keys.join(", ")}`;
-      return `${where}: ${i.message}`;
+      if (i.code === "unrecognized_keys") return { path, unknownKey: true, text: `${where}: unknown key(s) ${i.keys.join(", ")}` };
+      // A message that already names its path ("commands.test is required: ...") is not prefixed again.
+      return { path, unknownKey: false, text: i.message.startsWith(`${where} `) ? i.message : `${where}: ${i.message}` };
     });
-    throw new ConfigError(`loopstra/config.yaml has problems:\n- ${lines.join("\n- ")}`);
+    throw new ConfigError(`loopstra/config.yaml has problems:\n- ${problems.map((p) => p.text).join("\n- ")}`, problems);
   }
   return result.data;
 }

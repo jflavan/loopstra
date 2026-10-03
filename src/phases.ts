@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -9,7 +10,7 @@ import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envel
 import { renderPrompt, type PromptVars } from "./prompts";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { AssistantUnavailable, StopRequested, throwIfStopping } from "./stop";
+import { AssistantUnavailable, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -132,8 +133,8 @@ type BlockingReason = Exclude<FailureReason, "environment" | "not-started">;
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
 export function ownerNote(reason: BlockingReason): string {
   switch (reason) {
-    case "timeout": return TIMEOUT_NOTE;
-    case "budget": return "This step hit its spending limit. An engineer may need to raise the limit.";
+    case "timeout": return `${TIMEOUT_NOTE} An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.`;
+    case "budget": return "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
     case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "invalid-envelope": return "The assistant's report could not be read.";
@@ -163,10 +164,27 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }
 
+/**
+ * Starts a loop phase's row. With claude.max_budget_usd_per_day set, the phase holds what it may
+ * spend of what is left of the loop's day (every change together, not chat), and does not start when
+ * too little is left. `capUsd` is the session's cap (Infinity: none); `fromDay`: the cap is what was
+ * left of the day, less than claude.max_budget_usd (or that is not set), so hitting it is the day's.
+ */
+function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd: number; fromDay: boolean } {
+  const c = ctx.cfg.claude;
+  if (c.max_budget_usd_per_day === undefined) return { seq: ctx.trace.phaseStart(ctx.slug, traceName, "agent"), capUsd: limitOf(c.max_budget_usd), fromDay: false };
+  const held = ctx.trace.phaseStartWithin(ctx.slug, traceName, "agent", {
+    since: startOfToday(), limitUsd: c.max_budget_usd_per_day, capUsd: limitOf(c.max_budget_usd), floorUsd: MIN_SESSION_USD,
+    pool: { except: CHAT_SLUG }, runningSince: staleBefore(ctx.cfg),
+  });
+  if (!held) throw new LoopBudgetReached();
+  return { seq: held.seq, capUsd: held.heldUsd, fromDay: held.heldUsd < limitOf(c.max_budget_usd) };
+}
+
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   throwIfStopping();
-  const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
+  const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];
   const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
@@ -175,6 +193,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: false, reason, note: ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+  // What the session cost, once it ended: kept if the phase fails after it.
+  let costUsd = 0;
   try {
     const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
     mkdirSync(dir, { recursive: true });
@@ -191,7 +211,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
-      maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
+      maxBudgetUsd: capUsd,
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
       onEvent: (e) => {
@@ -201,11 +221,17 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     });
 
     denied = r.denied;
+    costUsd = r.costUsd;
     if (!r.ok) {
       if (unavailable(r.reason)) {
         // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
         throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
+      }
+      if (r.reason === "budget" && fromDay) {
+        // The loop's day ran out, not this step's own limit: the loop pauses and the step resumes later.
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: "budget: the loop's daily budget ran out during this session", denied });
+        throw new LoopBudgetReached();
       }
       return failed(r.reason, r.detail, r.sessionId, r.costUsd);
     }
@@ -221,12 +247,13 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
-    if (e instanceof AssistantUnavailable) throw e;
     if (e instanceof StopRequested) {
       ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
       throw e;
     }
-    return failed("crash", `runtime error: ${errorText(e)}`, null);
+    // Its phase row is already ended.
+    if (notTheStepsFault(e)) throw e;
+    return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd);
   } finally {
     if (raw) { try { await raw.end(); } catch { /* already closed */ } }
   }

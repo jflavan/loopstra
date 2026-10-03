@@ -1,11 +1,12 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
+import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { activePause, clearPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
@@ -18,8 +19,8 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
-import { AssistantUnavailable, installStopSignals, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
-import { Trace } from "./trace";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { Trace, type EventType } from "./trace";
 
 export interface TickResult {
   picked: string | null; result?: StepResult; signal?: string;
@@ -106,6 +107,17 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
+    // The loop's day is used up or held (claude.max_budget_usd_per_day): nothing starts until there is budget again.
+    if (loopDayUsedUp(cfg, trace)) {
+      out.paused = dayPaused(root, cfg, loopDaySpent(cfg, trace));
+      // Traced when the reason is new today, not on every poll.
+      const last = trace.lastEvent("_loop", "pause");
+      const same = last && last.ts >= startOfToday() && (JSON.parse(last.payload) as { reason?: string }).reason === out.paused;
+      if (!same) trace.event("_loop", "pause", { reason: out.paused });
+      return out;
+    }
+    heartbeatDayPause(root, null);
+
     // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
     // whose depends_on names one not merged yet waits, so it is never built on a main without it.
@@ -125,6 +137,7 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
     if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
+    if (e instanceof LoopBudgetReached) return await afterDayBudget(root, cfg, trace, out);
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
@@ -189,6 +202,8 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
   trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
   out.paused = p.reason;
   if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
+  // The probe is a session too: with the loop's day used up, keep backing off instead.
+  if (loopDayUsedUp(cfg, trace)) return out;
   try {
     const probe = await probeAssistant(root, cfg, trace, cause.slug);
     if (!probe.reached) {
@@ -211,6 +226,59 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
 }
 
 /**
+ * The tick waits for the loop's daily budget: the day's note, which the loop line shows as well
+ * (until local midnight when the day is spent; while it is only held, for two polls, so it lasts
+ * until the next tick says again). Returns the note.
+ */
+function dayPaused(root: string, cfg: Config, spent: boolean): string {
+  const reason = loopDayNote(cfg, spent);
+  const now = new Date();
+  const until = spent ? new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) : new Date(now.getTime() + 2 * cfg.poll_seconds * 1000);
+  heartbeatDayPause(root, { reason, until: until.toISOString() });
+  return reason;
+}
+
+/**
+ * Of the day's budget, the share a change must have spent itself, on both days, before running out
+ * partway twice means its step cannot fit in a day. Not all of it: another change's short session
+ * may take a little of a day. A change that others left less than this only pauses.
+ */
+const HAD_THE_DAY = 0.9;
+
+/**
+ * The loop's day ran out partway through a step: the change keeps its status and the step resumes
+ * when there is budget again. When the day is spent (not only held by others), the pause records
+ * that status, what the change itself spent today, and the day's limit. The step is blocked instead,
+ * with a note that says so, when it would start over and run out every day: the change's previous
+ * such pause was on an earlier day at the same status, its status has not changed since (no status
+ * change in the trace after it), and on both days the change itself spent at least HAD_THE_DAY of the day.
+ */
+async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult): Promise<TickResult> {
+  const spent = loopDaySpent(cfg, trace);
+  const slug = out.picked;
+  let intent: Intent | null = null;
+  if (slug && spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
+  const status = intent?.file.frontmatter.status;
+  const dayUsd = cfg.claude.max_budget_usd_per_day ?? 0;
+  const spentUsd = slug ? trace.costSince(slug, startOfToday(), { endedOnly: true }) : 0;
+  const hadTheDay = (usd: number | undefined, limit: number | undefined) => usd !== undefined && limit !== undefined && usd >= HAD_THE_DAY * limit;
+  if (slug && intent && hadTheDay(spentUsd, dayUsd)) {
+    const last = trace.lastEvent(slug, "pause", '"dayBudget":true');
+    const earlier = last ? (JSON.parse(last.payload) as { status?: string; spentUsd?: number; dayUsd?: number }) : null;
+    const moves: EventType[] = ["status_change", "person-changed-status"];
+    const movedSince = !!last && moves.some((t) => (trace.lastEvent(slug, t)?.id ?? 0) > last.id);
+    if (last && earlier && last.ts < startOfToday() && earlier.status === status && !movedSince && hadTheDay(earlier.spentUsd, earlier.dayUsd)) {
+      const ctx = new StepContext(root, cfg, trace, intent);
+      out.result = await blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, spentUsd, dayUsd, earlierPause: last.ts, earlierSpentUsd: earlier.spentUsd } });
+      return out;
+    }
+  }
+  const reason = out.paused = dayPaused(root, cfg, spent);
+  trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status, spentUsd, dayUsd } : { reason });
+  return out;
+}
+
+/**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
  * plain note (the detail goes to the trace); only a stop request passes through.
  */
@@ -218,7 +286,7 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     return await runStep(ctx);
   } catch (e) {
-    if (e instanceof StopRequested || e instanceof AssistantUnavailable) throw e;
+    if (notTheStepsFault(e)) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
@@ -231,9 +299,9 @@ function unexpectedNote(e: unknown): string {
 }
 
 /** Blocks with a note; if even that fails (for example a commit is refused), traces it instead of throwing. */
-async function blockSafely(ctx: StepContext, note: string): Promise<StepResult> {
+async function blockSafely(ctx: StepContext, note: string, opts: { detail?: unknown } = {}): Promise<StepResult> {
   try {
-    return await block(ctx, note);
+    return await block(ctx, note, opts);
   } catch (e) {
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "block", note, error: errorText(e) });
@@ -392,16 +460,19 @@ export async function start(root: string, opts: { once: boolean; installSignals?
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
   const beat = startHeartbeat(root);
   try {
+    // The last pause logged: a pause that lasts (the loop's day, until midnight) is logged once, not every poll.
+    let lastPaused = "";
     for (;;) {
       try {
         beat.tickStarted();
         const r = await tick(root);
         if (r.error) console.error(`Config problem, will retry next tick:\n${r.error}`);
-        else if (r.paused) log(`paused: ${r.paused}`);
+        else if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
         else if (r.stopped) log(`stopped${r.picked ? ` during ${r.picked}; it resumes on the next start` : ""}`);
         else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
         else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : r.result.personChanged ? "a person changed the status; it is picked up next" : "step done") : r.result?.note}`);
         else log("idle");
+        lastPaused = r.paused ?? "";
       } catch (e) {
         log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);
         try {

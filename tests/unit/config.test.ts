@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, configPath, loadConfig } from "../../src/config";
+import { ConfigError, configPath, loadConfig, validateConfig } from "../../src/config";
 import { tempDir } from "../helpers";
 
 async function writeConfig(root: string, text: string) {
@@ -64,6 +64,12 @@ describe("loadConfig", () => {
     await writeConfig(t.path, "version: 1\n");
     await expect(loadConfig(t.path)).rejects.toThrow(/commands\.test/);
     t.cleanup();
+  });
+
+  test("a problem whose words already start with its path does not repeat it", () => {
+    let problems: ConfigError["problems"] = [];
+    try { validateConfig({ version: 1, commands: { test: "" } }); } catch (e) { problems = (e as ConfigError).problems; }
+    expect(problems.map((p) => p.text)).toEqual(["commands.test is required: the single command that runs your tests"]);
   });
 
   test("reports a missing file plainly", async () => {

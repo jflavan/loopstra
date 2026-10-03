@@ -19,9 +19,9 @@ async function configWith(text: string) {
 }
 
 describe("the chat settings", () => {
-  test("are optional, with a daily budget and no bots", async () => {
+  test("are optional, with no budgets and no bots", async () => {
     const cfg = await configWith("");
-    expect(cfg.chat).toEqual({ model: "default", max_budget_usd_per_day: 5, max_budget_usd_per_session: 2, transports: {} });
+    expect(cfg.chat).toEqual({ model: "default", transports: {} });
   });
 
   test("bots take ids as strings (numbers too), token variables by name, and defaults for them", async () => {

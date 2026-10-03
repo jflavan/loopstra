@@ -94,7 +94,7 @@ function intentView(root: string, trace: Trace, i: Intent, all: Intent[], now: D
       .map((f) => ({ name: f, url: `/files/${[i.slug, "phases", dir, f].map(encodeURIComponent).join("/")}` }));
     return {
       seq: p.seq, name: p.name, kind: p.kind, status: p.status, started: p.started, ended: p.ended,
-      durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.cost_usd ?? 0, error: p.error, files,
+      durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0, error: p.error, files,
       denied: denied.get(p.seq) ?? [],
     };
   });

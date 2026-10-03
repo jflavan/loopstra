@@ -33,6 +33,21 @@ describe("the command line outside a set-up repo", () => {
     }
   });
 
+  test("setup --help prints the usage and the sections, and exits 0", async () => {
+    const t = tempDir();
+    try {
+      for (const flag of ["--help", "-h"]) {
+        const r = await run([process.execPath, CLI, "setup", flag], t.path);
+        expect({ flag, code: r.code }).toEqual({ flag, code: 0 });
+        expect(r.out).toStartWith("Usage: loopstra setup [section] [--defaults | --check]\n\nSections:\n  budgets   Budgets\n");
+        expect(r.out).toContain("  models    Models\n");
+      }
+      expect(readdirSync(t.path)).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("init in a folder that is not a git repository warns and stops", async () => {
     const t = tempDir();
     try {

@@ -34,6 +34,26 @@ export class AssistantUnavailable extends Error {
   }
 }
 
+/**
+ * The loop's daily budget (claude.max_budget_usd_per_day) is used up. Like an unavailable assistant,
+ * it is not the change's fault: the step ends, the change keeps its status, and the loop waits until
+ * local midnight (or a raised limit).
+ */
+export class LoopBudgetReached extends Error {
+  constructor() {
+    super("the loop's daily budget is used up");
+    this.name = "LoopBudgetReached";
+  }
+}
+
+/**
+ * A stop request, an unavailable assistant, or the loop's used-up day: none is the step's own
+ * failure. The step ends, the change keeps its status, and the scheduler handles each. The one list.
+ */
+export function notTheStepsFault(e: unknown): boolean {
+  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached;
+}
+
 let requested = false;
 let resolveStop: () => void = () => {};
 let stopping = new Promise<void>((resolve) => { resolveStop = resolve; });
