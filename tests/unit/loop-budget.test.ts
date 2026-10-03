@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { attention } from "../../src/attention";
-import { CHAT_SLUG, loopDayNote, loopDayUsedUp } from "../../src/budget";
+import { CHAT_SLUG, loopDayNote, loopDaySpent, loopDayUsedUp } from "../../src/budget";
+import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { loadConfig } from "../../src/config";
+import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { agentPhase } from "../../src/phases";
 import { tick } from "../../src/scheduler";
 import { LoopBudgetReached } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { setupRepo, tempDir, withEnv } from "../helpers";
+import { FAKE_CLAUDE, setupRepo, tempDir, withEnv } from "../helpers";
 
 function spent(trace: Trace, slug: string, usd: number): void {
   const seq = trace.phaseStart(slug, "build", "agent");
@@ -104,7 +106,38 @@ describe("the loop's daily budget", () => {
     }, 60_000);
   }
 
-  test("a day only held by a running phase says so, and the loop goes on when it ends", async () => {
+  test("an outage that repeats while the day is spent keeps backing off without a probe session", async () => {
+    const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+    const dir = tempDir();
+    try {
+      // The assistant is out (the outage fixture). On the third tick, while intake runs, another
+      // change spends the day, as another process could: the probe would come next.
+      const wrapper = join(dir.path, "claude.ts");
+      await Bun.write(wrapper, [
+        `import { Trace } from ${JSON.stringify(join(import.meta.dir, "..", "..", "src", "trace.ts"))};`,
+        "if (process.env.LOOPSTRA_TEST_SPEND) {",
+        "  const t = Trace.open(process.env.LOOPSTRA_TEST_SPEND);",
+        '  t.phaseEnd("other", t.phaseStart("other", "build", "agent"), { status: "success", costUsd: 1 });',
+        "  t.close();",
+        "}",
+        `await import(${JSON.stringify(FAKE_CLAUDE)});`,
+        "",
+      ].join("\n"));
+      const env = { [FAKE_CLAUDE_ENV]: wrapper, LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "outage.jsonl") };
+      for (const n of [1, 2, 3]) {
+        const out = await withEnv(n === 3 ? { ...env, LOOPSTRA_TEST_SPEND: repo.path } : env, () => tick(repo.path));
+        expect(out.paused).toMatch(/^The assistant is unavailable/);
+        const p = readPause(repo.path)!;
+        expect(p).toMatchObject({ repeats: n });
+        await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+      }
+      expect(loopDaySpent(await loadConfig(repo.path), trace)).toBe(true);
+      expect(trace.phases(SLUG).map((p) => p.name)).toEqual(["intake", "intake", "intake"]);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+    } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+  }, 60_000);
+
+  test("a day only held by a running phase says so to the tick, needs no person, and the loop goes on when it ends", async () => {
     const { repo, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
     try {
       const cfg = await loadConfig(repo.path);
@@ -112,8 +145,9 @@ describe("the loop's daily budget", () => {
       expect(loopDayUsedUp(cfg, trace)).toBe(true);
       expect(loopDayNote(cfg, trace)).toContain("is held by a phase still running");
       expect(loopDayNote(cfg, trace)).toContain("within 40 minutes");
-      const items = await attention(repo.path, cfg, trace);
-      expect(items.find((i) => i.kind === "paused")?.what).toBe(loopDayNote(cfg, trace));
+      expect(loopDaySpent(cfg, trace)).toBe(false);
+      // The loop is simply working: nothing for a person on the attention list.
+      expect((await attention(repo.path, cfg, trace)).filter((i) => i.kind === "paused")).toEqual([]);
       trace.phaseEnd("other", 1, { status: "success", costUsd: 0.5 });
       expect(loopDayUsedUp(cfg, trace)).toBe(false);
     } finally { trace.close(); repo.cleanup(); }

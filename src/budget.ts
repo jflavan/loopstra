@@ -39,14 +39,24 @@ export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): bool
 }
 
 /**
- * Why the loop is waiting, for the owner: the attention list, `status`, the tick's pause. Asked once
- * loopDayUsedUp: when what ended today still leaves enough for a session, the rest is only held by a
- * phase still running (or by one whose process was killed, until its hold goes stale).
+ * What ended today alone uses up the loop's day: the loop waits until midnight. Not so while the day
+ * is only held by running phases (with no session cap, a running phase holds the rest of the day):
+ * that clears by itself and needs no person.
+ */
+export function loopDaySpent(cfg: Config, trace: Trace, now = new Date()): boolean {
+  const day = cfg.claude.max_budget_usd_per_day;
+  return day !== undefined && day - trace.costIn(LOOP_POOL, startOfToday(now), { endedOnly: true }) < MIN_SESSION_USD;
+}
+
+/**
+ * Why the loop is waiting: the tick's pause and, once the day is spent, the attention list. Asked once
+ * loopDayUsedUp: unless loopDaySpent, the rest is only held by a phase still running (or by one whose
+ * process was killed, until its hold goes stale).
  */
 export function loopDayNote(cfg: Config, trace: Trace, now = new Date()): string {
   const day = cfg.claude.max_budget_usd_per_day ?? 0;
   const setting = `claude.max_budget_usd_per_day, $${day.toFixed(2)}`;
-  if (day - trace.costIn(LOOP_POOL, startOfToday(now), { endedOnly: true }) >= MIN_SESSION_USD) {
+  if (!loopDaySpent(cfg, trace, now)) {
     return `The rest of the loop's budget for today (${setting}) is held by a phase still running, or by one that stopped without ending. The loop goes on once it ends, or within ${cfg.claude.timeout_minutes + STALE_GRACE_MINUTES} minutes at the latest.`;
   }
   return `The loop has used today's budget (${setting}). It resumes after midnight, or an engineer can change it with \`loopstra setup budgets\`.`;
