@@ -63,6 +63,47 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("set replaces a parent that is not a map (a word, an empty string, a list) with one", () => {
+    for (const gates of ["none", "''", "[]"]) {
+      const { t, doc } = load(`version: 1\ncommands:\n  test: bun test\ngates: ${gates}\n`);
+      try {
+        doc.set(["gates", "spec", "human"], "status");
+        expect(parse(doc.text()).gates).toEqual({ spec: { human: "status" } });
+        expect(doc.validate().gates.spec.human).toBe("status");
+      } finally { t.cleanup(); }
+    }
+  });
+
+  test("a parent that is filled keeps the comment on its line, and commented-out lines under it", () => {
+    const { t, doc } = load(`${TEXT}chat: # the orchestrator\nnext: 1\n`);
+    try {
+      doc.set(["chat", "model"], "cheap");
+      expect(doc.text()).toContain("# the orchestrator");
+      expect(parse(doc.text()).chat).toEqual({ model: "cheap" });
+    } finally { t.cleanup(); }
+    const b = load(`${TEXT}chat:\n  # model: default\n  # transports: {}\n`);
+    try {
+      b.doc.set(["chat", "model"], "cheap");
+      expect(b.doc.text()).toContain("# model: default");
+      expect(b.doc.text()).toContain("# transports: {}");
+      expect(parse(b.doc.text()).chat).toEqual({ model: "cheap" });
+    } finally { b.t.cleanup(); }
+  });
+
+  test("a file with Windows line endings keeps them, and only the edited line changes", () => {
+    const crlf = TEXT.replace(/\n/g, "\r\n");
+    const { t, doc, file } = load(crlf);
+    try {
+      doc.set(["claude", "timeout_minutes"], 45);
+      doc.save();
+      const before = crlf.split("\r\n");
+      const after = file().split("\r\n");
+      expect(file()).not.toMatch(/[^\r]\n/);
+      expect(after.length).toBe(before.length);
+      expect(after.filter((line, i) => line !== before[i])).toEqual(["  timeout_minutes: 45"]);
+    } finally { t.cleanup(); }
+  });
+
   test("put adds a key only when it differs from the default, but updates one that is there", () => {
     const { t, doc } = load();
     try {
@@ -82,6 +123,19 @@ describe("ConfigDocument", () => {
       doc.clear(["nothing", "here"]);
       expect(doc.get(["claude", "max_budget_usd"])).toBeUndefined();
       expect(doc.get(["claude", "timeout_minutes"])).toBe(30);
+    } finally { t.cleanup(); }
+  });
+
+  test("clear removes the maps it leaves empty, keeping the comments above them, but never the document", () => {
+    const { t, doc } = load(`${TEXT}\n# Chat heading\nchat:\n  transports:\n    discord:\n      channel: "1"\nsignals:\n  main_health: { every_minutes: 30 }\n`);
+    try {
+      doc.clear(["chat", "transports", "discord", "channel"]);
+      expect(doc.get(["chat"])).toBeUndefined();
+      expect(doc.text()).toContain("# Chat heading");
+      expect(parse(doc.text()).signals).toEqual({ main_health: { every_minutes: 30 } });
+      for (const key of ["version", "commands", "claude", "gates", "signals"]) doc.clear([key]);
+      expect(parse(doc.text())).toEqual({});
+      expect(doc.text()).toContain("# Chat heading");
     } finally { t.cleanup(); }
   });
 

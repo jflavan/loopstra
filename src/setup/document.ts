@@ -1,25 +1,32 @@
 import { readFileSync } from "node:fs";
-import { isCollection, isScalar, parseDocument, type Document } from "yaml";
+import { isCollection, isMap, isScalar, isSeq, parseDocument, Scalar, type Document, type Node } from "yaml";
 import { ConfigError, configPath, validateConfig, type Config } from "../config";
 import { writeFileAtomic } from "../fsutil";
 
 /** Where a value is in the config, like ["claude", "max_budget_usd"]. */
 export type Path = readonly (string | number)[];
 
+/** Comment texts joined into one, skipping the empty ones; undefined when there are none. */
+function joined(...comments: (string | null | undefined)[]): string | undefined {
+  const kept = comments.filter((c): c is string => !!c);
+  return kept.length ? kept.join("\n") : undefined;
+}
+
 /**
- * loopstra/config.yaml as a YAML document: edits keep its comments and key order. Nothing is written
- * until save(), and save() refuses a config that would not load.
+ * loopstra/config.yaml as a YAML document: edits keep its comments, key order, and line endings.
+ * Nothing is written until save(), and save() refuses a config that would not load.
  */
 export class ConfigDocument {
   private dirty = false;
 
-  private constructor(private readonly path: string, private readonly doc: Document) {}
+  private constructor(private readonly path: string, private readonly doc: Document, private readonly crlf: boolean) {}
 
   static load(root: string): ConfigDocument {
     const path = configPath(root);
-    const doc = parseDocument(readFileSync(path, "utf8"));
+    const text = readFileSync(path, "utf8");
+    const doc = parseDocument(text);
     if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
-    return new ConfigDocument(path, doc);
+    return new ConfigDocument(path, doc, text.includes("\r\n"));
   }
 
   /** The value at `path` as plain data (maps and lists too), or undefined. */
@@ -30,14 +37,16 @@ export class ConfigDocument {
 
   set(path: Path, value: unknown): void {
     if (JSON.stringify(this.get(path)) === JSON.stringify(value)) return;
-    // A parent written with no value (`chat:` on its own) is an empty map to fill, not a scalar.
+    // A parent that is not a map to write into (`chat:` on its own, `gates: none`, `gates: []`)
+    // becomes an empty one, keeping its comments; validation still decides what is valid.
     for (let i = 1; i < path.length; i++) {
-      const parent = this.doc.getIn(path.slice(0, i), true);
+      const parent = this.doc.getIn(path.slice(0, i), true) as Node | undefined;
       if (parent === undefined) break;
-      if (isScalar(parent) && (parent.value === null || parent.value === undefined)) {
-        this.doc.setIn(path.slice(0, i), this.doc.createNode({}));
-        break;
-      }
+      if (isMap(parent) || (isSeq(parent) && typeof path[i] === "number")) continue;
+      const map = this.doc.createNode({});
+      map.commentBefore = joined(parent?.commentBefore, parent?.comment);
+      this.doc.setIn(path.slice(0, i), map);
+      break;
     }
     const node = this.doc.getIn(path, true);
     // A scalar is changed in place, so a comment on its line stays with it.
@@ -55,10 +64,40 @@ export class ConfigDocument {
     this.set(path, value);
   }
 
+  /** Removes a key, and any map that leaves empty above it (never the whole document). */
   clear(path: Path): void {
-    if (!this.doc.hasIn(path)) return;
-    this.doc.deleteIn(path);
+    if (!path.length || !this.doc.hasIn(path)) return;
+    let at = path;
+    for (;;) {
+      this.remove(at);
+      at = at.slice(0, -1);
+      const parent = at.length ? this.doc.getIn(at, true) : undefined;
+      if (!isMap(parent) || parent.items.length) break;
+    }
     this.dirty = true;
+  }
+
+  /** Deletes one key. Comments above it, or inside a map it held, move to the next key (or the end of its map). */
+  private remove(path: Path): void {
+    const parentPath = path.slice(0, -1);
+    const parent = parentPath.length ? this.doc.getIn(parentPath, true) : this.doc.contents;
+    const key = path[path.length - 1];
+    const i = isMap(parent) ? parent.items.findIndex((p) => (isScalar(p.key) ? p.key.value : p.key) === key) : -1;
+    if (!isMap(parent) || i < 0) { this.doc.deleteIn(path); return; }
+    const pair = parent.items[i]!;
+    const keyNode = isScalar(pair.key) ? pair.key : undefined;
+    const notes = joined(keyNode?.commentBefore, ...(isCollection(pair.value) ? [pair.value.commentBefore, pair.value.comment] : []));
+    const next = parent.items[i + 1];
+    if (notes && next) {
+      if (!isScalar(next.key)) next.key = new Scalar(next.key);
+      const nextKey = next.key as Scalar;
+      nextKey.commentBefore = joined(notes, nextKey.commentBefore);
+      if (keyNode?.spaceBefore) nextKey.spaceBefore = true;
+    } else if (notes) {
+      // A leading empty line keeps the blank line that was above the key.
+      parent.comment = joined(parent.comment, keyNode?.spaceBefore ? `\n${notes}` : notes);
+    }
+    parent.items.splice(i, 1);
   }
 
   /** The config these edits make, checked the way loading checks it. Throws ConfigError. */
@@ -74,7 +113,9 @@ export class ConfigDocument {
     return true;
   }
 
+  /** The file as it would be written, with the line endings it was read with. */
   text(): string {
-    return String(this.doc);
+    const text = String(this.doc);
+    return this.crlf ? text.replace(/\r?\n/g, "\r\n") : text;
   }
 }
