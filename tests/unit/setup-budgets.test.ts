@@ -39,7 +39,7 @@ describe("the budgets section", () => {
       expect(yaml.claude).toEqual({ max_budget_usd: 9 });
       expect(yaml.chat).toEqual({ max_budget_usd_per_session: 4, max_budget_usd_per_day: 36 });
       // The suggestion for a loop session follows timeout_minutes (30 by default): 45 minutes.
-      expect(shown).toContain("Suggested: 45m ($9.00)");
+      expect(shown).toContain("What may one loop session spend? Suggested: 45m ($9.00). Enter keeps: no limit.");
     } finally { r.cleanup(); }
   });
 
@@ -52,6 +52,16 @@ describe("the budgets section", () => {
       expect(shown).toContain("Suggested: 45m ($13.50)");
       expect(parse(text).claude).toEqual({ max_budget_usd: 13.5 });
       expect(parse(text).chat).toBeUndefined();
+    } finally { r.cleanup(); }
+  });
+
+  test("yes: each question says what Enter keeps, a chosen limit or no limit", async () => {
+    const r = configRepo(`${BASE}chat:\n  max_budget_usd_per_day: 20\n`);
+    try {
+      const { text, shown } = await askSection(budgets, r.root, ["y", "", "", "", "", ""]);
+      expect(shown).toContain("What may chat spend in a day, everyone together? Suggested: 3h ($36.00). Enter keeps: $20.00 (about 100 min).");
+      expect(shown).toContain("What may one chat turn or write-up spend? Suggested: 20m ($4.00). Enter keeps: no limit.");
+      expect(text).toBe(`${BASE}chat:\n  max_budget_usd_per_day: 20\n`);
     } finally { r.cleanup(); }
   });
 

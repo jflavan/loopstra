@@ -1,4 +1,4 @@
-import { DEFAULT_RATE_PER_MINUTE, parseAmount } from "../prompt";
+import { amountText, DEFAULT_RATE_PER_MINUTE, parseAmount } from "../prompt";
 import type { Section, SetupContext } from "../types";
 
 interface Limit {
@@ -53,8 +53,10 @@ export const budgets: Section = {
     for (const l of LIMITS) {
       const hint = l.suggest(timeout);
       const usd = parseAmount(hint, rate);
-      const question = `${l.question} Suggested: ${typeof usd === "number" ? `${hint} ($${usd.toFixed(2)})` : "none"}.`;
-      const a = await ctx.ask.amount(question, { suggestion: chosen(ctx, l) ?? "none", ratePerMinute: rate });
+      // Enter keeps what is there (no limit when unset), so --defaults never adds a limit; the suggestion is a hint.
+      const current = chosen(ctx, l) ?? "none";
+      const question = `${l.question} Suggested: ${typeof usd === "number" ? `${hint} ($${usd.toFixed(2)})` : "none"}. Enter keeps: ${amountText(current, rate)}.`;
+      const a = await ctx.ask.amount(question, { suggestion: current, ratePerMinute: rate });
       if (a === "none") ctx.doc.clear(l.path);
       else ctx.doc.set(l.path, a);
     }
