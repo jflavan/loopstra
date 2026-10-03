@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
 import { DefaultsPrompt } from "../../src/setup/prompt";
+import { budgets } from "../../src/setup/sections/budgets";
 import { gates } from "../../src/setup/sections/gates";
 import { github } from "../../src/setup/sections/github";
 import { models } from "../../src/setup/sections/models";
@@ -152,6 +153,20 @@ describe("loopstra setup", () => {
         expect(o.text()).toContain(`Fix these in loopstra/config.yaml first:\n- ${path}`);
       }
     } finally { model.cleanup(); skills.cleanup(); spec.cleanup(); }
+  });
+
+  test("budgets on a broken claude, or an invalid limit: --defaults answers no limit, and that saves", async () => {
+    for (const broken of ["claude: off\n", "claude:\n  max_budget_usd: 0\n"]) {
+      const r = configRepo(`${CONFIG}${broken}`);
+      try {
+        const o = io();
+        expect({ broken, code: await setup(r.root, { output: o.output, defaults: true, sections: [budgets] }) }).toEqual({ broken, code: 0 });
+        expect(o.text()).toContain("the questions below can fix them");
+        expect(o.text()).toContain("Saved loopstra/config.yaml.");
+        expect(o.text()).toContain("Do you want spending limits?: no");
+        expect(r.text()).toBe(CONFIG);
+      } finally { r.cleanup(); }
+    }
   });
 
   test("gates: none is replaced by the gates questions, even when every answer is the default", async () => {

@@ -140,6 +140,18 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("clear under a parent that is not a map empties that parent, keeping its comments, and the empty map goes", () => {
+    const { t, doc } = load("version: 1\ncommands:\n  test: x\n# The assistant\nclaude: off # for now\nchat:\n  model: default\n  transports: x\nsignals: {}\n");
+    try {
+      doc.clear(["claude", "max_budget_usd"]);
+      doc.clear(["chat", "transports", "slack"]);
+      expect(parse(doc.text())).toEqual({ version: 1, commands: { test: "x" }, chat: { model: "default" }, signals: {} });
+      expect(doc.text()).toContain("# The assistant");
+      expect(doc.text()).toContain("for now");
+      expect(() => doc.validate()).not.toThrow();
+    } finally { t.cleanup(); }
+  });
+
   test("clear removes the maps it leaves empty, keeping the comments above them, but never the document", () => {
     const { t, doc } = load(`${TEXT}\n# Chat heading\nchat:\n  transports:\n    discord:\n      channel: "1"\nsignals:\n  main_health: { every_minutes: 30 }\n`);
     try {

@@ -46,8 +46,11 @@ export const budgets: Section = {
   async ask(ctx) {
     // Decided once, before any answer changes the limits.
     const old = oldTemplate(ctx.doc);
-    /** The limit someone chose, or undefined (unset, or the old template's value). */
-    const chosen = (l: Limit) => { const v = ctx.doc.get(l.path); return typeof v === "number" && !old ? v : undefined; };
+    /**
+     * The limit someone chose, or undefined: unset, the old template's value, or one that would not
+     * load (0, a word, or under a parent that is not a map), which Enter must not keep.
+     */
+    const chosen = (l: Limit) => { const v = ctx.doc.get(l.path); return typeof v === "number" && v > 0 && !old ? v : undefined; };
     ctx.ask.say("Spending limits stop a session (or the loop, or chat, for the rest of the day) at an amount. Unset means no limit; claude.timeout_minutes still ends a session.");
     for (const l of LIMITS) {
       const v = ctx.doc.get(l.path);

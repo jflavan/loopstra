@@ -57,15 +57,8 @@ export class ConfigDocument {
     if (JSON.stringify(this.get(path)) === JSON.stringify(value)) return;
     // A parent that is not a map to write into (`chat:` on its own, `gates: none`, `gates: []`)
     // becomes an empty one, keeping its comments; validation still decides what is valid.
-    for (let i = 1; i < path.length; i++) {
-      const parent = this.doc.getIn(path.slice(0, i), true) as Node | undefined;
-      if (parent === undefined) break;
-      if (isMap(parent) || (isSeq(parent) && typeof path[i] === "number")) continue;
-      const map = this.doc.createNode({});
-      map.commentBefore = joined(parent?.commentBefore, parent?.comment);
-      this.doc.setIn(path.slice(0, i), map);
-      break;
-    }
+    const blocked = this.nonMapParent(path);
+    if (blocked) this.emptyMap(blocked);
     const node = this.doc.getIn(path, true);
     const quoted = <N>(n: N): N => { if (o.quote && isScalar(n) && typeof n.value === "string") n.type = Scalar.QUOTE_DOUBLE; return n; };
     // A scalar is changed in place, so a comment on its line stays with it.
@@ -151,21 +144,48 @@ export class ConfigDocument {
 
   /** Whether a parent on the path is there but is not a map (a word, an empty value, a list). */
   private underNonMap(path: Path): boolean {
-    for (let i = 1; i < path.length; i++) {
-      const parent = this.doc.getIn(path.slice(0, i), true);
-      if (parent === undefined) return false;
-      if (!isMap(parent) && !(isSeq(parent) && typeof path[i] === "number")) return true;
-    }
-    return false;
+    return this.nonMapParent(path) !== null;
   }
 
   /**
-   * Removes a key, and any map that leaves empty above it (never the whole document). With
+   * The path of the first parent on `path` that is there but cannot hold the next key (a word, an
+   * empty value, a list indexed by a name), or null.
+   */
+  private nonMapParent(path: Path): Path | null {
+    for (let i = 1; i < path.length; i++) {
+      const parent = this.doc.getIn(path.slice(0, i), true);
+      if (parent === undefined) return null;
+      if (!isMap(parent) && !(isSeq(parent) && typeof path[i] === "number")) return path.slice(0, i);
+    }
+    return null;
+  }
+
+  /** Replaces the value at `path` with an empty map, keeping the comments that were on it. */
+  private emptyMap(path: Path): void {
+    const old = this.doc.getIn(path, true) as Node | undefined;
+    const map = this.doc.createNode({});
+    map.commentBefore = joined(old?.commentBefore, old?.comment);
+    this.doc.setIn(path, map);
+    this.dirty = true;
+  }
+
+  /**
+   * Removes a key, and any map that leaves empty above it (never the whole document). Under a parent
+   * that is not a map, that parent is emptied and removed the same way. With
    * `placeholder`, the key's line becomes `# <key>:`: it says the key was left out on purpose, and a
    * later set fills it again.
    */
   clear(path: Path, o: { placeholder?: boolean } = {}): void {
-    if (!path.length || !this.doc.hasIn(path)) return;
+    if (!path.length) return;
+    // Under a parent that is not a map (`claude: off`), nothing is there: the parent becomes an
+    // empty map, which goes like any map left empty.
+    const blocked = this.nonMapParent(path);
+    if (blocked) {
+      this.emptyMap(blocked);
+      this.clear(blocked);
+      return;
+    }
+    if (!this.doc.hasIn(path)) return;
     let at = path;
     for (let first = true; ; first = false) {
       this.remove(at, first && !!o.placeholder);
