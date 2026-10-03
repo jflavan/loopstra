@@ -67,9 +67,9 @@ export function loopDayNote(cfg: Config, spent: boolean): string {
 }
 
 /**
- * The owner's note when a step ran out of the loop's day partway, at the same status, on two days:
+ * The owner's note when a step ran out of the loop's day partway at the same status as on an earlier day:
  * it would start over and run out again every day. The block adds the status to set to resume.
  */
 export function stepOverDayNote(cfg: Config): string {
-  return `This step needs more than the loop's daily budget (${loopDaySetting(cfg)}): it ran out partway on two days in a row. Raise or remove the limit with \`loopstra setup budgets\`.`;
+  return `This step needs more than the loop's daily budget (${loopDaySetting(cfg)}): it ran out partway again at the same point as on an earlier day. Raise or remove the limit with \`loopstra setup budgets\`.`;
 }

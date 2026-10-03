@@ -135,8 +135,8 @@ blocks. Both trace a `pause` event (under `_loop` once per new reason a day, or 
 A step that cannot fit in a day would start over and run out every day. So a day-budget pause
 records the change's status, and when the change's previous such pause was on an earlier day at the
 same status, the change is blocked instead: "This step needs more than the loop's daily budget
-(claude.max_budget_usd_per_day, $X.XX): it ran out partway on two days in a row. Raise or remove the
-limit with `loopstra setup budgets`.", plus the status to set to resume.
+(claude.max_budget_usd_per_day, $X.XX): it ran out partway again at the same point as on an earlier
+day. Raise or remove the limit with `loopstra setup budgets`.", plus the status to set to resume.
 
 Every session's cost counts: a phase that ends interrupted (the assistant unavailable, the day's
 budget) or crashes after its session ended keeps what the session cost, in chat turns too.

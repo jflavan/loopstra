@@ -167,7 +167,7 @@ describe("the loop's daily budget", () => {
     }, 60_000);
   }
 
-  describe("a step that runs out partway on two days in a row", () => {
+  describe("a step that runs out partway at the same status on an earlier day and again today", () => {
     /** Moves today's trace (phases and the change's pauses) to yesterday, as if the step had run then. */
     function yesterday(trace: Trace, status?: string): void {
       const db = (trace as unknown as { db: { run(sql: string, args: unknown[]): void } }).db;
@@ -198,7 +198,7 @@ describe("the loop's daily budget", () => {
         expect(out.paused).toBeUndefined();
         const intent = (await readIntent(repo.path, SLUG)).file.frontmatter;
         expect(intent.status).toBe("blocked");
-        expect(intent.note).toBe("This step needs more than the loop's daily budget (claude.max_budget_usd_per_day, $1.00): it ran out partway on two days in a row. Raise or remove the limit with `loopstra setup budgets`. When that is sorted out, set status to accepted to try again.");
+        expect(intent.note).toBe("This step needs more than the loop's daily budget (claude.max_budget_usd_per_day, $1.00): it ran out partway again at the same point as on an earlier day. Raise or remove the limit with `loopstra setup budgets`. When that is sorted out, set status to accepted to try again.");
         expect(out.result).toMatchObject({ ok: false, note: intent.note });
       } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
     }, 60_000);
