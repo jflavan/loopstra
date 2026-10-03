@@ -33,9 +33,11 @@ loopstra setup                 # every section, in order
 loopstra setup <section>       # one section: budgets, commands, gates, github, chat, models
 loopstra setup --defaults      # no questions: every question takes its suggestion
 loopstra setup --check         # no questions, no edits: run the checks; exit 1 if any fails
+loopstra setup --help          # the usage line and the sections, each with its title; exit 0
 ```
 
-The arguments are at most one section and at most one of the two flags. Anything else prints
+The arguments are at most one section and at most one of the two flags. `--help` or `-h` wins over
+anything else and works in any folder. Anything else prints
 "Usage: loopstra setup [section] [--defaults | --check]" and exits 1; an unknown section lists the
 sections. In a folder without `loopstra/config.yaml` it says to run `loopstra init` first.
 
@@ -46,26 +48,30 @@ suggestion) or --check (only check)."
 `--check` first prints "loopstra/config.yaml loads." (or why it does not, and exits 1), then the
 checks of the sections named (all of them by default).
 
-`loopstra init` is unchanged in what it writes. Its "Next:" list names `loopstra setup`. Then, in a
-terminal, `offerSetup` asks "Walk through the settings now? [Y/n]" and runs setup. One prompt reads
-the answer to the offer and every question after it (a second reader on the same input would lose
-lines). After the walkthrough it prints "Next: commit what init wrote (loopstra/, .claude/, intent/,
-REVIEW.md, CLAUDE.md, .gitignore) on <main_branch>, then run `loopstra start`." Init exits 0 whatever
-setup did; setup says why when it saves nothing.
+`loopstra init` is unchanged in what it writes. The first steps have one order everywhere: setup,
+commit, start. Its "Next:" list says so, `loopstra setup` first. Then, in a terminal, `offerSetup`
+asks "Walk through the settings now? [Y/n]" and runs setup. One prompt reads the answer to the offer
+and every question after it (a second reader on the same input would lose lines). After the
+walkthrough, when setup saved (or had no changes), it prints "Next: commit what init wrote (loopstra/,
+.claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on <main_branch>, then run `loopstra start`."
+When setup stopped or saved nothing: "Next: run `loopstra setup` again when you are ready (or edit
+loopstra/config.yaml), commit what init wrote (...) on <main_branch>, then run `loopstra start`."
+Init exits 0 whatever setup did; setup says why when it saves nothing.
 
 ## Sections
 
 Sections run in the order below. Each shows the current value, explains it in one sentence, and
 suggests a value. Enter takes the suggestion, which is the current value when there is one. On a
-question that may be left empty, `-` leaves it empty.
+question that may be left empty, `-` leaves it empty. Under `--defaults` nobody types, so hints about
+typing ("Type - to leave out an optional one.", "press Enter to keep it") are left out.
 
 | Section | Asks | Checks |
 |---|---|---|
-| `budgets` | The four limits as they are now, then "Do you want spending limits?". If yes: the rate, then each limit, in minutes or dollars (below). | `claude.max_budget_usd` below `timeout_minutes` at $0.20 a minute is a warning: a long step stops on the budget first. |
-| `commands` | `test`, `install`, `lint`, `build`, `run` in turn, suggesting the current value or what `init` detects. Only `test` needs an answer. | `claude` is found (on PATH, or `LOOPSTRA_CLAUDE_EXECUTABLE`); missing fails. `commands.install` (when set) then `commands.test` run once in a throwaway detached checkout of `main_branch` at `.loopstra/setup-main`, sharing one `timeout_minutes`; the checkout is removed afterwards. A failure or timeout is a warning, since main may be red today. |
+| `budgets` | The four limits as they are now, then "Do you want spending limits?". If yes: the rate, then each limit, in minutes or dollars (below). | Warnings, at the rate entered in this run ($0.20 a minute otherwise): `claude.max_budget_usd` below `timeout_minutes` (a long step stops on the budget first); a session limit above its day limit, for the loop or for chat; `chat.max_budget_usd_per_day` without `chat.max_budget_usd_per_session`. |
+| `commands` | `test`, `install`, `lint`, `build`, `run` in turn, suggesting the current value or what `init` detects. Only `test` needs an answer. `-` leaves one out and sticks: the key becomes its `# install:` placeholder, and the detected command is suggested only when there is neither a key nor a placeholder. | `claude` is found (on PATH, or `LOOPSTRA_CLAUDE_EXECUTABLE`); missing fails. `commands.install` (when set) then `commands.test` run once in a throwaway detached checkout of `main_branch` at `.loopstra/setup-main`, sharing one `timeout_minutes`; the checkout is removed afterwards. A failure or timeout is a warning, since main may be red today; a program the shell could not find fails, naming it ("`bun` is not installed or not on PATH (commands.test)."). |
 | `gates` | For spec, plan and done: should a person approve (`status`) or not (`none`), and does an independent agent review. (The merge gate belongs to `github`.) | — |
-| `github` | Says whether the repository has a remote (with one, every change goes up as a pull request). Who approves a merge: `none`, `status` or `pr`; then the method (`squash` or `merge`). | With a remote: `git ls-remote --heads <remote>` answers and `gh` is signed in (20 seconds each), whatever the merge gate, since every change goes through a pull request. Without one: `pr` fails, anything else is fine. |
-| `chat` | Where people talk to the orchestrator: any mix of terminal, dashboard, Slack, Discord. Only the chosen bots are asked about: the names of the token environment variables (a token pasted there is refused), the channel, `allow`, `acceptors` and `announce_to`. Discord ids must be numbers; Slack ids must be ids, not `#names`. A bot that isn't chosen is removed. | Each chosen bot's token variables are set, and the platform accepts the bot token: Slack `auth.test`, Discord `GET /users/@me` (10 seconds each). A refused token, or a platform that cannot be reached, fails; any other answer (a rate limit, an outage) is a warning, and so is a Slack app-level token that does not start with `xapp-`. |
+| `github` | Says whether the repository has a remote (with one, every change goes up as a pull request). Who approves a merge: `none`, `status` or `pr`; then the method (`squash` or `merge`). Without a remote, `pr` is asked again, and a config already set to `pr` suggests `status`. | With a remote: `git ls-remote --heads <remote>` answers and `gh` is signed in (20 seconds each), whatever the merge gate, since every change goes through a pull request. Without one: `pr` fails, anything else is fine. |
+| `chat` | Where people talk to the orchestrator: any mix of terminal, dashboard, Slack, Discord. Only the chosen bots are asked about: the names of the token environment variables (a token pasted there is refused, naming that question's variable as the example), the channel, `allow`, `acceptors` and `announce_to` (for a new bot, the channel just entered is suggested). Discord ids must be numbers, kept as quoted strings; Slack ids must be ids, not `#names`. The token variable names are always written, so the file says which to set; id lists are written on one line (`allow: [ U1, U2 ]`). A bot that isn't chosen is removed. | Each chosen bot's token variables are set, and the platform accepts the bot token: Slack `auth.test`, Discord `GET /users/@me` (10 seconds each). A refused token, or a platform that cannot be reached, fails; any other answer (a rate limit, an outage) is a warning, and so is a Slack app-level token that does not start with `xapp-`. |
 | `models` | The `claude.models` names (default, cheap, strong; no spaces), the model each stage uses, and `chat.model`. | — |
 
 The terminal and the dashboard need no settings. Choosing them only says they'll be used, and
@@ -120,8 +126,20 @@ change's cost, the dashboard and `status` leave running phases out.
 Each tick checks before picking a change: while spent plus held leaves less than $0.01, nothing
 starts, and the probe session that tells an outage from a phase's own failure is skipped too. A phase
 that cannot start partway through a step ends the step like an unavailable assistant: the change
-keeps its status, with no failure and no retry, and resumes when there is budget again. Both trace a
-`pause` event (under `_loop` once per new reason a day, or under the change).
+keeps its status, with no failure and no retry, and resumes when there is budget again. So does a
+session cut short by the day: when its cap was what was left of the day (less than
+`claude.max_budget_usd`, or that is unset) and it ends on its budget, the phase ends interrupted
+with its real cost and the loop pauses. A session stopped by `claude.max_budget_usd` itself still
+blocks. Both trace a `pause` event (under `_loop` once per new reason a day, or under the change).
+
+A step that cannot fit in a day would start over and run out every day. So a day-budget pause
+records the change's status, and when the change's previous such pause was on an earlier day at the
+same status, the change is blocked instead: "This step needs more than the loop's daily budget
+(claude.max_budget_usd_per_day, $X.XX): it ran out partway on two days in a row. Raise or remove the
+limit with `loopstra setup budgets`.", plus the status to set to resume.
+
+Every session's cost counts: a phase that ends interrupted (the assistant unavailable, the day's
+budget) or crashes after its session ended keeps what the session cost, in chat turns too.
 
 The note tells the two cases apart:
 
@@ -134,25 +152,30 @@ The note tells the two cases apart:
   within N minutes at the latest." Only in the tick's result and the trace: it clears by itself, so it
   is not on the attention list.
 
-The heartbeat line ("Loop: Running ...") does not show the day pause; it only knows the assistant's
-pause, which is kept in `.loopstra/paused.json`.
+The tick also records its wait in the heartbeat, so the loop line reads "Paused — <note>" in
+`status`, `tail` and the dashboard: until local midnight when the day is spent, for two polls while
+it is only held, and cleared when a tick goes on. An unavailable assistant's pause (kept in
+`.loopstra/paused.json`) comes first; a stopped loop drops the day's.
 
 ### In setup
 
 The section first lists the four limits as they are. "Do you want spending limits?" "No" removes all
-four keys. Enter takes "yes" when a limit someone chose is set (a value other than the old template's),
-else "no", so `--defaults` never removes a limit someone chose but does remove the old template's.
+four keys. Enter takes "yes" when a limit someone chose is set (any limit unless they are the old
+template's, below), else "no", so `--defaults` never removes a limit someone chose but does remove the
+old template's.
 
 "Yes" asks the rate first: "Minutes are turned into dollars at $0.20 a minute (about $2 per 10
-minutes); press Enter to keep it or type another rate". The rate is only used during setup and is not
-saved. Then each limit in turn, with its suggestion as a hint in the question, while Enter keeps the
+minutes); press Enter to keep it or type another rate". The rate is used for this run (the questions
+and the budgets check) and is not saved; `--check` uses $0.20. Then each limit in turn, with its suggestion as a hint in the question, while Enter keeps the
 current limit (none when unset or the old template's), so `--defaults` never adds a limit:
 
 ```
 What may one loop session spend? Suggested: 45m ($9.00). Enter keeps: no limit. (minutes like 30m, dollars like $6, or none) [no limit]:
 ```
 
-An answer can be minutes (`30m`, `2h`), dollars (`$6`, `6`) or `none`, which removes the key.
+An answer can be minutes (`30m`, `2h`), dollars (`$6`, `6`) or `none`, which removes the key. Amounts
+are kept to the cent and shown with two decimals. One that comes to $0 is asked again: "Answer more
+than $0, or none for no limit."
 
 | Setting | Suggested |
 |---|---|
@@ -161,10 +184,11 @@ An answer can be minutes (`30m`, `2h`), dollars (`$6`, `6`) or `none`, which rem
 | `chat.max_budget_usd_per_session` | 20 minutes ($4) |
 | `chat.max_budget_usd_per_day` | 3 hours ($36) |
 
-An existing repository's config keeps whatever values it has until setup runs. Where a value equals
-the old template's (`claude.max_budget_usd: 5`, `chat.max_budget_usd_per_day: 5`,
-`chat.max_budget_usd_per_session: 2`), setup shows it as "$5 (the old default; the default is now no
-limit)" and treats it as unset.
+An existing repository's config keeps whatever values it has until setup runs. The limits count as
+the old template's only when every one present has that template's value (`claude.max_budget_usd: 5`,
+`chat.max_budget_usd_per_day: 5`, `chat.max_budget_usd_per_session: 2`) and there is no
+`claude.max_budget_usd_per_day`, which it never wrote. Then setup shows each as "$5.00 (the old
+default; the default is now no limit)" and treats it as unset; otherwise every limit there is a choice.
 
 ### When a limit is hit
 
@@ -172,6 +196,8 @@ The notes for a phase stopped by a limit name the setting and the command:
 
 - budget: "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or
   remove it with `loopstra setup budgets`."
+- the loop's day, twice at the same status: the note above ("This step needs more than the loop's
+  daily budget ...").
 - timeout: the existing note, plus "An engineer can allow longer with claude.timeout_minutes in
   loopstra/config.yaml."
 - chat, when its day is spent: "I have used today's chat budget ($X.XX), so I cannot answer until
@@ -192,37 +218,46 @@ src/setup/sections/*.ts     budgets, commands, gates, github, chat, models
 interface SetupContext {
   root: string;
   doc: ConfigDocument;    // edits go here; nothing is written until the end
-  ask: Prompt;            // with --defaults, every question returns its suggestion
+  ask: Prompt;            // with --defaults, every question returns its suggestion; ask.interactive is false
   env: Record<string, string | undefined>;  // where token variables are read
+  ratePerMinute?: number; // the rate entered in this run (budgets sets it; its check uses it)
 }
 
 interface Section {
   name: string;
   title: string;
+  covers: string[];       // the top-level keys its questions edit: what it can fix
   ask(ctx: SetupContext): Promise<void>;
   check(ctx: SetupContext, cfg: Config): Promise<Check[]>;
 }
 
-interface Check { level: "ok" | "warn" | "fail"; text: string }
+interface Check { level: "ok" | "warn" | "fail"; text: string; section?: string }
 ```
 
 - Sections are independent. Each reads current values from `ctx.doc` and writes only what the person
   changed. `put` adds a key that is not in the file only when the answer differs from its default; a
-  key that is there (the template writes many, as documentation) is updated in place. Budgets are the
-  exception: no limit is the absence of the key, so choosing none removes it.
+  key that is there (the template writes many, as documentation) is updated in place. The exceptions:
+  budgets (no limit is the absence of the key, so choosing none removes it), a chosen bot's token
+  variable names (always written), and a parent that is not a map (`gates: none`), which `put`
+  replaces with one so the config loads.
 - `document.ts` uses `yaml`'s `parseDocument`, `getIn`, `setIn` and `deleteIn`, and `String(doc)` to
   save. Comments, key order and line endings survive (CRLF when most lines have it). A scalar is
   changed in place, so its line comment stays. A new key takes the place of its commented-out
   placeholder line (`# lint:`) when its map has one. Clearing a key removes any map it leaves empty,
   and moves its comments to the next key.
-- A config that does not load now gets a note before the questions ("the questions below can fix
-  them"). At the end, the edited document is validated with `ConfigSchema`. If it is invalid, the
+- A config that does not load now gets a note before the questions ("Note: loopstra/config.yaml has
+  problems now; the questions below can fix them:", then one line per problem) when every problem is
+  under a top-level key the sections being run cover. An unknown key, or a problem elsewhere, prints
+  "Fix these in loopstra/config.yaml first:" with the problems, asks nothing and exits 1. A
+  validation message that already starts with its path is not prefixed with it again. At the end, the edited document is validated with `ConfigSchema`. If it is invalid, the
   errors are printed and nothing is saved. If it is valid and changed, it is written in one atomic
   write. Quitting (end of input: Ctrl-D, or Ctrl-Z then Enter on Windows), a section that throws, or
   `--defaults` reaching a question with no suggestion saves nothing and exits 1.
-- Checks run after saving (or alone with `--check`), only for the sections that ran, each section's
-  within `timeout_minutes` plus a minute, and only read. A failed check never undoes the save; it is
-  printed under "To fix". Setup exits 0 once saved; `--check` exits 1 when any check fails.
+- Checks run after saving (or alone with `--check`), only for the sections that ran, all sections at
+  the same time, each section's within `timeout_minutes` plus a minute, and only read. They are
+  listed in section order. A failed check never undoes the save; what is not ok is counted under "To
+  fix", which names the `loopstra setup <section>` commands to run again. Setup exits 0 once saved;
+  `--check` exits 1 when any check fails.
 
 ## The skill
 
