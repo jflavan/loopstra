@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { configPath } from "../../src/config";
 import { init } from "../../src/init";
-import { commands, missingProgram } from "../../src/setup/sections/commands";
+import { commands, missingProgram, programsIn } from "../../src/setup/sections/commands";
 import { setupRepo, tempGitRepo } from "../helpers";
 import { askSection, checkSection, configRepo } from "../setup-helpers";
 
@@ -115,6 +115,13 @@ describe("the commands section", () => {
     // Arguments are not programs.
     expect(missingProgram("cd sub && cat missing.txt", "cat: missing.txt: No such file or directory")).toBeUndefined();
     expect(missingProgram("CI=1 cargo test", "error: CI=1: not found")).toBeUndefined();
+  });
+
+  test("quotes and redirects do not split a command into programs", () => {
+    expect(programsIn('bun test --grep "a;b" 2>&1 | tee out.txt')).toEqual(["bun", "tee"]);
+    expect(programsIn("npm test &> log.txt && echo 'x | y'")).toEqual(["npm", "echo"]);
+    expect(programsIn('"C:\\Program Files\\nodejs\\npm.cmd" test')).toEqual(["C:\\Program Files\\nodejs\\npm.cmd"]);
+    expect(missingProgram("bun test 2>&1", "sh: 1: 1: not found")).toBeUndefined();
   });
 
   test("an install command that fails on main is a warning naming it, and the tests do not run", async () => {
