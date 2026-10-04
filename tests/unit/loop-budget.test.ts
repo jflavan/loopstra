@@ -5,6 +5,7 @@ import { attention } from "../../src/attention";
 import { CHAT_SLUG, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday } from "../../src/budget";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { loadConfig } from "../../src/config";
+import { Git } from "../../src/git";
 import { heartbeatState, readHeartbeat, readPause, startHeartbeat } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { agentPhase } from "../../src/phases";
@@ -68,6 +69,17 @@ describe("the loop's daily budget", () => {
       expect(trace.phases(SLUG)).toMatchObject([
         { name: "intake", status: "interrupted", cost_usd: 5.01, error: "budget: the loop's daily budget ran out during this session" },
       ]);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a session that died without reporting its cost still counts against the day", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 10\n" });
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:crash");
+      expect((await agentPhase(ctx, INTAKE)).ok).toBe(false);
+      const [phase] = trace.phases(SLUG);
+      expect(phase!.cost_usd).toBeGreaterThan(0);
+      expect(phase!.cost_usd).toBeLessThanOrEqual(10);
     } finally { trace.close(); repo.cleanup(); }
   });
 
@@ -284,6 +296,19 @@ describe("the loop's daily budget", () => {
         spent(trace, "other", 0.5);
         expect((await tick(repo.path)).paused).toBe(loopDayNote(cfg, true));
         beat.stopped();
+        expect(readHeartbeat(repo.path)!.pausedUntil).toBeNull();
+      } finally { beat.stopped(); trace.close(); repo.cleanup(); }
+    });
+
+    test("a checkout off main drops the day's pause: that is not why the loop waits now", async () => {
+      const { repo, trace } = await setupRepo("draft", { config: "claude:\n  max_budget_usd_per_day: 1\n" });
+      const beat = startHeartbeat(repo.path, 60_000);
+      try {
+        spent(trace, "other", 1);
+        await tick(repo.path);
+        expect(readHeartbeat(repo.path)!.pausedUntil).not.toBeNull();
+        await new Git(repo.path).run(["checkout", "-q", "-b", "elsewhere"]);
+        expect((await tick(repo.path)).paused).not.toMatch(/budget/);
         expect(readHeartbeat(repo.path)!.pausedUntil).toBeNull();
       } finally { beat.stopped(); trace.close(); repo.cleanup(); }
     });

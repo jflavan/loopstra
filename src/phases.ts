@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -185,6 +185,7 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   throwIfStopping();
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+  const started = Date.now();
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];
   const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
@@ -193,8 +194,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: false, reason, note: ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
-  // What the session cost, once it ended: kept if the phase fails after it.
-  let costUsd = 0;
+  // What the session cost, once it ended (null until then): kept if the phase fails after it.
+  let costUsd: number | null = null;
   try {
     const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
     mkdirSync(dir, { recursive: true });
@@ -221,19 +222,19 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     });
 
     denied = r.denied;
-    costUsd = r.costUsd;
+    costUsd = sessionCost(r, r.durationMs, capUsd);
     if (!r.ok) {
       if (unavailable(r.reason)) {
         // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
         throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
       }
       if (r.reason === "budget" && fromDay) {
         // The loop's day ran out, not this step's own limit: the loop pauses and the step resumes later.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: "budget: the loop's daily budget ran out during this session", denied });
+        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd, sessionId: r.sessionId ?? undefined, error: "budget: the loop's daily budget ran out during this session", denied });
         throw new LoopBudgetReached();
       }
-      return failed(r.reason, r.detail, r.sessionId, r.costUsd);
+      return failed(r.reason, r.detail, r.sessionId, costUsd);
     }
     const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
@@ -248,12 +249,14 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested) {
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
+      // A session the stop killed never reported its cost.
+      const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, capUsd);
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: spent, error: "stopped by request; the step resumes on the next start" });
       throw e;
     }
     // Its phase row is already ended.
     if (notTheStepsFault(e)) throw e;
-    return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd);
+    return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd ?? 0);
   } finally {
     if (raw) { try { await raw.end(); } catch { /* already closed */ } }
   }

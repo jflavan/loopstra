@@ -254,6 +254,42 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("the nudge may spend only what the first send left of the cap", async () => {
+    const t = tempDir();
+    try {
+      const callsFile = join(t.path, "calls.jsonl");
+      await runPhase({ cwd: t.path, prompt: "FIXTURE:no-envelope", schema: {}, model: "haiku", permissionMode: "default",
+        allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+      const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+      expect(calls[0]).toEqual(expect.arrayContaining(["--max-budget-usd", "1"]));
+      // The first send cost $0.02.
+      expect(calls[1]).toEqual(expect.arrayContaining(["--max-budget-usd", "0.98"]));
+    } finally { t.cleanup(); }
+  });
+
+  test("a session that used up its cap is not nudged: its report is unreadable", async () => {
+    const t = tempDir();
+    try {
+      const callsFile = join(t.path, "calls.jsonl");
+      const r = await runPhase({ cwd: t.path, prompt: "FIXTURE:no-envelope", schema: {}, model: "haiku", permissionMode: "default",
+        allowedTools: [], timeoutMs: 10_000, maxBudgetUsd: 0.025, env: { LOOPSTRA_FAKE_CALLS: callsFile }, executable: FAKE });
+      expect(r.reason).toBe("invalid-envelope");
+      expect(r.costUsd).toBeCloseTo(0.02);
+      expect((await Bun.file(callsFile).text()).trim().split("\n").length).toBe(1);
+    } finally { t.cleanup(); }
+  });
+
+  test("says whether the session reported its cost", async () => {
+    const t = tempDir();
+    try {
+      const base = { cwd: t.path, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: [], maxBudgetUsd: 1, executable: FAKE };
+      expect((await runPhase({ ...base, prompt: "FIXTURE:simple-success", timeoutMs: 10_000 })).costReported).toBe(true);
+      const hung = await runPhase({ ...base, prompt: "FIXTURE:hang", timeoutMs: 800 });
+      expect(hung.reason).toBe("timeout");
+      expect(hung.costReported).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
   test("a session that still returns no structured output after the nudge fails as an unreadable report", async () => {
     const t = tempDir();
     const callsFile = join(t.path, "calls.jsonl");

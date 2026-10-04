@@ -141,7 +141,14 @@ change is traced for it since, and on both days the change itself spent at least
 day. Raise or remove the limit with `loopstra setup budgets`.", plus the status to set to resume.
 
 Every session's cost counts: a phase that ends interrupted (the assistant unavailable, the day's
-budget) or crashes after its session ended keeps what the session cost, in chat turns too.
+budget) or crashes after its session ended keeps what the session cost, in chat turns too. A session
+that ends without reporting its cost (killed at `timeout_minutes` or by a stop request, or it
+crashed) never says what it spent: under a cap it counts at about $0.20 a minute of it (at least
+what it reported before, never more than the cap), not $0 (`sessionCost` in `src/budget.ts`). With
+no cap, nothing is held, and it counts at what it reported. A session asked again on the same
+session (the nudge for a missing report, or a re-send after a background notification) is a new
+run with a cap of its own, so each later send gets only what the earlier ones left of the cap; with
+less than $0.01 left it is not sent.
 
 The note tells the two cases apart:
 
@@ -156,7 +163,7 @@ The note tells the two cases apart:
 
 The tick also records its wait in the heartbeat, so the loop line reads "Paused — <note>" in
 `status`, `tail` and the dashboard: until local midnight when the day is spent, for two polls while
-it is only held, and cleared when a tick goes on. An unavailable assistant's pause (kept in
+it is only held, and cleared when a tick goes on (or finds the checkout off main, which is then the reason). An unavailable assistant's pause (kept in
 `.loopstra/paused.json`) comes first; a stopped loop drops the day's.
 
 ### In setup

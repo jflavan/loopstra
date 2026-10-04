@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "../budget";
 import { runPhase, type FailureReason } from "../claude";
 import { modelFor, type Config, type ModelRef } from "../config";
 import { jsonSchemaOf } from "../envelopes";
@@ -93,10 +93,11 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
   const seq = held.seq;
+  const started = Date.now();
   const dir = join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${seq}-${o.name}`);
   let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
-  // What the session cost, once it ended: kept if the turn fails after it.
-  let costUsd = 0;
+  // What the session cost, once it ended (null until then): kept if the turn fails after it.
+  let costUsd: number | null = null;
   try {
     mkdirSync(dir, { recursive: true });
     await Bun.write(join(dir, "prompt.md"), o.prompt);
@@ -116,10 +117,10 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
       onEvent: (e) => { raw.write(JSON.stringify(e) + "\n"); },
     });
-    costUsd = r.costUsd;
+    costUsd = sessionCost(r, r.durationMs, held.heldUsd);
     if (!r.ok) {
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied: r.denied });
-      return { ok: false, reason: r.reason, detail: r.detail, sessionId: r.sessionId, costUsd: r.costUsd };
+      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied: r.denied });
+      return { ok: false, reason: r.reason, detail: r.detail, sessionId: r.sessionId, costUsd };
     }
     const parsed = o.schema.safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
@@ -132,11 +133,13 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     return { ok: true, value: parsed.data, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested) {
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "interrupted", error: "stopped by request" });
+      // A session the stop killed never reported its cost.
+      const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, held.heldUsd);
+      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "interrupted", costUsd: spent, error: "stopped by request" });
       throw e;
     }
-    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd, error: `crash: runtime error: ${errorText(e)}` });
-    return { ok: false, reason: "crash", detail: errorText(e), sessionId: null, costUsd };
+    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: costUsd ?? 0, error: `crash: runtime error: ${errorText(e)}` });
+    return { ok: false, reason: "crash", detail: errorText(e), sessionId: null, costUsd: costUsd ?? 0 };
   } finally {
     if (writer) { try { await writer.end(); } catch { /* already closed */ } }
   }

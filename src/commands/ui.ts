@@ -1,6 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { attention, healthView, type AttentionItem } from "../attention";
+import { startOfToday } from "../budget";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } from "../heartbeat";
 import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
@@ -124,7 +125,7 @@ function runningPhase(intents: IntentView[], slug: string): string | null {
 }
 
 function totals(phases: Array<Pick<PhaseView, "started" | "costUsd">>, now: Date): UiState["totals"] {
-  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const day = new Date(startOfToday(now));
   // The week starts on Monday, local time.
   const week = new Date(day.getFullYear(), day.getMonth(), day.getDate() - ((day.getDay() + 6) % 7));
   let todayUsd = 0, weekUsd = 0, allUsd = 0;

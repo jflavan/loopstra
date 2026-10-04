@@ -12,6 +12,25 @@ export function startOfToday(now = new Date()): string {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
+/** Local midnight tonight: when every daily budget starts again. */
+export function startOfTomorrow(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+}
+
+/** About what a minute of a session costs ($2 is about 10 minutes). Setup turns minutes into dollars at it. */
+export const USD_PER_MINUTE = 0.2;
+
+/**
+ * What a session counts against its budget: what it reported. A session that ended without reporting
+ * (killed at its timeout or by a stop request, or crashed) never says what it spent, so under a cap it
+ * counts at about its minutes (USD_PER_MINUTE), at least what earlier sends of it reported, and never
+ * more than the cap (the CLI stops it there). With no cap, what it reported.
+ */
+export function sessionCost(r: { costUsd: number; costReported: boolean }, durationMs: number, capUsd: number): number {
+  if (r.costReported || !Number.isFinite(capUsd)) return r.costUsd;
+  return Math.min(capUsd, Math.max(r.costUsd, (durationMs / 60_000) * USD_PER_MINUTE));
+}
+
 /** A budget that is not set is no limit. */
 export function limitOf(usd: number | undefined): number {
   return usd ?? Infinity;

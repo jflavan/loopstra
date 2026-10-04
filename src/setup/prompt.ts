@@ -1,5 +1,6 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { USD_PER_MINUTE } from "../budget";
 
 /** Setup ended without saving: input ran out (Ctrl-D, or Ctrl-Z then Enter on Windows), or --defaults had no answer to give. */
 export class SetupStopped extends Error {
@@ -13,7 +14,7 @@ export class SetupStopped extends Error {
 export type Amount = number | "none";
 
 /** What setup converts minutes at unless the person gives another rate: about $2 per 10 minutes. */
-export const DEFAULT_RATE_PER_MINUTE = 0.2;
+export const DEFAULT_RATE_PER_MINUTE = USD_PER_MINUTE;
 
 export interface TextOptions {
   /** What Enter takes. */

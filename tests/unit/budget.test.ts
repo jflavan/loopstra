@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHAT_SLUG, limitOf, staleBefore } from "../../src/budget";
+import { CHAT_SLUG, limitOf, sessionCost, staleBefore, startOfTomorrow, USD_PER_MINUTE } from "../../src/budget";
 import { validateConfig } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -60,6 +60,26 @@ describe("budget pools", () => {
       expect(trace.phaseStartWithin("b", "x", "agent", day)!.heldUsd).toBe(1);
       expect(trace.phaseStartWithin("c", "x", "agent", day)).toBeNull();
     });
+  });
+
+  test("a session that reported its cost counts at it", () => {
+    expect(sessionCost({ costUsd: 1.5, costReported: true }, 60 * 60_000, 2)).toBe(1.5);
+  });
+
+  test("under a cap, a session that never reported its cost counts at about its minutes, at least what it reported, never more than the cap", () => {
+    const minutes = (m: number) => m * 60_000;
+    expect(sessionCost({ costUsd: 0, costReported: false }, minutes(10), 20)).toBeCloseTo(10 * USD_PER_MINUTE);
+    expect(sessionCost({ costUsd: 5, costReported: false }, minutes(10), 20)).toBe(5);
+    expect(sessionCost({ costUsd: 0, costReported: false }, minutes(30), 4)).toBe(4);
+  });
+
+  test("with no cap, a session that never reported its cost counts at what it reported", () => {
+    expect(sessionCost({ costUsd: 0, costReported: false }, 30 * 60_000, Infinity)).toBe(0);
+  });
+
+  test("tomorrow starts at local midnight", () => {
+    const t = startOfTomorrow(new Date(2026, 9, 4, 15, 30));
+    expect([t.getFullYear(), t.getMonth(), t.getDate(), t.getHours(), t.getMinutes()]).toEqual([2026, 9, 5, 0, 0]);
   });
 
   test("a budget that is not set is no limit", () => {

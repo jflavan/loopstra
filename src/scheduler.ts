@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, stepOverDayNote } from "./budget";
+import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
@@ -66,6 +66,8 @@ export async function tick(root: string): Promise<TickResult> {
     if (branch !== cfg.main_branch) {
       trace.event("_loop", "error", { where: "tick", expected: cfg.main_branch, actual: branch || "(unknown)" });
       out.paused = OFF_MAIN_NOTE;
+      // Off main is the reason now (start logs it), not a day pause an earlier tick recorded.
+      heartbeatDayPause(root, null);
       return out;
     }
 
@@ -232,8 +234,7 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
  */
 function dayPaused(root: string, cfg: Config, spent: boolean): string {
   const reason = loopDayNote(cfg, spent);
-  const now = new Date();
-  const until = spent ? new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) : new Date(now.getTime() + 2 * cfg.poll_seconds * 1000);
+  const until = spent ? startOfTomorrow() : new Date(Date.now() + 2 * cfg.poll_seconds * 1000);
   heartbeatDayPause(root, { reason, until: until.toISOString() });
   return reason;
 }
