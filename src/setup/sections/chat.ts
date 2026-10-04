@@ -41,8 +41,9 @@ const LATER = "try loopstra setup --check again later.";
 /** Asks one bot's settings. Ids are kept as strings, so long numeric ones (Discord's) stay exact. */
 async function askBot(ctx: SetupContext, bot: Bot): Promise<void> {
   const at = (k: string) => ["chat", "transports", bot, k];
-  const str = (k: string) => { const v = ctx.doc.get(at(k)); return v === undefined || v === null ? undefined : String(v); };
-  const ids = (k: string) => { const v = ctx.doc.get(at(k)); return Array.isArray(v) && v.length ? v.map(String).join(", ") : undefined; };
+  // As written in the file: a Discord id without quotes is too long to read as a number.
+  const str = (k: string) => { const v = ctx.doc.written(at(k)); return typeof v === "string" ? v : undefined; };
+  const ids = (k: string) => { const v = ctx.doc.written(at(k)); return Array.isArray(v) && v.length ? v.join(", ") : undefined; };
   const added = ctx.doc.get(["chat", "transports", bot]) === undefined;
   ctx.ask.say(`${LABEL[bot]}: the config holds only the names of the environment variables with the tokens, never the tokens.`);
   // Always written, even as the default: the file then says which variables to set.

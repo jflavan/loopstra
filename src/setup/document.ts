@@ -50,6 +50,18 @@ export class ConfigDocument {
   }
 
   /**
+   * The value at `path` as it is written in the file: a scalar's text, or a list of them for a list;
+   * undefined for anything else. A long number written without quotes (a Discord id) keeps every
+   * digit, where get() gives the number YAML read, already rounded.
+   */
+  written(path: Path): string | string[] | undefined {
+    const asWritten = (n: unknown) => (!isScalar(n) || n.value === null ? undefined : typeof n.source === "string" ? n.source : String(n.value));
+    const node = this.doc.getIn(path, true);
+    if (isSeq(node)) return node.items.map(asWritten).filter((s): s is string => s !== undefined);
+    return asWritten(node);
+  }
+
+  /**
    * Sets a value. `quote` writes a string in double quotes, the way init writes commands; `flow`
    * writes a list or map on one line (`[ a, b ]`).
    */

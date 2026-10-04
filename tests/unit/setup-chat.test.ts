@@ -92,6 +92,17 @@ describe("the chat section", () => {
     } finally { r.cleanup(); }
   });
 
+  test("long ids written without quotes are offered with every digit, and kept that way", async () => {
+    const r = configRepo(`${BASE}chat:\n  transports:\n    discord:\n      channel: 123456789012345678\n      allow: [123456789012345671, 42]\n      announce_to: 123456789012345678\n`);
+    try {
+      // Enter takes each suggestion.
+      const { shown, text } = await askSection(chat, r.root, ["discord", "", "", "", "", ""]);
+      expect(shown).toContain("123456789012345678");
+      expect(shown).not.toContain("123456789012345680");
+      expect(parse(text).chat.transports.discord).toMatchObject({ channel: "123456789012345678", allow: ["123456789012345671", "42"], announce_to: "123456789012345678" });
+    } finally { r.cleanup(); }
+  });
+
   test("adding a Slack bot to the config init writes keeps its comments", async () => {
     const repo = await tempGitRepo();
     try {
