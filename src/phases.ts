@@ -177,8 +177,8 @@ export function setPhaseBoundary(fn: PhaseBoundary | null): void {
 
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
-  throwIfStopping();
   if (phaseBoundary) await phaseBoundary(ctx);
+  throwIfStopping();
   const seq = ctx.trace.phaseStart(ctx.slug, traceName, "agent");
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];

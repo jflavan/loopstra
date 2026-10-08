@@ -117,6 +117,7 @@ export async function tick(root: string): Promise<TickResult> {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
       out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
+      // Only merge steps wait, so a change merged between this step's phases is never run again from `ordered`.
       if (!(out.result.ok && out.result.waiting)) break;
     }
     return out;
@@ -154,6 +155,8 @@ async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, runnin
   if (mergingBetweenPhases || WATCHING_PR.has(running.intent.file.frontmatter.status)) return;
   mergingBetweenPhases = true;
   try {
+    // Without a remote a merge step runs the tests and may run sessions: never between phases.
+    if ((await new Git(root).remoteName()) === null) return;
     const ordered = orderQueue((await scanRepo(root)).intents);
     const human = humanGates(cfg);
     for (const i of ordered) {
