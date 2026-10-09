@@ -44,6 +44,10 @@ describe("checks", () => {
       "- Makefile: add a target",
       "- Dockerfile (new)",
       "- `Justfile` gets a recipe",
+      "- **Procfile**: add a worker",
+      "- __Rakefile__: x",
+      "- Containerfile (new): base image",
+      "- (new) Brewfile",
       "", "Pages that need no edits:",
       "- The Admin pages only read the board list.",
       "- Admin pages are unaffected.",
@@ -55,7 +59,8 @@ describe("checks", () => {
     ].join("\n");
     expect(parsePlanFiles(plan)).toEqual([
       { path: "src/Pages/Board.razor", new: false }, { path: "Makefile", new: false },
-      { path: "Dockerfile", new: true }, { path: "Justfile", new: false },
+      { path: "Dockerfile", new: true }, { path: "Justfile", new: false }, { path: "Procfile", new: false },
+      { path: "Rakefile", new: false }, { path: "Containerfile", new: true }, { path: "Brewfile", new: true },
     ]);
   });
 
