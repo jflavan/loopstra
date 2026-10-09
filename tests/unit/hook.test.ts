@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tempDir } from "../helpers";
+import { run, tempDir, tempGitRepo } from "../helpers";
 
 const HOOK = fileURLToPath(new URL("../../templates/hooks/loopstra-protect-tests.ts", import.meta.url));
 
@@ -40,5 +40,42 @@ describe("protect-tests hook", () => {
       expect((await runHook({ tool_name: "Edit", tool_input: { file_path: code } }, fix, real)).code).toBe(0);
       expect((await runHook({ tool_name: "Edit", tool_input: { file_path: test_ } }, fix, real)).code).toBe(2);
     } finally { t.cleanup(); }
+  });
+
+  test("during fix, allows tests the change added or changed on its branch, and refuses tests unchanged on main", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const root = realpathSync.native(repo.path);
+      mkdirSync(join(root, "tests"), { recursive: true });
+      await Bun.write(join(root, "tests", "old.test.ts"), "old\n");
+      await Bun.write(join(root, "tests", "kept.test.ts"), "kept\n");
+      await run(["git", "add", "-A"], root);
+      await run(["git", "commit", "-q", "-m", "tests on main"], root);
+      await run(["git", "checkout", "-q", "-b", "intent/x"], root);
+      await Bun.write(join(root, "tests", "new.test.ts"), "new\n");
+      await Bun.write(join(root, "tests", "kept.test.ts"), "kept, changed\n");
+      await run(["git", "add", "-A"], root);
+      await run(["git", "commit", "-q", "-m", "build"], root);
+      // main moves on after the branch left it: its own changes are not the branch's.
+      await run(["git", "checkout", "-q", "main"], root);
+      await Bun.write(join(root, "tests", "old.test.ts"), "old, changed on main\n");
+      await run(["git", "commit", "-q", "-am", "main moves"], root);
+      await run(["git", "checkout", "-q", "intent/x"], root);
+
+      const log = join(root, ".git", "protected-tests.txt");
+      const env = { LOOPSTRA_PHASE: "fix", LOOPSTRA_BASE: "main", LOOPSTRA_PROTECTED_LOG: log, CLAUDE_PROJECT_DIR: root };
+      const edit = (rel: string, e: Record<string, string> = env) => runHook({ tool_name: "Edit", tool_input: { file_path: join(root, rel) } }, e);
+      expect((await edit("tests/new.test.ts")).code).toBe(0);
+      expect((await edit("tests/kept.test.ts")).code).toBe(0);
+      expect(existsSync(log)).toBe(false);
+      const refused = await edit("tests/old.test.ts");
+      expect(refused.code).toBe(2);
+      expect(refused.err).toContain("protected");
+      expect(readFileSync(log, "utf8")).toBe("tests/old.test.ts\n");
+      // Without a base (an older runtime) or with one git does not know, every test stays protected.
+      const { LOOPSTRA_BASE: _, ...noBase } = env;
+      expect((await edit("tests/new.test.ts", noBase)).code).toBe(2);
+      expect((await edit("tests/new.test.ts", { ...env, LOOPSTRA_BASE: "no-such-branch" })).code).toBe(2);
+    } finally { repo.cleanup(); }
   });
 });

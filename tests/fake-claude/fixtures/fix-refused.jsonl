@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"fake-fix-refused","cwd":"/","tools":[],"model":"fake"}
+{"type":"fake_action","refuse":"tests/old.test.ts"}
+{"type":"fake_action","refuse":"tests/old.test.ts"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-fix-refused","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"fail","summary":"The only fix is in a protected test file","commit_message":""},"result":"ok"}

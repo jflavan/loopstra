@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
@@ -172,11 +172,14 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
     const refused = denied.length ? `; not allowed: ${denied.join(", ")}` : "";
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}${refused}`, denied });
-    return { ok: false, reason, note: ownerNote(reason), sessionId };
+    const tests = protectedTests(protectedLog);
+    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+  const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
+  // The protect-tests hook writes here the test files it refused to let a fix session edit.
+  const protectedLog = join(dir, "protected-tests.txt");
   try {
-    const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
     mkdirSync(dir, { recursive: true });
     await Bun.write(join(dir, "prompt.md"), prompt);
     const writer = Bun.file(join(dir, "raw.jsonl")).writer();
@@ -193,7 +196,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: ctx.cfg.claude.max_budget_usd,
       resume: spec.resume,
-      env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, ...(spec.env ?? {}) },
+      env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
       onEvent: (e) => {
         writer.write(JSON.stringify(e) + "\n");
         if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
@@ -230,6 +233,21 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   } finally {
     if (raw) { try { await raw.end(); } catch { /* already closed */ } }
   }
+}
+
+/** The test files the protect-tests hook refused during a phase, once each, in the order refused. */
+function protectedTests(log: string): string[] {
+  try {
+    return [...new Set(readFileSync(log, "utf8").split("\n").map((l) => l.trim()).filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+/** Names the protected test files a failed fix wanted to edit, so a person can make the edit instead of a rebuild. */
+export function protectedNote(ctx: StepContext, files: string[]): string {
+  const list = files.map((f) => `\`${f}\``).join(", ");
+  return `It was not allowed to edit ${files.length === 1 ? "this test file" : "these test files"}, which the change did not add or change: ${list}. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
 }
 
 const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
