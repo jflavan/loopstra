@@ -37,6 +37,28 @@ describe("checks", () => {
     ]);
   });
 
+  test("parsePlanFiles skips prose bullets and file:line references in notes after the file list", () => {
+    const plan = [
+      "# Plan", "", "## Files that change",
+      "- src/Pages/Board.razor",
+      "- Makefile: add a target",
+      "- Dockerfile (new)",
+      "- `Justfile` gets a recipe",
+      "", "Pages that need no edits:",
+      "- The Admin pages only read the board list.",
+      "- Admin pages are unaffected.",
+      "", "Existing tests checked and found unaffected:",
+      "- `ReadTests.cs:98` and `ArchiveTests.cs:85` check thread-summary fields.",
+      "- InboxTests.cs:125, PostNumberHintTests.cs:129",
+      "- `McpTests.cs:62-73` covers the tool list.",
+      "", "## Order of work", "1. x", "",
+    ].join("\n");
+    expect(parsePlanFiles(plan)).toEqual([
+      { path: "src/Pages/Board.razor", new: false }, { path: "Makefile", new: false },
+      { path: "Dockerfile", new: true }, { path: "Justfile", new: false },
+    ]);
+  });
+
   test("parsePlanFiles returns null when there is no Files that change section", () => {
     expect(parsePlanFiles("# Plan\n\n## Order of work\n1. x\n")).toBeNull();
     expect(parsePlanFiles("# Plan\n\n## Files that change\n\n## Order of work\n")).toEqual([]);
