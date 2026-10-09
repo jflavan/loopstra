@@ -247,7 +247,7 @@ function protectedTests(log: string): string[] {
 /** Names the protected test files a failed fix wanted to edit, so a person can make the edit instead of a rebuild. */
 export function protectedNote(ctx: StepContext, files: string[]): string {
   const list = files.map((f) => `\`${f}\``).join(", ");
-  return `It was not allowed to edit ${files.length === 1 ? "this test file" : "these test files"}, which the change did not add or change: ${list}. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
+  return `It was not allowed to edit ${files.length === 1 ? "this test file" : "these test files"}, which this branch did not add or edit: ${list}. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
 }
 
 const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };

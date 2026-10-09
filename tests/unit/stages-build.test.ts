@@ -76,6 +76,9 @@ describe("build stage", () => {
     expect(trace.phases("add-numbers").filter((p) => p.name.startsWith("test-")).map((p) => p.status)).toEqual(["fail", "fail", "fail"]);
     const recorded = await Bun.file(argsFile).json();
     expect(recorded.env.LOOPSTRA_PHASE).toBe("fix");
+    // What the protect-tests hook needs: the base its branch diff starts from, and where to record refusals.
+    expect(recorded.env.LOOPSTRA_BASE).toBe("main");
+    expect(recorded.env.LOOPSTRA_PROTECTED_LOG).toBe(join(ctx.runDir, "phases", `${trace.phases("add-numbers").find((p) => p.name === "fix-2")!.seq}-fix-2`, "protected-tests.txt"));
     expect(recorded.args).toEqual(expect.arrayContaining(["--resume", "fake-build"]));
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("exit 1"))).toBe(true);
     trace.close(); repo.cleanup();

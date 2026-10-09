@@ -263,7 +263,7 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe("agent-fail");
-      expect(r.note).toBe(`The assistant reported it could not finish this step. It was not allowed to edit this test file, which the change did not add or change: \`tests/old.test.ts\`. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`);
+      expect(r.note).toBe(`The assistant reported it could not finish this step. It was not allowed to edit this test file, which this branch did not add or edit: \`tests/old.test.ts\`. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`);
     }
     trace.close(); repo.cleanup();
   });

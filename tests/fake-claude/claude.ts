@@ -29,6 +29,8 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
   await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, prompt, cwd: process.cwd(), env: {
     LOOPSTRA_PHASE: phase || null,
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
+    LOOPSTRA_BASE: process.env.LOOPSTRA_BASE ?? null,
+    LOOPSTRA_PROTECTED_LOG: process.env.LOOPSTRA_PROTECTED_LOG ?? null,
   } }));
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
