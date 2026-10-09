@@ -48,6 +48,7 @@ describe("checks", () => {
       "- __Rakefile__: x",
       "- Containerfile (new): base image",
       "- (new) Brewfile",
+      "- Vagrantfile `(new)`",
       "", "Pages that need no edits:",
       "- The Admin pages only read the board list.",
       "- Admin pages are unaffected.",
@@ -61,6 +62,7 @@ describe("checks", () => {
       { path: "src/Pages/Board.razor", new: false }, { path: "Makefile", new: false },
       { path: "Dockerfile", new: true }, { path: "Justfile", new: false }, { path: "Procfile", new: false },
       { path: "Rakefile", new: false }, { path: "Containerfile", new: true }, { path: "Brewfile", new: true },
+      { path: "Vagrantfile", new: true },
     ]);
   });
 

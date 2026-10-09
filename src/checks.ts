@@ -39,7 +39,7 @@ export function parsePlanFiles(plan: string): PlanFile[] | null {
     if (/^#{1,2}\s/.test(line)) break;
     const m = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
     if (!m?.[1]) continue;
-    if (/^[A-Za-z][\w-]*\s+[\w`*]/.test(m[1])) continue; // prose: a bare word, then more words
+    if (/^[A-Za-z][\w-]*\s+(?![`*_]*\(new\))[\w`*]/i.test(m[1])) continue; // prose: a bare word, then more words
     const token = m[1].replace(/\(new\)/gi, " ").replace(/\*\*|__|`/g, " ").trim().split(/\s+/)[0] ?? "";
     const bare = token.replace(/[:,;]+$/, "");
     const path = normalizePath(bare);
