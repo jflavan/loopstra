@@ -7,7 +7,7 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { activePause, clearPause, heartbeatDayPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
-import { ownerNote, probeAssistant } from "./phases";
+import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
@@ -124,10 +124,14 @@ export async function tick(root: string): Promise<TickResult> {
     // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
     // whose depends_on names one not merged yet waits, so it is never built on a main without it.
     const human = humanGates(cfg);
+    // With a remote, a pull request whose checks pass while another change's step runs merges
+    // between that step's phases, not only on the next tick.
+    if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
     for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length)) {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
       out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
+      // Only merge steps wait, so a change merged between this step's phases is never run again from `ordered`.
       if (!(out.result.ok && out.result.waiting)) break;
     }
     return out;
@@ -144,8 +148,43 @@ export async function tick(root: string): Promise<TickResult> {
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
   } finally {
+    setPhaseBoundary(null);
     await endOfTick(root, cfg, trace, out, share);
     trace.close();
+  }
+}
+
+/** Statuses whose merge step only watches the pull request (with a remote): a cheap look on GitHub. */
+const WATCHING_PR = new Set(["merge-review", "merge-approved"]);
+/** True while mergeReadyChanges runs: the merge steps it starts have phases of their own. */
+let mergingBetweenPhases = false;
+
+/**
+ * Runs before each phase of a step (with a remote): the merge step of every other change that is
+ * watching its pull request, so one whose checks passed (or that was approved) merges now rather
+ * than after the whole running step. The queue is read again from disk each time. Not during a
+ * merge step itself (those run one after another in the tick), nor inside one started here. A
+ * problem is traced and never stops the running step; only a stop request passes through.
+ */
+async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, running: StepContext): Promise<void> {
+  if (mergingBetweenPhases || WATCHING_PR.has(running.intent.file.frontmatter.status)) return;
+  mergingBetweenPhases = true;
+  try {
+    // Without a remote a merge step runs the tests and may run sessions: never between phases.
+    if ((await new Git(root).remoteName()) === null) return;
+    const ordered = orderQueue((await scanRepo(root)).intents);
+    const human = humanGates(cfg);
+    for (const i of ordered) {
+      if (i.slug === running.slug || !WATCHING_PR.has(i.file.frontmatter.status)) continue;
+      if (!isRunnable(i, human, true) || waitingOn(i, ordered).length) continue;
+      const r = await runStepGuarded(new StepContext(root, cfg, trace, i));
+      if (!(r.ok && r.waiting)) trace.event(i.slug, "command", { command: "merge step between phases", during: running.slug, ok: r.ok });
+    }
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event("_loop", "error", { where: "merge between phases", during: running.slug, error: errorText(e) });
+  } finally {
+    mergingBetweenPhases = false;
   }
 }
 

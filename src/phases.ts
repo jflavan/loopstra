@@ -164,6 +164,18 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }
 
+/** Run before every phase (agent or code); the scheduler sets it for the duration of a tick. */
+type PhaseBoundary = (ctx: StepContext) => Promise<void>;
+let phaseBoundary: PhaseBoundary | null = null;
+
+/**
+ * Sets (or with null clears) what runs before each phase of a step: the scheduler uses it to merge
+ * other changes whose pull requests became ready while this step runs (see the scheduler).
+ */
+export function setPhaseBoundary(fn: PhaseBoundary | null): void {
+  phaseBoundary = fn;
+}
+
 /**
  * Starts a loop phase's row. With claude.max_budget_usd_per_day set, the phase holds what it may
  * spend of what is left of the loop's day (every change together, not chat), and does not start when
@@ -183,6 +195,7 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+  if (phaseBoundary) await phaseBoundary(ctx);
   throwIfStopping();
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   const started = Date.now();
@@ -319,6 +332,7 @@ export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: strin
 
 /** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
+  if (phaseBoundary) await phaseBoundary(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
     const r = await fn(seq);

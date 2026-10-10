@@ -174,6 +174,46 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("checks that pass while another change's step runs: the pull request merges between that step's phases, not after the step", async () => {
+    const s = await remoteSetup();
+    mkdirSync(join(s.repo, "intent", "other"), { recursive: true });
+    await Bun.write(join(s.repo, "intent", "other", "intent.md"), "---\nstatus: plan-approved\n---\n# Intent: other\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
+    await Bun.write(join(s.repo, "intent", "other", "spec.md"), "# Spec\n\n## Summary\ns\n");
+    await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN);
+    // The test command of the next build: GitHub's checks finish while it runs.
+    await Bun.write(join(s.repo, "flip-checks.ts"), [
+      "const path = process.env.LOOPSTRA_FAKE_GH_STATE!;",
+      "const state = await Bun.file(path).json();",
+      "for (const pr of Object.values(state.prs) as { checks: string }[]) pr.checks = \"pass\";",
+      "await Bun.write(path, JSON.stringify(state));",
+      "",
+    ].join("\n"));
+    await new Git(s.repo).commitAll("another change");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build add-numbers
+      await tick(s.repo); // review, pull request
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
+
+      await Bun.write(configPath(s.repo), "version: 1\ncommands:\n  test: bun flip-checks.ts\n");
+      await new Git(s.repo).commitAll("test command");
+      await run(["git", "push", "-q", "origin", "main"], s.repo);
+      const r = await tick(s.repo); // add-numbers still waits; then other is built, and its tests let the checks pass
+      expect(r.picked).toBe("other");
+      expect((await readIntent(s.repo, "other")).file.frontmatter.status).toBe("reviewing");
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect((await s.pr()).merged).toBe(true);
+      expect(await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true).then((x) => x.code)).toBe(0);
+      const trace = Trace.open(s.repo);
+      try {
+        expect(trace.events(SLUG).some((e) => e.type === "command" && e.payload.includes("\"merge step between phases\"") && e.payload.includes("\"during\":\"other\""))).toBe(true);
+      } finally {
+        trace.close();
+      }
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("merged through gh while main here cannot be brought up to date: waits, and finishes once main has the merged commit", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {
