@@ -10,6 +10,9 @@ const root = process.cwd();
 const HELP = `loopstra <command>
 
   init      stamp Loopstra into this repo
+  setup     walk through the settings (setup <section> for one: budgets, commands,
+            gates, github, chat, models; --defaults takes every suggestion;
+            --check only checks)
   start     run the loop (--once for a single tick, e.g. from cron);
             Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
@@ -39,7 +42,20 @@ async function main(): Promise<number> {
       for (const f of r.kept) console.log(`kept   ${f}`);
       for (const w of r.warnings) console.log(`warning: ${w}`);
       console.log(["", "Next:", ...r.next.map((n) => `  - ${n}`)].join("\n"));
+      // In a terminal, offer the walkthrough now; elsewhere the next steps name it. Init has
+      // succeeded either way: a walkthrough that saves nothing says why.
+      const { offerSetup } = await import("./setup/offer");
+      await offerSetup(root);
       return 0;
+    }
+    case "setup": {
+      const { parseSetupArgs, setup, SETUP_USAGE, setupHelp } = await import("./setup");
+      const args = parseSetupArgs(rest);
+      // The help reads no config, so it works before init too.
+      if (args?.help) { process.stdout.write(setupHelp()); return 0; }
+      if (!setUp()) return 1;
+      if (!args) { console.error(SETUP_USAGE); return 1; }
+      return setup(root, args);
     }
     case "status":
       if (!setUp()) return 1;

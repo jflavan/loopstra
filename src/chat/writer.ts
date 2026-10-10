@@ -125,7 +125,7 @@ export async function writeIntents(o: {
     });
     cost += r.costUsd;
     if (!r.ok && r.budgetUsedUp) {
-      return { ok: false, costUsd: cost, budget: r.budgetUsedUp, problem: r.budgetUsedUp === "held" ? "Other conversations are using what is left of today's chat budget right now; say yes again in a few minutes." : "Today's chat budget is used up; say yes again tomorrow, or an engineer can raise chat.max_budget_usd_per_day." };
+      return { ok: false, costUsd: cost, budget: r.budgetUsedUp, problem: r.budgetUsedUp === "held" ? "Other conversations are using what is left of today's chat budget right now; say yes again in a few minutes." : `Today's chat budget is used up; say yes again tomorrow, or an engineer can raise or remove the limit with \`loopstra setup budgets\`.` };
     }
     if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };

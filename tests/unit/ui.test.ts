@@ -55,6 +55,24 @@ describe("ui state", () => {
     }
   });
 
+  test("a running phase's hold on a budget is not shown as spending", async () => {
+    const t = tempDir();
+    try {
+      await intent(t.path, "one", "status: building");
+      const trace = Trace.open(t.path);
+      trace.upsertIntent("one", "building", "normal");
+      const done = trace.phaseStart("one", "build", "agent"); trace.phaseEnd("one", done, { status: "success", costUsd: 0.3 });
+      trace.phaseStart("one", "fix-1", "agent", 2); // holding $2 while it runs
+      trace.close();
+      const s = await buildState(t.path, 0);
+      expect(s.intents[0]?.phases.map((p) => [p.status, p.costUsd])).toEqual([["success", 0.3], ["running", 0]]);
+      expect(s.intents[0]?.costUsd).toBeCloseTo(0.3);
+      expect(s.totals.allUsd).toBeCloseTo(0.3);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a phase lists the commands it was not allowed to run", async () => {
     const t = tempDir();
     try {

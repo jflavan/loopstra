@@ -26,6 +26,8 @@ const FILES_HEADING = /^##\s+files that change\b/i;
  * Reads the bullets under "## Files that change" (any case, with or without a trailing colon
  * or description). Each bullet's first token is the path; `**`, backticks, `./`, a trailing
  * `:` or `,` and a description after it are ignored; `(new)` anywhere on the line marks it new.
+ * Notes are skipped: a bullet that starts with a bare word followed by more words (prose), or
+ * whose first token is a `file:line` or `file:a-b` reference.
  * Returns null when the plan has no Files that change section at all.
  */
 export function parsePlanFiles(plan: string): PlanFile[] | null {
@@ -37,9 +39,11 @@ export function parsePlanFiles(plan: string): PlanFile[] | null {
     if (/^#{1,2}\s/.test(line)) break;
     const m = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
     if (!m?.[1]) continue;
+    if (/^[A-Za-z][\w-]*\s+(?![`*_]*\(new\))[\w`*]/i.test(m[1])) continue; // prose: a bare word, then more words
     const token = m[1].replace(/\(new\)/gi, " ").replace(/\*\*|__|`/g, " ").trim().split(/\s+/)[0] ?? "";
-    const path = normalizePath(token.replace(/[:,;]+$/, ""));
-    if (!path) continue;
+    const bare = token.replace(/[:,;]+$/, "");
+    const path = normalizePath(bare);
+    if (!path || /:\d+(?:-\d+)?$/.test(bare)) continue; // a file:line reference
     out.push({ path, new: /\(new\)/i.test(line) });
   }
   return out;
