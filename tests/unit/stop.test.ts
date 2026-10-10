@@ -5,7 +5,8 @@ import { runPhase } from "../../src/claude";
 import { GitHub } from "../../src/github";
 import { agentPhase } from "../../src/phases";
 import { runCommand } from "../../src/shell";
-import { onStopSignal, requestStop, resetStop, stopPromise, stopRequested, StopRequested } from "../../src/stop";
+import { GitTimeout, passOn } from "../../src/git";
+import { AssistantUnavailable, LoopBudgetReached, notTheStepsFault, onStopSignal, requestStop, resetStop, stopPromise, stopRequested, StopRequested } from "../../src/stop";
 import { FAKE_CLAUDE as FAKE, setupRepo, tempDir } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -88,4 +89,16 @@ describe("stop", () => {
     expect(trace.phases("add-numbers")).toHaveLength(1);
     trace.close(); repo.cleanup();
   }, 30_000);
+});
+
+describe("not the step's fault", () => {
+  test("a stop, an unavailable assistant, and the loop's used-up day; nothing else", () => {
+    for (const e of [new StopRequested(), new AssistantUnavailable("down"), new LoopBudgetReached()]) expect(notTheStepsFault(e)).toBe(true);
+    for (const e of [new Error("x"), new GitTimeout(["status"], 1000), "text", null]) expect(notTheStepsFault(e)).toBe(false);
+  });
+
+  test("passOn rethrows those and a git timeout, and lets anything else be handled", () => {
+    for (const e of [new StopRequested(), new AssistantUnavailable("down"), new LoopBudgetReached(), new GitTimeout(["status"], 1000)]) expect(() => passOn(e)).toThrow(e);
+    expect(() => passOn(new Error("x"))).not.toThrow();
+  });
 });

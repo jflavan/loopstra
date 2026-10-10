@@ -1,3 +1,4 @@
+import { MIN_SESSION_USD } from "./budget";
 import { lastLine, spawnBounded, withBunOnPath } from "./shell";
 import { StopRequested } from "./stop";
 
@@ -13,6 +14,8 @@ export interface Collected {
   subtype: string;
   structuredOutput: unknown;
   costUsd: number;
+  /** A result event said what the session cost. False when it ended without one (killed at its deadline, or it crashed): costUsd is then only what earlier sends of it reported. */
+  costReported: boolean;
   usage: unknown;
   /** The result event's text; an error result says there why the session failed. */
   resultText: string;
@@ -64,6 +67,7 @@ export class StreamCollector {
       subtype: r?.subtype ?? "missing_result",
       structuredOutput: r?.structured_output,
       costUsd: r?.total_cost_usd ?? 0,
+      costReported: typeof r?.total_cost_usd === "number",
       usage: r?.usage,
       resultText: r?.result ?? "",
       events: this.events,
@@ -129,7 +133,8 @@ export interface RunPhaseInput {
   /** Deny rules (--disallowedTools). A bare tool name removes the tool from the session. */
   disallowedTools?: string[];
   timeoutMs: number;
-  maxBudgetUsd: number;
+  /** The session's spending cap. Absent or Infinity: no --max-budget-usd, and the timeout is the only stop. */
+  maxBudgetUsd?: number;
   resume?: string;
   env?: Record<string, string>;
   /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
@@ -199,7 +204,6 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     "--json-schema", JSON.stringify(input.schema),
     "--model", input.model,
     "--permission-mode", input.permissionMode,
-    "--max-budget-usd", String(input.maxBudgetUsd),
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
@@ -215,11 +219,19 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   // that finished without structured output is asked for it once, the same way.
   let resume = input.resume;
   let stdin = input.prompt;
+  // Each send is a run of its own, with a cap of its own: a later one may spend only what the earlier
+  // ones left of maxBudgetUsd (null: too little is left to send again).
+  const capped = input.maxBudgetUsd !== undefined && Number.isFinite(input.maxBudgetUsd);
+  const budgetArgs = (spentUsd: number): string[] | null => {
+    if (!capped) return [];
+    const left = Math.round((input.maxBudgetUsd! - spentUsd) * 1e6) / 1e6;
+    return left < MIN_SESSION_USD ? null : ["--max-budget-usd", String(left)];
+  };
   let r: Awaited<ReturnType<typeof spawnBounded>>;
   for (let resends = 0; ; resends++) {
     const resumeArgs = resume ? ["--resume", resume] : [];
     r = await spawnBounded({
-      cmd: [...cmd, ...resumeArgs], cwd: input.cwd, env, stdin,
+      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env, stdin,
       timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
       // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
       onLine: (line) => {
@@ -231,6 +243,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     if (r.stopped || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
+      if (budgetArgs(earlierCostUsd + c.costUsd) === null) break; // nothing left to ask with
       nudged = true;
       earlierCostUsd += c.costUsd;
       earlierDenied = c.denied;
@@ -244,6 +257,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     // A result's total_cost_usd is the run's running total, so the last one is what the run cost.
     const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
     earlierCostUsd += typeof cost === "number" ? cost : 0;
+    if (budgetArgs(earlierCostUsd) === null) break; // nothing left to send it again with
     resume = c.sessionId;
     collector = new StreamCollector();
   }

@@ -1,6 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { attention, healthView, type AttentionItem } from "../attention";
+import { startOfToday } from "../budget";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } from "../heartbeat";
 import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
@@ -94,7 +95,7 @@ function intentView(root: string, trace: Trace, i: Intent, all: Intent[], now: D
       .map((f) => ({ name: f, url: `/files/${[i.slug, "phases", dir, f].map(encodeURIComponent).join("/")}` }));
     return {
       seq: p.seq, name: p.name, kind: p.kind, status: p.status, started: p.started, ended: p.ended,
-      durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.cost_usd ?? 0, error: p.error, files,
+      durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0, error: p.error, files,
       denied: denied.get(p.seq) ?? [],
     };
   });
@@ -124,7 +125,7 @@ function runningPhase(intents: IntentView[], slug: string): string | null {
 }
 
 function totals(phases: Array<Pick<PhaseView, "started" | "costUsd">>, now: Date): UiState["totals"] {
-  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const day = new Date(startOfToday(now));
   // The week starts on Monday, local time.
   const week = new Date(day.getFullYear(), day.getMonth(), day.getDate() - ((day.getDay() + 6) % 7));
   let todayUsd = 0, weekUsd = 0, allUsd = 0;

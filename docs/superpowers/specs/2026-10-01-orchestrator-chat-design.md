@@ -169,6 +169,8 @@ Only people on `allow` (per transport, user ids) can talk to it; others are igno
 
 ## Config
 
+> Since 2026-10-02 chat's budgets are unset by default (no limit); see `2026-10-02-onboarding-setup-design.md`.
+
 ```yaml
 chat:
   model: default                  # orchestrator; writer uses stages.design.model

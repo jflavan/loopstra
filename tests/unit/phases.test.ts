@@ -5,7 +5,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AssistantUnavailable } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -229,9 +229,22 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe("budget");
-      expect(r.note).toBe("This step hit its spending limit. An engineer may need to raise the limit.");
+      expect(r.note).toBe("This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.");
     }
     expect(trace.phases("x").map((p) => p.name)).toEqual(["intake"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("the timeout note names the setting", () => {
+    expect(ownerNote("timeout")).toBe("The assistant took too long on this step. An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.");
+  });
+
+  test("with no claude.max_budget_usd, a session gets no --max-budget-usd", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, ".loopstra", "args.json");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:simple-success");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    expect((await Bun.file(argsFile).json()).args).not.toContain("--max-budget-usd");
     trace.close(); repo.cleanup();
   });
 

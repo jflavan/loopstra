@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "../budget";
 import { runPhase, type FailureReason } from "../claude";
 import { modelFor, type Config, type ModelRef } from "../config";
 import { jsonSchemaOf } from "../envelopes";
@@ -8,8 +9,7 @@ import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import type { Trace } from "../trace";
 
-/** The trace slug every chat turn and writer run is recorded under. */
-export const CHAT_SLUG = "_chat";
+export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
 
 export type ChatPhase = "orchestrator" | "write-intent";
 
@@ -54,9 +54,6 @@ export const CHAT_DENIED = [
   ...["**/.loopstra/chat/**", "**/.loopstra/runs/_chat/**"].map((p) => `Read(${p})`),
 ];
 
-/** The least a chat session may hold of the day's budget; with less left, it does not start. */
-export const MIN_SESSION_USD = 0.01;
-
 export type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
   | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number;
@@ -71,7 +68,7 @@ export interface ChatAgentInput<T> {
   prompt: string;
   schema: z.ZodType<T>;
   model: ModelRef;
-  /** The most this one session may spend; it also never holds more than is left of the day's chat budget. */
+  /** The most this one session may spend (Infinity: no cap of its own); it also never holds more than is left of the day's chat budget. */
   capUsd: number;
   resume?: string | null;
 }
@@ -84,16 +81,23 @@ export interface ChatAgentInput<T> {
  * passed on.
  */
 export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentResult<T>> {
+  const day = limitOf(o.cfg.chat.max_budget_usd_per_day);
   const held = o.trace.phaseStartWithin(CHAT_SLUG, o.name, "agent", {
-    since: startOfToday(), limitUsd: o.cfg.chat.max_budget_usd_per_day, capUsd: Math.min(o.capUsd, o.cfg.claude.max_budget_usd, o.cfg.chat.max_budget_usd_per_session), floorUsd: MIN_SESSION_USD,
+    since: startOfToday(), limitUsd: day,
+    capUsd: Math.min(o.capUsd, limitOf(o.cfg.claude.max_budget_usd), limitOf(o.cfg.chat.max_budget_usd_per_session)), floorUsd: MIN_SESSION_USD,
+    // A chat process killed mid-turn leaves its row running; its hold stops counting once stale.
+    runningSince: staleBefore(o.cfg),
   });
   if (!held) {
-    const why = o.cfg.chat.max_budget_usd_per_day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
+    const why = day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
   const seq = held.seq;
+  const started = Date.now();
   const dir = join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${seq}-${o.name}`);
   let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+  // What the session cost, once it ended (null until then): kept if the turn fails after it.
+  let costUsd: number | null = null;
   try {
     mkdirSync(dir, { recursive: true });
     await Bun.write(join(dir, "prompt.md"), o.prompt);
@@ -113,9 +117,10 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
       onEvent: (e) => { raw.write(JSON.stringify(e) + "\n"); },
     });
+    costUsd = sessionCost(r, r.durationMs, held.heldUsd);
     if (!r.ok) {
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied: r.denied });
-      return { ok: false, reason: r.reason, detail: r.detail, sessionId: r.sessionId, costUsd: r.costUsd };
+      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied: r.denied });
+      return { ok: false, reason: r.reason, detail: r.detail, sessionId: r.sessionId, costUsd };
     }
     const parsed = o.schema.safeParse(r.structuredOutput);
     await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
@@ -128,19 +133,16 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     return { ok: true, value: parsed.data, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested) {
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "interrupted", error: "stopped by request" });
+      // A session the stop killed never reported its cost.
+      const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, held.heldUsd);
+      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "interrupted", costUsd: spent, error: "stopped by request" });
       throw e;
     }
-    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", error: `crash: runtime error: ${errorText(e)}` });
-    return { ok: false, reason: "crash", detail: errorText(e), sessionId: null, costUsd: 0 };
+    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: costUsd ?? 0, error: `crash: runtime error: ${errorText(e)}` });
+    return { ok: false, reason: "crash", detail: errorText(e), sessionId: null, costUsd: costUsd ?? 0 };
   } finally {
     if (writer) { try { await writer.end(); } catch { /* already closed */ } }
   }
-}
-
-/** Local midnight today, as an ISO time: the start of the chat's daily budget. */
-export function startOfToday(now = new Date()): string {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
 /** What chat has spent since local midnight, in sessions that have ended (not what running ones hold). */

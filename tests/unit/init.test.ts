@@ -29,7 +29,7 @@ describe("init", () => {
       // The runtime runs its judges as fresh sessions itself; no subagent files.
       expect(existsSync(join(t.path, ".claude", "agents"))).toBe(false);
       // The workspaces only see what is committed on main.
-      expect(report.next[0]).toBe("Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on main. The loop works in its own checkouts, which only see what is committed.");
+      expect(report.next[1]).toBe("Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on main. The loop works in its own checkouts, which only see what is committed.");
       const settings = JSON.parse(await Bun.file(join(t.path, ".claude", "settings.json")).text());
       expect(settings.permissions.allow).toEqual(["Bash(git *)"]);
       expect(settings.hooks.PreToolUse.length).toBe(2);
@@ -80,8 +80,18 @@ describe("init", () => {
       const report = await init(t.path);
       expect(await Bun.file(join(t.path, "loopstra", "config.yaml")).text()).toContain("\nmain_branch: master\n");
       expect((await loadConfig(t.path)).main_branch).toBe("master");
-      expect(report.next[0]).toContain(" on master.");
+      expect(report.next[1]).toContain(" on master.");
     } finally { t.cleanup(); }
+  });
+
+  test("the next steps point to loopstra setup", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const report = await init(repo.path);
+      // Setup first, then commit what it saved with the rest, then start.
+      expect(report.next[0]).toBe("Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.");
+      expect(report.next.join(" ")).not.toContain("gates.*.human");
+    } finally { repo.cleanup(); }
   });
 
   test("a repository with no commits yet gets its unborn branch", async () => {
