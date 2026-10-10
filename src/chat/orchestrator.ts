@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { limitOf } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
 import { Git } from "../git";
@@ -125,12 +126,13 @@ export class Orchestrator {
   }
 
   private budgetLeft(cfg: Config, trace: Trace): number {
-    return cfg.chat.max_budget_usd_per_day - chatSpentToday(trace);
+    return limitOf(cfg.chat.max_budget_usd_per_day) - chatSpentToday(trace);
   }
 
   private budgetUsedUp(cfg: Config, why: "today" | "held" = "today"): string {
     if (why === "held") return "Other conversations are using what is left of today's chat budget right now. Please try again in a few minutes.";
-    return `I have used today's chat budget ($${cfg.chat.max_budget_usd_per_day.toFixed(2)}), so I cannot answer until tomorrow. An engineer can raise chat.max_budget_usd_per_day in loopstra/config.yaml.`;
+    const d = cfg.chat.max_budget_usd_per_day;
+    return `I have used today's chat budget${d === undefined ? "" : ` ($${d.toFixed(2)})`}, so I cannot answer until tomorrow. An engineer can raise or remove the limit with \`loopstra setup budgets\`.`;
   }
 
   private async turn(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, say: Send, declined: string | null): Promise<void> {
@@ -141,7 +143,7 @@ export class Orchestrator {
     }
     const seenUpTo = new AnnouncementLog(this.root).lastId();
     const message = await this.messageBlock(cfg, t, m, declined, seenUpTo);
-    const capUsd = cfg.claude.max_budget_usd;
+    const capUsd = limitOf(cfg.claude.max_budget_usd);
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
     let r = await runChatAgent({
       root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd,
@@ -247,14 +249,14 @@ export class Orchestrator {
 
   private async doHandoff(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, h: Handoff, say: Send): Promise<void> {
     if (this.budgetLeft(cfg, trace) < MIN_SESSION_USD) {
-      await say(`I have used today's chat budget, so I cannot write this up until tomorrow. Say yes again then, or an engineer can raise chat.max_budget_usd_per_day.`);
+      await say(`I have used today's chat budget, so I cannot write this up until tomorrow. Say yes again then, or an engineer can raise or remove the limit with \`loopstra setup budgets\`.`);
       t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
       return;
     }
     await say("Writing it up now. This can take a few minutes.");
     const out: HandoffOutcome = await handOff({
       root: this.root, cfg, trace, handoff: h, author: m.authorName, authorId: m.authorId, transport: m.transport, thread: m.thread, via: m.via,
-      maxBudgetUsd: cfg.claude.max_budget_usd,
+      maxBudgetUsd: limitOf(cfg.claude.max_budget_usd),
     });
     if (out.kind === "failed") {
       // Stopped by the budget: the proposal still stands, so a later yes writes it up.

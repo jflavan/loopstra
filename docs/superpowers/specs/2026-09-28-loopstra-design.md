@@ -196,6 +196,8 @@ never edited, and committed only along with another runtime commit (§10).
 `loopstra/config.yaml`, validated with a schema at every load. Unknown keys
 are errors. Every key has a default except `commands.test`.
 
+> Since 2026-10-02 every budget is unset by default (no limit), and `claude.max_budget_usd_per_day` was added; see `2026-10-02-onboarding-setup-design.md`.
+
 ```yaml
 version: 1
 main_branch: main
@@ -759,6 +761,8 @@ continuation resumes session B if present. If `--resume` fails (session gone),
 the runtime starts a fresh session and records it.
 
 ## 15. Errors and budgets
+
+> Budgets are optional since 2026-10-02; see `2026-10-02-onboarding-setup-design.md`.
 
 - Per-phase timeout and dollar budget from config. Both are failures that
   count against the phase's retry budget, then block.

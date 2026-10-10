@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeFileAtomic } from "../fsutil";
 import type { Handoff } from "./schemas";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
@@ -62,10 +63,7 @@ function fileName(key: string): string {
 
 /** Writes a JSON file whole (temp file, then rename), so a reader never sees half of it. Makes its folder. */
 export function writeJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2));
-  try { renameSync(tmp, path); } catch { writeFileSync(path, JSON.stringify(value, null, 2)); }
+  writeFileAtomic(path, JSON.stringify(value, null, 2));
 }
 
 /** Text on one line, at most `max` characters: for commit subjects and pull request titles. */

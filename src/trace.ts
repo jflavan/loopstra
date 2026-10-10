@@ -81,6 +81,9 @@ function damaged(e: unknown): boolean {
   return /SQLITE_(CORRUPT|NOTADB)|not a database|malformed/i.test(text);
 }
 
+/** Whose phases a budget counts: one slug's, or every slug's but one (the loop's day leaves chat out). */
+export type BudgetPool = { slug: string } | { except: string };
+
 export class Trace {
   private constructor(private readonly root: string, private readonly db: Database) {}
 
@@ -156,15 +159,18 @@ export class Trace {
    * Starts a phase that holds part of a daily budget until it ends: in one transaction, works out
    * what is left of `limitUsd` since `since` (phases still running count at what they hold), and,
    * when at least `floorUsd` is, starts the phase holding up to `capUsd` of it. `phaseEnd` then
-   * records what it really cost. Null when too little is left. Safe across processes.
+   * records what it really cost. Null when too little is left. Safe across processes. `pool` is whose
+   * spending counts against the limit (the slug's own by default); `runningSince` drops holds left by
+   * killed processes (see costIn). With no limit and no cap (both Infinity) nothing is held: the row
+   * starts at 0.
    */
-  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number }): { seq: number; heldUsd: number } | null {
+  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number; pool?: BudgetPool; runningSince?: string }): { seq: number; heldUsd: number } | null {
     const reserve = this.db.transaction(() => {
-      const spent = this.costSince(slug, budget.since);
+      const spent = this.costIn(budget.pool ?? { slug }, budget.since, { runningSince: budget.runningSince });
       const left = budget.limitUsd - spent;
       if (left < budget.floorUsd) return null;
       const heldUsd = Math.min(budget.capUsd, left);
-      return { seq: this.phaseStart(slug, name, kind, heldUsd), heldUsd };
+      return { seq: this.phaseStart(slug, name, kind, Number.isFinite(heldUsd) ? heldUsd : 0), heldUsd };
     });
     return reserve.immediate();
   }
@@ -248,14 +254,25 @@ export class Trace {
    * what they hold, unless `endedOnly`.
    */
   costSince(slug: string, since: string, opts: { endedOnly?: boolean } = {}): number {
-    const running = opts.endedOnly ? " AND status != 'running'" : "";
-    return this.db.query<{ c: number | null }, [string, string]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND started >= ?${running}`).get(slug, since)?.c ?? 0;
+    return this.costIn({ slug }, since, opts);
+  }
+
+  /**
+   * costSince over a pool of slugs. `runningSince`: a running phase that started before it no longer
+   * counts (its process was killed and nothing will end its row); `endedOnly` takes precedence over it.
+   */
+  costIn(pool: BudgetPool, since: string, opts: { endedOnly?: boolean; runningSince?: string } = {}): number {
+    const who = "slug" in pool ? "slug = ?" : "slug != ?";
+    const stale = opts.endedOnly ? undefined : opts.runningSince;
+    const running = opts.endedOnly ? " AND status != 'running'" : stale ? " AND (status != 'running' OR started >= ?)" : "";
+    const args = [("slug" in pool ? pool.slug : pool.except), since, ...(stale ? [stale] : [])];
+    return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
   }
 
   intentSummary(slug: string): IntentSummary | null {
     const i = this.db.query<{ slug: string; status: string; priority: string; updated: string }, [string]>("SELECT * FROM intents WHERE slug = ?").get(slug);
     if (!i) return null;
-    const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ?").get(slug)?.c ?? 0;
+    const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
     const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? ORDER BY seq DESC LIMIT 1").get(slug);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);
     return {

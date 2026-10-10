@@ -98,13 +98,13 @@ const template = (...parts: string[]) => Bun.file(join(TEMPLATES, ...parts)).tex
 
 function commandLines(d: Detected): string {
   const q = (v: string) => JSON.stringify(v);
+  const optional = ["install", "lint", "build", "run"] as const;
   return [
-    d.test ? `  test: ${q(d.test)}` : "  test:",
-    "  # Optional. Leave a key out if you do not have it.",
-    d.install ? `  install: ${q(d.install)}` : "  # install:",
-    d.lint ? `  lint: ${q(d.lint)}` : "  # lint:",
-    d.build ? `  build: ${q(d.build)}` : "  # build:",
-    d.run ? `  run: ${q(d.run)}` : "  # run:",
+    "  # Optional: leave a key out if you do not have it.",
+    ...optional.map((k) => (d[k] ? `  ${k}: ${q(d[k]!)}` : `  # ${k}:`)),
+    "  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:",
+    "  # sessions may run the whole chain and each part of it.",
+    `  test: ${d.test ? q(d.test) : '""'}`,
   ].join("\n");
 }
 
@@ -136,10 +136,10 @@ export async function init(root: string): Promise<InitReport> {
   await ensureClaudeMd(root, d, report);
   await ensureGitignore(root, report);
 
+  // Setup, then commit (what it saved goes in with the rest), then start.
   report.next.push(
+    "Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.",
     `Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on ${branch}. The loop works in its own checkouts, which only see what is committed.`,
-    "Open loopstra/config.yaml and confirm commands.test.",
-    "Decide which gates get a person (gates.*.human).",
     "Start the loop with `loopstra start`; watch it with `loopstra status` or `loopstra ui`.",
   );
   return report;

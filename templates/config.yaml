@@ -1,13 +1,12 @@
 # Loopstra configuration. Engineers edit this; product owners never need to.
-# Every key except commands.test has a default. Unknown keys are errors.
+# Every key except commands.test has a default (spending limits default to none). Unknown keys are errors.
 # Changes take effect on the next pass of the loop; no restart needed.
+# `loopstra setup` walks through these settings and keeps this file's comments.
 version: 1
 main_branch: __MAIN_BRANCH__
 poll_seconds: 60
 
 commands:
-  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:
-  # sessions may run the whole chain and each part of it.
 __COMMANDS__
 
 claude:
@@ -15,51 +14,54 @@ claude:
     default: sonnet
     cheap: haiku
     strong: opus
-  timeout_minutes: 30
-  max_budget_usd: 5
   # What a build session may do without asking. The commands above (test, lint, build, run, install)
   # are always added. Git stays read-only: Loopstra makes every commit itself. The default:
   # allowed_tools: [Read, Edit, Write, Glob, Grep, "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]
+  # Spending limits, in US dollars, are off unless set (`loopstra setup budgets` sets them in minutes or dollars):
+  #   max_budget_usd: what one session may spend
+  #   max_budget_usd_per_day: what the loop's sessions may spend together in a day
+  timeout_minutes: 30
 
 # Gates between stages. human: status (a person edits the status line) | none; the merge gate also
 # takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.
 # A person always accepts an intent (draft -> accepted); by default everything after runs on its own.
 gates:
-  spec:   { human: none, agent: true }
-  plan:   { human: none, agent: true }
-  merge:  { human: none, method: squash }
-  done:   { human: none, agent: true }
+  spec: { human: none, agent: true }
+  plan: { human: none, agent: true }
+  merge: { human: none, method: squash }
+  done: { human: none, agent: true }
 
 # Per-stage model, skills to load, and deterministic commands to run before and after.
 stages:
-  design: { model: strong,  skills: [], before: [], after: [] }
-  plan:   { model: strong,  skills: [], before: [], after: [] }
-  build:  { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
-  review: { model: strong,  skills: [], before: [], after: [], max_rounds: 2 }
+  design: { model: strong, skills: [], before: [], after: [] }
+  plan: { model: strong, skills: [], before: [], after: [] }
+  build: { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
+  review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 
 signals:
   main_health: { every_minutes: 30 }
 
-# Chat: `loopstra chat` (terminal, plus any bots below) and the panel in `loopstra ui`. The orchestrator
+# Chat: `loopstra chat` (terminal, plus any bots) and the panel in `loopstra ui`. The orchestrator
 # answers questions and works out new changes with you; agreed ones are written up as draft intents
 # (through a pull request when there is a remote). It is read-only, except that someone on a bot's
 # acceptors list (or at the terminal or dashboard) can ask it to start a draft.
+# `loopstra setup chat` adds Slack or Discord bots under transports, for example:
+#   transports:
+#     slack:                     # Socket Mode; tokens are read from these environment variables
+#       token_env: LOOPSTRA_SLACK_APP_TOKEN
+#       bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
+#       channel: C0123ABCD       # each top-level message starts a conversation in its thread
+#       allow: [U01AAA, U01BBB]  # who may chat; empty means anyone in the channel
+#       acceptors: [U01AAA]      # who may also start drafts; empty means nobody from Slack
+#       announce_to: C0123ABCD   # where blocked / waiting / merged changes are announced
+#     discord:                   # gateway bot with the Message Content intent on
+#       token_env: LOOPSTRA_DISCORD_TOKEN
+#       channel: "1234567890"
+#       allow: []
+#       acceptors: []
+#       announce_to: "1234567890"
+# Spending limits (off unless set): max_budget_usd_per_day for chat turns and write-ups together,
+# max_budget_usd_per_session for what one of them may hold of it, so others can run meanwhile.
 chat:
-  model: default                 # the orchestrator; the writer uses stages.design.model
-  max_budget_usd_per_day: 5      # chat turns and writer runs together
-  max_budget_usd_per_session: 2  # what one turn or writer run may hold of it, so others can run meanwhile
-  # transports:
-  #   slack:                       # Socket Mode; tokens are read from these environment variables
-  #     token_env: LOOPSTRA_SLACK_APP_TOKEN
-  #     bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
-  #     channel: C0123ABCD          # each top-level message starts a conversation in its thread
-  #     allow: [U01AAA, U01BBB]     # who may chat; empty means anyone in the channel
-  #     acceptors: [U01AAA]         # who may also start drafts; empty means nobody from Slack
-  #     announce_to: C0123ABCD      # where blocked / waiting / merged changes are announced
-  #   discord:                     # gateway bot with the Message Content intent on
-  #     token_env: LOOPSTRA_DISCORD_TOKEN
-  #     channel: "1234567890"
-  #     allow: []
-  #     acceptors: []
-  #     announce_to: "1234567890"
+  model: default # the orchestrator; the writer uses stages.design.model
