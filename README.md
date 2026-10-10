@@ -51,7 +51,7 @@ loopstra init
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
 - `REVIEW.md` (what the reviewer looks for) and a Commands block in `CLAUDE.md`
 - `.claude/skills/loopstra/` (an operator skill for drafting intents, reading status and unblocking)
-- a hook, wired into `.claude/settings.json`, that stops build sessions editing tests to make them pass. Claude Code runs it through its own shell (`bun "$CLAUDE_PROJECT_DIR/.claude/hooks/loopstra-protect-tests.ts"`, Git Bash on Windows), so `bun` must be on the PATH Claude Code sees
+- a hook, wired into `.claude/settings.json`, that stops fix sessions editing tests to make them pass. Tests the change itself added or changed on its branch stay editable; when a fix is refused an edit, the block note names the file. Claude Code runs it through its own shell (`bun "$CLAUDE_PROJECT_DIR/.claude/hooks/loopstra-protect-tests.ts"`, Git Bash on Windows), so `bun` must be on the PATH Claude Code sees
 - `.loopstra/` in `.gitignore`
 
 `main_branch` in the config is the branch the repository is on when you run `init` (for a detached checkout, git's `init.defaultBranch`, else `main`).

@@ -269,6 +269,18 @@ describe("agentPhase failures", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a failed fix names the test files it was not allowed to edit", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "fix.md"), "x FIXTURE:fix-refused");
+    const r = await agentPhase(ctx, { name: "fix", model: "default", permissionMode: "acceptEdits", tools: "build", vars: {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("agent-fail");
+      expect(r.note).toBe(`The assistant reported it could not finish this step. It was not allowed to edit this test file, which this branch did not add or edit: \`tests/old.test.ts\`. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`);
+    }
+    trace.close(); repo.cleanup();
+  });
+
   test("an unavailable assistant is not the phase's failure: the phase is interrupted, not retried, and the step is told", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:outage");
