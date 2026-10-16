@@ -6,7 +6,7 @@ import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { activePause, clearPause, heartbeatDayPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
@@ -82,7 +82,7 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
-    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlug);
+    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
@@ -130,7 +130,11 @@ export async function tick(root: string): Promise<TickResult> {
     for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length)) {
       out.picked = next.slug;
       heartbeatWorkingOn(root, next.slug);
-      out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
+      try {
+        out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
+      } finally {
+        heartbeatDoneWith(root, next.slug);
+      }
       // Only merge steps wait, so a change merged between this step's phases is never run again from `ordered`.
       if (!(out.result.ok && out.result.waiting)) break;
     }

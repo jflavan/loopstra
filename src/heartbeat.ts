@@ -18,8 +18,10 @@ export interface Heartbeat {
   lastTickAt: string | null;
   /** Refreshed every few seconds while the process runs. Staleness is judged from this. */
   lastBeatAt: string;
-  /** The change the current tick is working on, if any. */
+  /** The first change in `working`, if any: written for older readers, which know only this field. */
   current: { slug: string } | null;
+  /** The changes the current tick is working on, in the order their steps started. Missing in older heartbeats. */
+  working?: string[];
   stopping: boolean;
   stopped: boolean;
   /** While the loop waits (the assistant was unavailable, or the day's budget): until when, and why in plain words. */
@@ -33,8 +35,19 @@ export interface LoopStatus {
   state: LoopState;
   /** Plain words for the owner, e.g. "Running — last check 20s ago". */
   text: string;
-  /** The change being worked on; the dashboard adds its running phase. */
-  current: { slug: string; phase?: string | null } | null;
+  /** The changes being worked on, in the order their steps started; the dashboard adds each one's running phase. */
+  working: Array<{ slug: string; phase?: string | null }>;
+}
+
+/** The changes a heartbeat says are being worked on; an older heartbeat has only `current`. */
+function workingOf(hb: Heartbeat): Array<{ slug: string }> {
+  const slugs = hb.working ?? (hb.current ? [hb.current.slug] : []);
+  return slugs.map((slug) => ({ slug }));
+}
+
+/** "a", "a and b", "a, b and c". */
+function namesText(names: string[]): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
 /** How often a live loop refreshes `lastBeatAt`. */
@@ -99,7 +112,7 @@ export function heartbeatState(
   const t = now.getTime();
   const until = opts.pause !== undefined ? opts.pause?.until : hb?.pausedUntil;
   const waits = until && Date.parse(until) > t ? ` The assistant was unavailable; the next start waits until ${clockText(new Date(until))}.` : "";
-  const stopped = (text: string): LoopStatus => ({ state: "stopped", text: waits ? `${text}.${waits}` : text, current: null });
+  const stopped = (text: string): LoopStatus => ({ state: "stopped", text: waits ? `${text}.${waits}` : text, working: [] });
   if (!hb) return stopped("Stopped");
   const lastCheck = `last check ${agoText(t - Date.parse(hb.lastTickAt ?? hb.startedAt))} ago`;
   if (hb.stopped) return stopped(hb.lastTickAt ? `Stopped — ${lastCheck}` : "Stopped");
@@ -107,12 +120,13 @@ export function heartbeatState(
   const beat = Date.parse(hb.lastBeatAt ?? hb.lastTickAt ?? hb.startedAt);
   if (t - beat > staleMs) {
     if (!(opts.alive ?? pidAlive)(hb.pid)) return stopped(`Stopped — it did not shut down cleanly (${lastCheck})`);
-    return { state: "not-responding", text: `Not responding (${lastCheck})`, current: hb.current };
+    return { state: "not-responding", text: `Not responding (${lastCheck})`, working: workingOf(hb) };
   }
-  if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, current: hb.current };
-  if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), current: null };
-  const working = hb.current ? `working on ${hb.current.slug}, ` : "";
-  return { state: "running", text: `Running — ${working}${lastCheck}`, current: hb.current };
+  if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, working: workingOf(hb) };
+  if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), working: [] };
+  const working = workingOf(hb);
+  const on = working.length ? `working on ${namesText(working.map((w) => w.slug))}, ` : "";
+  return { state: "running", text: `Running — ${on}${lastCheck}`, working };
 }
 
 /** "Loop: Running — last check 20s ago" plus a newline, for `status`. */
@@ -191,9 +205,20 @@ export function clockText(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** Ends the pause and its back-off (a phase got through to the assistant). */
-export function clearPause(root: string): void {
-  try { rmSync(pausePath(root), { force: true }); } catch { /* nothing to clear */ }
+/**
+ * A phase of change `slug` got through to the assistant, so the pause and its back-off end. When the
+ * pause names another change as its cause, its cause and repeat count stay: that change's own phase
+ * may keep failing with words that look like an outage, and it must still reach the probe (see
+ * PROBE_AFTER in the scheduler) while other changes get through in between. Without `slug`, or with
+ * no cause recorded, the pause is removed completely. Never throws.
+ */
+export function clearPause(root: string, slug?: string, now: Date = new Date()): void {
+  const p = readPause(root);
+  if (!p) return;
+  try {
+    if (!slug || !p.slug || p.slug === slug) rmSync(pausePath(root), { force: true });
+    else writeFileAtomic(pausePath(root), JSON.stringify({ ...p, until: now.toISOString(), failures: 0 }, null, 2));
+  } catch { /* the next pause or success tries again */ }
 }
 
 /** The tick waits for the loop's daily budget: why, and until when the loop line says so. */
@@ -202,7 +227,10 @@ export interface DayPause { until: string; reason: string }
 export interface LoopBeat {
   tickStarted(): void;
   tickEnded(): void;
+  /** A step for this change started (it joins the list once). */
   workingOn(slug: string): void;
+  /** That change's step ended. */
+  doneWith(slug: string): void;
   /** The tick waits for the day's budget (null: it does not). */
   dayPause(p: DayPause | null): void;
   stopped(): void;
@@ -211,9 +239,14 @@ export interface LoopBeat {
 /** The running loops in this process, by root, so `tick` can say what it picked. */
 const active = new Map<string, LoopBeat>();
 
-/** Records the change the current tick picked. Does nothing when no loop is running for `root`. */
+/** Records that the tick started a step for this change. Does nothing when no loop is running for `root`. */
 export function heartbeatWorkingOn(root: string, slug: string): void {
   active.get(resolve(root))?.workingOn(slug);
+}
+
+/** Records that this change's step ended. Does nothing when no loop is running for `root`. */
+export function heartbeatDoneWith(root: string, slug: string): void {
+  active.get(resolve(root))?.doneWith(slug);
 }
 
 /**
@@ -230,8 +263,12 @@ export function heartbeatDayPause(root: string, p: DayPause | null): void {
  */
 export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   const at = () => new Date().toISOString();
-  const hb: Heartbeat = { pid: process.pid, startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, stopping: false, stopped: false };
+  const hb: Heartbeat = { pid: process.pid, startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, working: [], stopping: false, stopped: false };
   let day: DayPause | null = null;
+  const setWorking = (slugs: string[]) => {
+    hb.working = slugs;
+    hb.current = slugs[0] ? { slug: slugs[0] } : null;
+  };
   const write = () => {
     hb.lastBeatAt = at();
     // An unavailable assistant's pause first: the tick checks it first.
@@ -245,9 +282,10 @@ export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   (timer as { unref?: () => void }).unref?.();
   const unsubscribe = onStop(() => { hb.stopping = true; write(); });
   const beat: LoopBeat = {
-    tickStarted: () => { hb.lastTickAt = at(); hb.current = null; write(); },
-    tickEnded: () => { hb.lastTickAt = at(); hb.current = null; write(); },
-    workingOn: (slug) => { hb.current = { slug }; write(); },
+    tickStarted: () => { hb.lastTickAt = at(); setWorking([]); write(); },
+    tickEnded: () => { hb.lastTickAt = at(); setWorking([]); write(); },
+    workingOn: (slug) => { if (!hb.working?.includes(slug)) setWorking([...(hb.working ?? []), slug]); write(); },
+    doneWith: (slug) => { setWorking((hb.working ?? []).filter((s) => s !== slug)); write(); },
     dayPause: (p) => { day = p; write(); },
     stopped: () => {
       clearInterval(timer);
@@ -255,7 +293,8 @@ export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
       active.delete(resolve(root));
       // A stopped loop waits for nothing; its line says what the next start does (see heartbeatState).
       day = null;
-      Object.assign(hb, { current: null, stopping: false, stopped: true });
+      setWorking([]);
+      Object.assign(hb, { stopping: false, stopped: true });
       write();
     },
   };

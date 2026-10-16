@@ -6,7 +6,7 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, ownTime, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
-import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { onMain, oneMerge } from "../../src/lanes";
 import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -316,6 +316,22 @@ describe("agentPhase failures", () => {
     expect(readPause(repo.path)?.failures).toBe(1);
     const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
+  test("a phase of another change getting through ends the wait but keeps the paused change's cause and repeats", async () => {
+    const { repo, ctx, trace } = await setup();
+    const cause = { slug: "other", phase: "build", line: "Claude usage limit reached" };
+    pauseAfterUnavailable(repo.path, new Date(), cause);
+    pauseAfterUnavailable(repo.path, new Date(), cause);
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toMatchObject({ ...cause, repeats: 2, failures: 0 });
+    expect(activePause(repo.path)).toBeNull();
+    // The paused change's own success clears it completely.
+    pauseAfterUnavailable(repo.path, new Date(), { ...cause, slug: "x" });
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   });

@@ -254,7 +254,7 @@ function assistantReached(ctx: StepContext): void {
   let g = inGroup.getStore()?.group;
   while (g?.decided) g = g.parent;
   if (g) g.succeeded = true;
-  else clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
+  else clearPause(ctx.root, ctx.slug); // the assistant is back: the next outage starts the back-off afresh (see clearPause)
 }
 
 /**

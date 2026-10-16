@@ -11,27 +11,40 @@ export type HealthResult = "pass" | "fail" | "error";
 
 const SIGNAL = "main_health";
 
-/** Written at merge; the next tick runs the check and removes it. Holds the merged slug. */
+/**
+ * Written at merge; the next tick runs the check and removes it. Holds the changes merged since the
+ * last check, one per line, in the order they merged.
+ */
 function pendingPath(root: string): string {
   return join(root, ".loopstra", "health-pending");
 }
 
-/** Asks for a main_health check on the next tick, attributed to the change that just merged. */
+/** The changes waiting for a main_health check (empty when none is asked for). */
+function pendingSlugs(root: string): string[] {
+  try {
+    return readFileSync(pendingPath(root), "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Asks for a main_health check on the next tick, attributed to every change merged since the last one (each named once). */
 export function markHealthPending(root: string, slug: string): void {
   mkdirSync(join(root, ".loopstra"), { recursive: true });
-  writeFileSync(pendingPath(root), slug);
+  const slugs = pendingSlugs(root);
+  if (!slugs.includes(slug)) slugs.push(slug);
+  writeFileSync(pendingPath(root), slugs.join("\n"));
 }
 
 /**
  * Whether main_health should run now, from what is on disk and in the trace (no process state):
  * a merge asked for it, or the newest check is older than the interval, or there never was one.
  */
-export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: boolean; afterSlug: string | null } {
-  const p = pendingPath(root);
-  if (existsSync(p)) return { due: true, afterSlug: readFileSync(p, "utf8").trim() || null };
+export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: boolean; afterSlugs: string[] } {
+  if (existsSync(pendingPath(root))) return { due: true, afterSlugs: pendingSlugs(root) };
   const last = trace.lastSignal(SIGNAL);
   const due = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
-  return { due, afterSlug: null };
+  return { due, afterSlugs: [] };
 }
 
 /**
@@ -40,7 +53,7 @@ export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: b
  * with no baseline yet the result is only recorded. Install or setup problems record `error`,
  * which never opens anything. Test output goes to the trace, never into the intent.
  */
-export async function runMainHealth(root: string, cfg: Config, trace: Trace, afterSlug: string | null): Promise<HealthResult> {
+export async function runMainHealth(root: string, cfg: Config, trace: Trace, afterSlugs: string[]): Promise<HealthResult> {
   const git = new Git(root);
   const dir = join(root, ".loopstra", "health", "main");
   // Traced on the loop; the commands get no change's slug.
@@ -64,7 +77,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);
   rmSync(pendingPath(root), { force: true });
-  if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, git, trace, afterSlug, output);
+  if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, git, trace, afterSlugs, output);
   return result;
 }
 
@@ -74,13 +87,22 @@ export function localDate(d = new Date()): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-async function openFailureIntent(root: string, git: Git, trace: Trace, afterSlug: string | null, output: string): Promise<void> {
+/** `after the change "a" merged`, `after the changes "a" and "b" merged`, or `on the main branch`. */
+function brokeWhen(afterSlugs: string[]): string {
+  const names = afterSlugs.map((s) => `"${s}"`);
+  if (names.length === 0) return "on the main branch";
+  if (names.length === 1) return `after the change ${names[0]} merged`;
+  return `after the changes ${names.slice(0, -1).join(", ")} and ${names.at(-1)} merged`;
+}
+
+/** Opens a draft for the failing tests, named after the first change merged since the last check. */
+async function openFailureIntent(root: string, git: Git, trace: Trace, afterSlugs: string[], output: string): Promise<void> {
   const today = localDate();
-  const slug = afterSlug ? `fix-tests-after-${afterSlug}` : `fix-tests-on-main-${today}`;
+  const slug = afterSlugs[0] ? `fix-tests-after-${afterSlugs[0]}` : `fix-tests-on-main-${today}`;
   const dir = join(root, "intent", slug);
   if (existsSync(dir)) return;
   mkdirSync(dir, { recursive: true });
-  const what = afterSlug ? `after the change "${afterSlug}" merged` : "on the main branch";
+  const what = brokeWhen(afterSlugs);
   await Bun.write(join(dir, "intent.md"), `---
 status: draft
 priority: high
@@ -105,6 +127,6 @@ Everyone working on this repository.
 ## Open questions
 Should the change be reverted, or fixed forward?
 `);
-  trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlug, output });
+  trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlugs, output });
   await git.commitPaths([`intent/${slug}`], bookkeeping(`loopstra(${slug}): open intent for failing tests on main`));
 }
