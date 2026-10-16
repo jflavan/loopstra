@@ -235,7 +235,9 @@ describe("the first review alongside the verifier", () => {
   const reviews = (trace: Trace) => phaseNames(trace).filter((n) => /^review-\d+$/.test(n));
 
   test("review-1 runs at the same time as verify, and the merge step's first round uses it instead of a new review", async () => {
-    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    // Both do a little git work before their sessions start; long sessions keep a slow machine's
+    // difference in that work well inside the time they run together.
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "2000" });
     try {
       const { repo, ctx, trace } = await planned({ test: "bun test" });
       await runBuildStep(ctx);

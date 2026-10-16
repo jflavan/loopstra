@@ -26,9 +26,13 @@ async function lessonsOf(repo: string): Promise<string> {
   return Bun.file(join(repo, "intent", "add-numbers", "lessons.md")).text();
 }
 
-/** Whether two traced phases ran at the same time. */
-function overlapped(a: PhaseRow, b: PhaseRow): boolean {
-  return a.started < b.ended! && b.started < a.ended!;
+/**
+ * Whether lessons started before the done-check ended: true when they run together, false when lessons
+ * waits for it. (Their sessions need not overlap in time: on a slow machine the done-check's copy of
+ * main can take longer to make than the whole lessons session.)
+ */
+function together(doneCheck: PhaseRow, lessons: PhaseRow): boolean {
+  return lessons.started < doneCheck.ended!;
 }
 
 describe("verify stage", () => {
@@ -42,7 +46,7 @@ describe("verify stage", () => {
         await runVerifyStep(ctx);
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
         const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
-        expect(overlapped(byName("done-check"), byName("lessons"))).toBe(on);
+        expect(together(byName("done-check"), byName("lessons"))).toBe(on);
         expect(await lessonsOf(repo.path)).toContain("doc comment");
         trace.close(); repo.cleanup();
       }
@@ -64,7 +68,7 @@ describe("verify stage", () => {
         await runVerifyStep(ctx);
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
         const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
-        expect(overlapped(byName("done-check"), byName("lessons"))).toBe(overlaps);
+        expect(together(byName("done-check"), byName("lessons"))).toBe(overlaps);
         trace.close(); repo.cleanup();
       }
     } finally {
