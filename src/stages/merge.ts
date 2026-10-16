@@ -131,8 +131,10 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
  * naming the artifacts and the review summary). The review goes on it as a comment when the pull
  * request is new or `newReview` says a review just passed. The number and link go to the trace.
  * The push overwrites only the commit recorded in PR_LEASE; a branch someone changed on GitHub is
- * left alone, and the change blocked in plain words. A push cut short earlier is settled first
- * (see adoptCutShortPush), and this one is recorded in PR_PUSHING until PR_LEASE has it.
+ * left alone, and the change blocked in plain words. GitHub is asked for its copy first (see
+ * settleLease): a branch it no longer has (a person deleted it) must still be missing when the push
+ * lands. A push cut short earlier is settled before this one is recorded in PR_PUSHING, which it is
+ * until PR_LEASE has it; when GitHub cannot be asked, this attempt fails and the record is kept.
  */
 async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
   let moved = false;
@@ -140,9 +142,12 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     // Main first, so the pull request's diff against it shows only the change, not the records.
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const head = (await ctx.git.run(["rev-parse", `refs/heads/${ctx.branch}`])).out.trim();
-    if (readMarker(ctx, PR_PUSHING)) adoptCutShortPush(ctx, await headOnGitHub(ctx));
+    const theirs = await headOnGitHub(ctx);
+    if (theirs === null && readMarker(ctx, PR_PUSHING)) throw new Error(`GitHub could not be asked for ${ctx.branch}, to settle a push of it that was cut short`);
+    if (theirs !== null) await settleLease(ctx, theirs);
     writeMarker(ctx, PR_PUSHING, head);
-    const pushed = await pushBranch(ctx.git, ctx.branch, readMarker(ctx, PR_LEASE)?.trim() || undefined);
+    // GitHub has no such branch: it must still have none (an empty lease), whatever was pushed before.
+    const pushed = await pushBranch(ctx.git, ctx.branch, theirs === "" ? "" : readMarker(ctx, PR_LEASE)?.trim() || undefined);
     if (!pushed.ok) {
       moved = pushed.moved === true;
       throw new Error(pushed.detail);
@@ -201,12 +206,22 @@ function adoptCutShortPush(ctx: StepContext, theirs: string): void {
   clearMarker(ctx, PR_PUSHING);
 }
 
-/** The head of the pull request's branch on GitHub, asked of GitHub ("" when it has none, or cannot be asked). */
-async function headOnGitHub(ctx: StepContext): Promise<string> {
+/**
+ * GitHub's copy of the pull request's branch (`theirs`, "" when it has none) becomes the lease when
+ * the next push may go over it: it is Loopstra's own push that was cut short, or the branch here
+ * already contains it (an engineer brought a person's commits in), so the push only adds to it.
+ */
+async function settleLease(ctx: StepContext, theirs: string): Promise<void> {
+  adoptCutShortPush(ctx, theirs);
+  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim() && (await ctx.git.isAncestor(theirs, ctx.branch))) writeMarker(ctx, PR_LEASE, theirs);
+}
+
+/** The head of the pull request's branch on GitHub, asked of GitHub: "" when it has none, null when it cannot be asked. */
+async function headOnGitHub(ctx: StepContext): Promise<string | null> {
   const remote = await ctx.git.remoteName();
-  if (!remote) return "";
+  if (!remote) return null;
   const r = await ctx.git.run(["ls-remote", remote, `refs/heads/${ctx.branch}`], true);
-  return r.code === 0 ? r.out.trim().split(/\s+/)[0] ?? "" : "";
+  return r.code === 0 ? r.out.trim().split(/\s+/)[0] ?? "" : null;
 }
 
 /**
@@ -308,9 +323,10 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
 }
 
 /**
- * Fetches, then judges what GitHub would merge: the pull request's branch as GitHub has it. Commits
- * a person added to that copy are taken into the branch here first (see takePersonCommits), so the
- * checks and the next push include them; when the branch here changed too, both changed. The
+ * Fetches, then judges what GitHub would merge: the pull request's branch as GitHub has it. A copy
+ * the branch here may be pushed over becomes the lease (see settleLease). Commits a person added to
+ * that copy are taken into the branch here first (see takePersonCommits), so the checks and the
+ * next push include them; when the branch here changed too, both changed. The
  * branch here has commits that copy lacks (a bring-up-to-date that stopped before its push): it is
  * not pushed. Otherwise, is main here or the remote's main ahead of that copy with code outside
  * intent/? Both branches are fetched by name, so this works whatever the remote's fetch setting
@@ -329,9 +345,9 @@ async function upToDate(ctx: StepContext): Promise<Freshness> {
   }
   const pushed = `refs/remotes/${remote}/${ctx.branch}`;
   const theirs = (await ctx.git.run(["rev-parse", "--verify", "--quiet", pushed], true)).out.trim();
-  adoptCutShortPush(ctx, theirs);
+  await settleLease(ctx, theirs);
   // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
-  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim() && !(await ctx.git.isAncestor(pushed, ctx.branch))) {
+  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim()) {
     if (!(await ctx.git.isAncestor(ctx.branch, pushed)) || !(await takePersonCommits(ctx, theirs))) return "both changed";
   }
   if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";

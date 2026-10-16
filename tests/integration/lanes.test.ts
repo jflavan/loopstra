@@ -6,7 +6,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
-import { readIntent } from "../../src/intents";
+import { readIntent, writeIntent } from "../../src/intents";
 import { lanesRunning } from "../../src/lanes";
 import { PROBE_AFTER, runStepGuarded, tick } from "../../src/scheduler";
 import { syncMain } from "../../src/remote";
@@ -536,7 +536,21 @@ describe("more than one change at a time, with a GitHub remote", () => {
       await commitWithLanes(r, 2);
       await checksPass(r);
 
-      await tick(r.path);
+      // GitHub answers alpha's lane only once beta's first phase has started, so beta's phase boundary
+      // (the between-phases merge) always runs while alpha's step is under way.
+      const answer = join(r.fixtures, "github-answers");
+      await withEnv({ LOOPSTRA_FAKE_GH_WAIT_FOR: answer }, async () => {
+        const running = tick(r.path);
+        try {
+          // Without the claim the boundary would wait on GitHub too, so beta's phase would never start:
+          // GitHub answers after a while all the same.
+          const until = Date.now() + 15_000;
+          while (Date.now() < until && !inTrace(r.path, (t) => t.phases("beta").length > 0)) await Bun.sleep(50);
+        } finally {
+          writeFileSync(answer, "");
+        }
+        await running;
+      });
       expect(await statusOf(r.path, "beta")).toBe("reviewing");
       // Merged on GitHub in alpha's own lane. While beta's lane runs, main here is not brought up to
       // date, so the merge may be recorded only by a later look (between beta's phases once alpha's
@@ -546,8 +560,11 @@ describe("more than one change at a time, with a GitHub remote", () => {
       inTrace(r.path, (trace) => {
         const merges = trace.events("alpha").filter((e) => e.type === "status_change" && payloadOf<{ to: string }>(e).to === "merged");
         expect(merges).toHaveLength(1);
-        // Never run twice at once: one merge on GitHub, by one step.
+        // Never run twice at once: one merge step looked at the checks, and merged on GitHub.
+        expect(trace.gates("alpha").filter((g) => g.check === "pr-checks")).toHaveLength(1);
         expect(trace.phases("alpha").filter((p) => p.name === "merge")).toHaveLength(1);
+        expect(trace.events("alpha").filter((e) => e.type === "error")).toEqual([]);
+        expect(trace.events("alpha").some((e) => e.payload.includes("merge step between phases"))).toBe(false);
       });
       const s = await Bun.file(r.state).json();
       expect(Object.values(s.prs as Record<string, { merged: boolean }>).filter((p) => p.merged)).toHaveLength(1);
@@ -790,6 +807,23 @@ describe("more than one change at a time, with a GitHub remote", () => {
       expect(await statusOf(both.path, "alpha")).toBe("blocked");
       expect((await readIntent(both.path, "alpha")).file.frontmatter.note).toContain("added commits to the pull request's branch on GitHub");
       expect(await onRemote(both, "src/fix.ts")).toBe(true);
+
+      // An engineer brings the two together here, as the note asks, and retries: the branch here now
+      // has GitHub's copy, so it is pushed over it, and the pull request keeps the fix.
+      const wt = join(both.path, ".loopstra", "worktrees", "alpha");
+      expect((await run(["git", "-c", "user.name=Engineer", "-c", "user.email=engineer@example.com", "merge", "-q", "--no-edit", "refs/remotes/origin/intent/alpha"], wt)).code).toBe(0);
+      await writeIntent(await readIntent(both.path, "alpha"), { status: "merge-review", note: "" });
+      await new Git(both.path).commitPaths(["intent/alpha"], "person: retry");
+      await withEnv(both.env, async () => {
+        const trace = Trace.open(both.path);
+        try {
+          const ctx = new StepContext(both.path, await loadConfig(both.path), trace, await readIntent(both.path, "alpha"));
+          expect(await runStepGuarded(ctx)).toEqual({ ok: true, waiting: true });
+        } finally { trace.close(); }
+      });
+      expect(await statusOf(both.path, "alpha")).toBe("merge-review");
+      expect(await onRemote(both, "src/fix.ts")).toBe(true);
+      expect(await onRemote(both, "src/other.ts")).toBe(true);
     } finally { both.cleanup(); }
 
     // Otherwise the person's commits are taken into the branch here, which is checked again with

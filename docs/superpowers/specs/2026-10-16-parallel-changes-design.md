@@ -409,9 +409,14 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    example a fix after GitHub's checks failed). A push that a stop, a timeout or a crash cut short
    may have reached GitHub all the same: its head is kept in the `pr-pushing` marker, written just
    before the push and cleared once `pr-lease` has it, and when GitHub's copy is that head it
-   becomes the lease, never a person's commits. `openPullRequest` does the same before it pushes
-   (asking GitHub with `git ls-remote`, only while a `pr-pushing` marker is left), so the next
-   push goes over it. If the branch here is part of that copy, it is
+   becomes the lease, never a person's commits. A copy the branch here already contains (an
+   engineer brought a person's commits in) becomes the lease too, since a push over it only adds
+   to it. `openPullRequest` does the same before it pushes, asking GitHub with `git ls-remote`.
+   When GitHub cannot be asked while a `pr-pushing` marker is left, that attempt fails and the
+   marker is kept, so the record of the earlier push is never lost. When GitHub has no such branch
+   (a person deleted it after the pull request was closed), the push leases on it still having
+   none (`--force-with-lease=<branch>:`), never on a stale remote-tracking ref. If the branch here
+   is part of that copy, it is
    fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
    moves to it, so the checks and the next push include the person's work. If the branch here
    changed too, the change is blocked with a plain note for an engineer, and nothing is
@@ -679,8 +684,17 @@ Integration (`LOOPSTRA_FAKE_DELAY_MS`):
     again and pushed, never merged with GitHub's old head.
   - With N=1 the behaviour is unchanged.
 - **Claims:** with N=2, a `merge-review` change in one lane is never also run by the other lane's
-  between-phases merge: exactly one `merge` phase and one change to `merged` for it, with up to
-  two more ticks allowed for rule 4 to record the merge.
+  between-phases merge: exactly one merge step for it (one `pr-checks` gate row, no error, no
+  "merge step between phases" event), one `merge` phase and one change to `merged`, with up to
+  two more ticks allowed for rule 4 to record the merge. The fake gh holds its answers
+  (`LOOPSTRA_FAKE_GH_WAIT_FOR`) until the other change's first phase has started, so that
+  change's phase boundary always runs while the merging change's step is under way.
+  - A pull request closed, its branch deleted on GitHub, and the change rebuilt: a new pull
+    request opens.
+  - A person's commits brought into the branch here by an engineer after a "both changed" block:
+    the retry pushes over GitHub's copy.
+  - GitHub not answering `ls-remote` while a cut-short push is recorded: that attempt fails, the
+    record is kept, and the retry goes over Loopstra's own push.
 - The remote tests start at N=2: a changed `loopstra/config.yaml` is code outside `intent/`, so
   switching N in the middle of a test would put open pull requests out of date.
 - **`depends_on`:** B depends on A, N=2, A at `plan-approved`. The tick builds A, and B has no

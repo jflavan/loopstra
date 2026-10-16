@@ -189,14 +189,14 @@ async function replayMain(git: Git, upstream: string): Promise<{ ok: true; tookR
  * Pushes an intent branch to the remote for its pull request. The branch is Loopstra's own and the
  * merge checks may have rebased it, so it is force-pushed, but only when the remote's branch is still
  * `lease` (the commit Loopstra last pushed there, or took from there): work a person added on GitHub
- * is never overwritten, even when a fetch has seen it since. Without a lease (the first push of a
- * build) the remote's branch must be what the last fetch saw. `moved`: refused because the remote's
- * branch has changed.
+ * is never overwritten, even when a fetch has seen it since. An empty lease: the remote must have no
+ * such branch. Without a lease (the first push of a build) the remote's branch must be what the last
+ * fetch saw. `moved`: refused because the remote's branch has changed.
  */
 export async function pushBranch(git: Git, branch: string, lease?: string): Promise<{ ok: true } | { ok: false; detail: string; moved?: true }> {
   const remote = await git.remoteName();
   if (!remote) return { ok: false, detail: "no remote" };
-  const r = await git.run(["push", "--quiet", lease ? `--force-with-lease=${branch}:${lease}` : "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
+  const r = await git.run(["push", "--quiet", lease !== undefined ? `--force-with-lease=${branch}:${lease}` : "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
   if (r.code === 0) return { ok: true };
   const detail = `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}`;
   return /\(stale info\)/i.test(r.err) ? { ok: false, detail, moved: true } : { ok: false, detail };

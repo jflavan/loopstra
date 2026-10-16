@@ -375,8 +375,8 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
   return { seq: held.seq, capUsd: held.heldUsd, fromDay: held.heldUsd < limitOf(c.max_budget_usd) };
 }
 
-/** The error on a phase row a stop request interrupted. */
-const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
+/** The error on a phase row a stop request interrupted, and the note of the step's `stop` event. */
+export const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
 /**
  * One traced run of a phase. The phase row always ends (never left running) and the raw log is always

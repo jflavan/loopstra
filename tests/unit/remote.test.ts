@@ -270,4 +270,27 @@ describe("pushBranch", () => {
       expect((await run(["git", "cat-file", "-e", "intent/x:fix.md"], s.remote)).code).toBe(0);
     } finally { s.cleanup(); }
   });
+
+  test("an empty lease: pushes while the remote has no such branch, though a fetch saw one, and is refused once it has one", async () => {
+    const s = await setup();
+    try {
+      const git = new Git(s.repo);
+      await run(["git", "checkout", "-q", "-b", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "first\n");
+      await run(["git", "add", "x.md"], s.repo);
+      await run(["git", "commit", "-q", "-m", "first"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+      // Deleted on the remote; the remote-tracking ref here still has it.
+      await run(["git", "branch", "-D", "intent/x"], s.remote);
+      expect((await pushBranch(git, "intent/x")).ok).toBe(false);
+      expect(await pushBranch(git, "intent/x", "")).toEqual({ ok: true });
+      await run(["git", "checkout", "-q", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "second\n");
+      await run(["git", "commit", "-q", "-a", "-m", "second"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      const refused = await pushBranch(git, "intent/x", "");
+      expect(!refused.ok && refused.moved).toBe(true);
+    } finally { s.cleanup(); }
+  });
 });

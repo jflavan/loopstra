@@ -8,7 +8,7 @@ import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, ST
 import { GitHub } from "./github";
 import { claim, laneEnded, laneStarted, oneMerge, release } from "./lanes";
 import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, namesText, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
-import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
+import { ownerNote, probeAssistant, setPhaseBoundary, STOPPED_NOTE } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, intentRoot, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
@@ -186,9 +186,6 @@ export async function tick(root: string): Promise<TickResult> {
     trace.close();
   }
 }
-
-/** The trace note of a step a stop ended. */
-const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
 /**
  * One lane: the pick loop over the tick's runnable changes (as one change at a time always ran it).
