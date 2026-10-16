@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
+import { claim, release } from "../../src/lanes";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
@@ -486,6 +487,22 @@ describe("the first review alongside the verifier", () => {
     expect(earlyNotes(trace)).toEqual(["not used: it was decided by the cheaper judge, which is no longer trusted to decide alone"]);
     expect(reviews(trace)).toEqual(["review-1"]);
     trace.close(); repo.cleanup();
+  });
+
+  test("with another change running a step, the review runs during the build only when the day also has room for that change's session", async () => {
+    // Two of this change's sessions plus one of the other's: $6 needed.
+    for (const [day, early] of [[5, false], [7, true]] as const) {
+      const { repo, ctx, trace } = await planned({ test: "bun test" }, `claude:\n  max_budget_usd_per_day: ${day}\n  max_budget_usd: 2\n`);
+      claim("say-goodbye");
+      try {
+        await runBuildStep(ctx);
+      } finally {
+        release("say-goodbye");
+      }
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+      expect(earlyReviews(trace).length > 0).toBe(early);
+      trace.close(); repo.cleanup();
+    }
   });
 
   for (const [what, config] of [

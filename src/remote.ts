@@ -1,5 +1,6 @@
 import type { Config } from "./config";
 import { Git, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL } from "./git";
+import { onMain } from "./lanes";
 import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -45,20 +46,22 @@ function recordSync(trace: Trace, o: SyncOutcome | null): void {
  * shareMain). Runs only when the checkout is on main with no staged or unstaged changes to tracked
  * files (the generated queue.md aside), so a person's work there is never touched. Never throws
  * (except for a stop request) and never stops the tick: the outcome is the `main_sync` signal, and a
- * rebase that conflicts is aborted. Returns the outcome's result (null without a remote).
+ * rebase that conflicts is aborted. Returns the outcome's result (null without a remote). It is one
+ * main-lock section: no other change commits on main while it is checked, fetched, rebased and pushed.
  */
-export async function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
-  const git = new Git(root);
-  const main = cfg.main_branch;
-  let outcome: SyncOutcome | null;
-  try {
-    outcome = await sync(git, main, trace);
-  } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
-  }
-  recordSync(trace, outcome);
-  return outcome?.result ?? null;
+export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
+  return onMain(root, async () => {
+    const git = new Git(root);
+    let outcome: SyncOutcome | null;
+    try {
+      outcome = await sync(git, cfg.main_branch, trace);
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
+    }
+    recordSync(trace, outcome);
+    return outcome?.result ?? null;
+  });
 }
 
 async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome | null> {
@@ -94,23 +97,25 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
  * once at the end of each tick, and before a pull request's branch is pushed. Main is pushed only when every commit the remote does not have is
  * Loopstra's own: a person's unpushed commits are theirs to share, so then nothing is pushed and
  * the signal waits. A push the remote refuses (a protected branch) is a `main_sync` failure; the
- * loop carries on. Never throws, except for a stop request.
+ * loop carries on. Never throws, except for a stop request. One main-lock section, like syncMain.
  */
-export async function shareMain(root: string, cfg: Config, trace: Trace): Promise<void> {
-  const git = new Git(root);
-  let outcome: SyncOutcome | null;
-  try {
-    const remote = await git.remoteName();
-    if (!remote) return;
-    const upstream = `refs/remotes/${remote}/${cfg.main_branch}`;
-    // Without the remote's main, the tick's sync reports it; nothing to compare with here.
-    if ((await git.run(["rev-parse", "--verify", "--quiet", upstream], true)).code !== 0) return;
-    outcome = await push(git, remote, cfg.main_branch, trace);
-  } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
-  }
-  recordSync(trace, outcome);
+export function shareMain(root: string, cfg: Config, trace: Trace): Promise<void> {
+  return onMain(root, async () => {
+    const git = new Git(root);
+    let outcome: SyncOutcome | null;
+    try {
+      const remote = await git.remoteName();
+      if (!remote) return;
+      const upstream = `refs/remotes/${remote}/${cfg.main_branch}`;
+      // Without the remote's main, the tick's sync reports it; nothing to compare with here.
+      if ((await git.run(["rev-parse", "--verify", "--quiet", upstream], true)).code !== 0) return;
+      outcome = await push(git, remote, cfg.main_branch, trace);
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
+    }
+    recordSync(trace, outcome);
+  });
 }
 
 /** Pushes main when only Loopstra's commits are ahead of the remote's main. Null: nothing new to record. */

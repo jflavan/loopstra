@@ -1,4 +1,4 @@
-import { roomFor } from "../budget";
+import { roomBeside } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor, type Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
@@ -81,11 +81,12 @@ function mayMergeFirst(cfg: Config, status: Status): boolean {
 /**
  * A plan is written ahead only when it is likely to be used and cannot starve the judge: the config
  * allows it (see ruledOut), no person is on the spec gate (they may take days and edit the spec), the
- * day has room for two sessions, and no other change may merge first (see mayMergeFirst).
+ * day has room for two sessions beside one for each other change running a step (see roomBeside),
+ * and no other change may merge first (see mayMergeFirst).
  */
 async function plansAhead(ctx: StepContext): Promise<boolean> {
   const cfg = ctx.cfg;
-  if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomFor(cfg, ctx.trace, 2)) return false;
+  if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomBeside(cfg, ctx.trace, ctx.slug, 2)) return false;
   const others = (await scanRepo(ctx.root)).intents.filter((i) => i.slug !== ctx.slug);
   return !others.some((i) => mayMergeFirst(cfg, i.file.frontmatter.status));
 }

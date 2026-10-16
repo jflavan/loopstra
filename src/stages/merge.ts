@@ -3,6 +3,7 @@ import { assertRootOnMain, block, clearMarker, onceMarker, readArtifact, readMar
 import { evaluateGate, type Check } from "../gates";
 import { bookkeeping, Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
+import { onMain } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, pushBranch, shareMain, syncMain } from "../remote";
@@ -255,14 +256,17 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  * contains the pull request's merge commit, or the branch's changes when gh does not name one.
  */
 async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
-  // A status a person saved without committing would keep the sync from touching main. Off main,
-  // the sync is skipped anyway and says so.
-  if ((await ctx.git.currentBranch()) === ctx.cfg.main_branch) await recordPersonEdits(ctx);
-  await syncMain(ctx.root, ctx.cfg, ctx.trace);
   const main = ctx.cfg.main_branch;
-  const hasIt = pr.mergeCommit
-    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
-    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+  // One main-lock section: nothing commits between the person's edits, the sync and the look at main.
+  const hasIt = await onMain(ctx.root, async () => {
+    // A status a person saved without committing would keep the sync from touching main. Off main,
+    // the sync is skipped anyway and says so.
+    if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
+    await syncMain(ctx.root, ctx.cfg, ctx.trace);
+    return pr.mergeCommit
+      ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
+      : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+  });
   if (!hasIt) {
     if (onceMarker(ctx, MAIN_BEHIND)) {
       ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting: `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`, pr: pr.number, mergeCommit: pr.mergeCommit });
@@ -346,19 +350,29 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   return { ok: true };
 }
 
-/** Commits the change's own folder on main (a person's uncommitted edits to it). Nothing else is touched. */
-async function recordPersonEdits(ctx: StepContext): Promise<void> {
-  await assertRootOnMain(ctx);
-  await ctx.git.commitPaths([`intent/${ctx.slug}`], bookkeeping(`loopstra(${ctx.slug}): record edits made by a person`));
+/** Commits the change's own folder on main (a person's uncommitted edits to it), as one main-lock section. Nothing else is touched. */
+function recordPersonEdits(ctx: StepContext): Promise<void> {
+  return onMain(ctx.root, async () => {
+    await assertRootOnMain(ctx);
+    await ctx.git.commitPaths([`intent/${ctx.slug}`], bookkeeping(`loopstra(${ctx.slug}): record edits made by a person`));
+  });
 }
 
 /**
  * Merges the intent branch into main in the root checkout, in one step that either lands whole or
  * not at all (see Git.merge). Only when the root is on main, nothing is staged, and no tracked file
  * outside intent/ has unsaved changes, so a person's work there is never touched. Unsaved edits
- * inside intent/ (an owner's status lines) never block it; the merge takes only the branch.
+ * inside intent/ (an owner's status lines) never block it; the merge takes only the branch. The look
+ * at the checkout, the catch-up rebase, the marker and the merge are one main-lock section, so no
+ * other change commits on main in between.
  */
 async function mergeNow(ctx: StepContext): Promise<StepResult> {
+  const landed = await onMain(ctx.root, () => mergeIntoMain(ctx));
+  return landed === true ? finishMerge(ctx) : landed;
+}
+
+/** mergeNow's section: true when the merge landed, else the block it recorded. */
+async function mergeIntoMain(ctx: StepContext): Promise<true | StepResult> {
   const root = await rootReady(ctx);
   if (!root.ok) return block(ctx, DIRTY_ROOT_NOTE, { detail: root.detail });
 
@@ -385,7 +399,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
     clearMarker(ctx, MERGING);
     return block(ctx, "The change could not be merged; main was left untouched. An engineer needs to look at it.", { detail: merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.detail });
   }
-  return finishMerge(ctx);
+  return true;
 }
 
 /**
@@ -435,9 +449,15 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
  * The branch is deleted only when main already has its changes. Otherwise (a person set merged by
  * hand, or main is not synced yet) the worktree and branch are left as they are, and the reason is
  * traced once. Files under intent/ are not compared: main's own record of the change moves on after
- * the merge (status, outcome), and the branch only holds an older copy of it.
+ * the merge (status, outcome), and the branch only holds an older copy of it. One main-lock
+ * section, so main cannot move between the look at the branch and its removal.
  */
-export async function cleanupChange(ctx: StepContext): Promise<boolean> {
+export function cleanupChange(ctx: StepContext): Promise<boolean> {
+  return onMain(ctx.root, () => removeMergedWork(ctx));
+}
+
+/** cleanupChange's section. */
+async function removeMergedWork(ctx: StepContext): Promise<boolean> {
   const main = ctx.cfg.main_branch;
   if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) {
     if (onceMarker(ctx, BRANCH_KEPT)) {

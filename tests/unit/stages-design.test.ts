@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
+import { claim, release } from "../../src/lanes";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD } from "../../src/stages/plan";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -242,6 +243,22 @@ describe("plan ahead", () => {
       expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
       expect(phaseNames(trace).includes("early-plan")).toBe(ahead);
       expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(ahead);
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("with another change running a step, a plan is written ahead only when the day also has room for that change's session", async () => {
+    // After intake and design (about $0.05), a day of 2.5 has room for two $1 sessions, not three.
+    for (const others of [0, 1]) {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config: "claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n" });
+      if (others) claim("say-goodbye");
+      try {
+        await runDesignStep(ctx);
+      } finally {
+        release("say-goodbye");
+      }
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(phaseNames(trace).includes("early-plan")).toBe(others === 0);
       trace.close(); repo.cleanup();
     }
   });

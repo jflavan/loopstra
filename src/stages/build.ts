@@ -15,9 +15,13 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, EARLY_REVIEW); // nor reviewed by a review of an earlier build
 
   const branch = await codePhase(ctx, "branch", async () => {
-    if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
-    // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
-    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    // One main-lock section: the branch and its worktree are made while no other change touches refs or worktrees.
+    await ctx.git.section(async () => {
+      if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
+      // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
+      await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    });
+    // In the change's own worktree, so no lock.
     if (ctx.cfg.commands.install) {
       const r = await projectCommand(ctx, ctx.cfg.commands.install, ctx.worktreeDir);
       if (r.code !== 0) throw new Error(`install failed: ${r.lastLine}`);

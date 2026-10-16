@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { CHAT_SLUG, limitOf, roomFor, sessionCost, staleBefore, startOfTomorrow, USD_PER_MINUTE } from "../../src/budget";
+import { CHAT_SLUG, lanesFor, limitOf, roomBeside, roomFor, sessionCost, staleBefore, startOfTomorrow, USD_PER_MINUTE } from "../../src/budget";
+import { claim, release } from "../../src/lanes";
 import { validateConfig } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -127,6 +128,75 @@ describe("room for several sessions at once", () => {
       spent(trace, "a", 1);
       expect(roomFor(cfg, trace, 1)).toBe(true);
       expect(roomFor(cfg, trace, 0)).toBe(true);
+    });
+  });
+});
+
+describe("lanes the day has room for", () => {
+  const cfgWith = (claude: Record<string, number>, n = 2) => validateConfig({ version: 1, commands: { test: "x" }, claude, speed: { max_parallel_changes: n } });
+
+  test("with no daily budget, every configured lane", () => {
+    withTrace((trace) => {
+      expect(lanesFor(cfgWith({}, 3), trace)).toBe(3);
+      expect(lanesFor(cfgWith({ max_budget_usd: 2 }, 4), trace)).toBe(4);
+    });
+  });
+
+  test("with a daily budget and no session cap, one lane: the first session would hold the rest of the day", () => {
+    withTrace((trace) => expect(lanesFor(cfgWith({ max_budget_usd_per_day: 100 }, 3), trace)).toBe(1));
+  });
+
+  test("as many lanes as what is left covers whole sessions, never more than configured", () => {
+    withTrace((trace) => {
+      expect(lanesFor(cfgWith({ max_budget_usd_per_day: 10, max_budget_usd: 4 }, 3), trace)).toBe(2);
+      expect(lanesFor(cfgWith({ max_budget_usd_per_day: 10, max_budget_usd: 1 }, 3), trace)).toBe(3);
+    });
+  });
+
+  test("day $10 with $7 spent and a $2 cap gives one lane", () => {
+    withTrace((trace) => {
+      spent(trace, "a", 7);
+      expect(lanesFor(cfgWith({ max_budget_usd_per_day: 10, max_budget_usd: 2 }, 2), trace)).toBe(1);
+    });
+  });
+
+  test("spending and a running hold of another change lower the count, never below 1", () => {
+    withTrace((trace) => {
+      const cfg = cfgWith({ max_budget_usd_per_day: 10, max_budget_usd: 2 }, 4);
+      expect(lanesFor(cfg, trace)).toBe(4);
+      spent(trace, "a", 5);
+      expect(lanesFor(cfg, trace)).toBe(2);
+      trace.phaseStart("b", "x", "agent", 2);
+      expect(lanesFor(cfg, trace)).toBe(1);
+      spent(trace, "c", 3);
+      expect(lanesFor(cfg, trace)).toBe(1);
+    });
+  });
+
+  test("one configured lane is always one", () => {
+    withTrace((trace) => {
+      expect(lanesFor(cfgWith({}, 1), trace)).toBe(1);
+      expect(lanesFor(cfgWith({ max_budget_usd_per_day: 100, max_budget_usd: 1 }, 1), trace)).toBe(1);
+      expect(lanesFor(cfgWith({ max_budget_usd_per_day: 100 }, 1), trace)).toBe(1);
+    });
+  });
+
+  test("an overlap leaves a session's room for each other change running a step: with one other, three caps", () => {
+    withTrace((trace) => {
+      const cfg = cfgWith({ max_budget_usd_per_day: 6, max_budget_usd: 2 });
+      expect(roomBeside(cfg, trace, "a", 2)).toBe(true);
+      claim("a");
+      claim("b");
+      try {
+        // Two of a's own plus one for b: three caps, $6.
+        expect(roomBeside(cfg, trace, "a", 2)).toBe(true);
+        spent(trace, "x", 1);
+        expect(roomBeside(cfg, trace, "a", 2)).toBe(false);
+        expect(roomFor(cfg, trace, 2)).toBe(true);
+      } finally {
+        release("a");
+        release("b");
+      }
     });
   });
 });

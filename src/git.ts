@@ -159,12 +159,20 @@ export class Git {
       cmd: ["git", ...args], cwd: this.cwd, env: gitEnv(this.cwd), timeoutMs,
       onStop: o.cleanup ? "ignore" : "grace", graceMs: this.stopGraceMs,
     });
-    const r = this.lockKey === null ? await spawn() : await onMainKey(this.lockKey, spawn);
+    const r = await this.section(spawn);
     if (r.timedOut) throw new GitTimeout(args, timeoutMs);
     if (r.stopped) throw new StopRequested();
     const code = r.code ?? 1;
     if (code !== 0 && !o.allowFail) throw new GitError(args, r.out, r.err, code);
     return { code, out: r.out, err: r.err };
+  }
+
+  /**
+   * Runs `fn` as one main-lock section of this checkout: no other change's git command runs here
+   * until it ends (its own commands go straight in). In a change's own worktree it just runs `fn`.
+   */
+  section<T>(fn: () => Promise<T>): Promise<T> {
+    return this.lockKey === null ? fn() : onMainKey(this.lockKey, fn);
   }
 
   /** Runs a command that makes commits, as the runtime: its identity, no signing, no hooks where `--no-verify` exists. */
@@ -198,16 +206,19 @@ export class Git {
   /**
    * Makes `dir` a worktree of this repository checked out on `branch`. An existing directory is
    * reused only if it is itself a worktree root (not just a folder inside the main checkout) on
-   * `branch`; anything else is removed and the worktree is added again.
+   * `branch`; anything else is removed and the worktree is added again. One main-lock section, so
+   * another change's prune never removes this half-made worktree.
    */
-  async ensureWorktree(dir: string, branch: string): Promise<void> {
-    if (existsSync(dir)) {
-      const there = new Git(dir);
-      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
-      await this.run(["worktree", "remove", "--force", dir], true);
-      rmSync(dir, { recursive: true, force: true });
-    }
-    await this.worktreeAdd(dir, branch);
+  ensureWorktree(dir: string, branch: string): Promise<void> {
+    return this.section(async () => {
+      if (existsSync(dir)) {
+        const there = new Git(dir);
+        if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
+        await this.run(["worktree", "remove", "--force", dir], true);
+        rmSync(dir, { recursive: true, force: true });
+      }
+      await this.worktreeAdd(dir, branch);
+    });
   }
 
   /** Throws unless the checkout at this path is on `expected`. Call before committing. */
@@ -365,26 +376,34 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
   return removed;
 }
 
-/** Removes a worktree directory however it can: git first, then the file system, then prunes git's record of it. */
-export async function removeWorktree(git: Git, dir: string): Promise<void> {
-  if (existsSync(dir)) {
-    try {
-      await git.worktreeRemove(dir);
-    } catch {
-      rmSync(dir, { recursive: true, force: true });
+/**
+ * Removes a worktree directory however it can: git first, then the file system, then prunes git's
+ * record of it. One main-lock section of `git`'s checkout.
+ */
+export function removeWorktree(git: Git, dir: string): Promise<void> {
+  return git.section(async () => {
+    if (existsSync(dir)) {
+      try {
+        await git.worktreeRemove(dir);
+      } catch {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
-  }
-  await git.run(["worktree", "prune"], true);
+    await git.run(["worktree", "prune"], true);
+  });
 }
 
 /**
  * Runs `fn` in a throwaway detached worktree of `ref` at `dir` (never the owner's checkout), and
- * always removes it afterwards. A leftover directory from an earlier run is removed first.
+ * always removes it afterwards. A leftover directory from an earlier run is removed first. The setup
+ * and the teardown are each one main-lock section; `fn` (a session) runs outside the lock.
  */
 export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  await removeWorktree(git, dir);
-  mkdirSync(dirname(dir), { recursive: true });
-  await git.run(["worktree", "add", "--detach", dir, ref]);
+  await git.section(async () => {
+    await removeWorktree(git, dir);
+    mkdirSync(dirname(dir), { recursive: true });
+    await git.run(["worktree", "add", "--detach", dir, ref]);
+  });
   try {
     return await fn(dir);
   } finally {

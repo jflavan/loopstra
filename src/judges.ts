@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { noSessionCap, roomFor } from "./budget";
+import { noSessionCap, roomBeside } from "./budget";
 import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
@@ -341,7 +341,8 @@ type JudgeOpts = { alongside?: number; prompt?: string | null };
  * otherwise the strong judge runs after it and decides. A due audit that has no room: the strong judge alone.
  *
  * `alongside`: sessions already running next to this call, which shadow needs room beside (the early
- * review beside the verifier passes 1, and so does spec-check beside the plan written ahead).
+ * review beside the verifier passes 1, and so does spec-check beside the plan written ahead), and one
+ * session for each other change running a step (see roomBeside).
  * `prompt`: the phase's phasePrompt, when the caller already has it; both judges are sent exactly that.
  */
 export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOpts = {}): Promise<JudgeResult<J>> {
@@ -390,7 +391,7 @@ export async function judgeFirst<J extends JudgeName>(ctx: StepContext, phase: A
     // A due audit runs before it decides alone again; until there is room for one, shadow lets the
     // strong judge decide alone.
     else if (mayDecideAlone(ctx.cfg, standing) && !standing.auditDue) return done(await cheapFirst(ctx, pair, c));
-    else if (roomFor(ctx.cfg, ctx.trace, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
+    else if (roomBeside(ctx.cfg, ctx.trace, ctx.slug, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
   return shadow(ctx, pair, c, sessions);
 }
@@ -400,8 +401,8 @@ export async function judgeFirst<J extends JudgeName>(ctx: StepContext, phase: A
  * budget room for both, the strong one alone.
  */
 async function shadow<J extends JudgeName>(ctx: StepContext, pair: Pair<J>, c: Comparison, sessions: number): Promise<JudgeAnswer<J>> {
-  if (!roomFor(ctx.cfg, ctx.trace, sessions)) {
-    // Shadow always gives way to the judge that decides and to the work already running.
+  if (!roomBeside(ctx.cfg, ctx.trace, ctx.slug, sessions)) {
+    // Shadow always gives way to the judge that decides, to the work already running, and to other changes.
     judgeEvent(ctx, pair.strong, "not compared: today's budget has no room for another session");
     return done({ ...(await agentPhase(ctx, pair.strong, pair.prompt)), decidedBy: "strong" });
   }
