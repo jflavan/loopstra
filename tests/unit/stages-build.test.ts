@@ -7,7 +7,8 @@ import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import type { Trace } from "../../src/trace";
-import { setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { configPath } from "../../src/config";
+import { openRepo, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -231,7 +232,7 @@ describe("build stage", () => {
 });
 
 describe("the first review alongside the verifier", () => {
-  const reviews = (trace: Trace) => phaseNames(trace).filter((n) => n.startsWith("review"));
+  const reviews = (trace: Trace) => phaseNames(trace).filter((n) => /^review-\d+$/.test(n));
 
   test("review-1 runs at the same time as verify, and the merge step's first round uses it instead of a new review", async () => {
     const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
@@ -262,6 +263,27 @@ describe("the first review alongside the verifier", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a review kept before review commands were added is not used: round 1 runs after them", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    await runBuildStep(ctx);
+    expect(existsSync(join(ctx.runDir, "review.early"))).toBe(true);
+    trace.close();
+    await Bun.write(configPath(repo.path), `${await Bun.file(configPath(repo.path)).text()}stages:\n  review:\n    before:\n      - echo before\n`);
+    await new Git(repo.path).commitAll("review commands");
+    const again = await openRepo(repo.path);
+    await runMergeStep(again.ctx);
+    expect(reviews(again.trace)).toEqual(["review-1", "review-1"]);
+    again.trace.close(); repo.cleanup();
+  });
+
+  test("no review runs ahead on a worktree the checks left files in: review start commits them, so it could not be used", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test", lint: "echo x > lint-report.txt" });
+    await runBuildStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+    expect(reviews(trace)).toEqual([]);
+    trace.close(); repo.cleanup();
+  });
+
   test("a review asked about other code, or with another prompt, is not used: round 1 runs again", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
     await runBuildStep(ctx);
@@ -287,6 +309,7 @@ describe("the first review alongside the verifier", () => {
     ["speed.overlap_judges is off", "speed:\n  overlap_judges: false\n"],
     ["build has after commands", "stages:\n  build:\n    after:\n      - echo after\n"],
     ["review has before commands", "stages:\n  review:\n    before:\n      - echo before\n"],
+    ["a daily budget has no room for two sessions", "claude:\n  max_budget_usd_per_day: 5\n"],
   ] as const) {
     test(`no review runs during the build when ${what}`, async () => {
       const { repo, ctx, trace } = await planned({ test: "bun test" }, config);

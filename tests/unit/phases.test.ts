@@ -5,9 +5,9 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, setPhaseBoundary, together, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, optional, ownerNote, setPhaseBoundary, together, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { AssistantUnavailable } from "../../src/stop";
+import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
@@ -367,6 +367,21 @@ describe("together", () => {
     ]).catch((e) => e);
     expect(err).toBeInstanceOf(AssistantUnavailable);
     expect(slowEnded).toBe(true);
+    // A stop request wins over any other error, so the loop stops instead of pausing.
+    const stop = await together(ctx, [
+      async () => { throw new AssistantUnavailable("down"); },
+      async () => { throw new StopRequested(); },
+    ]).catch((e) => e);
+    expect(stop).toBeInstanceOf(StopRequested);
+    trace.close(); repo.cleanup();
+  });
+
+  test("optional work that throws is dropped and traced; a stop request still passes through", async () => {
+    const { repo, ctx, trace } = await setup();
+    expect(await optional(ctx, "early review", async () => { throw new AssistantUnavailable("down"); })).toBeNull();
+    expect(trace.events("x").some((e) => e.payload.includes("dropped") && e.payload.includes("down"))).toBe(true);
+    expect(await optional(ctx, "early review", async () => 7)).toBe(7);
+    expect(await optional(ctx, "early review", async () => { throw new StopRequested(); }).catch((e) => e)).toBeInstanceOf(StopRequested);
     trace.close(); repo.cleanup();
   });
 });

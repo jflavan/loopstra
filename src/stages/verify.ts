@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
-import { agentPhase, projectCommand, together } from "../phases";
+import { roomForTwo } from "../budget";
+import { agentPhase, optional, projectCommand, together } from "../phases";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
 
@@ -34,14 +35,15 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   if (!before.ok) return before;
   const a = await artifacts(ctx);
 
-  // Lessons never reads the done-check's result, so the two may run at the same time.
-  const previous = ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail").map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
   const learn = () => agentPhase(ctx, {
     name: "lessons", model: "cheap", permissionMode: "default", tools: "read",
-    vars: { review: a.review, previous }, skills: ctx.cfg.stages.verify.skills,
+    vars: { review: a.review, previous: ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail").map((p) => `${p.name}: ${p.error ?? ""}`).join("\n") },
+    skills: ctx.cfg.stages.verify.skills,
   });
-  const [judged, early] = ctx.cfg.speed.overlap_judges
-    ? await together(ctx, [() => doneCheck(ctx, a), learn] as const)
+  // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
+  // is optional: an unavailable assistant or the day's budget leaves it to run after the done-check.
+  const [judged, early] = ctx.cfg.speed.overlap_judges && roomForTwo(ctx.cfg, ctx.trace)
+    ? await together(ctx, [() => doneCheck(ctx, a), () => optional(ctx, "lessons", learn)] as const)
     : [await doneCheck(ctx, a), null];
   if (!judged.ok) return block(ctx, judged.note, judged);
   const unmet = judged.items.filter((i) => i.result === "unmet");

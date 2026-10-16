@@ -51,6 +51,37 @@ describe("verify stage", () => {
     }
   });
 
+  test("with a daily budget, lessons runs alongside only when the day has room for two whole sessions", async () => {
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    try {
+      // No session cap: the first session would hold the rest of the day and starve the other.
+      for (const [config, overlaps] of [
+        ["claude:\n  max_budget_usd_per_day: 5\n", false],
+        ["claude:\n  max_budget_usd_per_day: 5\n  max_budget_usd: 3\n", false],
+        ["claude:\n  max_budget_usd_per_day: 5\n  max_budget_usd: 2\n", true],
+      ] as const) {
+        const { repo, ctx, trace } = await merged({ config });
+        await runVerifyStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
+        const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
+        expect(overlapped(byName("done-check"), byName("lessons"))).toBe(overlaps);
+        trace.close(); repo.cleanup();
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  test("lessons that cannot reach the assistant never turn a done-check failure into a pause: the change blocks", async () => {
+    const { repo, ctx, trace } = await merged({ doneCheck: "crash" });
+    await Bun.write(join(repo.path, "loopstra", "prompts", "lessons.md"), "{{review}} FIXTURE:usage-limit");
+    await new Git(repo.path).commitAll("lessons prompt");
+    await ctx.reload();
+    await runVerifyStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+    trace.close(); repo.cleanup();
+  });
+
   test("when the done-check cannot be completed, the change blocks and the lessons that ran alongside are not written", async () => {
     const { repo, ctx, trace } = await merged({ doneCheck: "crash" });
     await runVerifyStep(ctx);

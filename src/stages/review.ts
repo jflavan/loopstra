@@ -3,8 +3,6 @@ import { modelFor } from "../config";
 import { Envelopes } from "../envelopes";
 import { Git } from "../git";
 import { agentPhase, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
-import { errorText } from "../shell";
-import { AssistantUnavailable, LoopBudgetReached } from "../stop";
 import { testLoop } from "./build";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
 
@@ -101,20 +99,12 @@ async function reviewKey(ctx: StepContext, phase: AgentPhaseSpec): Promise<strin
 /**
  * Round 1's review, run by the build step at the same time as the verifier (the tests have passed,
  * so both judge the same commit). Returns what to keep if the verifier passes, or null when the
- * review did not finish (round 1 then runs as usual). It is optional work: an unavailable assistant
- * or the day's budget drops it instead of ending the build step; the verifier meets either on its own.
+ * review did not finish (round 1 then runs as usual). The build step runs it as optional work.
  */
 export async function reviewAhead(ctx: StepContext, spec: string, plan: string): Promise<string | null> {
   const phase = await reviewPhase(ctx, 1, spec, plan);
   const key = await reviewKey(ctx, phase);
-  let r: AgentPhaseResult<"review">;
-  try {
-    r = await agentPhase(ctx, phase);
-  } catch (e) {
-    if (!(e instanceof AssistantUnavailable || e instanceof LoopBudgetReached)) throw e;
-    ctx.trace.event(ctx.slug, "command", { command: "early review", note: `dropped: ${errorText(e)}` });
-    return null;
-  }
+  const r = await agentPhase(ctx, phase);
   return key !== null && r.ok ? JSON.stringify({ key, envelope: r.envelope }) : null;
 }
 
@@ -123,7 +113,10 @@ export function keepEarlyReview(ctx: StepContext, kept: string): void {
   writeMarker(ctx, EARLY_REVIEW, kept);
 }
 
-/** The early review, when it was asked exactly what `phase` would ask; it is used up either way. */
+/**
+ * The early review, when it was asked exactly what `phase` would ask; it is used up either way. Not
+ * once review before commands are set: what they changed may be left uncommitted, so the key misses it.
+ */
 async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec): Promise<AgentPhaseResult<"review"> | null> {
   const kept = readMarker(ctx, EARLY_REVIEW);
   if (kept === null) return null;
@@ -131,8 +124,8 @@ async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec): Promise
   let saved: { key?: unknown; envelope?: unknown };
   try { saved = JSON.parse(kept); } catch { return null; }
   const envelope = Envelopes.review.safeParse(saved.envelope);
-  if (!envelope.success || saved.key !== (await reviewKey(ctx, phase))) {
-    ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: the change, its plan, or the review prompt moved on since it ran" });
+  if (!envelope.success || ctx.cfg.stages.review.before.length || saved.key !== (await reviewKey(ctx, phase))) {
+    ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: the change, its plan, the review prompt or its commands moved on since it ran" });
     return null;
   }
   ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName} uses the review that ran alongside the verifier` });

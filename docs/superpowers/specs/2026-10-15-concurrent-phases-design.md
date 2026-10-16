@@ -43,8 +43,11 @@ speed:
   and not inside it, so no merge touches main while two phases run. It waits for every function to
   settle; if any threw, it throws the first error in list order (a stop, an outage, a used-up day
   still reach the scheduler, after the other phase has ended and recorded its row).
-- Phase rows already get their own `seq` and folder; the daily budget hold already counts running
-  phases, so each concurrent session holds its own share.
+- Phase rows already get their own `seq` and folder. A session holds `min(session cap, what is left
+  of the day)`, so with a daily budget two sessions overlap only when the day covers two whole
+  session caps (`roomForTwo`); with a daily budget and no session cap they never overlap.
+- The work that runs alongside (lessons, the early review) is optional: anything it throws but a
+  stop request drops it (`optional` in `src/phases.ts`) instead of ending the step.
 - The dashboard's "working on" names every running phase (`verify + review-1`).
 
 ## Tests

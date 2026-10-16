@@ -193,8 +193,8 @@ async function boundary(ctx: StepContext): Promise<void> {
 /**
  * Runs phase functions at the same time and returns their results in order. The phase boundary runs
  * once, before them, and not inside the group, so no merge touches main while they run. It waits for
- * every function to settle, so each phase ends its own row; if any threw, it throws the first error
- * in list order (a stop or an outage still reaches the scheduler).
+ * every function to settle, so each phase ends its own row; if any threw, it throws a stop request if
+ * there is one, else the first error in list order (an outage or the day's budget still reaches the scheduler).
  */
 export async function together<T extends readonly unknown[]>(ctx: StepContext, fns: { [K in keyof T]: () => Promise<T[K]> }): Promise<T> {
   await boundary(ctx);
@@ -205,9 +205,24 @@ export async function together<T extends readonly unknown[]>(ctx: StepContext, f
   } finally {
     groups--;
   }
-  const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
-  if (failed) throw failed.reason;
+  const errors = settled.filter((s): s is PromiseRejectedResult => s.status === "rejected").map((s) => s.reason as unknown);
+  if (errors.length) throw errors.find((e) => e instanceof StopRequested) ?? errors[0];
   return settled.map((s) => (s as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
+/**
+ * Work run alongside a phase that does not need it (see together): anything it throws but a stop
+ * request (an unavailable assistant, the day's budget, a git failure) drops it, traced, and gives
+ * null, so it never ends the step; the phase that matters meets the same trouble on its own.
+ */
+export async function optional<T>(ctx: StepContext, what: string, fn: () => Promise<T>): Promise<T | null> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    ctx.trace.event(ctx.slug, "command", { command: what, note: `dropped: ${errorText(e)}` });
+    return null;
+  }
 }
 
 /**

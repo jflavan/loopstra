@@ -1,7 +1,8 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase, codePhase, projectCommand, together } from "../phases";
+import { roomForTwo } from "../budget";
+import { agentPhase, codePhase, optional, projectCommand, together } from "../phases";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./review";
 import type { CommandResult } from "../shell";
 import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
@@ -76,8 +77,8 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   // The verifier. A verify failure gets exactly one fix (then the tests again), then blocks.
   // Round 1's review may judge the same tested commit meanwhile; it is kept only if verify passes.
-  const [verified, early] = reviewsAhead(ctx)
-    ? await together(ctx, [() => verifyChange(ctx, a.spec, plan, "verify"), () => reviewAhead(ctx, a.spec, plan)] as const)
+  const [verified, early] = (await reviewsAhead(ctx, wt))
+    ? await together(ctx, [() => verifyChange(ctx, a.spec, plan, "verify"), () => optional(ctx, "early review", () => reviewAhead(ctx, a.spec, plan))] as const)
     : [await verifyChange(ctx, a.spec, plan, "verify"), null];
   if (!verified.ok) return block(ctx, verified.note, verified);
   if (verified.passed && early) keepEarlyReview(ctx, early);
@@ -107,10 +108,14 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
 /**
  * Whether round 1's review runs alongside the verifier: on with speed.overlap_judges, unless commands
- * must run between the two (after the build stage, or before the review stage).
+ * must run between the two (after the build stage, or before the review stage), the day's budget has
+ * no room for two sessions, or the checks left files in the worktree (review start commits them, so
+ * the early review would judge another commit and go unused).
  */
-function reviewsAhead(ctx: StepContext): boolean {
-  return ctx.cfg.speed.overlap_judges && !ctx.cfg.stages.build.after.length && !ctx.cfg.stages.review.before.length;
+async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
+  const { speed, stages } = ctx.cfg;
+  if (!speed.overlap_judges || stages.build.after.length || stages.review.before.length) return false;
+  return roomForTwo(ctx.cfg, ctx.trace) && !(await wt.isDirty());
 }
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
