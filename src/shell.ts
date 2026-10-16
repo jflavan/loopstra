@@ -1,5 +1,5 @@
 import { delimiter, dirname } from "node:path";
-import { onStop, StopRequested, throwIfStopping } from "./stop";
+import { Cancelled, onStop, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
 /** Resolves to the promise's value, or to `fallback` once `ms` pass. Never waits longer than `ms`. */
 export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
@@ -144,6 +144,8 @@ export interface SpawnOptions {
   graceMs?: number;
   /** Reads stdout line by line; returning true ends the call (the process then gets `graceMs` to exit before it is killed). */
   onLine?: (line: string) => boolean | void;
+  /** Aborting it kills the process tree at once (the result says `cancelled`). Once aborted, nothing starts (Cancelled is thrown). */
+  signal?: AbortSignal;
 }
 
 export interface SpawnResult {
@@ -157,15 +159,18 @@ export interface SpawnResult {
   timedOut: boolean;
   /** A stop was requested while it ran; the caller throws StopRequested (nothing waits for its output). */
   stopped: boolean;
+  /** `signal` was aborted while it ran; the caller throws Cancelled (nothing waits for its output). */
+  cancelled: boolean;
 }
 
 /**
  * Runs one process, bounded: everything it awaits ends within the timeout plus a short grace. Past
  * the timeout the process and everything it started are killed. It never waits on pipes a leftover
- * grandchild may hold, and it never throws for the process's sake (only StopRequested before start).
+ * grandchild may hold, and it never throws for the process's sake (only StopRequested or Cancelled before start).
  */
 export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   if (o.onStop !== "ignore") throwIfStopping();
+  throwIfCancelled(o.signal);
   const graceMs = o.graceMs ?? 2_000;
   let proc: Bun.Subprocess<"pipe" | "ignore", "pipe", "pipe">;
   try {
@@ -176,7 +181,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
       detached: DETACHED,
     });
   } catch (e) {
-    return { code: 127, out: "", err: errorText(e), started: false, timedOut: false, stopped: false };
+    return { code: 127, out: "", err: errorText(e), started: false, timedOut: false, stopped: false, cancelled: false };
   }
   track(proc);
 
@@ -187,6 +192,9 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
     if (o.onStop === "kill") void killTree(proc);
     else grace = setTimeout(() => { void killTree(proc); }, graceMs);
   });
+  let cancelled = false;
+  const cancel = () => { cancelled = true; void killTree(proc); };
+  o.signal?.addEventListener("abort", cancel, { once: true });
 
   if (o.stdin !== undefined) {
     const stdin = proc.stdin as Bun.FileSink;
@@ -236,9 +244,10 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   }
   clearTimeout(grace);
   unsubscribe();
+  o.signal?.removeEventListener("abort", cancel);
   // Output pipes may be held by a leftover grandchild; take what arrived.
-  if (!stopped) await within(Promise.all([outDone, errDone]), timedOut || o.onLine ? 250 : 2_000, undefined);
-  return { code, out, err, started: true, timedOut, stopped };
+  if (!stopped && !cancelled) await within(Promise.all([outDone, errDone]), timedOut || o.onLine ? 250 : 2_000, undefined);
+  return { code, out, err, started: true, timedOut, stopped, cancelled };
 }
 
 export interface CommandResult {
@@ -255,6 +264,8 @@ export interface RunCommandOptions {
   env?: Record<string, string>;
   /** Kill the command (and anything it started) after this long. Callers pass `claude.timeout_minutes`. */
   timeoutMs?: number;
+  /** Aborting it kills the command; runCommand then throws Cancelled. */
+  signal?: AbortSignal;
 }
 
 /** Used only when a caller passes no timeout; matches the config default of 30 minutes. */
@@ -270,13 +281,14 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
  * Runs one configured command string through Bun's cross-platform shell (`bun exec`).
  * Never throws on non-zero exit; the exit code is the result. Past the timeout the
  * process tree is killed and the result says so. After a stop request it does not start, or it
- * kills the running command's tree, and throws StopRequested.
+ * kills the running command's tree, and throws StopRequested. Likewise Cancelled for `signal`.
  */
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath({ ...process.env, ...opts.env }), timeoutMs, onStop: "kill" });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath({ ...process.env, ...opts.env }), timeoutMs, onStop: "kill", signal: opts.signal });
   if (r.stopped) throw new StopRequested();
+  if (r.cancelled) throw new Cancelled();
   if (!r.started) throw new Error(r.err);
   let output = r.out + r.err;
   if (r.timedOut) output += `\nThe command \`${command}\` did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped.\n`;

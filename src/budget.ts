@@ -55,11 +55,19 @@ export function loopDaySetting(cfg: Config): string {
 /** Whose spending counts against the loop's day: every change, not chat. */
 const LOOP_POOL = { except: CHAT_SLUG };
 
+/**
+ * What is left of the loop's day: the daily budget less what was spent today and what running phases
+ * hold, as startPhase counts it. Infinity without claude.max_budget_usd_per_day.
+ */
+export function loopDayLeft(cfg: Config, trace: Trace, now = new Date()): number {
+  const day = cfg.claude.max_budget_usd_per_day;
+  return day === undefined ? Infinity : day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) });
+}
+
 /** claude.max_budget_usd_per_day is set and less than a session's floor of it is left. */
 export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): boolean {
-  const day = cfg.claude.max_budget_usd_per_day;
-  // Spent plus what running phases hold, as startPhase counts it, so the tick pauses instead of picking a change that cannot start.
-  return day !== undefined && day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) }) < MIN_SESSION_USD;
+  // As startPhase counts it, so the tick pauses instead of picking a change that cannot start.
+  return loopDayLeft(cfg, trace, now) < MIN_SESSION_USD;
 }
 
 /**
@@ -68,10 +76,8 @@ export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): bool
  * cap, the first session holds the rest of the day and the second could not start.
  */
 export function roomForTwo(cfg: Config, trace: Trace, now = new Date()): boolean {
-  const { max_budget_usd_per_day: day, max_budget_usd: cap } = cfg.claude;
-  if (day === undefined) return true;
-  if (cap === undefined) return false;
-  return day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) }) >= 2 * cap;
+  const left = loopDayLeft(cfg, trace, now);
+  return left === Infinity || left >= 2 * limitOf(cfg.claude.max_budget_usd);
 }
 
 /**

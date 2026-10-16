@@ -5,6 +5,7 @@ import { configPath } from "../../src/config";
 import type { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
+import { setPhaseBoundary } from "../../src/phases";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD, runPlanStep } from "../../src/stages/plan";
 import type { Trace } from "../../src/trace";
@@ -137,9 +138,10 @@ describe("plan stage", () => {
   });
 });
 
-/** A design step on the default config: spec-approved, with the plan written ahead kept. `designPhases` counts its rows. */
-async function designed(config = "") {
+/** A design step on the default config (after `first`, if given): spec-approved, with the plan written ahead kept. `designPhases` counts its rows. */
+async function designed(config = "", first?: (repo: string) => Promise<void>) {
   const s = await setupRepo("accepted", { config });
+  await first?.(s.repo.path);
   await runDesignStep(s.ctx);
   await s.ctx.reload();
   expect(s.ctx.intent.file.frontmatter.status).toBe("spec-approved");
@@ -194,7 +196,7 @@ describe("plan written ahead", () => {
       const row = trace.phases("add-numbers").find((p) => p.name === name)!;
       return readFileSync(join(ctx.runDir, "phases", `${row.seq}-${name}`, "prompt.md"));
     };
-    expect((await prompt("plan")).equals(await prompt("plan-ahead"))).toBe(true);
+    expect((await prompt("plan")).equals(await prompt("early-plan"))).toBe(true);
     trace.close(); repo.cleanup();
   });
 
@@ -221,6 +223,12 @@ describe("plan written ahead", () => {
     }],
     ["code outside intent/ was committed", "the code on main changed", async ({ repo }) => commitFile(repo.path, "README.md", "# test repo\n\nMore.\n")],
     ["a tracked file outside intent/ was edited and not committed", "the code on main changed", async ({ repo }) => { await Bun.write(join(repo.path, "README.md"), "# test repo\n\nEdited.\n"); }],
+    ["a new file outside intent/ was added and not committed", "the code on main changed", async ({ repo }) => { await Bun.write(join(repo.path, "src", "new.ts"), "export const x = 1;\n"); }],
+    ["the kept base is not a commit id", "it could not be read", async ({ ctx }) => writeFileSync(join(ctx.runDir, PLAN_AHEAD), JSON.stringify({ ...keptPlan(ctx), base: "--cached" }))],
+    ["the kept report says it failed", "it could not be read", async ({ ctx }) => {
+      const kept = keptPlan(ctx) as { envelope: Record<string, unknown> };
+      writeFileSync(join(ctx.runDir, PLAN_AHEAD), JSON.stringify({ ...kept, envelope: { ...kept.envelope, status: "fail" } }));
+    }],
   ];
   for (const [what, reason, change, phases] of misses) {
     test(`not used when ${what}: the plan step plans as usual`, async () => {
@@ -235,6 +243,47 @@ describe("plan written ahead", () => {
       trace.close(); s.repo.cleanup();
     });
   }
+
+  test("not used when a pull request merges at the boundary before the plan step decides", async () => {
+    const { repo, ctx, trace, designPhases } = await designed();
+    // Stands in for the between-phases merge of another change whose checks just passed.
+    setPhaseBoundary(async () => { setPhaseBoundary(null); await commitFile(repo.path, "src/merged.ts", "export const y = 2;\n"); });
+    try {
+      await runPlanStep(ctx);
+    } finally {
+      setPhaseBoundary(null);
+    }
+    expect(phaseNames(trace).slice(designPhases)).toEqual(["plan", "plan-challenge"]);
+    expect(planAheadNotes(trace).at(-1)).toBe("not used: the code on main changed");
+    trace.close(); repo.cleanup();
+  });
+
+  test("not used when a file that was edited while the plan was written has been put back", async () => {
+    const { repo, ctx, trace, designPhases } = await designed("", async (path) => { await Bun.write(join(path, "README.md"), "# test repo\n\nEdited.\n"); });
+    await new Git(repo.path).run(["checkout", "--", "README.md"]);
+    await runPlanStep(ctx);
+    expect(phaseNames(trace).slice(designPhases)).toEqual(["plan", "plan-challenge"]);
+    expect(planAheadNotes(trace).at(-1)).toBe("not used: the code on main changed");
+    trace.close(); repo.cleanup();
+  });
+
+  test("still used when a file left edited while the plan was written is still the same", async () => {
+    const { repo, ctx, trace, designPhases } = await designed("", async (path) => { await Bun.write(join(path, "README.md"), "# test repo\n\nEdited.\n"); });
+    await runPlanStep(ctx);
+    expect(phaseNames(trace).slice(designPhases)).toEqual(["plan-challenge"]);
+    expect(planAheadNotes(trace).at(-1)).toBe(USES);
+    trace.close(); repo.cleanup();
+  });
+
+  test("still used when only a setting the plan does not see changed in loopstra/config.yaml", async () => {
+    const s = await designed();
+    const { ctx, trace } = await reopen(s, "signals:\n  main_health:\n    every_minutes: 45\n");
+    await new Git(s.repo.path).commitAll("edit loopstra/config.yaml");
+    await runPlanStep(ctx);
+    expect(phaseNames(trace).slice(s.designPhases)).toEqual(["plan-challenge"]);
+    expect(planAheadNotes(trace).at(-1)).toBe(USES);
+    trace.close(); s.repo.cleanup();
+  });
 
   test("still used when only intent/ changed on main (another change's bookkeeping)", async () => {
     const { repo, ctx, trace, designPhases } = await designed();

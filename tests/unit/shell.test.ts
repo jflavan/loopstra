@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCommand, spawnBounded, withBunOnPath, within } from "../../src/shell";
+import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
 describe("runCommand", () => {
@@ -38,6 +39,18 @@ describe("runCommand", () => {
     expect(r.lastLine).toBe("A project command did not finish in time.");
     const ok = await runCommand("echo fine", t.path, { timeoutMs: 10_000 });
     expect(ok.timedOut).toBe(false);
+    t.cleanup();
+  });
+
+  test("a cancelled command is killed at once and throws Cancelled; once cancelled, none starts", async () => {
+    const t = tempDir();
+    const cancel = new AbortController();
+    const started = Date.now();
+    setTimeout(() => cancel.abort(), 200);
+    expect(await runCommand(`bun -e "await Bun.sleep(5000)"`, t.path, { signal: cancel.signal }).catch((e: unknown) => e)).toBeInstanceOf(Cancelled);
+    expect(Date.now() - started).toBeLessThan(4_500);
+    expect(await runCommand("echo never > ran.txt", t.path, { signal: cancel.signal }).catch((e: unknown) => e)).toBeInstanceOf(Cancelled);
+    expect(existsSync(join(t.path, "ran.txt"))).toBe(false);
     t.cleanup();
   });
 

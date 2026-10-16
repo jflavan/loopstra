@@ -42,9 +42,9 @@ stages:
 # Work that runs at the same time to save waiting; no setting here changes what is checked.
 # parallel_checks: test, lint and build start together (leave off if they write the same folder).
 # overlap_judges: the first review runs alongside the verifier, and lessons alongside the final
-# check. When the verifier fails, that review is thrown away and runs again after the fix.
-# plan_ahead: the first plan is written while the spec is being checked; it is thrown away if the
-# spec does not pass, and used only if nothing it read has changed.
+# check. When the verifier fails, that review is stopped at once and runs again after the fix.
+# plan_ahead: the first plan is written while the spec is being checked; it is stopped if the spec
+# does not pass, and used only if the code it read has not changed (files git ignores are not compared).
 speed: { parallel_checks: false, overlap_judges: true, plan_ahead: true }
 
 signals:

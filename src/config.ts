@@ -124,7 +124,7 @@ export const ConfigSchema = z.object({
     parallel_checks: z.boolean().default(false),
     /** The first review runs alongside the verifier, and lessons alongside the done-check. */
     overlap_judges: z.boolean().default(true),
-    /** The first plan is written while the spec's check runs; kept only if the spec passes, used only if nothing it read changed. */
+    /** The first plan is written while the spec's check runs; kept only if the spec passes, used only if the code it read is unchanged. */
     plan_ahead: z.boolean().default(true),
   }).strict().prefault({}),
   signals: z.object({
