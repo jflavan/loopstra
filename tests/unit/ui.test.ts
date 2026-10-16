@@ -116,14 +116,14 @@ describe("ui state", () => {
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
       const s = await buildState(t.path, 0, now);
       expect(s.loop).toMatchObject({ state: "running", text: "Running — working on one, last check 20s ago", current: { slug: "one", phase: "build" } });
-      // Two phases at once (verify with the first review): both are named, in the order they started.
+      // Two phases at once (verify with the early review): both are named, in the order they started.
       // A row left running before this tick (its process was killed) is not named.
       setStarted(t.path, "one", 1, iso(60));
       const t2 = Trace.open(t.path);
       t2.phaseStart("one", "verify", "agent");
-      t2.phaseStart("one", "review-1", "agent");
+      t2.phaseStart("one", "early-review", "agent");
       t2.close();
-      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ current: { slug: "one", phase: "verify + review-1" } });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ current: { slug: "one", phase: "verify + early-review" } });
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "not-responding", text: "Not responding (last check 14 min ago)" });
       // The same, from a process that is gone: it did not shut down cleanly.
@@ -141,12 +141,12 @@ describe("ui state", () => {
       await intent(t.path, "one", "status: designing");
       const trace = Trace.open(t.path);
       trace.phaseStart("one", "spec-check", "agent");
-      trace.phaseStart("one", "plan-ahead", "agent");
+      trace.phaseStart("one", "early-plan", "agent");
       trace.close();
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
-      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "running", current: { slug: "one", phase: "spec-check + plan-ahead" } });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "running", current: { slug: "one", phase: "spec-check + early-plan" } });
     } finally {
       t.cleanup();
     }

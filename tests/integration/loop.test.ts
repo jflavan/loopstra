@@ -87,9 +87,9 @@ describe("the loop", () => {
         expect(trace.signals().map((s) => s.result)).toEqual(["pass", "pass"]);
         // The first plan was written while the spec was checked, and the plan step used it.
         const phases = trace.phases("add-numbers");
-        expect(phases.map((p) => p.name)).toContain("plan-ahead");
+        expect(phases.map((p) => p.name)).toContain("early-plan");
         expect(phases.map((p) => p.name)).not.toContain("plan");
-        const ahead = phases.find((p) => p.name === "plan-ahead")!;
+        const ahead = phases.find((p) => p.name === "early-plan")!;
         expect(ahead.cost_usd).toBeGreaterThan(0);
         // What the day counts includes it.
         const total = phases.reduce((sum, p) => sum + p.cost_usd, 0);

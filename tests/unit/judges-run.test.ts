@@ -143,6 +143,9 @@ describe("runJudge shadow", () => {
     });
   });
 
+  // The strong judge takes a moment, so the cheaper one has ended when it fails.
+  const STRONG_LAST = { LOOPSTRA_FAKE_DELAY_MS: "spec-check@opus=1500" };
+
   test("a strong judge that cannot reach the assistant throws once the cheaper one has ended; the cheaper verdict is kept and used again", async () => {
     await withRepo(SHADOW, { "spec-check@opus-1": fixture("outage"), "spec-check@sonnet": fixture("spec-check-reject") }, async ({ ctx, trace, fake }) => {
       expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
@@ -155,7 +158,15 @@ describe("runJudge shadow", () => {
       expect(fake.models().at(-1)).toBe("opus");
       expect(fake.models()).toHaveLength(3);
       expect(trace.judgeRows().at(-1)).toMatchObject({ how: "shadow", cheap: "reject", strong: "pass", cheap_usd: null, cheap_ms: null });
-    });
+    }, STRONG_LAST);
+  });
+
+  test("a strong judge that cannot reach the assistant calls off a cheaper judge still running; no row", async () => {
+    await withRepo(SHADOW, { "spec-check@opus": fixture("outage") }, async ({ ctx, trace }) => {
+      expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
+      expect(phase(trace, "spec-check-cheap")?.status).toBe("interrupted");
+      expect(trace.judgeRows()).toEqual([]);
+    }, { LOOPSTRA_FAKE_DELAY_MS: "spec-check@sonnet=5000" });
   });
 
   for (const mode of ["shadow", "first"] as const) {
@@ -171,7 +182,7 @@ describe("runJudge shadow", () => {
         // The back-off keeps climbing: the next pause is the third in a row.
         expect(readPause(ctx.root)?.failures).toBe(2);
         expect(pauseAfterUnavailable(ctx.root, new Date(), out).failures).toBe(3);
-      });
+      }, STRONG_LAST);
     });
   }
 

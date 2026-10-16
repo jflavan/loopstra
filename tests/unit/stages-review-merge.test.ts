@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
-import { EARLY_REVIEW } from "../../src/stages/review";
+import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
@@ -119,7 +119,7 @@ describe("review", () => {
   test("reviewing → merge-review with a person on the merge gate: the reviewer reads git but cannot write, and nothing reaches main", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
     // Without the review that ran alongside the verifier, so the merge step runs a review session.
-    rmSync(join(ctx.runDir, EARLY_REVIEW));
+    rmSync(join(ctx.runDir, EARLY_REVIEW), { force: true });
     const argsFile = join(repo.path, "args.json");
     await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
     const i = await readIntent(repo.path, "add-numbers");

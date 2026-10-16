@@ -1,7 +1,7 @@
-import { block, clearMarker, writeIntentPriority, type StepContext, type StepResult } from "../context";
+import { block, writeIntentPriority, type StepContext, type StepResult } from "../context";
 import { agentPhase } from "../phases";
 import { runArtifactStep, type ArtifactStage } from "./artifact";
-import { PLAN_AHEAD, planAhead } from "./plan";
+import { planAhead } from "./plan";
 
 const DESIGN: ArtifactStage<"design", "spec-check"> = {
   stage: "design", gate: "spec", artifact: "spec.md",
@@ -28,9 +28,6 @@ const DESIGN: ArtifactStage<"design", "spec-check"> = {
  * speed.plan_ahead, the first plan may be written alongside spec-check (see planAhead).
  */
 export function runDesignStep(ctx: StepContext): Promise<StepResult> {
-  // Only a passing spec gate keeps a plan, and it moves the status out of this step: one found here
-  // is from an earlier design (killed before its status commit) and was never approved.
-  clearMarker(ctx, PLAN_AHEAD);
   return runArtifactStep(ctx, DESIGN);
 }
 

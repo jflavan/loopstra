@@ -142,7 +142,7 @@ function statusSince(trace: Trace, i: Intent): string | null {
 }
 
 /**
- * The phases running now, in the order they started ("verify + review-1" when two run at once). Only
+ * The phases running now, in the order they started ("verify + early-review" when two run at once). Only
  * those started since the tick began (`since`): a row a killed process left running is not current.
  */
 function runningPhase(intents: IntentView[], slug: string, since: string | null): string | null {

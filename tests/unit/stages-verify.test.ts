@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
+import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { readIntent, writeIntent } from "../../src/intents";
 import { NEEDS_PERSON_DONE_NOTE, runVerifyStep } from "../../src/stages/verify";
-import type { PhaseRow } from "../../src/trace";
-import { setEnv, setupRepo } from "../helpers";
+import { AssistantUnavailable } from "../../src/stop";
+import type { PhaseRow, Trace } from "../../src/trace";
+import { setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 async function merged(opts: { config?: string; doneCheck?: string } = {}) {
   const s = await setupRepo("merged", { config: opts.config });
@@ -35,6 +37,15 @@ function together(doneCheck: PhaseRow, lessons: PhaseRow): boolean {
   return lessons.started < doneCheck.ended!;
 }
 
+/** The lessons row: early-lessons when it ran alongside the done-check, lessons when after it. */
+function lessonsRow(trace: Trace): PhaseRow {
+  return trace.phases("add-numbers").find((p) => p.name === "early-lessons" || p.name === "lessons")!;
+}
+
+function promptOf(runDir: string, p: PhaseRow): Promise<string> {
+  return Bun.file(join(runDir, "phases", `${p.seq}-${p.name}`, "prompt.md")).text();
+}
+
 describe("verify stage", () => {
   test("lessons runs alongside the done-check; with speed.overlap_judges off, after it", async () => {
     const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
@@ -46,7 +57,9 @@ describe("verify stage", () => {
         await runVerifyStep(ctx);
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
         const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
-        expect(together(byName("done-check"), byName("lessons"))).toBe(on);
+        expect(together(byName("done-check"), lessonsRow(trace))).toBe(on);
+        // Lessons runs once either way: nothing failed while they ran together.
+        expect(trace.phases("add-numbers").filter((p) => p.name.endsWith("lessons")).map((p) => p.name)).toEqual([on ? "early-lessons" : "lessons"]);
         expect(await lessonsOf(repo.path)).toContain("doc comment");
         trace.close(); repo.cleanup();
       }
@@ -68,7 +81,7 @@ describe("verify stage", () => {
         await runVerifyStep(ctx);
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
         const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
-        expect(together(byName("done-check"), byName("lessons"))).toBe(overlaps);
+        expect(together(byName("done-check"), lessonsRow(trace))).toBe(overlaps);
         trace.close(); repo.cleanup();
       }
     } finally {
@@ -91,7 +104,7 @@ describe("verify stage", () => {
     await runVerifyStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
     expect(existsSync(join(repo.path, "intent", "add-numbers", "lessons.md"))).toBe(false);
-    expect(trace.phases("add-numbers").some((p) => p.name === "lessons")).toBe(true);
+    expect(trace.phases("add-numbers").some((p) => p.name === "early-lessons")).toBe(true);
     trace.close(); repo.cleanup();
   });
 
@@ -101,12 +114,56 @@ describe("verify stage", () => {
     fail("spec-check-cheap", "cheap-judge", "invalid envelope from the cheaper judge");
     fail("build", "agent", "the build broke");
     await runVerifyStep(ctx);
-    const p = trace.phases("add-numbers").find((x) => x.name === "lessons")!;
-    const prompt = await Bun.file(join(ctx.runDir, "phases", `${p.seq}-lessons`, "prompt.md")).text();
+    const p = trace.phases("add-numbers").find((x) => x.name === "lessons" || x.name === "early-lessons")!;
+    const prompt = await promptOf(ctx.runDir, p);
     expect(prompt).toContain("build: the build broke");
     expect(prompt).not.toContain("spec-check-cheap");
     expect(prompt).not.toContain("invalid envelope from the cheaper judge");
     trace.close(); repo.cleanup();
+  });
+
+  test("a usage limit on the done-check keeps the loop's pause growing, though lessons alongside reached the assistant", async () => {
+    // The done-check takes a moment, so lessons has succeeded before it fails (a failure first cancels lessons).
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "done-check=2000" });
+    try {
+      const { repo, ctx, trace } = await merged({ doneCheck: "usage-limit" });
+      pauseAfterUnavailable(repo.path);
+      pauseAfterUnavailable(repo.path);
+      expect(await runVerifyStep(ctx).catch((e: unknown) => e)).toBeInstanceOf(AssistantUnavailable);
+      expect(lessonsRow(trace).status).toBe("success");
+      // The scheduler counts this outage on top of the two before it, so the back-off keeps growing.
+      expect(readPause(repo.path)?.failures).toBe(2);
+      trace.close(); repo.cleanup();
+    } finally {
+      restore();
+    }
+  });
+
+  test("lessons hear the fix history as it stands once the done-check ended; work that ran alongside is left out of it", async () => {
+    // The done-check's first session crashes and its retry passes, while lessons runs alongside.
+    const fixtures = tempDir("loopstra-fixtures-");
+    copyFileSync(join(import.meta.dir, "..", "fake-claude", "fixtures", "crash.jsonl"), join(fixtures.path, "done-check-1.jsonl"));
+    try {
+      const { repo, ctx, trace } = await merged();
+      for (const [name, error] of [["fix-1", "crash: the build broke"], ["early-review", "timeout: an optional review"]] as const) {
+        trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, "agent"), { status: "fail", error });
+      }
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, () => runVerifyStep(ctx));
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
+      const rows = trace.phases("add-numbers");
+      expect(rows.filter((p) => p.name.startsWith("done-check")).map((p) => [p.name, p.status])).toEqual([["done-check", "fail"], ["done-check-retry", "success"]]);
+      // The lessons that ran alongside missed the done-check's failure, so lessons runs again, after it.
+      const early = rows.find((p) => p.name === "early-lessons")!;
+      const late = rows.find((p) => p.name === "lessons")!;
+      expect(await promptOf(ctx.runDir, early)).not.toContain("done-check: crash");
+      const told = await promptOf(ctx.runDir, late);
+      expect(told).toContain("done-check: crash");
+      expect(told).toContain("fix-1: crash: the build broke");
+      expect(told).not.toContain("early-review");
+      trace.close(); repo.cleanup();
+    } finally {
+      fixtures.cleanup();
+    }
   });
 
   test("merged → done: outcome.md for the owner, lessons.md for engineers, both written by the runtime and committed", async () => {
@@ -127,7 +184,7 @@ describe("verify stage", () => {
     expect(await new Git(repo.path).isDirty()).toBe(false);
     expect((await new Git(repo.path).run(["cat-file", "-e", "main:intent/add-numbers/lessons.md"], true)).code).toBe(0);
     // Both judges are told the verify stage's skills.
-    for (const name of ["done-check", "lessons"]) {
+    for (const name of ["done-check", "early-lessons"]) {
       const p = trace.phases("add-numbers").find((x) => x.name === name)!;
       expect(await Bun.file(join(ctx.runDir, "phases", `${p.seq}-${name}`, "prompt.md")).text()).toContain("`checking-results`");
     }
@@ -152,7 +209,7 @@ describe("verify stage", () => {
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
     const names = trace.phases("add-numbers").map((p) => p.name);
     // done-check and lessons run at the same time, so either may start first.
-    expect([names[0], new Set(names.slice(1, 3)), names[3]]).toEqual(["verify-before", new Set(["done-check", "lessons"]), "verify-after"]);
+    expect([names[0], new Set(names.slice(1, 3)), names[3]]).toEqual(["verify-before", new Set(["done-check", "early-lessons"]), "verify-after"]);
     trace.close(); repo.cleanup();
   });
 
@@ -166,7 +223,7 @@ describe("verify stage", () => {
     const outcome = await outcomeOf(repo.path);
     expect(outcome).toContain("## Evidence");
     expect(await lessonsOf(repo.path)).toContain("## Lessons");
-    expect(trace.phases("add-numbers").map((p) => p.name).sort()).toEqual(["done-check", "lessons", "verify-after"]);
+    expect(trace.phases("add-numbers").map((p) => p.name).sort()).toEqual(["done-check", "early-lessons", "verify-after"]);
     expect(trace.phases("add-numbers").at(-1)!.name).toBe("verify-after");
 
     // Stepping the waiting status does nothing.

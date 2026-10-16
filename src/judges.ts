@@ -6,7 +6,7 @@ import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
-import { agentPhase, optional, phasePrompt, together, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { agentPhase, alongside, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { AssistantUnavailable } from "./stop";
 import type { JudgeRow, NewJudgeRow } from "./trace";
 
@@ -292,6 +292,12 @@ interface Comparison {
   prompt: string;
 }
 
+/** What the caller already has: the judge's rendered prompt (its phasePrompt) and, for the review, its commit. */
+interface Known {
+  rendered?: string | null;
+  commit?: string;
+}
+
 /**
  * What a comparison is keyed on, or null when there is nothing to compare: the setting is off, the
  * judge does not run on the strong model, both model names are the same, or the prompt is missing
@@ -299,14 +305,14 @@ interface Comparison {
  * prompt does not name the commit it judges, so every round of a change would read the same; its
  * commit (`commit`, else HEAD where it runs) is added, so each round is its own question.
  */
-async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, commit?: string): Promise<Comparison | null> {
+async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, known: Known = {}): Promise<Comparison | null> {
   const cheap = modelFor(ctx.cfg, "default");
   const strong = modelFor(ctx.cfg, "strong");
   if (ctx.cfg.speed.cheap_judges === "off" || phase.model !== "strong" || cheap === strong) return null;
   const template = templateSha(ctx.root, phase.name);
-  const prompt = phase.prompt ?? await phasePrompt(ctx, phase);
+  const prompt = known.rendered !== undefined ? known.rendered : await phasePrompt(ctx, phase);
   if (template === null || prompt === null) return null;
-  const question = phase.name === "review" ? `${commit ?? await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
+  const question = phase.name === "review" ? `${known.commit ?? await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
   return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(question), prompt };
 }
 
@@ -380,11 +386,9 @@ export function shadowRoom(ctx: StepContext, alongside = 0): boolean {
   return roomFor(ctx.cfg, ctx.trace, 2 + alongside);
 }
 
-export interface JudgeOptions {
+export interface JudgeOptions extends Known {
   /** Room for shadow (see shadowRoom), from a caller that starts other work beside the judge. Default: shadowRoom now, with nothing beside. */
   room?: boolean;
-  /** The review's commit, when the caller already has it (see comparison). */
-  commit?: string;
   /** A pass the cheaper judge decides alone is handed back (JudgeResult.alone), not written, for a caller that may not use it. */
   keepAlone?: boolean;
 }
@@ -397,24 +401,23 @@ export interface JudgeOptions {
  * decides. A due audit that has no room: the strong judge alone.
  */
 export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOptions = {}): Promise<JudgeResult<J>> {
-  const c = await comparison(ctx, phase, opts.commit);
-  if (!c) return { ...(await agentPhase(ctx, phase)), decidedBy: "strong" };
+  const c = await comparison(ctx, phase, opts);
+  if (!c) return { ...(await agentPhase(ctx, phase, opts.rendered)), decidedBy: "strong" };
   const room = opts.room ?? shadowRoom(ctx);
-  const strongPhase: AgentPhaseSpec & { name: J } = { ...phase, prompt: c.prompt };
   // Same phase (so the same prompt, LOOPSTRA_PHASE and tools), on the cheaper model, never retried,
-  // and its own kind in the trace.
-  const cheapPhase: AgentPhaseSpec & { name: J } = { ...strongPhase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false, kind: "cheap-judge" };
+  // and its own kind in the trace. Both sessions get the prompt rendered once (c.prompt).
+  const cheapPhase: AgentPhaseSpec & { name: J } = { ...phase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false, kind: "cheap-judge" };
   const rows = ctx.trace.judgeRows();
   const before = earlierCheap(rows, c);
   if (ctx.cfg.speed.cheap_judges === "first") {
     const standing = firstStanding(rows, c.key);
     if (!standing.earned) judgeEvent(ctx, phase, `first: running as shadow; ${standingWhy(standing)}`);
-    else if (mayDecideAlone(ctx.cfg, standing)) return cheapFirst(ctx, strongPhase, cheapPhase, c, before, opts.keepAlone ?? false);
+    else if (mayDecideAlone(ctx.cfg, standing)) return cheapFirst(ctx, phase, cheapPhase, c, before, opts.keepAlone ?? false);
     // A due audit runs before it decides alone again; until there is room for one, shadow lets the
     // strong judge decide alone.
     else if (room) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
-  return shadow(ctx, strongPhase, cheapPhase, c, before, room);
+  return shadow(ctx, phase, cheapPhase, c, before, room);
 }
 
 /**
@@ -423,7 +426,7 @@ export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: Age
  */
 async function strongJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, c: Comparison, side: CheapSide<J>): Promise<AgentPhaseResult<J>> {
   try {
-    return await agentPhase(ctx, phase);
+    return await agentPhase(ctx, phase, c.prompt);
   } catch (e) {
     record(ctx, phase, c, { ...side, strong: null, strongVerdict: "failed" });
     throw e;
@@ -444,19 +447,24 @@ async function shadow<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSp
   if (!room) {
     // Shadow always gives way to the judge that decides and to the work already running.
     judgeEvent(ctx, phase, "not compared: today's budget has no room for another session");
-    return { ...(await agentPhase(ctx, phase)), decidedBy: "strong" };
+    return { ...(await agentPhase(ctx, phase, c.prompt)), decidedBy: "strong" };
   }
-  // The cheaper judge is optional: an outage or the day's budget drops it, and the strong judge meets
-  // the same trouble on its own. If the strong judge throws, the cheaper verdict is still recorded once
-  // both have ended; then the error passes on (a stop request first, as together does).
-  let threw: { e: unknown } | null = null;
-  const [strong, cheap] = await together(ctx, [
-    () => agentPhase(ctx, phase).catch((e: unknown) => { threw = { e }; return null; }),
-    () => optional(ctx, cheapPhase.traceName!, () => agentPhase(ctx, cheapPhase)),
-  ] as const);
-  if (cheap) record(ctx, phase, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(phase.name, cheap), strong, strongVerdict: strong ? strongVerdict(phase.name, strong) : "failed" });
-  if (threw) throw (threw as { e: unknown }).e;
-  return { ...strong!, decidedBy: "strong" };
+  // The cheaper judge runs alongside, so it is optional: an outage or the day's budget drops it, and
+  // the strong judge meets the same trouble on its own. The strong judge needs all of it, so it is
+  // never cancelled while the strong judge runs. If the strong judge throws, the cheaper judge is
+  // called off; a verdict it gave before that is still recorded, then the error passes on.
+  const got: { cheap: AgentPhaseResult<J> | null } = { cheap: null };
+  const askCheap = async () => (got.cheap = await agentPhase(ctx, cheapPhase, c.prompt));
+  let strong: AgentPhaseResult<J>;
+  try {
+    [strong] = await alongside(ctx, () => agentPhase(ctx, phase, c.prompt), { what: cheapPhase.traceName!, run: askCheap, wanted: () => true });
+  } catch (e) {
+    if (got.cheap) record(ctx, phase, c, { how: "shadow", cheap: got.cheap, cheapVerdict: cheapVerdict(phase.name, got.cheap), strong: null, strongVerdict: "failed" });
+    throw e;
+  }
+  const cheap = got.cheap;
+  if (cheap) record(ctx, phase, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(phase.name, cheap), strong, strongVerdict: strongVerdict(phase.name, strong) });
+  return { ...strong, decidedBy: "strong" };
 }
 
 /**
@@ -472,7 +480,7 @@ async function cheapFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPha
     verdict = before;
   } else {
     try {
-      cheap = await agentPhase(ctx, cheapPhase);
+      cheap = await agentPhase(ctx, cheapPhase, c.prompt);
     } catch (e) {
       if (!(e instanceof AssistantUnavailable)) throw e; // its phase row already ended interrupted
     }
@@ -500,8 +508,8 @@ function mayDecideAlone(cfg: Config, standing: FirstStanding): boolean {
 }
 
 /** First is on and this judge may decide alone now (a kept early review the cheaper judge decided is rechecked with this). */
-export async function cheapMayDecide(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, commit?: string): Promise<boolean> {
+export async function cheapMayDecide(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, known: Known = {}): Promise<boolean> {
   if (ctx.cfg.speed.cheap_judges !== "first") return false;
-  const c = await comparison(ctx, phase, commit);
+  const c = await comparison(ctx, phase, known);
   return c !== null && mayDecideAlone(ctx.cfg, firstStanding(ctx.trace.judgeRows(), c.key));
 }

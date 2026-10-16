@@ -2,8 +2,8 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
-import { roomFor } from "../budget";
-import { agentPhase, optional, projectCommand, together } from "../phases";
+import { agentPhase, alongside, mayOverlap, projectCommand } from "../phases";
+import { EARLY } from "../trace";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
 
@@ -35,21 +35,24 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   if (!before.ok) return before;
   const a = await artifacts(ctx);
 
-  const learn = () => agentPhase(ctx, {
-    name: "lessons", model: "cheap", permissionMode: "default", tools: "read",
-    vars: { review: a.review, previous: failures(ctx) },
-    skills: ctx.cfg.stages.verify.skills,
+  const history = () => failures(ctx);
+  const learn = (traceName?: string) => agentPhase(ctx, {
+    name: "lessons", traceName, model: "cheap", permissionMode: "default", tools: "read",
+    vars: { review: a.review, previous: history() }, skills: ctx.cfg.stages.verify.skills,
   });
   // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
   // is optional: an unavailable assistant or the day's budget leaves it to run after the done-check.
-  const [judged, early] = ctx.cfg.speed.overlap_judges && roomFor(ctx.cfg, ctx.trace, 2)
-    ? await together(ctx, [() => doneCheck(ctx, a), () => optional(ctx, "lessons", learn)] as const)
+  const historyBefore = history();
+  const [judged, early] = mayOverlap(ctx)
+    ? await alongside(ctx, () => doneCheck(ctx, a), { what: "lessons", run: () => learn(`${EARLY}lessons`), wanted: (j) => j.ok })
     : [await doneCheck(ctx, a), null];
   if (!judged.ok) return block(ctx, judged.note, judged);
   const unmet = judged.items.filter((i) => i.result === "unmet");
   const forPerson = judged.items.filter((i) => i.result === "needs-person");
 
-  const lessons = early ?? await learn();
+  // Lessons that ran alongside saw the history as it was when the done-check started; when a
+  // done-check attempt failed meanwhile (and its retry passed), they run again with it.
+  const lessons = early !== null && history() === historyBefore ? early : await learn();
   // outcome.md is for the owner; lessons.md is for engineers (`loopstra apply-lessons` reads it).
   let outcome = (judged.outcome || NO_CHECK_OUTCOME).trimEnd();
   if (unmet.length) outcome += `\n\n## Not met\n${bullets(unmet.map(line))}`;
@@ -74,12 +77,13 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * The change's failed phases, for lessons. A cheaper judge's failure (a cheap-judge phase) is left out:
- * the strong judge decided that step, so it was never the change's failure.
+ * The fix history lessons is shown: the change's failed phases, less work that ran alongside another
+ * (optional, so its failures never mattered to the change) and a cheaper judge's (the strong judge
+ * decided that step, so it was never the change's failure).
  */
 function failures(ctx: StepContext): string {
   return ctx.trace.phases(ctx.slug)
-    .filter((p) => p.status === "fail" && p.kind !== "cheap-judge")
+    .filter((p) => p.status === "fail" && !p.name.startsWith(EARLY) && p.kind !== "cheap-judge")
     .map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
 }
 

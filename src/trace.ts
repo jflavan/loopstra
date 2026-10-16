@@ -21,6 +21,13 @@ export interface IntentSummary {
 export type AgentKind = "agent" | "cheap-judge";
 export type PhaseKind = AgentKind | "code" | "human";
 
+/**
+ * The trace names of work run alongside another phase start with this ("early-review" beside the
+ * verifier, "early-lessons" beside the done-check; see alongside in phases). That work is optional, so
+ * summaries and the fix history pass over its rows.
+ */
+export const EARLY = "early-";
+
 export interface PhaseRow {
   slug: string; seq: number; name: string; kind: PhaseKind; status: string;
   started: string; ended: string | null; cost_usd: number; session_id: string | null; error: string | null;
@@ -351,8 +358,9 @@ export class Trace {
     const i = this.db.query<{ slug: string; status: string; priority: string; updated: string }, [string]>("SELECT * FROM intents WHERE slug = ?").get(slug);
     if (!i) return null;
     const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
-    // A cheaper judge's row is never where a change is: it only runs beside (or before) the judge that decides.
-    const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? AND kind != 'cheap-judge' ORDER BY seq DESC LIMIT 1").get(slug);
+    // The newest phase, passing over work that ran alongside one (it is optional: the one it ran beside
+    // says where the change is) and a cheaper judge's row (it only runs beside or before the judge that decides).
+    const last = this.db.query<PhaseRow, [string, string]>("SELECT * FROM phases WHERE slug = ? AND kind != 'cheap-judge' ORDER BY name LIKE ?, seq DESC LIMIT 1").get(slug, `${EARLY}%`);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);
     return {
       slug: i.slug, status: i.status, priority: i.priority, updated: i.updated,

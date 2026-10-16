@@ -17,6 +17,22 @@ export class StopRequested extends Error {
 }
 
 /**
+ * Thrown by work whose result stopped being wanted while it ran (see alongside in phases): its
+ * session or command was killed. Not a failure; it never gets past the work that cancelled it.
+ */
+export class Cancelled extends Error {
+  constructor() {
+    super("cancelled: its result was no longer needed");
+    this.name = "Cancelled";
+  }
+}
+
+/** Throws Cancelled when `signal` was aborted. Call before starting a process. */
+export function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Cancelled();
+}
+
+/**
  * The assistant could not be used (signed out, a usage limit, an outage, the network, not
  * installed). Like a stop, it is not the intent's fault: the step ends, the intent keeps its
  * status, and the loop pauses and tries again later. `detail` is for the trace; `phase` and `line`

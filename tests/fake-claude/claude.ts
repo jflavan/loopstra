@@ -16,13 +16,14 @@
 // $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
 // A sequence: $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>-<n>.jsonl is used for the n-th call of that phase
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
-// each prompt as one JSON line ({phase, args, prompt}).
+// each prompt as one JSON line ({phase, args, prompt, cwd}).
 // One model (the --model argument): before everything above, $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>@<model>-<n>.jsonl
 // (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. A session one of these
 // serves is not counted in the plain sequence. Two sessions of one phase that start together would race on
 // the plain sequence's counter, so a test that runs both judges gives at least one model its own fixtures.
 // Like the real CLI, the process exits 1 after a result event with is_error.
-// $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap).
+// $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap);
+// as "<phase>=<ms>,..." only those phases' sessions, and as "<phase>@<model>=<ms>" only that model's.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -40,7 +41,7 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
 
-if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt }) + "\n");
+if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt, cwd: process.cwd() }) + "\n");
 
 /** Counts one more call of `name` in <dir>/.count-<name> and gives the count. */
 async function nextCall(dir: string, name: string): Promise<number> {
@@ -105,7 +106,9 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
 // the way a real session can leave a background process behind.
 const linger = fixture.endsWith("linger.jsonl");
 
-if (process.env.LOOPSTRA_FAKE_DELAY_MS) await Bun.sleep(Number(process.env.LOOPSTRA_FAKE_DELAY_MS));
+const delay = process.env.LOOPSTRA_FAKE_DELAY_MS ?? "";
+const delayMs = delay.includes("=") ? delay.split(",").map((d) => d.split("=")).find(([p]) => p === phase || p === `${phase}@${model}`)?.[1] : delay;
+if (delayMs) await Bun.sleep(Number(delayMs));
 
 let failed = false;
 for (const line of (await Bun.file(fixture).text()).split("\n")) {
