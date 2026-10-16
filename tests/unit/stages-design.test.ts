@@ -7,7 +7,8 @@ import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD } from "../../src/stages/plan";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { FIRST_NEEDS } from "../../src/judges";
+import { FAKE_CLAUDE, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -362,6 +363,53 @@ describe("plan ahead", () => {
     await runDesignStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
     expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("cheaper judges on the spec check", () => {
+  const judgeNotes = (trace: Trace) => trace.events("add-numbers").filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
+
+  test("shadow: a cheaper pass of a spec the strong judge rejects changes nothing; the rewrite gets the strong judge's findings", async () => {
+    const dir = fixtureDir({ "spec-check@sonnet": fixture("spec-check"), "spec-check@opus-1": fixture("spec-check-reject") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\n" });
+        await runDesignStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        const second = trace.phases("add-numbers").filter((p) => p.name === "design")[1]!;
+        expect(await Bun.file(join(ctx.runDir, "phases", `${second.seq}-design`, "prompt.md")).text()).toContain("The spec never mentions negative numbers.");
+        // The cheaper judge writes no gate rows: only the strong spec-check's.
+        expect(trace.gates("add-numbers").map((g) => `${g.check}:${g.result}`)).toEqual(["headings:pass", "spec-check:fail", "headings:pass", "spec-check:pass"]);
+        expect(trace.judgeRows().map((r) => `${r.cheap}/${r.strong}`)).toEqual(["pass/reject", "pass/pass"]);
+        expect(judgeNotes(trace)[0]).toBe("the cheaper judge (sonnet) passed what the strong judge (opus) rejected; the strong judge decided");
+        expect(phaseNames(trace).filter((n) => n === "spec-check-cheap")).toHaveLength(2);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("shadow alongside the plan written ahead needs room for three sessions", async () => {
+    // After intake and design (about $0.05), a day of 2.5 with $1 sessions has room for two, not three.
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n" });
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toContain("plan-ahead");
+    expect(phaseNames(trace)).not.toContain("spec-check-cheap");
+    expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("first, earned: a cheaper pass decides alone and the gate's evidence names the cheaper judge", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: first\n" });
+    seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toContain("plan-ahead");
+    expect(phaseNames(trace).filter((n) => n !== "plan-ahead")).toEqual(["intake", "design", "spec-check-cheap"]);
+    expect(trace.gates("add-numbers").find((g) => g.check === "spec-check")?.evidence).toBe("spec covers the intent (decided by the cheaper judge, sonnet)");
     trace.close(); repo.cleanup();
   });
 });

@@ -2,7 +2,8 @@ import { block, clearMarker, readMarker, writeArtifact, writeMarker, type StepCo
 import { modelFor } from "../config";
 import { Envelopes } from "../envelopes";
 import { Git } from "../git";
-import { agentPhase, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { cheapMayDecide, passes, runJudge, type JudgeResult } from "../judges";
+import { phasePrompt, type AgentPhaseSpec } from "../phases";
 import { testLoop } from "./build";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
 
@@ -41,15 +42,17 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
     const phase = await reviewPhase(ctx, round, a.spec, a.currentPlan);
-    const review = (await takeEarlyReview(ctx, phase)) ?? await agentPhase(ctx, phase);
+    const review = (await takeEarlyReview(ctx, phase)) ?? await runJudge(ctx, phase);
     if (!review.ok) return block(ctx, review.note);
+    // review.md, the gate row and the findings all come from the review that decided.
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
 
     // The runtime decides: the change passes when there are no important findings. The
     // reviewer's own approved flag is kept in the trace only.
     const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.finding}`);
-    const pass = important.length === 0;
-    const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}`;
+    const pass = passes("review", review.envelope);
+    const by = review.decidedBy === "cheap" ? `; decided by the cheaper judge (${modelFor(ctx.cfg, "default")})` : "";
+    const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}${by}`;
     ctx.trace.gate(ctx.slug, "review", "findings", pass ? "pass" : "fail", summary);
 
     if (pass) {
@@ -104,8 +107,10 @@ async function reviewKey(ctx: StepContext, phase: AgentPhaseSpec): Promise<strin
 export async function reviewAhead(ctx: StepContext, spec: string, plan: string): Promise<string | null> {
   const phase = await reviewPhase(ctx, 1, spec, plan);
   const key = await reviewKey(ctx, phase);
-  const r = await agentPhase(ctx, phase);
-  return key !== null && r.ok ? JSON.stringify({ key, envelope: r.envelope }) : null;
+  // The verifier is already running beside it, so a cheaper judge in shadow needs room for a third
+  // session. Its comparison is recorded even if the verifier fails: it was the same question.
+  const r = await runJudge(ctx, phase, { alongside: 1 });
+  return key !== null && r.ok ? JSON.stringify({ key, envelope: r.envelope, decidedBy: r.decidedBy }) : null;
 }
 
 /** Keeps an early review for round 1 (see reviewAhead). */
@@ -117,17 +122,24 @@ export function keepEarlyReview(ctx: StepContext, kept: string): void {
  * The early review, when it was asked exactly what `phase` would ask; it is used up either way. Not
  * once review before commands are set: what they changed may be left uncommitted, so the key misses it.
  */
-async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec): Promise<AgentPhaseResult<"review"> | null> {
+async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & { name: "review" }): Promise<JudgeResult<"review"> | null> {
   const kept = readMarker(ctx, EARLY_REVIEW);
   if (kept === null) return null;
   clearMarker(ctx, EARLY_REVIEW);
-  let saved: { key?: unknown; envelope?: unknown };
+  let saved: { key?: unknown; envelope?: unknown; decidedBy?: unknown };
   try { saved = JSON.parse(kept); } catch { return null; }
   const envelope = Envelopes.review.safeParse(saved.envelope);
   if (!envelope.success || ctx.cfg.stages.review.before.length || saved.key !== (await reviewKey(ctx, phase))) {
     ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: the change, its plan, the review prompt or its commands moved on since it ran" });
     return null;
   }
+  // One the cheaper judge decided stands only if it is still trusted now: since the build step, an
+  // audit may have found a miss, or the setting may have moved. A marker without decidedBy is older, and strong.
+  const decidedBy = saved.decidedBy === "cheap" ? "cheap" : "strong";
+  if (decidedBy === "cheap" && !(await cheapMayDecide(ctx, phase))) {
+    ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: it was decided by the cheaper judge, which is no longer trusted to decide alone" });
+    return null;
+  }
   ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName} uses the review that ran alongside the verifier` });
-  return { ok: true, envelope: envelope.data, sessionId: null, costUsd: 0 };
+  return { ok: true, envelope: envelope.data, sessionId: null, costUsd: 0, decidedBy };
 }

@@ -7,7 +7,8 @@ import { configPath, loadConfig } from "../src/config";
 import { StepContext } from "../src/context";
 import { Git } from "../src/git";
 import { readIntent } from "../src/intents";
-import { Trace } from "../src/trace";
+import { templateSha, type JudgeName } from "../src/judges";
+import { Trace, type NewJudgeRow } from "../src/trace";
 
 /** The fake `claude` executable and the shipped prompt templates, as file system paths. */
 export const FAKE_CLAUDE = fileURLToPath(new URL("./fake-claude/claude.ts", import.meta.url));
@@ -98,6 +99,21 @@ export async function copyRepo(template: string): Promise<{ path: string; cleanu
 /** The newest commit in a checkout, as "<short sha> <subject>". */
 export async function lastCommit(cwd: string): Promise<string> {
   return (await new Git(cwd).run(["log", "-1", "--format=%h %s"])).out.trim();
+}
+
+/**
+ * Seeds `n` judges rows for `judge` with the default models (sonnet, opus) and the repository's
+ * current prompt template: strong rejections the cheaper judge also caught, each a different prompt,
+ * under another change. FIRST_NEEDS of them earn first.
+ */
+export function seedCaught(root: string, trace: Trace, judge: JudgeName, n: number, over: Partial<NewJudgeRow> = {}): void {
+  for (let i = 0; i < n; i++) {
+    trace.judge("earlier", {
+      judge, trace_name: judge === "review" ? "review-1" : judge, mode: "shadow", how: "shadow", cheap_model: "sonnet", strong_model: "opus",
+      template_sha: templateSha(root, judge)!, prompt_sha: `seed-${i}-${Math.random()}`, cheap: "reject", strong: "reject",
+      cheap_usd: 0.03, strong_usd: 0.03, cheap_ms: 10, strong_ms: 10, ...over,
+    });
+  }
 }
 
 /** Sets environment variables and returns a function that puts back what was there before. */

@@ -8,7 +8,8 @@ import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
-import { openRepo, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { FIRST_NEEDS } from "../../src/judges";
+import { openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -304,6 +305,67 @@ describe("the first review alongside the verifier", () => {
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
     expect(existsSync(join(ctx.runDir, "review.early"))).toBe(false);
     expect(trace.phases("add-numbers").find((p) => p.name === "review-1")?.status).toBe("interrupted");
+    trace.close(); repo.cleanup();
+  });
+
+  const judgeNotes = (trace: Trace) => trace.events("add-numbers").filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
+  const earlyNotes = (trace: Trace) => trace.events("add-numbers").map((e) => JSON.parse(e.payload) as { command?: string; note?: string })
+    .filter((p) => p.command === "early review").map((p) => p.note);
+
+  test("shadow: review-1 and review-1-cheap run alongside verify, and the comparison is recorded", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\n");
+    await runBuildStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+    expect(phaseNames(trace).slice(-3).sort()).toEqual(["review-1", "review-1-cheap", "verify"]);
+    expect(trace.judgeRows()).toMatchObject([{ trace_name: "review-1", how: "shadow", cheap: "pass", strong: "pass" }]);
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "review.early")).text()).decidedBy).toBe("strong");
+    trace.close(); repo.cleanup();
+  });
+
+  test("shadow with room in the day for two sessions but not three: the early review runs without the cheaper judge", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n");
+    await runBuildStep(ctx);
+    expect(reviews(trace)).toEqual(["review-1"]);
+    expect(phaseNames(trace)).not.toContain("review-1-cheap");
+    expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("shadow: when verify fails the early review is not kept, but its comparison stays", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\n");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "verify.md"), "{{spec}} {{plan}} FIXTURE:verify-reject");
+    await runBuildStep(ctx);
+    expect(existsSync(join(ctx.runDir, "review.early"))).toBe(false);
+    expect(trace.judgeRows()).toMatchObject([{ trace_name: "review-1" }]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("first: an early review the cheaper judge decided is used while it is still trusted", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: first\n");
+    seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+    await runBuildStep(ctx);
+    expect(reviews(trace)).toEqual([]);
+    expect(phaseNames(trace)).toContain("review-1-cheap");
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "review.early")).text()).decidedBy).toBe("cheap");
+    await ctx.reload();
+    await runMergeStep(ctx);
+    expect(reviews(trace)).toEqual([]);
+    expect(earlyNotes(trace)).toEqual(["review-1 uses the review that ran alongside the verifier"]);
+    expect(trace.lastGate("add-numbers", "review", "findings")?.evidence).toEndWith("; decided by the cheaper judge (sonnet)");
+    trace.close(); repo.cleanup();
+  });
+
+  test("first: an early review the cheaper judge decided is dropped once a miss was found since; round 1 runs on the strong model", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: first\n");
+    seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+    await runBuildStep(ctx);
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "review.early")).text()).decidedBy).toBe("cheap");
+    // Another change's audit: the cheaper judge passed what the strong one rejected.
+    seedCaught(repo.path, trace, "review", 1, { mode: "first", cheap: "pass" });
+    await ctx.reload();
+    await runMergeStep(ctx);
+    expect(earlyNotes(trace)).toEqual(["not used: it was decided by the cheaper judge, which is no longer trusted to decide alone"]);
+    expect(reviews(trace)).toEqual(["review-1"]);
     trace.close(); repo.cleanup();
   });
 
