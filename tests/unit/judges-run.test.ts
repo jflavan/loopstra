@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Git } from "../../src/git";
+import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
 import type { AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -136,6 +138,39 @@ describe("runJudge shadow", () => {
       expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
       expect(phase(trace, "spec-check-cheap")?.status).toBe("success");
       expect(trace.judgeRows()).toEqual([]);
+    });
+  });
+
+  for (const mode of ["shadow", "first"] as const) {
+    test(`${mode}: a cheaper judge that gets through does not end the pause while the strong model is still out`, async () => {
+      const files = { "spec-check@opus": fixture("outage"), "spec-check@sonnet": fixture("spec-check-reject") };
+      await withRepo(mode === "shadow" ? SHADOW : FIRST, files, async ({ repo, ctx, trace }) => {
+        if (mode === "first") seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+        pauseAfterUnavailable(ctx.root);
+        pauseAfterUnavailable(ctx.root);
+        expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
+        expect(phase(trace, "spec-check-cheap")?.status).toBe("success");
+        // The back-off keeps climbing: the next pause is the third in a row.
+        expect(readPause(ctx.root)?.failures).toBe(2);
+        expect(pauseAfterUnavailable(ctx.root).failures).toBe(3);
+      });
+    });
+  }
+
+  test("each review round is its own question: the commit under review is part of the prompt's sha", async () => {
+    const files = { "review@sonnet": fixture("review-reject"), "review@opus": fixture("review-reject") };
+    await withRepo(SHADOW, files, async ({ repo, ctx, trace }) => {
+      const review: AgentPhaseSpec & { name: "review" } = {
+        name: "review", model: "strong", permissionMode: "default", tools: "read+git", cwd: repo.path, vars: { spec: "# Spec", plan: "# Plan", test_result: "TESTS_PASSED" },
+      };
+      await runJudge(ctx, review);
+      await runJudge(ctx, review);
+      await Bun.write(join(repo.path, "revised.txt"), "revised");
+      await new Git(repo.path).commitAll("revise");
+      await runJudge(ctx, review);
+      const [a, b, c] = trace.judgeRows().map((r) => r.prompt_sha);
+      expect(a).toBe(b!);
+      expect(c).not.toBe(a!);
     });
   });
 

@@ -6,6 +6,7 @@ import { readIntent, writeIntent } from "../../src/intents";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
+import { reviewAhead } from "../../src/stages/review";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -322,11 +323,22 @@ describe("the first review alongside the verifier", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("shadow with room in the day for two sessions but not three: the early review runs without the cheaper judge", async () => {
+  test("shadow with too little of the day left beside the verifier: the early review runs without the cheaper judge", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n");
     await runBuildStep(ctx);
     expect(reviews(trace)).toEqual(["review-1"]);
     expect(phaseNames(trace)).not.toContain("review-1-cheap");
+    expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("the early review counts the verifier beside it even before the verifier's session holds its share", async () => {
+    // Called directly, with nothing running: room for two sessions, not three, so the cheaper judge stays out.
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n");
+    await ctx.git.run(["branch", ctx.branch]);
+    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    expect(await reviewAhead(ctx, "# Spec", PLAN)).not.toBeNull();
+    expect(phaseNames(trace)).toEqual(["review-1"]);
     expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
     trace.close(); repo.cleanup();
   });

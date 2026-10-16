@@ -71,6 +71,12 @@ describe("firstStanding", () => {
     expect(firstStanding(rows(...caught(29), { prompt_sha: "p1" }), KEY).caught).toBe(29);
   });
 
+  test("a miss is not hidden by a newer row that asked the same prompt and was caught", () => {
+    const s = firstStanding(rows(...caught(30), { cheap: "pass", prompt_sha: "same", slug: "missed" }, { prompt_sha: "same" }), KEY);
+    expect(s).toMatchObject({ earned: false, caught: 0 });
+    expect(s.miss?.slug).toBe("missed");
+  });
+
   test("a miss among the newest 30 loses first, with when and where; 30 newer caught earn it back", () => {
     const missed = rows(...caught(40), { cheap: "pass", slug: "add-numbers", ts: new Date(2026, 9, 14, 9).toISOString() }, ...caught(6));
     const s = firstStanding(missed, KEY);
@@ -88,6 +94,14 @@ describe("firstStanding", () => {
     expect(firstStanding(rows(...caught(30), first, first, first, first, { mode: "first" }), KEY).auditDue).toBe(false);
     // Another model's first-mode rows are not this judge's.
     expect(firstStanding(rows(...caught(30), ...caught(4, { ...first, cheap_model: "haiku" })), KEY).auditDue).toBe(false);
+  });
+
+  test("audited counts only audits, not the shadow calls that earn first back after a miss", () => {
+    const first = { how: "alone" as const, mode: "first" as const, strong: null, cheap: "pass" as const };
+    const audit = { mode: "first" as const, cheap: "pass" as const };
+    const earningBack = caught(30, { mode: "first" as const });
+    expect(firstStanding(rows(...caught(30), first, first, first, first, audit, ...earningBack), KEY)).toMatchObject({ earned: true, alone: 4, audited: 1 });
+    expect(firstStanding(rows(...caught(30, { mode: "first" })), KEY).audited).toBe(0);
   });
 });
 

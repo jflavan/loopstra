@@ -5,6 +5,7 @@ import { roomFor } from "./budget";
 import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
+import { Git } from "./git";
 import { agentPhase, optional, phasePrompt, together, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { AssistantUnavailable } from "./stop";
 import type { JudgeRow, NewJudgeRow } from "./trace";
@@ -64,35 +65,40 @@ export interface FirstStanding {
   caught: number;
   miss: JudgeRow | null;
   auditDue: boolean;
-  /** Questions it decided alone, and audits (shadow rows in first after its first first-mode row). */
+  /**
+   * Questions it decided alone, and audits: shadow rows in first right after an alone or escalated
+   * row (a call that runs as shadow because first is not earned never follows one).
+   */
   alone: number;
   audited: number;
 }
 
 /**
  * Evidence is the shadow rows (audits included) where the strong judge rejected and the cheaper one
- * answered; each prompt counts once, at its newest row. Walking newest first, a cheaper pass is a miss
- * and stops the walk. First is earned when FIRST_NEEDS were caught before any miss.
+ * answered; each prompt counts once, at its newest row, and a prompt the cheaper judge ever passed
+ * there is a miss. Walking newest first, a miss stops the walk. First is earned when FIRST_NEEDS were
+ * caught before any miss.
  */
 export function firstStanding(rows: readonly JudgeRow[], key: JudgeKey): FirstStanding {
   const mine = rows.filter((r) => matches(r, key));
   const evidence = mine.filter((r) => r.how === "shadow" && r.strong === "reject" && r.cheap !== "failed");
+  const misses = new Map(evidence.filter((r) => r.cheap === "pass").map((r) => [r.prompt_sha, r]));
   const seen = new Set<string>();
   let caught = 0;
   let miss: JudgeRow | null = null;
   for (const r of [...evidence].reverse()) {
     if (seen.has(r.prompt_sha)) continue;
     seen.add(r.prompt_sha);
-    if (r.cheap === "pass") { miss = r; break; }
+    miss = misses.get(r.prompt_sha) ?? null;
+    if (miss) break;
     caught++;
   }
   const lastShadow = mine.findLastIndex((r) => r.how === "shadow");
   const sinceShadow = mine.slice(lastShadow + 1).filter((r) => r.how !== "shadow").length;
-  const firstUse = mine.findIndex((r) => r.how !== "shadow");
   return {
     earned: caught >= FIRST_NEEDS, caught, miss, auditDue: sinceShadow >= AUDIT_EVERY - 1,
     alone: mine.filter((r) => r.how === "alone").length,
-    audited: firstUse < 0 ? 0 : mine.slice(firstUse).filter((r) => r.how === "shadow" && r.mode === "first").length,
+    audited: mine.filter((r, i) => r.how === "shadow" && r.mode === "first" && i > 0 && mine[i - 1]!.how !== "shadow").length,
   };
 }
 
@@ -256,7 +262,7 @@ export function templateSha(root: string, judge: JudgeName): string | null {
   return existsSync(path) ? sha256(readFileSync(path, "utf8")) : null;
 }
 
-/** What a comparison is keyed on: the judge's key and the sha256 of the whole prompt. */
+/** What a comparison is keyed on: the judge's key and the sha256 of the question (the whole prompt, and the review's commit). */
 interface Comparison {
   key: JudgeKey;
   promptSha: string;
@@ -265,7 +271,9 @@ interface Comparison {
 /**
  * What a comparison is keyed on, or null when there is nothing to compare: the setting is off, the
  * judge does not run on the strong model, both model names are the same, or the prompt is missing
- * (agentPhase then gives today's missing-prompt failure, and no cheaper session starts).
+ * (agentPhase then gives today's missing-prompt failure, and no cheaper session starts). The review's
+ * prompt does not name the commit it judges, so every round of a change would read the same; its
+ * commit is added, so each round is its own question.
  */
 async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }): Promise<Comparison | null> {
   const cheap = modelFor(ctx.cfg, "default");
@@ -274,7 +282,8 @@ async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: Judg
   const template = templateSha(ctx.root, phase.name);
   const prompt = await phasePrompt(ctx, phase);
   if (template === null || prompt === null) return null;
-  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(prompt) };
+  const question = phase.name === "review" ? `${await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
+  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(question) };
 }
 
 /** The strong judge's verdict: failed when its session did not end ok. */
@@ -325,8 +334,9 @@ function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & {
 export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: { alongside?: number } = {}): Promise<JudgeResult<J>> {
   const c = await comparison(ctx, phase);
   if (!c) return { ...(await agentPhase(ctx, phase)), decidedBy: "strong" };
-  // Same phase (so the same prompt file, LOOPSTRA_PHASE and tools), on the cheaper model, never retried.
-  const cheapPhase: AgentPhaseSpec & { name: J } = { ...phase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false };
+  // Same phase (so the same prompt file, LOOPSTRA_PHASE and tools), on the cheaper model, never
+  // retried. It never ends an outage pause: the strong model may be the one that is out.
+  const cheapPhase: AgentPhaseSpec & { name: J } = { ...phase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false, endsPause: false };
   const sessions = 2 + (opts.alongside ?? 0);
   if (ctx.cfg.speed.cheap_judges === "first") {
     const standing = firstStanding(ctx.trace.judgeRows(), c.key);

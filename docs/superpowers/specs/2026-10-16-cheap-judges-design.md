@@ -40,7 +40,8 @@ cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow o
 `templates/config.yaml`:
 
 ```yaml
-# Work that runs at the same time to save waiting; no setting changes what is checked.
+# Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides:
+# once earned, a cheaper judge's pass stands.
 # parallel_checks: ...            (unchanged)
 # overlap_judges: ...             (unchanged)
 # plan_ahead: ...                 (unchanged)
@@ -210,7 +211,8 @@ is the judge, `cheap_model`, `strong_model` and `template_sha`, all as they are 
 
 Walk them from newest to oldest, counting each `prompt_sha` once (the newest row for it):
 
-- A row with `cheap = 'pass'` is a miss. The walk stops: not earned, and the standing says when and
+- A prompt with `cheap = 'pass'` in any of its rows is a miss, so a newer caught row asking the
+  same never hides one. The walk stops: not earned, and the standing says when and
   where the miss was.
 - Otherwise the row is caught (`reject` or `unsure`).
 - First is earned when 30 rows have been caught before any miss.
@@ -226,7 +228,8 @@ Why this rule:
   (escalations), and those rows can never show a miss. Counting them would only pad the record.
   Audits are unbiased samples, so they count both ways.
 - **Each prompt counts once.** A restarted step that asks the same judge the same question does
-  not count twice.
+  not count twice. The review's prompt does not name the commit it judges, so for the review the
+  head commit is part of `prompt_sha`: each round of a change is its own question.
 - **What 30 means:** a clean record of 30 shows, at about 95% confidence, that the cheaper judge
   misses fewer than about 1 in 10 of what the strong judge catches (the rule of three: 3/30). This
   is acceptable only because later gates stand behind every judge: the plan check, tests, the
@@ -251,12 +254,15 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 - `timed(spec)` wraps `agentPhase` and measures milliseconds.
 - A session's cost comes from `AgentPhaseResult.costUsd` when it is ok, and is null otherwise.
 - `template_sha` is the sha256 of the template file text. `prompt_sha` is the sha256 of
-  `phasePrompt(ctx, phase)`.
+  `phasePrompt(ctx, phase)`, with the head commit of the phase's folder before it for the review.
 
 ### src/phases.ts
 
 - `AgentPhaseSpec` gains `retry?: boolean` (default true). `agentPhase` retries a timeout or crash
   only when it is not false.
+- `AgentPhaseSpec` gains `endsPause?: boolean` (default true). A session that ends ok clears the
+  outage pause only when it is not false; the cheaper judge sets it false, so with only the strong
+  model out the back-off keeps climbing instead of restarting at one minute.
 - `together` and `optional` are unchanged.
 - **Nested groups:** the early review's shadow runs a `together` inside the build step's
   `together`. The inner group skips the boundary because `groups > 0`.
@@ -360,7 +366,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
     cheaper judge did not pass) / strong, as a percentage. This is measured, not guessed from
     prices, and tells whether first pays.
   - **Spent on cheaper judges:** the sum of the cost of every `-cheap` phase.
-  - **Goes first?:** shown only when the setting is shadow or first.
+  - **Goes first?:** shown only when the setting is shadow or first. "Audited" counts only audits:
+    a first-mode shadow row right after an alone or escalated row, not the shadow calls that earn
+    first back after a miss.
   - **Why a judge cannot be compared**, spelled out in words:
     - "review already runs on sonnet; there is nothing cheaper to compare"
     - "with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run
@@ -398,7 +406,7 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   written. A kill after the row but before the gate row gives a duplicate with the same
   `prompt_sha`, which counts once.
 - **The strong model is unavailable while the cheaper one answers:** the loop pauses as today. The
-  cheaper result is thrown away, unrecorded.
+  cheaper result is thrown away, unrecorded, and it does not end the pause, so the back-off climbs.
 - **Only the cheaper model is unavailable:** shadow drops it, and first sends the question to the
   strong judge. The loop is never paused because of it.
 - **Shadow, the cheaper session ends `ok: false`** (invalid envelope, agent-fail, a timeout):
@@ -457,7 +465,8 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   - 29 caught gives "29 so far"; 30 gives earned.
   - Rows with another model, another `template_sha`, `how` alone or escalated, or cheap `failed`
     are ignored.
-  - Duplicates with the same `prompt_sha` count once.
+  - Duplicates with the same `prompt_sha` count once; a miss followed by a caught row with the
+    same `prompt_sha` is still a miss.
   - One miss among the newest 30 means not earned, with its date and slug; 30 newer caught after
     it means earned again.
   - An audit is due after 4 first-mode rows since the newest shadow row.

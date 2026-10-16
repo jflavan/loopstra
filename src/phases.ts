@@ -37,6 +37,8 @@ export interface AgentPhaseSpec {
   skills?: string[];
   /** false: a timeout or crash is not tried again (the cheaper judge: the strong judge stands behind it). Default true. */
   retry?: boolean;
+  /** false: getting through does not end an outage pause, since another model may still be out (the cheaper judge). Default true. */
+  endsPause?: boolean;
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
@@ -312,7 +314,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
-    clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
+    if (spec.endsPause !== false) clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested) {

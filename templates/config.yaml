@@ -39,7 +39,8 @@ stages:
   review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 
-# Work that runs at the same time to save waiting; no setting here changes what is checked.
+# Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides:
+# once earned, a cheaper judge's pass stands.
 # parallel_checks: test, lint and build start together (leave off if they write the same folder).
 # overlap_judges: the first review runs alongside the verifier, and lessons alongside the final
 # check. When the verifier fails, that review is thrown away and runs again after the fix.
