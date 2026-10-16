@@ -700,18 +700,24 @@ describe("more than one change at a time, with a GitHub remote", () => {
     });
     one.cleanup();
 
-    // Two at a time: beta's intake runs until alpha's step has looked at main. It ends with a question,
-    // so beta's step has no later phase: with one lane left, a merge between beta's phases could
-    // rightly bring main up to date in this tick.
+    // Two at a time: GitHub answers alpha's lane only once beta's intake has started, so beta's phase
+    // boundary always runs while alpha's lane is under way (once alpha's lane ended, with one lane left,
+    // a merge between beta's phases could rightly bring main up to date in this tick). Beta's intake
+    // then runs until alpha's step has looked at main. It ends with a question, so beta's step has no
+    // later phase.
     await writeChange(r.path, r.fixtures, { slug: "beta", status: "accepted" });
     const release = holdSession(r, "beta", "intake", "intake-question");
     await commitWithLanes(r, 2);
-    await withEnv(r.env, async () => {
+    const answer = join(r.fixtures, "github-answers");
+    await withEnv({ ...r.env, LOOPSTRA_FAKE_GH_WAIT_FOR: answer }, async () => {
       const looked = (t: Trace) => t.events("alpha").some((e) => e.payload.includes("\"finish merge\"") || (e.type === "status_change" && e.payload.includes("merged")));
       const running = tick(r.path);
       try {
+        await traceShows(r.path, (t) => t.phases("beta").length > 0);
+        writeFileSync(answer, "");
         await traceShows(r.path, looked);
       } finally {
+        writeFileSync(answer, "");
         release();
       }
       await running;
