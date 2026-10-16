@@ -227,6 +227,41 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 120_000);
 
+  test("a lane whose problem cannot even be traced: the tick still waits for the other lane, which finishes its step", async () => {
+    const r = await lanesRepo(2, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }]);
+    const releaseBeta = holdSession(r, "beta", "intake");
+    // Every trace write for alpha fails (as with a full disk): its step fails, and so does tracing why.
+    const event = Trace.prototype.event;
+    let failed = 0;
+    Trace.prototype.event = function (this: Trace, slug: string, ...rest: [never, unknown, (number | null)?]) {
+      if (slug === "alpha") {
+        failed++;
+        throw new Error("disk full");
+      }
+      return event.call(this, slug, ...rest);
+    };
+    try {
+      await withEnv(r.env, async () => {
+        let ended = false;
+        const running = tick(r.path).then((t) => { ended = true; return t; });
+        await traceShows(r.path, (t) => t.phases("beta").some((p) => p.name === "intake"));
+        const until = Date.now() + 60_000;
+        while (failed < 2 && Date.now() < until) await Bun.sleep(50);
+        expect(failed).toBeGreaterThanOrEqual(2);
+        await Bun.sleep(500);
+        // beta's session is still held: the tick has not ended under it.
+        expect(ended).toBe(false);
+        expect(lanesRunning()).toBeGreaterThanOrEqual(1);
+        releaseBeta();
+        const t = await running;
+        expect(t.crashed).toBe("disk full");
+        expect(await statusOf(r.path, "beta")).toBe("spec-approved");
+        expect(lanesRunning()).toBe(0);
+      });
+    } finally { Trace.prototype.event = event; }
+    r.cleanup();
+  }, 120_000);
+
   test("an outage in one change only: it stays the pause's cause each tick, reaches the probe and is blocked, while the other moves on", async () => {
     const r = await lanesRepo(2, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }]);
     writeFileSync(join(r.fixtures, "alpha", "intake.jsonl"), fixture("outage"));
@@ -323,6 +358,29 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     });
     roomy.cleanup();
   }, 180_000);
+
+  test("fewer changes at a time, back to the configured number, then fewer again on the same day: each change is traced", async () => {
+    const r = await lanesRepo(2, [], "claude:\n  max_budget_usd: 2\n  max_budget_usd_per_day: 3\n");
+    const dayOf = async (usd: number) => Bun.write(configPath(r.path), (await Bun.file(configPath(r.path)).text()).replace(/max_budget_usd_per_day: \d+/, `max_budget_usd_per_day: ${usd}`));
+    await withEnv(r.env, async () => {
+      await tick(r.path); // room for 1
+      await tick(r.path); // still 1: not traced again
+      await dayOf(8);
+      await tick(r.path); // room for 2 again
+      await tick(r.path);
+      await dayOf(3);
+      await tick(r.path); // 1 again
+    });
+    inTrace(r.path, (trace) => {
+      const notes = trace.events("_loop").filter((e) => e.type === "command" && e.payload.includes("changes at a time")).map((e) => payloadOf<{ note: string }>(e).note);
+      expect(notes).toEqual([
+        "Today's budget has room for 1 change at a time instead of 2.",
+        "Today's budget has room for 2 changes at a time again.",
+        "Today's budget has room for 1 change at a time instead of 2.",
+      ]);
+    });
+    r.cleanup();
+  }, 120_000);
 
   test("two changes reaching a local merge together merge one at a time: the second is tested again on a main with the first", async () => {
     // beta's plan lists no files, so the same-file wait does not keep it from building beside alpha.
@@ -839,6 +897,31 @@ describe("more than one change at a time, with a GitHub remote", () => {
         expect(trace.events("alpha").filter((e) => e.payload.includes("Brought up to date"))).toHaveLength(1);
       });
     });
+    r.cleanup();
+  }, 240_000);
+
+  test("a fix a person pushed that the workspace here cannot take: blocked saying so, not as if the branch here had changed too", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+    });
+    await personPushes(r, "alpha", "src/fix.ts");
+    await checksPass(r);
+    // Unsaved edits in the change's workspace to the file the person's commit adds: git will not take it.
+    await Bun.write(join(r.path, ".loopstra", "worktrees", "alpha", "src", "fix.ts"), "export const mine = 2;\n");
+    await withEnv(r.env, async () => { await tick(r.path); });
+    const alpha = await readIntent(r.path, "alpha");
+    expect(alpha.file.frontmatter.status).toBe("blocked");
+    expect(alpha.file.frontmatter.note).toMatch(/^Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here/);
+    expect(alpha.file.frontmatter.note).not.toContain("the branch here changed too");
+    inTrace(r.path, (trace) => {
+      const blocked = trace.events("alpha").filter((e) => e.type === "status_change" && payloadOf<{ to: string }>(e).to === "blocked");
+      expect(blocked).toHaveLength(1);
+      expect(trace.events("alpha").map((e) => e.payload).join("\n")).not.toContain("each have commits the other lacks");
+    });
+    expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(false);
     r.cleanup();
   }, 240_000);
 

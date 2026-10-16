@@ -233,7 +233,9 @@ traceLanes(trace, cfg, lanes);                          // only when fewer than 
 if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
 const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
 const started = Date.now();
-const perLane = await Promise.all(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+// Settled, not all: a lane that rejects (see runLane) is waited for like the others; laneSteps records its error as a crash.
+const settled = await Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+const perLane = settled.map((s) => laneSteps(s, shared));
 out.steps = perLane.flat();
 // N=1 callers unchanged: the first lane's last step (the one that did real work, or the last that only looked).
 const last = perLane.find((l) => l.length)?.at(-1);
@@ -250,7 +252,7 @@ polls add none.
 N=1.
 
 ```ts
-/** Runs steps one after another until one does real work. Never rejects. */
+/** Runs steps one after another until one does real work. Rejects only when the trace cannot be written while it records a problem. */
 async function runLane(...): Promise<LaneStep[]> {
   const done: LaneStep[] = [];
   laneStarted();
@@ -292,6 +294,11 @@ async function runLane(...): Promise<LaneStep[]> {
 - An intent that cannot be read now (`readFresh`): traces `error { where: "lane" }`, and the lane
   moves on to the next candidate. The next scan reports it.
 - Anything else: traces `error { where: "lane" }`, and the tick sets `crashed`.
+
+The problem is recorded and `halt` set before anything is traced. When that trace write fails too
+(a full disk, a database held past its busy timeout), the lane rejects. The tick uses
+`Promise.allSettled`, so it still waits for every other lane before its `finally` closes the trace,
+and the rejection is one more problem that sets `crashed`.
 
 A stop requested outside the lanes (at tick start) is traced under `_loop`.
 
@@ -374,8 +381,9 @@ tried again for a day, so a gc that cannot finish does not hold up every tick.
 - When `lanesFor` gives fewer lanes than configured, the trace says so once each time the
   number changes, and again on a new day: "Today's budget has room for 1 change at a time instead
   of 2." The number can go back up during a day (a killed session's hold stops counting once it
-  is stale, or the owner raises the day's budget); the line comes again only when the number it
-names changes, so a drop back to the number last noted that day is not noted twice.
+  is stale, or the owner raises the day's budget). Going back up to the configured number is
+  traced too ("Today's budget has room for 2 changes at a time again."), so a later drop the same
+  day is a change, and is traced again.
 - When the day runs out in the middle of a step, as it can today, that change ends with
   `LoopBudgetReached`, the other lanes start nothing new, and `afterDayBudget` handles every
   change that hit it.
@@ -420,7 +428,10 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
    moves to it, so the checks and the next push include the person's work. If the branch here
    changed too, the change is blocked with a plain note for an engineer, and nothing is
-   overwritten. When the branch here has commits that copy lacks
+   overwritten. If the branch here did not change but the workspace cannot take the person's
+   commits (it cannot be prepared, or unsaved edits there touch the same files), the change is
+   blocked with a note that says so, and git's error goes to the trace; it is never reported as
+   both sides having changed. When the branch here has commits that copy lacks
    (`not pushed`: a bring-up-to-date rebased it, then a stop, an outage, the day's budget or a
    failed push ended the step before its push), go to step 6. Otherwise GitHub would merge the old
    head, which never met the other change.
@@ -450,7 +461,12 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    - Fixes made by those checks go back for a review round (`anotherRound`, then `reviewing`).
      A conflict blocks with `UPDATE_FAILED_NOTE`.
 
-At N=1 this is off, so today's behaviour is kept exactly.
+At N=1 the up-to-date check is off: `gh pr merge` runs as soon as the checks pass, as today. The
+push rules in step 2 (the explicit lease, the `pr-lease` and `pr-pushing` markers, `git ls-remote`
+before each push in `openPullRequest`, and the block when GitHub's copy moved) apply at every N.
+At N=1 that changes one thing: a person's commits on the pull request's branch are no longer
+overwritten by the next push (after a retry of failed checks, say); the push is refused and the
+change blocked instead.
 
 ### Same files: a change waits instead of building into a conflict (N > 1 only)
 
@@ -715,7 +731,8 @@ Integration (`LOOPSTRA_FAKE_DELAY_MS`):
   - The probe blocks a change that ran in the second lane: the tick's `picked` and `result` stay
     the first lane's step, and the block is on the second lane's step in `steps`.
 - **Budget:** day $3, cap $2, N=2 gives one lane (the trace says "room for 1 change at a time
-  instead of 2", once). Day $8 gives two lanes, and no lane hits `LoopBudgetReached` on its first
+  instead of 2", once). Raising the day to $8 the same day traces "room for 2 changes at a time
+  again", and lowering it to $3 again traces the drop again. Day $8 gives two lanes, and no lane hits `LoopBudgetReached` on its first
   session. (A $4 day gives floor(4/2) = 2 lanes on a fresh day.)
 - **Worktrees:** two build steps start in the same tick. Both worktrees exist,
   `git worktree list` shows both, and neither step is blocked.

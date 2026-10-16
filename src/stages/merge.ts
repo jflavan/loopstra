@@ -24,6 +24,7 @@ const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, 
 const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
 const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
+const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
@@ -301,6 +302,7 @@ type Freshness = "up to date" | "main ahead" | "not pushed" | "remote ahead" | "
 async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
   const r = await oneMergeAtATime(ctx, async () => {
     const seen = await upToDate(ctx);
+    if (typeof seen !== "string") return block(ctx, seen.note, { ...seen, retryFrom: mergeRetry(ctx) });
     return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr) : seen;
   });
   const main = ctx.cfg.main_branch;
@@ -326,14 +328,15 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
  * Fetches, then judges what GitHub would merge: the pull request's branch as GitHub has it. A copy
  * the branch here may be pushed over becomes the lease (see settleLease). Commits a person added to
  * that copy are taken into the branch here first (see takePersonCommits), so the checks and the
- * next push include them; when the branch here changed too, both changed. The
+ * next push include them; when the branch here changed too, both changed, and when the workspace
+ * cannot take them, the failure to block with is returned. The
  * branch here has commits that copy lacks (a bring-up-to-date that stopped before its push): it is
  * not pushed. Otherwise, is main here or the remote's main ahead of that copy with code outside
  * intent/? Both branches are fetched by name, so this works whatever the remote's fetch setting
  * covers (a single-branch clone fetches only main). A fetch that fails is traced; the step waits
  * and looks again next time.
  */
-async function upToDate(ctx: StepContext): Promise<Freshness> {
+async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
   const remote = await ctx.git.remoteName();
   if (!remote) return "unreachable";
   const main = ctx.cfg.main_branch;
@@ -348,7 +351,9 @@ async function upToDate(ctx: StepContext): Promise<Freshness> {
   await settleLease(ctx, theirs);
   // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
   if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim()) {
-    if (!(await ctx.git.isAncestor(ctx.branch, pushed)) || !(await takePersonCommits(ctx, theirs))) return "both changed";
+    if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "both changed";
+    const taken = await takePersonCommits(ctx, theirs);
+    if (!taken.ok) return taken;
   }
   if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
   if (await outOfDate(ctx, main, pushed)) return "main ahead";
@@ -359,16 +364,17 @@ async function upToDate(ctx: StepContext): Promise<Freshness> {
 /**
  * Moves the branch here forward to `sha`, GitHub's copy, which has commits a person added on top of
  * it (in the worktree, so its files follow). From then on the pull request's branch may be pushed
- * over `sha`: the person's work is part of the branch here. False when the worktree cannot take it.
+ * over `sha`: the person's work is part of the branch here. A failure to block with when the
+ * workspace cannot be prepared, or cannot take them (for example unsaved edits there to the same files).
  */
-async function takePersonCommits(ctx: StepContext, sha: string): Promise<boolean> {
+async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: true } | Failure> {
   const open = await openBranchWorktree(ctx);
-  if (!open.ok) return false;
+  if (!open.ok) return open;
   const r = await new Git(ctx.worktreeDir).run([...NO_AUTO_MAINTENANCE, "merge", "--ff-only", "-q", sha], true);
-  if (r.code !== 0) return false;
+  if (r.code !== 0) return { ok: false, note: PERSON_COMMITS_NOT_TAKEN_NOTE, detail: `git merge --ff-only ${sha} in ${ctx.branch}'s workspace: ${(r.err || r.out).trim()}` };
   writeMarker(ctx, PR_LEASE, sha);
   ctx.trace.event(ctx.slug, "command", { command: "take pull request commits", note: "Commits someone added to the pull request on GitHub were taken into the branch here.", head: sha });
-  return true;
+  return { ok: true };
 }
 
 /**

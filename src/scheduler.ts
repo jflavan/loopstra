@@ -155,7 +155,9 @@ export async function tick(root: string): Promise<TickResult> {
     if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
     const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
     const started = Date.now();
-    const perLane = await Promise.all(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
+    const settled = await Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    const perLane = settled.map((s) => laneSteps(s, shared));
     out.steps = perLane.flat();
     // With one lane, as before: the step that did real work, or the last one that only looked.
     const last = perLane.find((l) => l.length)?.at(-1);
@@ -194,7 +196,8 @@ export async function tick(root: string): Promise<TickResult> {
  * share the list, and a change is taken and claimed in one go, so two lanes never run one change and
  * the between-phases merge never runs a change a lane is running. A stop, an outage or the day's
  * budget ends the lane, and no lane starts another step; the tick handles them once every lane has
- * ended (afterLanes). Never rejects.
+ * ended (afterLanes). It rejects only when the trace cannot be written while it records a problem
+ * (a full disk, a database held too long); see laneSteps.
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
   const done: LaneStep[] = [];
@@ -224,6 +227,16 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
   } finally {
     laneEnded();
   }
+}
+
+/**
+ * A lane's steps once every lane has ended. A lane that rejected (see runLane) gives none, and its
+ * error marks the tick as crashed.
+ */
+function laneSteps(settled: PromiseSettledResult<LaneStep[]>, shared: TickLanes): LaneStep[] {
+  if (settled.status === "fulfilled") return settled.value;
+  shared.problems.push({ slug: "_loop", error: settled.reason });
+  return [];
 }
 
 /**
@@ -307,14 +320,23 @@ const FEWER_LANES = "changes at a time";
 
 /**
  * Says when the day's budget gives fewer lanes than speed.max_parallel_changes (see lanesFor): once
- * each time the number changes, and again on a new day, not on every tick.
+ * each time the number changes, and again on a new day, not on every tick. The number going back up
+ * to speed.max_parallel_changes during the day (a bigger day, a session's hold gone stale) is said
+ * too, so a later drop counts as a change.
  */
 function traceLanes(trace: Trace, cfg: Config, lanes: number): void {
   const configured = cfg.speed.max_parallel_changes;
-  if (lanes >= configured) return;
-  const note = `Today's budget has room for ${lanes} change${lanes === 1 ? "" : "s"} at a time instead of ${configured}.`;
+  const changes = (n: number) => `${n} change${n === 1 ? "" : "s"}`;
   const last = trace.lastEvent("_loop", "command", `"command":"${FEWER_LANES}"`);
-  if (last && last.ts >= startOfToday() && (JSON.parse(last.payload) as { note?: string }).note === note) return;
+  const today = last && last.ts >= startOfToday() ? (JSON.parse(last.payload) as { note?: string; lanes?: number; configured?: number }) : null;
+  if (lanes >= configured) {
+    if (today && (today.lanes ?? 0) < (today.configured ?? 0)) {
+      trace.event("_loop", "command", { command: FEWER_LANES, note: `Today's budget has room for ${changes(configured)} at a time again.`, lanes: configured, configured });
+    }
+    return;
+  }
+  const note = `Today's budget has room for ${changes(lanes)} at a time instead of ${configured}.`;
+  if (today?.note === note) return;
   trace.event("_loop", "command", { command: FEWER_LANES, note, lanes, configured });
 }
 
