@@ -50,8 +50,10 @@ stages:
 # the plan challenge and the review. shadow: it judges alongside the strong one on the same question
 # and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the
 # cheaper judge has also rejected the last 30 things the strong one rejected, it judges alone and a
-# pass stands; anything it rejects or is unsure of goes to the strong judge. Until then, first runs
-# as shadow.
+# pass stands; anything it rejects or is unsure of goes to the strong judge, and every 5th call runs
+# both as an audit. Until then, first runs as shadow. shadow and audits need room in the day's
+# budget for both sessions, so never with max_budget_usd_per_day and no max_budget_usd; then the
+# strong judge decides alone.
 speed:
   parallel_checks: false
   overlap_judges: true

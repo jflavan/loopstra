@@ -49,8 +49,10 @@ cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow o
 # the plan challenge and the review. shadow: it judges alongside the strong one on the same question
 # and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the
 # cheaper judge has also rejected the last 30 things the strong one rejected, it judges alone and a
-# pass stands; anything it rejects or is unsure of goes to the strong judge. Until then, first runs
-# as shadow.
+# pass stands; anything it rejects or is unsure of goes to the strong judge, and every 5th call runs
+# both as an audit. Until then, first runs as shadow. shadow and audits need room in the day's
+# budget for both sessions, so never with max_budget_usd_per_day and no max_budget_usd; then the
+# strong judge decides alone.
 speed:
   parallel_checks: false
   overlap_judges: true
@@ -596,7 +598,7 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 - The done-check is left out because a second judge would need a second copy of main and install (or would share the output folder), and it runs once per change after the merge, so the saving is small.
 - No cut-short: the cheaper model is normally the faster one, it is never retried, and `timeout_minutes` bounds it; plumbing an abort signal through the process layer was not worth the code for a mode that is off by default.
 - In first mode, a cheaper session that throws AssistantUnavailable escalates to the strong judge rather than pausing the loop, since a per-model limit should only cost more, never stop work.
-- First-mode escalation runs cheap then strong sequentially without a together wrapper, because the strong judge then sees exactly what it sees today and no extra concept is needed.
+- First-mode escalation runs cheap then strong one after the other, never at once, so the strong judge sees exactly what it sees today; each is timed as a group of one so the merge boundary is not counted.
 - The early review is shadowed (room for three) so round 1 gets measured; a kept review decided by the cheaper judge is used only if the judge is still trusted now, while strong-decided reviews keep today's key unchanged.
 - Lessons' previous-failures input and the status table's last phase leave out -cheap rows, which Design 1 missed: otherwise a cheap judge's invalid envelope would be fed to lessons as the change's failure.
 - Observability lives in a new `loopstra judges` command and a dashboard section; `loopstra status` and the attention list stay owner-only because a shadow false pass needs no person.
