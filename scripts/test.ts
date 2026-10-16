@@ -9,7 +9,7 @@ import { Glob } from "bun";
 const WEIGHTS: Record<string, number> = {
   "tests/integration/remote.test.ts": 34,
   "tests/unit/stages-review-merge.test.ts": 29,
-  "tests/integration/lanes.test.ts": 24,
+  "tests/integration/lanes.test.ts": 36,
   "tests/integration/scheduler.test.ts": 17,
   "tests/unit/remote.test.ts": 13,
   "tests/unit/stages-build.test.ts": 12,

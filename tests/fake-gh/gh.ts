@@ -91,9 +91,17 @@ if (cmd === "view") {
       return r.stdout.toString().trim();
     };
     git("clone", "-q", remote, ".");
-    if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
-    else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
-    git("push", "-q", "origin", "HEAD");
+    // Like GitHub, the merge lands on main as it is at that moment: when main moves on while this
+    // merges (Loopstra sharing its records), merge again on top of it.
+    for (let attempt = 1; ; attempt++) {
+      if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
+      else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
+      const pushed = Bun.spawnSync({ cmd: ["git", "push", "-q", "origin", "HEAD"], cwd: dir, stdout: "pipe", stderr: "pipe" });
+      if (pushed.exitCode === 0) break;
+      if (attempt >= 5) { console.error(`fake gh: git push failed: ${pushed.stderr.toString()}`); rmSync(dir, { recursive: true, force: true }); process.exit(1); }
+      git("fetch", "-q", "origin");
+      git("reset", "-q", "--hard", `origin/${git("rev-parse", "--abbrev-ref", "HEAD")}`);
+    }
     pr.mergeCommit = git("rev-parse", "HEAD");
     if (args.includes("--delete-branch")) git("push", "-q", "origin", "--delete", branch);
     rmSync(dir, { recursive: true, force: true });

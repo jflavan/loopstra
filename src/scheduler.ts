@@ -11,7 +11,8 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, intentRoot, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { applyChatRequests } from "./chat/requests";
 import { runBuildStep } from "./stages/build";
@@ -118,7 +119,9 @@ export async function tick(root: string): Promise<TickResult> {
     }
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg)));
+    // With more than one change at a time, a change that would build into another's files waits.
+    const holds = await sameFileHolds(root, cfg.speed.max_parallel_changes, ordered);
+    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     await cleanupLeftovers(root, cfg, trace, ordered);
     await packWhileNoLaneRuns(root, trace);
 
@@ -142,9 +145,9 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Run steps for up to speed.max_parallel_changes changes at once, each in its own lane; the
     // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
-    // never built on a main without it.
+    // never built on a main without it, and so does one waiting for another to merge the same files.
     const human = humanGates(cfg);
-    const candidates = ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length);
+    const candidates = ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
     const lanes = lanesFor(cfg, trace);
     traceLanes(trace, cfg, lanes);
     // With a remote, a pull request whose checks pass while another change's step runs merges
@@ -283,6 +286,25 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
   return out;
 }
 
+/** Statuses whose plan's file list the same-file wait reads. */
+const READS_PLAN_FILES = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
+
+/**
+ * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
+ * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
+ * counts as one with no file list.
+ */
+export async function sameFileHolds(root: string, lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
+  if (lanes <= 1) return new Map();
+  const files = new Map<string, string[] | null>();
+  for (const i of ordered.filter((x) => READS_PLAN_FILES.has(x.file.frontmatter.status))) {
+    const path = join(intentRoot(root), i.slug, "plan.md");
+    const plan = existsSync(path) ? await Bun.file(path).text().catch(() => null) : null;
+    files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
+  }
+  return fileHolds(ordered, files);
+}
+
 /** The trace's command name for fewer changes at a time than configured. */
 const FEWER_LANES = "changes at a time";
 
@@ -380,7 +402,9 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
   try {
     if (out.steps?.length) {
       const scan = await scanRepo(root);
-      await writeQueue(root, trace, renderQueue(orderQueue(scan.intents), scan.unreadable, humanGates(cfg)));
+      const ordered = orderQueue(scan.intents);
+      const holds = await sameFileHolds(root, cfg.speed.max_parallel_changes, ordered);
+      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     }
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {

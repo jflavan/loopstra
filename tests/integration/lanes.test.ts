@@ -28,10 +28,11 @@ interface Change { slug: string; status: string; dependsOn?: string[]; writes?: 
 /** The files a change's build writes. */
 const writesOf = (c: Change) => c.writes ?? { [`src/${c.slug}.ts`]: "export function add(a: number, b: number): number {\n  return a + b;\n}\n" };
 
-/** A plan that lists the files the change's build writes (or `planFiles`). */
+/** A plan that lists the files the change's build writes (or `planFiles`); the change's own file is new. */
 function planFor(c: Change): string {
   const files = c.planFiles === undefined ? Object.keys(writesOf(c)) : c.planFiles;
-  const list = files === null ? "" : `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n`;
+  const line = (f: string) => `- ${f}${f === `src/${c.slug}.ts` ? " (new)" : ""}`;
+  const list = files === null ? "" : `## Files that change\n${files.map(line).join("\n")}\n\n`;
   return `# Plan: ${c.slug}\n\n${list}## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n`;
 }
 
@@ -57,6 +58,16 @@ async function writeChange(path: string, fixtures: string, c: Change): Promise<v
   }
   mkdirSync(join(fixtures, c.slug), { recursive: true });
   writeFileSync(join(fixtures, c.slug, "build.jsonl"), buildFixture(c));
+  writeFileSync(join(fixtures, c.slug, "plan.jsonl"), planFixture(c));
+}
+
+/** The change's plan session, as a fake fixture: it writes planFor(c), so changes planned in a test list their own files. */
+function planFixture(c: Change): string {
+  return fixture("plan").split("\n").filter((l) => l.trim()).map((l) => {
+    const e = JSON.parse(l) as { type: string; structured_output?: { plan_markdown: string } };
+    if (e.type === "result" && e.structured_output) e.structured_output.plan_markdown = planFor(c);
+    return JSON.stringify(e);
+  }).join("\n") + "\n";
 }
 
 /**
@@ -291,9 +302,10 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
   }, 180_000);
 
   test("two changes reaching a local merge together merge one at a time: the second is tested again on a main with the first", async () => {
+    // beta's plan lists no files, so the same-file wait does not keep it from building beside alpha.
     const r = await lanesRepo(2, [
       { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
-      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 20: "beta" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 20: "beta" }) }, planFiles: null },
     ], "", { "src/shared.ts": numbered() });
     await withEnv(r.env, async () => {
       await tick(r.path); // both build
@@ -316,9 +328,10 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
   }, 180_000);
 
   test("two changes that clash: the first merges, the second is blocked as out of date, and main keeps only the first", async () => {
+    // As above, beta's plan lists no files: the same-file wait would otherwise keep the two apart.
     const r = await lanesRepo(2, [
       { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
-      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) }, planFiles: null },
     ], "", { "src/shared.ts": numbered() });
     await withEnv(r.env, async () => {
       await tick(r.path);
@@ -331,6 +344,29 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       const git = new Git(r.path);
       expect((await git.run(["show", "main:src/shared.ts"])).out).toBe(numbered({ 1: first }));
       expect((await git.run(["status", "--porcelain"])).out.trim()).toMatch(/^(M intent\/queue\.md)?$/);
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("two plan-approved changes that change the same file: only the first builds, the second waits with a note and builds once it merged", async () => {
+    const r = await lanesRepo(2, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha", 2: "beta" }) } },
+    ], "", { "src/shared.ts": numbered() });
+    const note = "Waits for alpha to be merged first, because both change the same files.";
+    const queueRow = async (slug: string) => (await Bun.file(join(r.path, "intent", "queue.md")).text()).split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
+    await withEnv(r.env, async () => {
+      await tick(r.path); // alpha builds; beta waits
+      expect(await statusOf(r.path, "alpha")).toBe("reviewing");
+      expect(await statusOf(r.path, "beta")).toBe("plan-approved");
+      expect(await queueRow("beta")).toContain(note);
+      await tick(r.path); // alpha merges; beta still waited when the tick began
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      inTrace(r.path, (trace) => expect(trace.phases("beta")).toEqual([]));
+      expect(await queueRow("beta")).not.toContain(note);
+      await tick(r.path); // beta builds on main with alpha
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      expect((await new Git(r.path).run(["show", "intent/beta:src/shared.ts"])).out).toBe(numbered({ 1: "alpha", 2: "beta" }));
     });
     r.cleanup();
   }, 180_000);
@@ -393,7 +429,10 @@ async function checksPass(r: RemoteRepo): Promise<void> {
   await Bun.write(r.state, JSON.stringify(s));
 }
 
-/** Sets speed.max_parallel_changes, commits everything, and pushes main. */
+/**
+ * Sets speed.max_parallel_changes, commits everything, and pushes main. A changed config is code
+ * outside intent/: with more than one change at a time, open pull requests are then out of date.
+ */
 async function commitWithLanes(r: RemoteRepo, n: number): Promise<void> {
   await Bun.write(configPath(r.path), (await Bun.file(configPath(r.path)).text()).replace(/max_parallel_changes: \d/, `max_parallel_changes: ${n}`));
   await new Git(r.path).commitAll(`${n} at a time`);
@@ -416,13 +455,13 @@ async function traceShows(repo: string, done: (t: Trace) => boolean): Promise<vo
 
 describe("more than one change at a time, with a GitHub remote", () => {
   test("a change merging in one lane is never also run by the other lane's between-phases merge", async () => {
-    const r = await remoteLanesRepo(1, [{ slug: "alpha", status: "plan-approved" }]);
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
     await withEnv(r.env, async () => {
       await tick(r.path); // build
       await tick(r.path); // review, pull request
       expect(await statusOf(r.path, "alpha")).toBe("merge-review");
 
-      // Another change to build, two lanes, and alpha's checks pass.
+      // Another change to build (only records reach main, so alpha's pull request stays up to date), and alpha's checks pass.
       await writeChange(r.path, r.fixtures, { slug: "beta", status: "plan-approved" });
       await commitWithLanes(r, 2);
       await checksPass(r);
@@ -430,9 +469,9 @@ describe("more than one change at a time, with a GitHub remote", () => {
       await tick(r.path);
       expect(await statusOf(r.path, "beta")).toBe("reviewing");
       // Merged on GitHub in alpha's own lane. While beta's lane runs, main here is not brought up to
-      // date, so the merge may be recorded only by the next look (between beta's phases once alpha's
+      // date, so the merge may be recorded only by a later look (between beta's phases once alpha's
       // lane has ended, or on the next tick).
-      if ((await statusOf(r.path, "alpha")) !== "merged") await tick(r.path);
+      for (let i = 0; i < 2 && (await statusOf(r.path, "alpha")) !== "merged"; i++) await tick(r.path);
       expect(await statusOf(r.path, "alpha")).toBe("merged");
       inTrace(r.path, (trace) => {
         const merges = trace.events("alpha").filter((e) => e.type === "status_change" && payloadOf<{ to: string }>(e).to === "merged");
@@ -447,7 +486,7 @@ describe("more than one change at a time, with a GitHub remote", () => {
   }, 180_000);
 
   test("a pull request merged while another change's session runs: main is not rebased during the tick, and the merge is recorded on the next", async () => {
-    const r = await remoteLanesRepo(1, [{ slug: "alpha", status: "plan-approved" }]);
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
     await withEnv(r.env, async () => {
       await tick(r.path); // build
       await tick(r.path); // review, pull request
@@ -457,6 +496,7 @@ describe("more than one change at a time, with a GitHub remote", () => {
 
     // One change at a time: the merge is recorded in the same tick, as before.
     const one = await copyRemoteRepo(r);
+    await commitWithLanes(one, 1);
     await withEnv(one.env, async () => {
       await tick(one.path);
       expect(await statusOf(one.path, "alpha")).toBe("merged");
