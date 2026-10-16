@@ -191,12 +191,13 @@ export async function tick(root: string): Promise<TickResult> {
 const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
 /**
- * One lane: today's pick loop over the tick's runnable changes. It runs one step after another
- * until a step does real work; a step that only looked and found nothing to do yet (a pull request
- * still waiting on GitHub) lets it take the next change. The lanes share the list, and a change is
- * taken and claimed in one go, so two lanes never run one change and the between-phases merge never
- * runs a change a lane is running. A stop, an outage or the day's budget ends the lane, and no lane
- * starts another step; the tick handles them once every lane has ended (afterLanes). Never rejects.
+ * One lane: the pick loop over the tick's runnable changes (as one change at a time always ran it).
+ * It runs one step after another until a step does real work; a step that only looked and found
+ * nothing to do yet (a pull request still waiting on GitHub) lets it take the next change. The lanes
+ * share the list, and a change is taken and claimed in one go, so two lanes never run one change and
+ * the between-phases merge never runs a change a lane is running. A stop, an outage or the day's
+ * budget ends the lane, and no lane starts another step; the tick handles them once every lane has
+ * ended (afterLanes). Never rejects.
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
   const done: LaneStep[] = [];
@@ -251,7 +252,9 @@ async function readFresh(root: string, trace: Trace, slug: string): Promise<Inte
 
 /**
  * A step ended with a stop, an outage, the day's budget, or (never expected) another problem. No
- * lane starts another step. A stop is traced for the change now, the rest once the lanes have ended.
+ * lane starts another step. A stop, and a problem that is not an outage or the day's budget, are
+ * traced for the change now; an outage and the day's budget are handled once the lanes have ended
+ * (afterLanes).
  */
 function laneProblem(trace: Trace, shared: TickLanes, slug: string, e: unknown, durationMs: number): LaneStep {
   shared.halt = true;
@@ -318,18 +321,27 @@ function traceLanes(trace: Trace, cfg: Config, lanes: number): void {
   trace.event("_loop", "command", { command: FEWER_LANES, note, lanes, configured });
 }
 
+/** How long the tick start's git gc may take: a full repack of a large repository takes a while. */
+const GC_TIMEOUT_MS = 60 * 60_000;
+/** After a git gc failed, the next try waits this long, so a gc that cannot finish does not hold up every tick. */
+const GC_RETRY_MS = 24 * 60 * 60_000;
+
 /**
  * Lets git pack the repository when it thinks it is time, while no lane runs. Runtime commits never
  * do it themselves (gc.auto=0): a pack of the refs during one change's commit could make another
- * change's commit fail. Traced only when it fails; never stops the tick.
+ * change's commit fail. Traced only when it fails, and then not tried again for a day; never stops
+ * the tick.
  */
 async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
+  const failed = trace.lastEvent("_loop", "error", '"where":"gc"');
+  if (failed && failed.ts > new Date(Date.now() - GC_RETRY_MS).toISOString()) return;
+  const note = "git could not pack the repository; it is tried again tomorrow";
   try {
-    const r = await new Git(root).run(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"], true);
-    if (r.code !== 0) trace.event("_loop", "error", { where: "gc", error: (r.err || r.out).trim() });
+    const r = await new Git(root).run(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"], { allowFail: true, timeoutMs: GC_TIMEOUT_MS });
+    if (r.code !== 0) trace.event("_loop", "error", { where: "gc", error: (r.err || r.out).trim(), note });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
-    trace.event("_loop", "error", { where: "gc", error: errorText(e) });
+    trace.event("_loop", "error", { where: "gc", error: errorText(e), note });
   }
 }
 

@@ -495,6 +495,19 @@ async function commitWithLanes(r: RemoteRepo, n: number): Promise<void> {
   await run(["git", "push", "-q", "origin", "main"], r.path);
 }
 
+/** A person pushes a commit adding `file` to the change's branch on GitHub (its pull request's branch). */
+async function personPushes(r: RemoteRepo, slug: string, file: string): Promise<void> {
+  const clone = tempDir("loopstra-person-");
+  try {
+    const git = (args: string[]) => run(["git", ...args], clone.path).then((x) => expect(x.code).toBe(0));
+    await git(["clone", "-q", "-b", `intent/${slug}`, r.remote, "."]);
+    await Bun.write(join(clone.path, file), "export const fix = 1;\n");
+    await git(["add", "-A"]);
+    await git(["-c", "user.name=Person", "-c", "user.email=person@example.com", "commit", "-q", "-m", `person: ${file}`]);
+    await git(["push", "-q", "origin", `intent/${slug}`]);
+  } finally { clone.cleanup(); }
+}
+
 /** A held session: the change's `phase` session waits until the returned `release` is called, then replays `answer`. */
 function holdSession(r: LanesRepo, slug: string, phase: string, answer = phase): () => void {
   const release = join(r.fixtures, `release-${slug}-${phase}`);
@@ -693,6 +706,54 @@ describe("more than one change at a time, with a GitHub remote", () => {
     });
     r.cleanup();
   }, 300_000);
+
+  test("a fix a person pushed to the pull request is kept when it is brought up to date, and never overwritten when the branch here changed too", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+    });
+    // An engineer pushes a fix to the pull request's branch on GitHub; meanwhile main gains code.
+    await personPushes(r, "alpha", "src/fix.ts");
+    await Bun.write(join(r.path, "src", "other.ts"), "export const other = 1;\n");
+    await new Git(r.path).commitAll("other code");
+    await run(["git", "push", "-q", "origin", "main"], r.path);
+    await checksPass(r);
+    const onRemote = async (repo: RemoteRepo, file: string) => (await run(["git", "cat-file", "-e", `intent/alpha:${file}`], repo.remote)).code === 0;
+
+    // The branch here was also changed and not pushed (a bring-up-to-date that stopped before its
+    // push): neither side is overwritten, and an engineer is asked to bring them together.
+    const both = await copyRemoteRepo(r);
+    try {
+      expect(await new Git(join(both.path, ".loopstra", "worktrees", "alpha")).rebaseOnto("main")).toBe(true);
+      await withEnv(both.env, async () => {
+        const trace = Trace.open(both.path);
+        try {
+          const ctx = new StepContext(both.path, await loadConfig(both.path), trace, await readIntent(both.path, "alpha"));
+          expect((await runStepGuarded(ctx)).ok).toBe(false);
+        } finally { trace.close(); }
+      });
+      expect(await statusOf(both.path, "alpha")).toBe("blocked");
+      expect((await readIntent(both.path, "alpha")).file.frontmatter.note).toContain("added commits to the pull request's branch on GitHub");
+      expect(await onRemote(both, "src/fix.ts")).toBe(true);
+    } finally { both.cleanup(); }
+
+    // Otherwise the person's commits are taken into the branch here, which is checked again with
+    // them and pushed: the pull request keeps the fix and gains main's code.
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect(await onRemote(r, "src/fix.ts")).toBe(true);
+      expect(await onRemote(r, "src/other.ts")).toBe(true);
+      expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(false);
+      inTrace(r.path, (trace) => {
+        expect(trace.events("alpha").filter((e) => e.payload.includes("\"take pull request commits\""))).toHaveLength(1);
+        expect(trace.events("alpha").filter((e) => e.payload.includes("Brought up to date"))).toHaveLength(1);
+      });
+    });
+    r.cleanup();
+  }, 240_000);
 
   test("an outage in one lane: the other lane, whose step only looked at a pull request, starts no further change", async () => {
     // alpha's pull request has its checks pending, so its step only looks, and its lane would then

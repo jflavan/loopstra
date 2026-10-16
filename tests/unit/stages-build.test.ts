@@ -8,6 +8,8 @@ import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/early-review";
+import { PR_LEASE, REMOTE_AHEAD } from "../../src/stages/shared";
+import { readMarker, writeMarker } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -104,6 +106,16 @@ describe("build stage", () => {
     // early-review runs alongside the first verify (see "the first review alongside the verifier").
     expect(withoutEarlyReview(trace)).toEqual(["branch", "build", "drift", "test-1", "verify"]);
     expect(JSON.parse(await Bun.file(join(ctx.runDir, "sessions.json")).text())).toEqual({ build: "fake-build" });
+    trace.close(); repo.cleanup();
+  });
+
+  test("a rebuild forgets the earlier pull request's wait and what Loopstra last pushed for it", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    writeMarker(ctx, REMOTE_AHEAD, "");
+    writeMarker(ctx, PR_LEASE, "0123456789abcdef0123456789abcdef01234567");
+    expect((await runBuildStep(ctx)).ok).toBe(true);
+    expect(readMarker(ctx, REMOTE_AHEAD)).toBeNull();
+    expect(readMarker(ctx, PR_LEASE)).toBeNull();
     trace.close(); repo.cleanup();
   });
 

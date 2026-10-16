@@ -181,6 +181,15 @@ export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
 /** Run-folder marker written just before merging (holds main's commit before the merge). */
 export const MERGING = "merging";
 
+/** Run-folder marker: the pull request waits for main here to get changes merged on GitHub (traced once). */
+export const REMOTE_AHEAD = "remote-ahead";
+
+/**
+ * Run-folder marker: the commit the pull request's branch on GitHub may be force-pushed over (what
+ * Loopstra last pushed there, or took from there). Anything else on that branch is a person's work.
+ */
+export const PR_LEASE = "pr-lease";
+
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {
   const n = Number.parseInt(readMarker(ctx, REVIEW_ROUND) ?? "", 10);

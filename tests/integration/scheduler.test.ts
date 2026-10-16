@@ -240,6 +240,23 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a git gc that fails at the start of a tick is traced once and not tried again on every tick", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    // gc refuses to run with a setting it cannot read; other git commands do not read it.
+    const git = new Git(repo.path);
+    await git.run(["config", "gc.pruneExpire", "bogus"]);
+    try {
+      await tick(repo.path);
+      await tick(repo.path);
+      const failures = trace.events("_loop").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"gc\""));
+      expect(failures).toHaveLength(1);
+      expect(JSON.parse(failures[0]!.payload).note).toContain("tried again tomorrow");
+    } finally {
+      await git.run(["config", "--unset", "gc.pruneExpire"], true);
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("start keeps going after a problem and a stop cuts its sleep short", async () => {
     const { repo, trace } = await setupRepo("draft");
     await Bun.write(configPath(repo.path), "version: 1\nbogus: true\n");

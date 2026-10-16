@@ -312,7 +312,9 @@ line per entry in `r.steps` that has a result, worded as today, so at N=1 a merg
 waited followed by a real step now gives two lines instead of one.
 
 The tick start also runs `git -c gc.autoDetach=false gc --auto --quiet` while no lane runs (see
-the shared-state table). It may fail; a failure is only traced.
+the shared-state table), with a time limit of an hour instead of git's usual five minutes, since a
+full repack of a large repository takes a while. It may fail; a failure is traced, and gc is not
+tried again for a day, so a gc that cannot finish does not hold up every tick.
 
 ## Shared state, one item at a time
 
@@ -326,7 +328,7 @@ the shared-state table). It may fail; a failure is only traced.
 | `recordPersonEdits` | One writer | A main-lock section. In `finishRemoteMerge` it shares one section with the sync. |
 | Local merge (`mergeNow`) | No commit lands between the checks and the merge | The merge lock from the checks to the merge, and the main lock across `mergeNow`. |
 | Worktree and branch admin (shared `.git/worktrees`, refs, `packed-refs`) | One caller | Root commands are locked automatically. `ensureWorktree`, `removeWorktree`, the `withDetachedWorktree` setup and teardown, and `cleanupChange` are sections. |
-| Commands inside worktrees (`saveWork`, `rebaseOnto`) | n/a | Each worktree has its own index and HEAD, so no lock is needed. Automatic `git gc` and maintenance are turned off for runtime commits, fetches and the fast-forward of a local merge (`-c gc.auto=0 -c maintenance.auto=false`, `NO_AUTO_MAINTENANCE`, part of `RUNTIME_COMMIT_CONFIG`); a fetch would otherwise start it in the background, outliving its main-lock section. Otherwise one change's commit could pack refs while another change commits or deletes a branch, and fail with "cannot lock ref". The tick start runs `git gc --auto --quiet` itself while no lane runs (allowed to fail, traced only on failure). |
+| Commands inside worktrees (`saveWork`, `rebaseOnto`) | n/a | Each worktree has its own index and HEAD, so no lock is needed. Automatic `git gc` and maintenance are turned off for runtime commits, fetches and the fast-forward of a local merge (`-c gc.auto=0 -c maintenance.auto=false`, `NO_AUTO_MAINTENANCE`, part of `RUNTIME_COMMIT_CONFIG`); a fetch would otherwise start it in the background, outliving its main-lock section. Otherwise one change's commit could pack refs while another change commits or deletes a branch, and fail with "cannot lock ref". The tick start runs `git gc --auto --quiet` itself while no lane runs (up to an hour; allowed to fail, traced only on failure, and then not tried again for a day). |
 | Read-only git on root (`isAncestor`, `ls-files`, `ls-tree`) | n/a | They go through the same per-command lock. They are short, so this costs little. |
 | Run folders, `.loopstra/verify/<slug>`, `sessions.json`, phase folders | n/a | Each belongs to one change. Nothing to do. |
 | `phaseBoundary`, `alongside` groups, `mergingBetweenPhases`, `mergeReadyChanges` | One step | See "Module-level state" above. |
@@ -399,7 +401,13 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
 1. `git fetch` (main lock, no automatic gc or maintenance). If it fails, the failure is traced
    and the step waits.
 2. What GitHub would merge is judged, not the branch here: the pull request's branch as GitHub
-   has it, `<remote>/<branch>` after the fetch. When the branch here has commits that copy lacks
+   has it, `<remote>/<branch>` after the fetch. When that copy has commits that neither the branch
+   here nor Loopstra's last push (the `pr-lease` run-folder marker) has, a person added them (for
+   example a fix after GitHub's checks failed). If the branch here is part of that copy, it is
+   fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
+   moves to it, so the checks and the next push include the person's work. If the branch here
+   changed too, the change is blocked with a plain note for an engineer, and nothing is
+   overwritten. When the branch here has commits that copy lacks
    (`not pushed`: a bring-up-to-date rebased it, then a stop, an outage, the day's budget or a
    failed push ended the step before its push), go to step 6. Otherwise GitHub would merge the old
    head, which never met the other change.
@@ -408,7 +416,8 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    since their merge base. The new Git helper is `gainedCodeSince(base, ref, ["intent/"])`.
 4. Neither ref is out of date: merge on GitHub as today, still inside the lock.
 5. Only the remote's main is ahead: wait. The next tick's sync brings it in. The trace says once
-   (a run-folder marker, cleared when the change is brought up to date or merges) that main here
+   (a run-folder marker, cleared when the change is brought up to date or merges, when its pull
+   request is found closed or its checks failed, and when it is built again) that main here
    gets those changes at the start of the next check, and that the `main_sync` signal says why if
    it does not.
 6. Local main is ahead, or the branch here is not pushed:
@@ -418,7 +427,9 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
      re-check the `merge-approved` path already used. It keeps unreviewed edits left in the
      worktree on the branch and sends them to review; otherwise it runs `mergeGate` (a rebase,
      the tests, the findings), then a push through `openPullRequest(ctx, false)`, which
-     force-pushes with lease and keeps the pull request open. The step then returns `waiting`,
+     force-pushes with an explicit lease (`--force-with-lease=<branch>:<pr-lease>`, so a fetch in
+     between cannot turn it off; a refused push blocks with the same plain note as above) and
+     keeps the pull request open. The step then returns `waiting`,
      with no status change.
    - The trace says, in plain words, "Brought up to date with changes merged meanwhile; waiting
      for the automatic checks on GitHub again."

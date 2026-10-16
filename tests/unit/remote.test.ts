@@ -5,7 +5,7 @@ import { loadConfig } from "../../src/config";
 import { setStatus, StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
+import { pushBranch, shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { run, tempDir, tempGitRepo, withEnv } from "../helpers";
 
@@ -226,5 +226,48 @@ describe("syncMain", () => {
     await syncMain(s.repo, s.cfg, s.trace);
     expect(syncErrors(s.trace)).toEqual(["fetch failed"]);
     s.cleanup();
+  });
+});
+
+describe("pushBranch", () => {
+  test("overwrites only what Loopstra pushed last: a commit a person added is kept, even after a fetch", async () => {
+    const s = await setup();
+    try {
+      const git = new Git(s.repo);
+      const sha = async () => (await git.run(["rev-parse", "intent/x"])).out.trim();
+      /** Gives the branch here a new head in place of its last commit, as a rebase does. */
+      const rewrite = async (text: string) => {
+        await run(["git", "checkout", "-q", "intent/x"], s.repo);
+        await Bun.write(join(s.repo, "x.md"), text);
+        await run(["git", "commit", "-q", "-a", "--amend", "-m", text], s.repo);
+        await run(["git", "checkout", "-q", "main"], s.repo);
+      };
+      await run(["git", "checkout", "-q", "-b", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "first\n");
+      await run(["git", "add", "x.md"], s.repo);
+      await run(["git", "commit", "-q", "-m", "first"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+
+      // Rewritten here: Loopstra's own last push is overwritten.
+      const first = await sha();
+      await rewrite("second\n");
+      expect(await pushBranch(git, "intent/x", first)).toEqual({ ok: true });
+
+      // A person adds a commit on GitHub; the branch here is rewritten again and the remote fetched.
+      const second = await sha();
+      await run(["git", "fetch", "-q", "origin"], s.other);
+      await run(["git", "checkout", "-q", "-b", "intent/x", "origin/intent/x"], s.other);
+      await Bun.write(join(s.other, "fix.md"), "fix\n");
+      await run(["git", "add", "fix.md"], s.other);
+      await run(["git", "commit", "-q", "-m", "fix"], s.other);
+      await run(["git", "push", "-q", "origin", "intent/x"], s.other);
+      await rewrite("third\n");
+      await git.fetch(["--quiet", "origin"]);
+      const refused = await pushBranch(git, "intent/x", second);
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.moved).toBe(true);
+      expect((await run(["git", "cat-file", "-e", "intent/x:fix.md"], s.remote)).code).toBe(0);
+    } finally { s.cleanup(); }
   });
 });
