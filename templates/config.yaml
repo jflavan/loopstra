@@ -39,6 +39,12 @@ stages:
   review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 
+# Work that runs at the same time to save waiting; neither setting changes what is checked.
+# parallel_checks: test, lint and build start together (leave off if they write the same folder).
+# overlap_judges: the first review runs alongside the verifier, and lessons alongside the final
+# check. When the verifier fails, that review is stopped at once and runs again after the fix.
+speed: { parallel_checks: false, overlap_judges: true }
+
 signals:
   main_health: { every_minutes: 30 }
 

@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
+import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
@@ -110,6 +111,8 @@ async function personSets(ctx: StepContext, to: "merge-approved" | "done"): Prom
 describe("review", () => {
   test("reviewing → merge-review with a person on the merge gate: the reviewer reads git but cannot write, and nothing reaches main", async () => {
     const { repo, ctx, trace } = await built(PERSON_MERGES);
+    // Without the review that ran alongside the verifier, so the merge step runs a review session.
+    rmSync(join(ctx.runDir, EARLY_REVIEW), { force: true });
     const argsFile = join(repo.path, "args.json");
     await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
     const i = await readIntent(repo.path, "add-numbers");
@@ -136,7 +139,7 @@ describe("review", () => {
     await Bun.write(join(ctx.worktreeDir, "src", "add.ts"), "export const add = (a: number, b: number) => a + b;\n");
     const argsFile = join(repo.path, "args.json");
     await withEnv({ LOOPSTRA_FAKE_ARGS: argsFile }, () => runMergeStep(ctx));
-    const reviewPrompt = await Bun.file(join(ctx.runDir, "phases", `${trace.phases("add-numbers").find((p) => p.name === "review-1")!.seq}-review-1`, "prompt.md")).text();
+    const reviewPrompt = await Bun.file(join(ctx.runDir, "phases", `${trace.phases("add-numbers").findLast((p) => p.name === "review-1")!.seq}-review-1`, "prompt.md")).text();
     expect(reviewPrompt).toContain("The tests have not run on the latest change yet; the runtime runs them before merging.");
     trace.close(); repo.cleanup();
   });

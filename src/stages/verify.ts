@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
-import { agentPhase, projectCommand } from "../phases";
+import { agentPhase, alongside, mayOverlap, projectCommand } from "../phases";
+import { EARLY } from "../trace";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
 
@@ -34,16 +35,26 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   if (!before.ok) return before;
   const a = await artifacts(ctx);
 
-  const judged = await doneCheck(ctx, a);
+  // The fix history lessons is shown: the phases that failed, less work that ran alongside another
+  // (optional, so its failures never mattered to the change).
+  const history = () => ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail" && !p.name.startsWith(EARLY)).map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
+  const learn = (traceName?: string) => agentPhase(ctx, {
+    name: "lessons", traceName, model: "cheap", permissionMode: "default", tools: "read",
+    vars: { review: a.review, previous: history() }, skills: ctx.cfg.stages.verify.skills,
+  });
+  // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
+  // is optional: an unavailable assistant or the day's budget leaves it to run after the done-check.
+  const historyBefore = history();
+  const [judged, early] = mayOverlap(ctx)
+    ? await alongside(ctx, () => doneCheck(ctx, a), { what: "lessons", run: () => learn(`${EARLY}lessons`), wanted: (j) => j.ok })
+    : [await doneCheck(ctx, a), null];
   if (!judged.ok) return block(ctx, judged.note, judged);
   const unmet = judged.items.filter((i) => i.result === "unmet");
   const forPerson = judged.items.filter((i) => i.result === "needs-person");
 
-  const lessons = await agentPhase(ctx, {
-    name: "lessons", model: "cheap", permissionMode: "default", tools: "read",
-    vars: { review: a.review, previous: ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail").map((p) => `${p.name}: ${p.error ?? ""}`).join("\n") },
-    skills: ctx.cfg.stages.verify.skills,
-  });
+  // Lessons that ran alongside saw the history as it was when the done-check started; when a
+  // done-check attempt failed meanwhile (and its retry passed), they run again with it.
+  const lessons = early !== null && history() === historyBefore ? early : await learn();
   // outcome.md is for the owner; lessons.md is for engineers (`loopstra apply-lessons` reads it).
   let outcome = (judged.outcome || NO_CHECK_OUTCOME).trimEnd();
   if (unmet.length) outcome += `\n\n## Not met\n${bullets(unmet.map(line))}`;

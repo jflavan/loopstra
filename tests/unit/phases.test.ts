@@ -5,9 +5,9 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { AssistantUnavailable } from "../../src/stop";
+import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
@@ -330,6 +330,110 @@ describe("codePhase", () => {
     const odd = await codePhase(ctx, "odd", async () => { throw null; });
     expect(odd.ok).toBe(false);
     if (!odd.ok) expect(odd.detail).toContain("null");
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("alongside", () => {
+  const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const intake = (ctx: StepContext, intent = "") => agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent } });
+  /** A command that runs far longer than any test waits, so a test that ends in time saw it cancelled. */
+  const LONG = `bun -e "setTimeout(() => {}, 30000)"`;
+
+  test("starts both before either finishes; the boundary runs once before them and never while both run", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      const r = await alongside(
+        ctx,
+        () => codePhase(ctx, "a", async () => { log.push("a start"); await tick(30); log.push("a end"); return { ok: true as const, v: 1 }; }),
+        { what: "b", run: () => codePhase(ctx, "b", async () => { log.push("b start"); await tick(5); log.push("b end"); return { ok: true as const, v: 2 }; }), wanted: () => true },
+      );
+      expect(r.map((x) => x && x.ok && x.v)).toEqual([1, 2]);
+      expect(log).toEqual(["boundary", "a start", "b start", "b end", "a end"]);
+      // Outside a group the boundary runs before each phase again.
+      await codePhase(ctx, "c", async () => ({ ok: true as const }));
+      expect(log.at(-1)).toBe("boundary");
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("a phase that starts once the other work has ended gets the boundary; work outside the group always does", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      const group = alongside(
+        ctx,
+        async () => {
+          await codePhase(ctx, "a", async () => { log.push("a"); return { ok: true as const }; });
+          await tick(60); // b has ended by now: a retry-like second phase may merge again
+          return codePhase(ctx, "a2", async () => { log.push("a2"); return { ok: true as const }; });
+        },
+        { what: "b", run: () => codePhase(ctx, "b", async () => { log.push("b"); await tick(20); return { ok: true as const }; }), wanted: () => true },
+      );
+      // Another change's phase, on its own call chain while the group runs: not part of the group.
+      await tick(5);
+      await codePhase(ctx, "other", async () => { log.push("other"); return { ok: true as const }; });
+      await group;
+      expect(log).toEqual(["boundary", "a", "b", "boundary", "other", "boundary", "a2"]);
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("extra work that throws is dropped and traced; main's error is thrown once the extra settled; a stop request wins", async () => {
+    const { repo, ctx, trace } = await setup();
+    const [m, x] = await alongside(ctx, async () => 7, { what: "early review", run: async () => { throw new AssistantUnavailable("down"); }, wanted: () => true });
+    expect([m, x]).toEqual([7, null]);
+    expect(trace.events("x").some((e) => e.payload.includes("dropped") && e.payload.includes("down"))).toBe(true);
+    let slowEnded = false;
+    const err = await alongside(ctx, async () => { throw new AssistantUnavailable("down"); }, { what: "x", run: async () => { await tick(30); slowEnded = true; return 1; }, wanted: () => true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AssistantUnavailable);
+    expect(slowEnded).toBe(true);
+    // A stop request from either wins, so the loop stops instead of pausing.
+    const stop = await alongside(ctx, async () => { throw new AssistantUnavailable("down"); }, { what: "x", run: async () => { throw new StopRequested(); }, wanted: () => true }).catch((e: unknown) => e);
+    expect(stop).toBeInstanceOf(StopRequested);
+    trace.close(); repo.cleanup();
+  });
+
+  test("extra work is cancelled as soon as main's result does not want it, or main throws: its command is killed", async () => {
+    const { repo, ctx, trace } = await setup();
+    const started = Date.now();
+    const extra = { what: "slow", run: () => codePhase(ctx, "slow", async () => { await projectCommand(ctx, LONG, repo.path); return { ok: true as const }; }) };
+    expect(await alongside(ctx, async () => { await tick(300); return "failed"; }, { ...extra, wanted: (m) => m !== "failed" })).toEqual(["failed", null]);
+    expect(await alongside(ctx, async () => { await tick(300); throw new Error("main broke"); }, { ...extra, wanted: () => true }).catch((e: unknown) => e)).toBeInstanceOf(Error);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    const slow = trace.phases("x").filter((p) => p.name === "slow");
+    expect(slow.map((p) => [p.status, p.error])).toEqual([["interrupted", "cancelled: its result was no longer needed"], ["interrupted", "cancelled: its result was no longer needed"]]);
+    expect(trace.events("x").filter((e) => e.payload.includes("cancelled")).length).toBeGreaterThanOrEqual(2);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a session that succeeds alongside never ends the pause while main finds the assistant unavailable", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}}\n");
+    pauseAfterUnavailable(repo.path);
+    pauseAfterUnavailable(repo.path);
+    // Main fails only once the extra succeeded (a main that throws first cancels the extra).
+    let extraEnded = () => {};
+    const ended = new Promise<void>((r) => { extraEnded = r; });
+    const err = await alongside(
+      ctx,
+      async () => { await ended; return intake(ctx, "FIXTURE:usage-limit"); },
+      { what: "lessons", run: () => intake(ctx).finally(extraEnded), wanted: () => true },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AssistantUnavailable);
+    expect(trace.phases("x").map((p) => p.status).sort()).toEqual(["interrupted", "success"]);
+    // The scheduler counts this outage on top of the two before it.
+    expect(readPause(repo.path)?.failures).toBe(2);
+    // Main reached the assistant: the pause ends.
+    await alongside(ctx, () => intake(ctx), { what: "lessons", run: () => intake(ctx, "FIXTURE:usage-limit"), wanted: () => true });
+    expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   });
 });

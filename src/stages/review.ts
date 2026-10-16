@@ -1,7 +1,8 @@
 import { block, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase } from "../phases";
+import { agentPhase, phasePrompt } from "../phases";
 import { testLoop } from "./build";
+import { reviewPhase, takeEarlyReview } from "./early-review";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
@@ -38,10 +39,9 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   const a = await artifacts(ctx);
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
-    const review = await agentPhase(ctx, {
-      name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-      vars: { spec: a.spec, plan: a.currentPlan, test_result: await testResult(ctx, wt) }, skills: stage.skills,
-    });
+    const phase = await reviewPhase(ctx, round, a.spec, a.currentPlan);
+    const prompt = await phasePrompt(ctx, phase);
+    const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
     if (!review.ok) return block(ctx, review.note);
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
 

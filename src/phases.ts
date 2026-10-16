@@ -1,6 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomForTwo, sessionCost, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -10,7 +11,7 @@ import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envel
 import { renderPrompt, type PromptVars } from "./prompts";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { AssistantUnavailable, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfStopping } from "./stop";
+import { AssistantUnavailable, Cancelled, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -147,15 +148,22 @@ export function ownerNote(reason: BlockingReason): string {
 /** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
 const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
-export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
+/** The prompt a phase would be sent, or null when its prompt file is missing. */
+export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
   const promptPath = join(ctx.root, "loopstra", "prompts", `${spec.name}.md`);
-  if (!existsSync(promptPath)) {
+  if (!existsSync(promptPath)) return null;
+  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
+  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
+  return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
+}
+
+/** Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it. */
+export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
+  const prompt = rendered === undefined ? await phasePrompt(ctx, spec) : rendered;
+  if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
-  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
-  const prompt = withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);
@@ -176,6 +184,78 @@ export function setPhaseBoundary(fn: PhaseBoundary | null): void {
   phaseBoundary = fn;
 }
 
+/** Two pieces of work running at once (see alongside): how many still run, and whether a session in them succeeded. */
+interface Group { running: number; succeeded: boolean }
+
+/**
+ * The group the current call runs in, and the signal that cancels its work (none for the main work).
+ * Kept per call chain, not per process: work outside the group (another change's phases) never sees it.
+ */
+const inGroup = new AsyncLocalStorage<{ group: Group; signal?: AbortSignal }>();
+
+/** Runs the phase boundary, except while other work of the same group still runs. */
+async function boundary(ctx: StepContext): Promise<void> {
+  const g = inGroup.getStore()?.group;
+  if (phaseBoundary && !(g && g.running > 1)) await phaseBoundary(ctx);
+}
+
+/** What cancels the current call's sessions and commands: set for the extra work of alongside. */
+function cancelSignal(): AbortSignal | undefined {
+  return inGroup.getStore()?.signal;
+}
+
+/** A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once both ended. */
+function assistantReached(ctx: StepContext): void {
+  const g = inGroup.getStore()?.group;
+  if (g) g.succeeded = true;
+  else clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
+}
+
+/** The judges may run alongside each other: speed.overlap_judges is on and the day's budget has room for two sessions. */
+export function mayOverlap(ctx: StepContext): boolean {
+  return ctx.cfg.speed.overlap_judges && roomForTwo(ctx.cfg, ctx.trace);
+}
+
+/**
+ * Runs `main` and, at the same time, `extra.run`: work that never reads main's result and that main
+ * does not need (lessons beside the done-check, round 1's review beside the verifier). Returns both
+ * results; extra's is null when it was dropped or cancelled.
+ *
+ * - The phase boundary (the between-phases merge) runs once, before them, and inside only for a phase
+ *   that starts after the other work ended, so no merge touches main while two phases run.
+ * - Extra work is optional: anything it throws but a stop request is dropped, traced, and never ends
+ *   the step; main meets the same trouble on its own.
+ * - Once main ends, extra is cancelled (its session or command killed) unless `extra.wanted` says
+ *   main's result still uses it; also when main throws.
+ * - It waits for both, so each phase ends its own row; then it throws a stop request from either (so
+ *   the loop stops rather than pauses), else main's error.
+ * - A session that succeeded inside ends the loop's pause, unless main found the assistant
+ *   unavailable: the scheduler then counts that outage on top of the pause before it.
+ */
+export async function alongside<M, E>(
+  ctx: StepContext, main: () => Promise<M>, extra: { what: string; run: () => Promise<E>; wanted: (m: M) => boolean },
+): Promise<[M, E | null]> {
+  await boundary(ctx);
+  const group: Group = { running: 2, succeeded: false };
+  const cancel = new AbortController();
+  const member = <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> =>
+    inGroup.run({ group, signal }, async () => { try { return await fn(); } finally { group.running--; } });
+  const mainDone = member(main).then(
+    (m) => { if (!extra.wanted(m)) cancel.abort(); return m; },
+    (e: unknown) => { cancel.abort(); throw e; },
+  );
+  const extraDone = member(extra.run, cancel.signal).catch((e: unknown) => {
+    if (e instanceof StopRequested) throw e;
+    ctx.trace.event(ctx.slug, "command", { command: extra.what, note: e instanceof Cancelled ? e.message : `dropped: ${errorText(e)}` });
+    return null;
+  });
+  const [m, x] = await Promise.allSettled([mainDone, extraDone]);
+  if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) clearPause(ctx.root);
+  if (x.status === "rejected") throw x.reason; // only ever a stop request
+  if (m.status === "rejected") throw m.reason;
+  return [m.value, x.value];
+}
+
 /**
  * Starts a loop phase's row. With claude.max_budget_usd_per_day set, the phase holds what it may
  * spend of what is left of the loop's day (every change together, not chat), and does not start when
@@ -193,10 +273,15 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
   return { seq: held.seq, capUsd: held.heldUsd, fromDay: held.heldUsd < limitOf(c.max_budget_usd) };
 }
 
+/** The error on a phase row a stop request interrupted. */
+const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
+
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
-  if (phaseBoundary) await phaseBoundary(ctx);
+  await boundary(ctx);
   throwIfStopping();
+  const signal = cancelSignal();
+  throwIfCancelled(signal);
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   const started = Date.now();
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
@@ -231,6 +316,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       maxBudgetUsd: capUsd,
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
+      signal,
       onEvent: (e) => {
         writer.write(JSON.stringify(e) + "\n");
         if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
@@ -261,13 +347,13 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
-    clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
+    assistantReached(ctx);
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
-    if (e instanceof StopRequested) {
-      // A session the stop killed never reported its cost.
+    if (e instanceof StopRequested || e instanceof Cancelled) {
+      // A session the stop (or a cancel) killed never reported its cost.
       const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, capUsd);
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: spent, error: "stopped by request; the step resumes on the next start" });
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: spent, error: e instanceof Cancelled ? e.message : STOPPED_NOTE });
       throw e;
     }
     // Its phase row is already ended.
@@ -335,30 +421,38 @@ function summarize(e: Record<string, unknown>): Record<string, unknown> {
 /**
  * Runs a configured project command in `cwd` with the configured time limit, and traces it as a
  * `command` event of `on.slug` (under phase `seq` when given). `env` defaults to LOOPSTRA_SLUG.
+ * `signal` cancels it (Cancelled is thrown); it defaults to the one for work run alongside.
  */
 export async function projectCommand(
   on: { trace: Trace; cfg: Config; slug: string }, command: string, cwd: string,
-  opts: { env?: Record<string, string>; seq?: number; where?: string } = {},
+  opts: { env?: Record<string, string>; seq?: number; where?: string; signal?: AbortSignal } = {},
 ): Promise<CommandResult> {
-  const r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug }, timeoutMs: commandTimeoutMs(on.cfg) });
-  on.trace.event(on.slug, "command", { command, code: r.code, lastLine: r.lastLine, durationMs: r.durationMs, ...(opts.where ? { where: opts.where } : {}) }, opts.seq);
+  const where = opts.where ? { where: opts.where } : {};
+  let r: CommandResult;
+  try {
+    r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug }, timeoutMs: commandTimeoutMs(on.cfg), signal: opts.signal ?? cancelSignal() });
+  } catch (e) {
+    if (e instanceof Cancelled) on.trace.event(on.slug, "command", { command, note: e.message, ...where }, opts.seq);
+    throw e;
+  }
+  on.trace.event(on.slug, "command", { command, code: r.code, lastLine: r.lastLine, durationMs: r.durationMs, ...where }, opts.seq);
   return r;
 }
 
 /** `detail`: what went wrong, for the trace (the caller words the owner's note). */
 export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
-/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
+/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request (or a cancel) is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
-  if (phaseBoundary) await phaseBoundary(ctx);
+  await boundary(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
     const r = await fn(seq);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return r;
   } catch (e) {
-    if (e instanceof StopRequested) {
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: "stopped by request; the step resumes on the next start" });
+    if (e instanceof StopRequested || e instanceof Cancelled) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof Cancelled ? e.message : STOPPED_NOTE });
       throw e;
     }
     const msg = errorText(e);
