@@ -333,7 +333,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   - **`takeEarlyReview`:**
     - A kept review with `decidedBy: "cheap"` is used only if `cheapMayDecide(ctx, phase)` is true
       now. Between the build step and the review step, another change's audit may have found a
-      miss, or the setting may have moved.
+      miss, or the setting may have moved. It uses the same rule as `runJudge` (first earned, and
+      not a daily budget with no session cap), less the due audit: the kept review's own row can
+      be what made the audit due.
     - Otherwise it is dropped with the note "not used: it was decided by the cheaper judge, which
       is no longer trusted to decide alone", and round 1 runs.
     - A review the strong judge decided stays valid under any setting, as long as the existing key
@@ -365,7 +367,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   - **Compared, Agreed, false passes, false rejects, Unsure:** from shadow rows where neither side
     failed. **Could not answer** counts the cheaper judge's `failed`.
   - **Average costs and minutes:** only non-null values, as an `Avg cost` and an `Avg time`
-    column (the example leaves the time column out for width).
+    column (the example leaves the time column out for width). A time is the session's own: each
+    judge session runs as a group of one, so the between-phases merge boundary runs before its
+    clock starts, in first as in shadow.
   - **First would cost:** worked out over the shadow rows as (cheaper + strong whenever the
     cheaper judge did not pass) / strong, as a percentage. This is measured, not guessed from
     prices, and tells whether first pays.

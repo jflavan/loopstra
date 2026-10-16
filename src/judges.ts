@@ -243,10 +243,18 @@ export type JudgeResult<J extends JudgeName> = AgentPhaseResult<J> & { decidedBy
 /** One session and how long it took. */
 type Timed<J extends JudgeName> = { r: AgentPhaseResult<J>; ms: number };
 
+/**
+ * Runs one judge session and times it. It runs as a group of one, so the phase boundary (merging other
+ * changes whose pull requests became ready) runs before the clock starts and is never counted as the
+ * judge's time; inside shadow's group the boundary has already run.
+ */
 async function timed<J extends JudgeName>(ctx: StepContext, spec: AgentPhaseSpec & { name: J }): Promise<Timed<J>> {
-  const started = Date.now();
-  const r = await agentPhase(ctx, spec);
-  return { r, ms: Date.now() - started };
+  const [t] = await together(ctx, [async () => {
+    const started = Date.now();
+    const r = await agentPhase(ctx, spec);
+    return { r, ms: Date.now() - started };
+  }] as const);
+  return t;
 }
 
 function sha256(text: string): string {
@@ -339,10 +347,9 @@ export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: Age
   if (ctx.cfg.speed.cheap_judges === "first") {
     const standing = firstStanding(ctx.trace.judgeRows(), c.key);
     if (!standing.earned) judgeEvent(ctx, phase, `first: running as shadow; ${standingWhy(standing)}`);
-    // The cheaper judge decides alone only while its audits can run. A due audit runs before it decides
-    // alone again; until there is room for one, shadow lets the strong judge decide alone. With a daily
-    // budget and no session cap there never is, so it never decides alone there.
-    else if (!standing.auditDue && !noSessionCap(ctx.cfg)) return cheapFirst(ctx, phase, cheapPhase, c);
+    // A due audit runs before it decides alone again; until there is room for one, shadow lets the
+    // strong judge decide alone.
+    else if (mayDecideAlone(ctx.cfg, standing) && !standing.auditDue) return cheapFirst(ctx, phase, cheapPhase, c);
     else if (roomFor(ctx.cfg, ctx.trace, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
   return shadow(ctx, phase, cheapPhase, c, sessions);
@@ -387,9 +394,21 @@ async function cheapFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPha
   return { ...strong.r, decidedBy: "strong" };
 }
 
-/** First is on and this judge has earned it now (a kept early review the cheaper judge decided is rechecked with this). */
+/**
+ * The one rule for whether an earned cheaper judge may decide alone (runJudge also waits for a due
+ * audit). It decides alone only while its audits can run: with a daily budget and no session cap they
+ * never can, so there it never decides alone, whatever its record says.
+ */
+function mayDecideAlone(cfg: Config, standing: FirstStanding): boolean {
+  return standing.earned && !noSessionCap(cfg);
+}
+
+/**
+ * First is on and this judge may decide alone now (a kept early review the cheaper judge decided is
+ * rechecked with this). A due audit does not drop it: the kept review's own row can be what made it due.
+ */
 export async function cheapMayDecide(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }): Promise<boolean> {
   if (ctx.cfg.speed.cheap_judges !== "first") return false;
   const c = await comparison(ctx, phase);
-  return c !== null && firstStanding(ctx.trace.judgeRows(), c.key).earned;
+  return c !== null && mayDecideAlone(ctx.cfg, firstStanding(ctx.trace.judgeRows(), c.key));
 }

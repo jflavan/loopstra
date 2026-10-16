@@ -381,6 +381,21 @@ describe("the first review alongside the verifier", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("first: an early review the cheaper judge decided is dropped once a daily budget is set with no session cap", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: first\n");
+    seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+    await runBuildStep(ctx);
+    expect(JSON.parse(await Bun.file(join(ctx.runDir, "review.early")).text()).decidedBy).toBe("cheap");
+    // Before the next tick the owner sets a daily budget and no session cap: the cheaper judge never decides alone there.
+    ctx.cfg.claude.max_budget_usd_per_day = 50;
+    delete ctx.cfg.claude.max_budget_usd;
+    await ctx.reload();
+    await runMergeStep(ctx);
+    expect(earlyNotes(trace)).toEqual(["not used: it was decided by the cheaper judge, which is no longer trusted to decide alone"]);
+    expect(reviews(trace)).toEqual(["review-1"]);
+    trace.close(); repo.cleanup();
+  });
+
   for (const [what, config] of [
     ["speed.overlap_judges is off", "speed:\n  overlap_judges: false\n"],
     ["build has after commands", "stages:\n  build:\n    after:\n      - echo after\n"],

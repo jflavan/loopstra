@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
-import type { AgentPhaseSpec } from "../../src/phases";
+import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, seedCaught, setupRepo, tempDir, withEnv } from "../helpers";
@@ -261,6 +261,31 @@ describe("runJudge first", () => {
       });
     });
   }
+
+  test("earned and escalated: the recorded times are the sessions' own, not the merge work run before each phase", async () => {
+    await withRepo(FIRST, { "spec-check@sonnet": fixture("spec-check-reject"), "spec-check@opus": fixture("spec-check-reject") }, async ({ repo, ctx, trace }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      // A slow boundary, like merging another change whose pull request became ready.
+      let boundaryMs = 0;
+      setPhaseBoundary(async () => {
+        const started = Date.now();
+        await Bun.sleep(800);
+        boundaryMs += Date.now() - started;
+      });
+      const started = Date.now();
+      try {
+        expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ decidedBy: "strong" });
+      } finally {
+        setPhaseBoundary(null);
+      }
+      const wall = Date.now() - started;
+      const row = trace.judgeRows().at(-1)!;
+      expect(row).toMatchObject({ how: "escalated" });
+      expect(boundaryMs).toBeGreaterThan(0);
+      // Each session and each boundary took its own time, so together they fit in the call's wall time.
+      expect(row.cheap_ms! + row.strong_ms! + boundaryMs).toBeLessThanOrEqual(wall + 50);
+    });
+  });
 
   test("earned, with a daily budget and no session cap: no audit can ever run, so the cheaper judge never decides alone", async () => {
     await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 50\n`, {}, async ({ repo, ctx, trace, fake }) => {
