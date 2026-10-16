@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { CHAT_SLUG, startOfToday } from "../../src/budget";
 import { configPath } from "../../src/config";
 import { OFF_MAIN_NOTE } from "../../src/context";
 import { Git } from "../../src/git";
@@ -84,6 +85,15 @@ describe("the loop", () => {
       const trace = Trace.open(repo.path);
       try {
         expect(trace.signals().map((s) => s.result)).toEqual(["pass", "pass"]);
+        // The first plan was written while the spec was checked, and the plan step used it.
+        const phases = trace.phases("add-numbers");
+        expect(phases.map((p) => p.name)).toContain("early-plan");
+        expect(phases.map((p) => p.name)).not.toContain("plan");
+        const ahead = phases.find((p) => p.name === "early-plan")!;
+        expect(ahead.cost_usd).toBeGreaterThan(0);
+        // What the day counts includes it.
+        const total = phases.reduce((sum, p) => sum + p.cost_usd, 0);
+        expect(trace.costIn({ except: CHAT_SLUG }, startOfToday())).toBeCloseTo(total, 6);
       } finally {
         trace.close();
       }

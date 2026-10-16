@@ -4,9 +4,11 @@ import { dirname, join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
+import { PLAN_AHEAD } from "../../src/stages/plan";
+import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FIRST_NEEDS } from "../../src/judges";
-import { FAKE_CLAUDE, seedCaught, setupRepo, tempDir, withEnv } from "../helpers";
+import { FAKE_CLAUDE, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -16,6 +18,27 @@ function statusesSeen(trace: Trace): string[] {
 
 function phaseNames(trace: Trace): string[] {
   return trace.phases("add-numbers").map((p) => p.name);
+}
+
+/** The phases without the plan written alongside each spec-check (at most one per spec-check: a plan called off before it started has none). */
+function withoutPlanAhead(trace: Trace): string[] {
+  const names = phaseNames(trace);
+  expect(names.filter((n) => n === "early-plan").length).toBeLessThanOrEqual(names.filter((n) => n === "spec-check").length);
+  return names.filter((n) => n !== "early-plan");
+}
+
+/** What alongside traces for work called off because the judge's result could not use it. */
+const CALLED_OFF = "cancelled: its result was no longer needed";
+
+/** Makes every plan session hang until it is killed, so a test shows the step does not wait for it. */
+async function hangingPlan(repo: string): Promise<void> {
+  await Bun.write(join(repo, "loopstra", "prompts", "plan.md"), "{{intent}} {{spec}} {{concerns}} FIXTURE:hang");
+}
+
+/** What the trace says happened to plans written ahead, in order. */
+function planAheadNotes(trace: Trace): string[] {
+  return trace.events("add-numbers").filter((e) => e.type === "command").map((e) => JSON.parse(e.payload) as { command: string; note?: string })
+    .filter((p) => p.command === "plan ahead").map((p) => p.note ?? "");
 }
 
 describe("design stage", () => {
@@ -74,8 +97,9 @@ describe("design stage", () => {
     await runDesignStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check"]);
+    expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check"]);
     expect(i.file.frontmatter.note).toContain("could not be checked");
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
     trace.close(); repo.cleanup();
   });
 
@@ -146,6 +170,15 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("with speed.plan_ahead off, the phases are exactly as before", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  plan_ahead: false\n" });
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check"]);
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("intake's question is the note, with how to continue; nothing else runs", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-question");
@@ -153,6 +186,267 @@ describe("design stage", () => {
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.note).toBe("Which portal page should show the status? Update intent.md, then set status to accepted.");
     expect(phaseNames(trace)).toEqual(["intake"]);
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("plan ahead", () => {
+  test("the first plan is written while spec-check runs, and kept in the run folder when the spec passes", async () => {
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    try {
+      const { repo, ctx, trace } = await setupRepo("accepted");
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check"]);
+      const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
+      // Judged by start order: on a slow machine the two sessions need not overlap in time.
+      expect(byName("early-plan").started < byName("spec-check").ended!).toBe(true);
+      const kept = JSON.parse(await Bun.file(join(ctx.runDir, PLAN_AHEAD)).text()) as { key: string; base: string; envelope: { plan_markdown: string } };
+      expect(kept.key).toContain(await Bun.file(join(repo.path, "intent", "add-numbers", "spec.md")).text());
+      expect(kept.base).toMatch(/^[0-9a-f]{40}$/);
+      expect(kept.envelope.plan_markdown).toContain("## Files that change");
+      expect(existsSync(join(repo.path, "intent", "add-numbers", "plan.md"))).toBe(false);
+      expect(planAheadNotes(trace)).toEqual(["kept for the plan step"]);
+      // The session written ahead is the plan session: same phase for hooks and the fake.
+      const prompt = await Bun.file(join(ctx.runDir, "phases", `${byName("early-plan").seq}-early-plan`, "prompt.md")).text();
+      expect(prompt).toContain("add(1, 2) returns 3");
+      trace.close(); repo.cleanup();
+    } finally {
+      restore();
+    }
+  });
+
+  for (const [what, config, status] of [
+    ["speed.plan_ahead is off", "speed:\n  plan_ahead: false\n", "spec-approved"],
+    ["a person is on the spec gate", HUMAN_SPEC, "spec-review"],
+    ["the plan stage has before commands", "stages:\n  plan:\n    before:\n      - echo before\n", "spec-approved"],
+    ["a daily budget has no session cap", "claude:\n  max_budget_usd_per_day: 10\n", "spec-approved"],
+    ["the spec gate has no judge", "gates:\n  spec:\n    agent: false\n", "spec-approved"],
+  ] as const) {
+    test(`no plan is written ahead when ${what}`, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config });
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe(status);
+      expect(phaseNames(trace)).not.toContain("early-plan");
+      expect(planAheadNotes(trace)).toEqual([]); // not even started and dropped
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+      trace.close(); repo.cleanup();
+    });
+  }
+
+  test("with a session cap, a plan is written ahead only when the day has room for two whole sessions", async () => {
+    // After intake and design (about $0.05), a day of 10 leaves room for two $1 sessions; a day of 1.6 does not.
+    for (const [day, ahead] of [[10, true], [1.6, false]] as const) {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config: `claude:\n  max_budget_usd_per_day: ${day}\n  max_budget_usd: 1\n` });
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(phaseNames(trace).includes("early-plan")).toBe(ahead);
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(ahead);
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a spec rejected once calls off the plan beside it at once; the second check gets a new one, and only that one is kept", async () => {
+    const dir = fixtureDir({
+      "spec-check-1": fixture("spec-check-reject"),
+      "spec-check-2": fixture("spec-check"),
+      "design-2": fixture("design").replace("Add an add function.", "Add an add function, for negative numbers too."),
+    });
+    try {
+      // Plans take longer than the first check, so the first one is still running when the spec is rejected.
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path, LOOPSTRA_FAKE_DELAY_MS: "plan=1500" }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted");
+        await runDesignStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check", "design", "spec-check"]);
+        expect(planAheadNotes(trace)).toEqual([CALLED_OFF, "kept for the plan step"]);
+        const kept = JSON.parse(await Bun.file(join(ctx.runDir, PLAN_AHEAD)).text()) as { key: string };
+        expect(kept.key).toContain("for negative numbers too");
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("a spec rejected twice blocks with nothing kept, without waiting for the plans beside it", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "{{intent}} {{spec}} FIXTURE:spec-check-reject");
+    await hangingPlan(repo.path);
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+    expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check", "design", "spec-check"]);
+    expect(planAheadNotes(trace)).toEqual([CALLED_OFF, CALLED_OFF]);
+    expect(trace.phases("add-numbers").filter((p) => p.name === "early-plan").every((p) => p.status === "interrupted")).toBe(true);
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("when the spec checker cannot run, the plan written alongside is called off and the change blocks at once", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "{{spec}} FIXTURE:budget");
+    await hangingPlan(repo.path);
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.note).toContain("could not be checked");
+    expect(planAheadNotes(trace)).toEqual([CALLED_OFF]);
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a plan that finished before the spec was rejected is not kept", async () => {
+    // The checker takes longer than the plan, so the plan has an answer when the rejection comes.
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "spec-check=1500" }, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted");
+      await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "{{intent}} {{spec}} FIXTURE:spec-check-reject");
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+      expect(planAheadNotes(trace)).toEqual(["not kept: the spec did not pass its check", "not kept: the spec did not pass its check"]);
+      expect(trace.phases("add-numbers").filter((p) => p.name === "early-plan").map((p) => p.status)).toEqual(["success", "success"]);
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+      trace.close(); repo.cleanup();
+    });
+  });
+
+  test("a stop after spec-check passed, while the plan still runs, keeps the pass and loses only the plan", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    await hangingPlan(repo.path);
+    // The pass is committed before the step waits for the plan: stop a moment after main has it.
+    const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repo.path }).stdout.toString().includes("→ spec-approved");
+    let asked = false;
+    const watch = setInterval(() => { if (!asked && committed()) { asked = true; setTimeout(requestStop, 300); } }, 50);
+    try {
+      expect(await runDesignStep(ctx)).toEqual({ ok: true });
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(trace.phases("add-numbers").find((p) => p.name === "early-plan")?.status).toBe("interrupted");
+      expect(planAheadNotes(trace)).toEqual(["not kept: stopped by request"]);
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    } finally {
+      clearInterval(watch);
+      resetStop();
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a plan whose session changed the code it read is not kept", async () => {
+    const plan = fixture("plan").split("\n");
+    plan.splice(1, 0, JSON.stringify({ type: "fake_action", write: { path: "NEW.md", content: "new\n" } }));
+    const dir = fixtureDir({ "plan-1": plan.join("\n") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted");
+        await runDesignStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        expect(planAheadNotes(trace)).toEqual(["not kept: the code on main changed while it was written"]);
+        expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  for (const [status, config, ahead] of [
+    ["merge-approved", "", false],
+    ["reviewing", "", false],
+    ["merge-review", "", false], // no person on the merge gate: it merges once its checks pass
+    ["merge-review", "gates:\n  merge:\n    human: status\n", true], // waiting for a person
+    ["building", "", true],
+  ] as const) {
+    test(`with another change at ${status}${config ? " (a person on the merge gate)" : ""}, a plan is ${ahead ? "" : "not "}written ahead`, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config });
+      const other = join(repo.path, "intent", "other-change");
+      mkdirSync(other, { recursive: true });
+      const text = readFileSync(join(repo.path, "intent", "add-numbers", "intent.md"), "utf8").replace(/status: \S+/, `status: ${status}`);
+      writeFileSync(join(other, "intent.md"), text);
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(phaseNames(trace).includes("early-plan")).toBe(ahead);
+      trace.close(); repo.cleanup();
+    });
+  }
+
+  test("a spec that fails its headings check is rewritten before any plan is written ahead", async () => {
+    const dir = fixtureDir({ "design-1": fixture("design").replace("## Open questions\\nNone.\\n\\n", "") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted");
+        await runDesignStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "design", "spec-check"]);
+        expect(phaseNames(trace).indexOf("early-plan")).toBeGreaterThan(phaseNames(trace).lastIndexOf("design"));
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  for (const [what, plan] of [
+    ["reports it could not finish", fixture("agent-fail")],
+    ["returns a report that cannot be read", fixture("plan").replace(/"plan_markdown":"[^"]*"/, "\"plan_md\":\"x\"")],
+  ] as const) {
+    test(`a plan written ahead that ${what} is not kept; the spec still passes`, async () => {
+      const dir = fixtureDir({ "plan-1": plan });
+      try {
+        await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+          const { repo, ctx, trace } = await setupRepo("accepted");
+          await runDesignStep(ctx);
+          expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+          expect(trace.phases("add-numbers").find((p) => p.name === "early-plan")?.status).toBe("fail");
+          expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+          expect(planAheadNotes(trace)).toEqual([]);
+          trace.close(); repo.cleanup();
+        });
+      } finally {
+        dir.cleanup();
+      }
+    });
+  }
+
+  test("a plan written ahead that cannot reach the assistant is dropped; the spec still passes", async () => {
+    const dir = fixtureDir({ "plan-1": fixture("usage-limit") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted");
+        await runDesignStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        expect(trace.phases("add-numbers").find((p) => p.name === "early-plan")?.status).toBe("interrupted");
+        expect(planAheadNotes(trace)).toHaveLength(1);
+        expect(planAheadNotes(trace)[0]).toStartWith("dropped: ");
+        expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("a stop requested while spec-check and the plan run ends both; the design starts over next time with nothing kept", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "{{spec}} FIXTURE:hang");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "plan.md"), "{{intent}} {{spec}} {{concerns}} FIXTURE:hang");
+    const running = () => trace.phases("add-numbers").filter((p) => p.status === "running").map((p) => p.name).sort();
+    const watch = setInterval(() => { if (running().length === 2) requestStop(); }, 50);
+    try {
+      expect(await runDesignStep(ctx).catch((e) => e)).toBeInstanceOf(StopRequested);
+      const rows = trace.phases("add-numbers").filter((p) => p.name === "spec-check" || p.name === "early-plan");
+      expect(rows.map((p) => `${p.name}:${p.status}`).sort()).toEqual(["early-plan:interrupted", "spec-check:interrupted"]);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("designing");
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    } finally {
+      clearInterval(watch);
+      resetStop();
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a plan.ahead found while designing is cleared before the spec is written", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing", { config: "speed:\n  plan_ahead: false\n" });
+    mkdirSync(ctx.runDir, { recursive: true });
+    await Bun.write(join(ctx.runDir, PLAN_AHEAD), "{\"key\":\"old\"}");
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
     trace.close(); repo.cleanup();
   });
 });
@@ -186,7 +480,9 @@ describe("cheaper judges on the spec check", () => {
     seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
     await runDesignStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
-    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check-cheap"]);
+    // The plan is written beside the judge, which here is the cheaper one alone.
+    expect(phaseNames(trace)).toContain("early-plan");
+    expect(phaseNames(trace).filter((n) => n !== "early-plan")).toEqual(["intake", "design", "spec-check-cheap"]);
     expect(trace.gates("add-numbers").find((g) => g.check === "spec-check")?.evidence).toBe("spec covers the intent (decided by the cheaper judge, sonnet)");
     trace.close(); repo.cleanup();
   });

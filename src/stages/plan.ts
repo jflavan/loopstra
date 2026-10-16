@@ -1,11 +1,20 @@
+import { roomFor } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
-import type { StepContext, StepResult } from "../context";
-import { runArtifactStep, type ArtifactStage } from "./artifact";
+import { modelFor, type Config } from "../config";
+import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
+import { scanRepo, type Status } from "../intents";
+import { agentPhase, boundary, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { errorText } from "../shell";
+import { notTheStepsFault } from "../stop";
+import { EARLY } from "../trace";
+import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
+import { codeState, takeKept, type Artifacts, type Kept } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
   entry: "spec-approved", working: "planning", review: "plan-review", approved: "plan-approved",
   marker: "replanned",
+  take: takePlanAhead,
   vars: (a, concerns) => ({ intent: a.intent, spec: a.spec, concerns }),
   text: (e) => e.plan_markdown,
   headings: ["Files that change", "Order of work", "Risks", "Proof"],
@@ -34,4 +43,123 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
  */
 export function runPlanStep(ctx: StepContext): Promise<StepResult> {
   return runArtifactStep(ctx, PLAN);
+}
+
+/**
+ * Run-folder file: the first plan, written while spec-check judged the spec (see planAhead), as JSON:
+ * what it was asked (`key`), the commit main was on when it started (`base`), and the code it read
+ * (`state`, see codeState).
+ */
+export const PLAN_AHEAD = "plan.ahead";
+
+/** A full commit id (SHA-1, or SHA-256). */
+const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** What a plan session is asked: its model and the whole prompt (intent, spec, concerns, skills, template). */
+function planKey(ctx: StepContext, phase: AgentPhaseSpec, prompt: string): string {
+  return [modelFor(ctx.cfg, phase.model), prompt].join("\n");
+}
+
+/**
+ * Why the config rules out a plan written ahead, for writing one and for using one; null when it does
+ * not. Plan before commands would run between the gate and the plan, and the key cannot see what they change.
+ */
+function ruledOut(cfg: Config): string | null {
+  if (!cfg.speed.plan_ahead) return "speed.plan_ahead is switched off";
+  if (cfg.stages.plan.before.length) return "the plan stage has before commands";
+  return null;
+}
+
+/**
+ * Another change in this status may merge into main before this change's plan step: its code would
+ * then not be the code the plan read. A pull request waiting for a person is not counted.
+ */
+function mayMergeFirst(cfg: Config, status: Status): boolean {
+  return status === "reviewing" || status === "merge-approved" || (status === "merge-review" && cfg.gates.merge.human === "none");
+}
+
+/**
+ * A plan is written ahead only when it is likely to be used and cannot starve the judge: the config
+ * allows it (see ruledOut), no person is on the spec gate (they may take days and edit the spec), the
+ * day has room for two sessions, and no other change may merge first (see mayMergeFirst).
+ */
+async function plansAhead(ctx: StepContext): Promise<boolean> {
+  const cfg = ctx.cfg;
+  if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomFor(cfg, ctx.trace, 2)) return false;
+  const others = (await scanRepo(ctx.root)).intents.filter((i) => i.slug !== ctx.slug);
+  return !others.some((i) => mayMergeFirst(cfg, i.file.frontmatter.status));
+}
+
+/**
+ * The first plan, written on the spec the judge was given, by the same session the plan step would
+ * start (LOOPSTRA_PHASE stays plan). Returns what to keep if the spec passes, or null when the session
+ * did not finish or the code changed while it ran (the plan step then plans as usual).
+ */
+async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | null> {
+  // An early- row, as for all work run alongside: its failures are not the change's (see EARLY).
+  const phase = { ...writerPhase(ctx, PLAN, a, ""), traceName: `${EARLY}plan` }; // the trace name is not part of the prompt
+  const prompt = await phasePrompt(ctx, phase);
+  // Taken before the session starts and again after it ends, so a change while it ran counts.
+  const base = await ctx.git.headSha();
+  const state = await codeState(ctx.git, base);
+  const r = await agentPhase(ctx, phase, prompt);
+  if (prompt === null || !r.ok) return null;
+  if (state === null || state !== await codeState(ctx.git, base)) {
+    ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "not kept: the code on main changed while it was written" });
+    return null;
+  }
+  return JSON.stringify({ key: planKey(ctx, phase, prompt), base, state, envelope: r.envelope });
+}
+
+/** Keeps the plan written ahead for the plan step (see planAheadRun). */
+function keepPlanAhead(ctx: StepContext, kept: string): void {
+  writeMarker(ctx, PLAN_AHEAD, kept);
+  ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "kept for the plan step" });
+}
+
+/** The design step's spec-check runs this alongside (see ArtifactStage.ahead). */
+export const planAhead: AheadWork = {
+  what: "plan ahead", when: plansAhead, run: planAheadRun, keep: keepPlanAhead,
+  discard: (ctx) => clearMarker(ctx, PLAN_AHEAD),
+};
+
+/**
+ * The plan written ahead, in place of the plan session, when it asked exactly what that session
+ * would ask (`prompt`), of the same code. It is used once, whatever happens: the file is cleared
+ * before the checks. Null (the plan step plans as usual) when there is none, or with the reason in
+ * the trace; trouble checking it is such a reason too, since it only saves a session.
+ */
+async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "plan" }, prompt: string | null): Promise<AgentPhaseResult<"plan"> | null> {
+  const kept = takeKept(ctx, PLAN_AHEAD, "plan");
+  if (kept === undefined) return null;
+  let why: string | null;
+  try {
+    why = await whyNotUsed(ctx, phase, prompt, kept);
+  } catch (e) {
+    if (notTheStepsFault(e)) throw e;
+    why = `it could not be checked: ${errorText(e)}`;
+  }
+  if (why !== null) {
+    ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: `not used: ${why}` });
+    return null;
+  }
+  ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "the plan step uses the plan written while the spec was being checked" });
+  // Plan sessions are never resumed, so a missing session id loses nothing.
+  return { ok: true, envelope: kept!.envelope, sessionId: null, costUsd: 0 };
+}
+
+/** In plain words, the first rule the kept plan breaks; null when it keeps them all. */
+async function whyNotUsed(ctx: StepContext, phase: AgentPhaseSpec, prompt: string | null, kept: Kept<"plan"> | null): Promise<string | null> {
+  const { base, state } = kept?.saved ?? {};
+  if (!kept || typeof base !== "string" || !COMMIT.test(base) || typeof state !== "string") return "it could not be read";
+  const ruled = ruledOut(ctx.cfg);
+  if (ruled !== null) return ruled;
+  if (prompt === null) return "the plan prompt is missing";
+  if (kept.key !== planKey(ctx, phase, prompt)) return "the intent, the spec, the plan prompt or its model changed";
+  // Pull requests that are ready merge first, as they would before a plan session.
+  await boundary(ctx);
+  // The code the plan read, measured from the same commit; the loop's own commits (statuses,
+  // artifacts, the queue) are all under intent/. A missing base commit counts as a change.
+  if (await codeState(ctx.git, base) !== state) return "the code on main changed";
+  return null;
 }

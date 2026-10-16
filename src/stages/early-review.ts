@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { clearMarker, readMarker, writeMarker, type StepContext } from "../context";
+import { writeMarker, type StepContext } from "../context";
 import { modelFor } from "../config";
-import { Envelopes } from "../envelopes";
 import { Git, withDetachedWorktree } from "../git";
 import { cheapMayDecide, runJudge, type JudgeResult } from "../judges";
 import { phasePrompt, type AgentPhaseSpec } from "../phases";
 import { EARLY } from "../trace";
-import { testResult } from "./shared";
+import { takeKept, testResult } from "./shared";
 
 /**
  * Run-folder file: a review that ran alongside the verifier (see reviewAhead), with a key for what
@@ -60,26 +59,20 @@ export function keepEarlyReview(ctx: StepContext, kept: string): void {
  * show in git (an ignored file, a running service).
  */
 export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & { name: "review" }, prompt: string | null): Promise<JudgeResult<"review"> | null> {
-  const kept = readMarker(ctx, EARLY_REVIEW);
-  if (kept === null) return null;
-  clearMarker(ctx, EARLY_REVIEW);
-  let saved: { key?: unknown; envelope?: unknown; decidedBy?: unknown };
-  try { saved = JSON.parse(kept); } catch { return null; }
-  const envelope = Envelopes.review.safeParse(saved.envelope);
+  const kept = takeKept(ctx, EARLY_REVIEW, "review");
+  if (kept === undefined) return null;
+  const notUsed = (why: string) => { ctx.trace.event(ctx.slug, "command", { command: "early review", note: `not used: ${why}` }); return null; };
+  if (kept === null) return notUsed("it could not be read");
   const wt = new Git(ctx.worktreeDir);
-  const same = envelope.success && prompt !== null && !ctx.cfg.stages.review.before.length && !(await wt.isDirty())
-    && saved.key === reviewKey(ctx, await wt.headSha(), phase, prompt);
-  if (!same) {
-    ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: the change, its plan, the review prompt or its commands moved on since it ran" });
-    return null;
-  }
+  const same = prompt !== null && !ctx.cfg.stages.review.before.length && !(await wt.isDirty())
+    && kept.key === reviewKey(ctx, await wt.headSha(), phase, prompt);
+  if (!same) return notUsed("the change, its plan, the review prompt or its commands moved on since it ran");
   // One the cheaper judge decided stands only if it is still trusted now: since the build step, an
   // audit may have found a miss, or the setting may have moved. A marker without decidedBy is older, and strong.
-  const decidedBy = saved.decidedBy === "cheap" ? "cheap" : "strong";
+  const decidedBy = kept.saved.decidedBy === "cheap" ? "cheap" : "strong";
   if (decidedBy === "cheap" && !(await cheapMayDecide(ctx, phase, prompt))) {
-    ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: it was decided by the cheaper judge, which is no longer trusted to decide alone" });
-    return null;
+    return notUsed("it was decided by the cheaper judge, which is no longer trusted to decide alone");
   }
   ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName} uses the review that ran alongside the verifier` });
-  return { ok: true, envelope: envelope.data, sessionId: null, costUsd: 0, decidedBy };
+  return { ok: true, envelope: kept.envelope, sessionId: null, costUsd: 0, decidedBy };
 }

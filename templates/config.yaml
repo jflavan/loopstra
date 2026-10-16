@@ -44,6 +44,8 @@ stages:
 # parallel_checks: test, lint and build start together (leave off if they write the same folder).
 # overlap_judges: the first review runs alongside the verifier, and lessons alongside the final
 # check. When the verifier fails, that review is stopped at once and runs again after the fix.
+# plan_ahead: the first plan is written while the spec is being checked; it is stopped if the spec
+# does not pass, and used only if the code it read has not changed (files git ignores are not compared).
 # cheap_judges: off | shadow | first. A cheaper judge (claude.models.default) for the spec check,
 # the plan challenge and the review. shadow: it judges alongside the strong one on the same question
 # and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the
@@ -55,6 +57,7 @@ stages:
 speed:
   parallel_checks: false
   overlap_judges: true
+  plan_ahead: true
   cheap_judges: off
 
 signals:

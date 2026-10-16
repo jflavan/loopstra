@@ -5,7 +5,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, ownTime, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, ownTime, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -412,6 +412,52 @@ describe("alongside", () => {
     // A stop request from either wins, so the loop stops instead of pausing.
     const stop = await alongside(ctx, async () => { throw new AssistantUnavailable("down"); }, { what: "x", run: async () => { throw new StopRequested(); }, wanted: () => true }).catch((e: unknown) => e);
     expect(stop).toBeInstanceOf(StopRequested);
+    trace.close(); repo.cleanup();
+  });
+
+  test("alongsideFirst returns once main wants the extra; no boundary runs in the extra until rest is called", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      let mayRetry: () => void = () => {};
+      const retry = new Promise<void>((r) => { mayRetry = r; });
+      const b = await alongsideFirst(ctx, async () => "pass", {
+        what: "b", wanted: (m) => m === "pass",
+        run: async () => {
+          await codePhase(ctx, "b", async () => { log.push("b"); return { ok: true as const }; });
+          await retry; // a retry-like second phase, started after main ended
+          await codePhase(ctx, "b2", async () => { log.push("b2"); return { ok: true as const }; });
+          return 2;
+        },
+      });
+      expect(b.result).toBe("pass");
+      log.push("main recorded");
+      mayRetry();
+      await tick(30);
+      // b2 ran without a boundary: main still counts as running until rest is called.
+      expect(log).toEqual(["boundary", "b", "main recorded", "b2"]);
+      expect(await b.rest()).toBe(2);
+      await codePhase(ctx, "c", async () => ({ ok: true as const }));
+      expect(log).toEqual(["boundary", "b", "main recorded", "b2", "boundary"]);
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("alongsideFirst waits for both when main's result does not want the extra, or throws; rest throws a stop that ended the extra", async () => {
+    const { repo, ctx, trace } = await setup();
+    const extra = { what: "slow", run: () => codePhase(ctx, "slow", async () => { await projectCommand(ctx, LONG, repo.path); return { ok: true as const }; }) };
+    const started = Date.now();
+    const notWanted = await alongsideFirst(ctx, async () => "failed", { ...extra, wanted: (m) => m !== "failed" });
+    expect(await notWanted.rest()).toBeNull();
+    expect(await alongsideFirst(ctx, async () => { throw new Error("main broke"); }, { ...extra, wanted: () => true }).catch((e: unknown) => e)).toBeInstanceOf(Error);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(trace.phases("x").filter((p) => p.name === "slow").map((p) => p.status)).toEqual(["interrupted", "interrupted"]);
+    const stopped = await alongsideFirst(ctx, async () => 1, { what: "x", run: async () => { await tick(20); throw new StopRequested(); }, wanted: () => true });
+    expect(stopped.result).toBe(1);
+    expect(await stopped.rest().catch((e: unknown) => e)).toBeInstanceOf(StopRequested);
     trace.close(); repo.cleanup();
   });
 
