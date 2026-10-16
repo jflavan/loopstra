@@ -95,6 +95,20 @@ describe("verify stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("lessons are told the change's failed phases, but never a cheaper judge's failure", async () => {
+    const { repo, ctx, trace } = await merged();
+    const fail = (name: string, error: string) => trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, "agent"), { status: "fail", error });
+    fail("spec-check-cheap", "invalid envelope from the cheaper judge");
+    fail("build", "the build broke");
+    await runVerifyStep(ctx);
+    const p = trace.phases("add-numbers").find((x) => x.name === "lessons")!;
+    const prompt = await Bun.file(join(ctx.runDir, "phases", `${p.seq}-lessons`, "prompt.md")).text();
+    expect(prompt).toContain("build: the build broke");
+    expect(prompt).not.toContain("spec-check-cheap");
+    expect(prompt).not.toContain("invalid envelope from the cheaper judge");
+    trace.close(); repo.cleanup();
+  });
+
   test("merged → done: outcome.md for the owner, lessons.md for engineers, both written by the runtime and committed", async () => {
     const { repo, ctx, trace } = await merged({ config: "stages:\n  verify:\n    skills:\n      - checking-results\n" });
     await runVerifyStep(ctx);

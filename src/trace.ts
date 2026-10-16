@@ -256,6 +256,11 @@ export class Trace {
     this.event(slug, "judge", { note: judgeNote(row), ...row });
   }
 
+  /** What every cheaper judge's session (a `-cheap` phase) has cost, across all changes; a running one holds, so it is left out. */
+  cheapJudgeCost(): number {
+    return this.db.query<{ c: number | null }, []>("SELECT SUM(cost_usd) AS c FROM phases WHERE name LIKE '%-cheap' AND status != 'running'").get()?.c ?? 0;
+  }
+
   /** Every judges row, oldest first. They are few; src/judges.ts filters them. */
   judgeRows(): JudgeRow[] {
     return this.db.query<JudgeRow, []>("SELECT * FROM judges ORDER BY id").all();

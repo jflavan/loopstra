@@ -37,7 +37,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
 
   const learn = () => agentPhase(ctx, {
     name: "lessons", model: "cheap", permissionMode: "default", tools: "read",
-    vars: { review: a.review, previous: ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail").map((p) => `${p.name}: ${p.error ?? ""}`).join("\n") },
+    vars: { review: a.review, previous: failures(ctx) },
     skills: ctx.cfg.stages.verify.skills,
   });
   // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
@@ -71,6 +71,16 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   }
   await setStatus(ctx, "done", forPerson.length ? NEEDS_PERSON_DONE_NOTE : "");
   return { ok: true };
+}
+
+/**
+ * The change's failed phases, for lessons. A cheaper judge's failure (a `-cheap` phase) is left out:
+ * the strong judge decided that step, so it was never the change's failure.
+ */
+function failures(ctx: StepContext): string {
+  return ctx.trace.phases(ctx.slug)
+    .filter((p) => p.status === "fail" && !p.name.endsWith("-cheap"))
+    .map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
 }
 
 function line(i: Item): string {
