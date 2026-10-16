@@ -76,6 +76,11 @@ export function roomFor(cfg: Config, trace: Trace, sessions: number, now = new D
   return day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) }) >= sessions * cap;
 }
 
+/** A daily budget and no session cap: two of the loop's sessions never have room at once (see roomFor). */
+export function noSessionCap(cfg: Config): boolean {
+  return cfg.claude.max_budget_usd_per_day !== undefined && cfg.claude.max_budget_usd === undefined;
+}
+
 /**
  * What ended today alone uses up the loop's day: the loop waits until midnight. Not so while the day
  * is only held by running phases (with no session cap, a running phase holds the rest of the day):

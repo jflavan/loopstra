@@ -145,7 +145,8 @@ describe("judgeReport", () => {
     expect(report(rows({ cheap: "pass", ts: new Date(2026, 9, 14, 9).toISOString() }, ...caught(6)))).toBe("no: missed one on 14 Oct (add-numbers); 6 of 30 caught since");
     const alone = { how: "alone" as const, mode: "first" as const, cheap: "pass" as const, strong: null };
     expect(report(rows(...caught(30), alone, alone, { mode: "first" }, alone), "first")).toBe("yes (decided alone 3 times, audited 1)");
-    expect(report(rows(...caught(30)))).toBe("it would: 30 of 30 rejections caught");
+    expect(report(rows(...caught(30)))).toBe("it would: it caught the last 30 rejections");
+    expect(report(rows(...caught(42)))).toBe("it would: it caught the last 42 rejections");
     expect(report(rows(...caught(3)), "off")).toBeNull();
   });
 

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { roomFor } from "./budget";
+import { noSessionCap, roomFor } from "./budget";
 import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
@@ -128,10 +128,7 @@ export function notComparable(cfg: Config, judge: JudgeName): string | null {
   if (modelFor(cfg, "default") === modelFor(cfg, "strong")) return `the cheaper and the strong model are both ${modelFor(cfg, "strong")}; there is nothing cheaper to compare`;
   const gate = judge === "spec-check" ? "spec" : judge === "plan-challenge" ? "plan" : null;
   if (gate && !cfg.gates[gate].agent) return `the ${gate} gate has no judge (gates.${gate}.agent is false)`;
-  const c = cfg.claude;
-  if (c.max_budget_usd_per_day !== undefined && c.max_budget_usd === undefined) {
-    return "with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run at once; set a session limit";
-  }
+  if (noSessionCap(cfg)) return "with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run at once; set a session limit";
   return null;
 }
 
@@ -179,7 +176,7 @@ function average(values: Array<number | null>): number | null {
 /** Whether the judge goes first, in words, for the report. */
 function goesFirstText(setting: JudgeReport["setting"], s: FirstStanding): string | null {
   if (setting === "off") return null;
-  if (s.earned) return setting === "first" ? `yes (decided alone ${s.alone} times, audited ${s.audited})` : `it would: ${s.caught} of ${FIRST_NEEDS} rejections caught`;
+  if (s.earned) return setting === "first" ? `yes (decided alone ${s.alone} times, audited ${s.audited})` : `it would: it caught the last ${s.caught} rejections`;
   if (s.miss) return `no: missed one on ${shortDay(s.miss.ts)} (${s.miss.slug}); ${s.caught} of ${FIRST_NEEDS} caught since`;
   return `not yet: ${s.caught} of ${FIRST_NEEDS} rejections caught`;
 }
@@ -329,7 +326,8 @@ function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & {
  * strong judge alone, as always. shadow (and first while not earned, and first's audits): both judges
  * at once on the same prompt, the strong one decides, and the two verdicts are recorded. first, earned:
  * the cheaper judge alone, and only a clean pass stands; otherwise the strong judge runs after it and
- * decides. `alongside`: sessions already running next to this call, which shadow needs room beside.
+ * decides. A due audit that has no room: the strong judge alone. `alongside`: sessions already running
+ * next to this call, which shadow needs room beside.
  */
 export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: { alongside?: number } = {}): Promise<JudgeResult<J>> {
   const c = await comparison(ctx, phase);
@@ -341,9 +339,11 @@ export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: Age
   if (ctx.cfg.speed.cheap_judges === "first") {
     const standing = firstStanding(ctx.trace.judgeRows(), c.key);
     if (!standing.earned) judgeEvent(ctx, phase, `first: running as shadow; ${standingWhy(standing)}`);
-    // An audit without room waits for a later call.
-    else if (!standing.auditDue || !roomFor(ctx.cfg, ctx.trace, sessions)) return cheapFirst(ctx, phase, cheapPhase, c);
-    else judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
+    // The cheaper judge decides alone only while its audits can run. A due audit runs before it decides
+    // alone again; until there is room for one, shadow lets the strong judge decide alone. With a daily
+    // budget and no session cap there never is, so it never decides alone there.
+    else if (!standing.auditDue && !noSessionCap(ctx.cfg)) return cheapFirst(ctx, phase, cheapPhase, c);
+    else if (roomFor(ctx.cfg, ctx.trace, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
   return shadow(ctx, phase, cheapPhase, c, sessions);
 }

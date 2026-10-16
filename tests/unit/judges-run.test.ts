@@ -124,6 +124,15 @@ describe("runJudge shadow", () => {
     });
   });
 
+  test("a cheaper judge that crashes is never retried: it is recorded as failed and the strong judge decides", async () => {
+    await withRepo(SHADOW, { "spec-check@sonnet": fixture("crash") }, async ({ ctx, trace }) => {
+      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong", envelope: { approved: true } });
+      expect(trace.judgeRows()).toMatchObject([{ cheap: "failed", strong: "pass" }]);
+      expect(phase(trace, "spec-check-cheap")?.status).toBe("fail");
+      expect(phase(trace, "spec-check-cheap-retry")).toBeUndefined();
+    });
+  });
+
   test("a cheaper judge that cannot reach the assistant is dropped with no row; the strong verdict stands", async () => {
     await withRepo(SHADOW, { "spec-check@sonnet": fixture("outage") }, async ({ ctx, trace }) => {
       expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
@@ -239,6 +248,7 @@ describe("runJudge first", () => {
     ["is unsure", unsure, "unsure"],
     ["gives a report that cannot be read", fixture("spec-check").replace("\"approved\":true,", ""), "failed"],
     ["cannot reach the assistant", fixture("outage"), "failed"],
+    ["crashes (and is not retried)", fixture("crash"), "failed"],
   ] as const) {
     test(`earned, but the cheaper judge ${what}: the strong judge runs after it and decides, and the loop is not paused`, async () => {
       await withRepo(FIRST, { "spec-check@sonnet": cheap, "spec-check@opus": fixture("spec-check-reject") }, async ({ repo, ctx, trace, fake }) => {
@@ -251,6 +261,37 @@ describe("runJudge first", () => {
       });
     });
   }
+
+  test("earned, with a daily budget and no session cap: no audit can ever run, so the cheaper judge never decides alone", async () => {
+    await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 50\n`, {}, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      const before = trace.judgeRows().length;
+      for (let i = 1; i <= AUDIT_EVERY + 1; i++) {
+        expect(await runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } })).toMatchObject({ decidedBy: "strong" });
+      }
+      expect(fake.models()).toEqual(Array(AUDIT_EVERY + 1).fill("opus"));
+      expect(trace.judgeRows()).toHaveLength(before);
+      expect(new Set(judgeNotes(trace))).toEqual(new Set(["not compared: today's budget has no room for another session"]));
+    });
+  });
+
+  test("earned, an audit is due and today's budget has no room for it: the strong judge decides alone until one runs", async () => {
+    // Room for two sessions (an audit alone) but not three (an audit beside other work).
+    await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n`, {}, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      const ask = (i: number, alongside: number) => runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } }, { alongside });
+      for (let i = 1; i < AUDIT_EVERY; i++) expect(await ask(i, 1)).toMatchObject({ decidedBy: "cheap" });
+      // The audit is due, and beside other work there is no room for it: the cheaper judge does not decide alone.
+      expect(await ask(AUDIT_EVERY, 1)).toMatchObject({ decidedBy: "strong" });
+      expect(await ask(AUDIT_EVERY + 1, 1)).toMatchObject({ decidedBy: "strong" });
+      expect(fake.models()).toEqual([...Array(AUDIT_EVERY - 1).fill("sonnet"), "opus", "opus"]);
+      expect(judgeNotes(trace).at(-1)).toBe("not compared: today's budget has no room for another session");
+      // With room again, the audit runs, and after it the cheaper judge decides alone again.
+      expect(await ask(AUDIT_EVERY + 2, 0)).toMatchObject({ decidedBy: "strong" });
+      expect(trace.judgeRows().at(-1)).toMatchObject({ mode: "first", how: "shadow" });
+      expect(await ask(AUDIT_EVERY + 3, 1)).toMatchObject({ decidedBy: "cheap" });
+    });
+  });
 
   test(`earned: every ${AUDIT_EVERY}th call runs both as an audit; a miss there sends the next call back to shadow`, async () => {
     await withRepo(FIRST, { "spec-check@sonnet": fixture("spec-check"), "spec-check@opus-1": fixture("spec-check-reject") }, async ({ repo, ctx, trace, fake }) => {

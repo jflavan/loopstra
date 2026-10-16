@@ -184,7 +184,11 @@ How the pieces behave when something throws:
 2. **Is an audit due?** An audit is due when, since this judge's newest shadow row (same models
    and template), it has had at least `AUDIT_EVERY - 1` first-mode rows (`alone` or `escalated`).
    If one is due and there is room, the call runs as shadow: both run, the strong judge decides,
-   and the row is an ordinary shadow row. Without room, the audit waits for a later call.
+   and the row is an ordinary shadow row. Without room, the strong judge decides alone, as shadow
+   does without room ("not compared"), and the audit stays due: the cheaper judge decides alone
+   again only after an audit has run. With a daily budget and no session cap an audit never has
+   room, so there the cheaper judge never decides alone, even with first earned under an earlier
+   budget setting.
 3. **Otherwise the cheaper judge runs alone** (`retry: false`), one session after the other, so no
    extra budget room is needed:
    - **A clean `pass`:** it decides. Row `how = 'alone'`, `strong` NULL. The result is returned
@@ -366,7 +370,8 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
     cheaper judge did not pass) / strong, as a percentage. This is measured, not guessed from
     prices, and tells whether first pays.
   - **Spent on cheaper judges:** the sum of the cost of every `-cheap` phase.
-  - **Goes first?:** shown only when the setting is shadow or first. "Audited" counts only audits:
+  - **Goes first?:** shown only when the setting is shadow or first. Under shadow, an earned judge
+    reads "it would: it caught the last N rejections" (N can pass 30). "Audited" counts only audits:
     a first-mode shadow row right after an alone or escalated row, not the shadow calls that earn
     first back after a miss.
   - **Why a judge cannot be compared**, spelled out in words:
@@ -419,8 +424,11 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   `claude.timeout_minutes`; it is never retried, so a timeout ends it as `failed` and the strong
   verdict stands.
 - **Daily budget too small:** without room for two sessions (three for the early review), only the
-  strong judge runs, and a "not compared" event is traced. With a daily budget and no session cap,
-  shadow never runs and first is never earned. `loopstra judges` explains why.
+  strong judge runs, and a "not compared" event is traced. In first, a due audit without room
+  means the strong judge decides alone too, so the cheaper judge never decides alone unaudited.
+  With a daily budget and no session cap, shadow never runs, and first is never used (a judge that
+  earned it under an earlier budget setting keeps its record, but the strong judge decides).
+  `loopstra judges` explains why.
 - **The day runs out during the cheaper session in first:** `LoopBudgetReached` is passed on as
   today. Shadow spending counts towards the change's `HAD_THE_DAY` share, because it is real
   spending.
