@@ -193,8 +193,11 @@ interface Group { running: number; succeeded: boolean }
  */
 const inGroup = new AsyncLocalStorage<{ group: Group; signal?: AbortSignal }>();
 
-/** Runs the phase boundary, except while other work of the same group still runs. */
-async function boundary(ctx: StepContext): Promise<void> {
+/**
+ * Runs the phase boundary, except while other work of the same group still runs. Every phase runs it
+ * first; a step runs it itself before deciding something on main's code (see takePlanAhead).
+ */
+export async function boundary(ctx: StepContext): Promise<void> {
   const g = inGroup.getStore()?.group;
   if (phaseBoundary && !(g && g.running > 1)) await phaseBoundary(ctx);
 }
@@ -232,15 +235,55 @@ export function mayOverlap(ctx: StepContext): boolean {
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
  */
-export async function alongside<M, E>(
-  ctx: StepContext, main: () => Promise<M>, extra: { what: string; run: () => Promise<E>; wanted: (m: M) => boolean },
-): Promise<[M, E | null]> {
+export async function alongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>): Promise<[M, E | null]> {
+  return (await startAlongside(ctx, main, extra, false)).both;
+}
+
+/** The work run beside main (see alongside): its name in the trace, the work, and whether main's result uses it. */
+type Extra<M, E> = { what: string; run: () => Promise<E>; wanted: (m: M) => boolean };
+
+/**
+ * alongside, returning as soon as main ends with a result that uses the extra work, so the step can
+ * record that result first (spec-check's pass is committed while the plan written beside it still
+ * runs, so a stop meanwhile loses only the plan). `rest` then waits for the extra (null when dropped)
+ * and throws a stop request that ended it; `cancel` calls it off. Until `rest` is called, the group
+ * still counts main as running, so no phase boundary (a merge) runs in the extra while the step works
+ * on main: the caller calls `rest` before any other phase. A result that does not use the extra, or an
+ * error, waits for both as alongside does.
+ */
+export async function alongsideFirst<M, E>(
+  ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>,
+): Promise<{ result: M; rest: () => Promise<E | null>; cancel: () => void }> {
+  const s = await startAlongside(ctx, main, extra, true);
+  let result: M;
+  try {
+    result = await s.main;
+  } catch (e) {
+    s.release();
+    await s.both; // throws: a stop request from either, else main's error
+    throw e;
+  }
+  if (!extra.wanted(result)) {
+    s.release();
+    const [, x] = await s.both;
+    return { result, rest: async () => x, cancel: () => {} };
+  }
+  return { result, rest: () => { s.release(); return s.both.then(([, x]) => x); }, cancel: s.cancel };
+}
+
+/**
+ * Starts main and the extra work in one group (see alongside). `main` is main's result; `both` ends
+ * once both have, with alongside's rules. With `hold`, main counts as running until `release`.
+ */
+async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>, hold: boolean) {
   await boundary(ctx);
   const group: Group = { running: 2, succeeded: false };
   const cancel = new AbortController();
-  const member = <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> =>
-    inGroup.run({ group, signal }, async () => { try { return await fn(); } finally { group.running--; } });
-  const mainDone = member(main).then(
+  let held = hold;
+  const release = () => { if (held) { held = false; group.running--; } };
+  const member = <T>(fn: () => Promise<T>, signal?: AbortSignal, holds = false): Promise<T> =>
+    inGroup.run({ group, signal }, async () => { try { return await fn(); } finally { if (!holds) group.running--; } });
+  const mainDone = member(main, undefined, hold).then(
     (m) => { if (!extra.wanted(m)) cancel.abort(); return m; },
     (e: unknown) => { cancel.abort(); throw e; },
   );
@@ -249,11 +292,14 @@ export async function alongside<M, E>(
     ctx.trace.event(ctx.slug, "command", { command: extra.what, note: e instanceof Cancelled ? e.message : `dropped: ${errorText(e)}` });
     return null;
   });
-  const [m, x] = await Promise.allSettled([mainDone, extraDone]);
-  if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) clearPause(ctx.root);
-  if (x.status === "rejected") throw x.reason; // only ever a stop request
-  if (m.status === "rejected") throw m.reason;
-  return [m.value, x.value];
+  const both = Promise.allSettled([mainDone, extraDone]).then(([m, x]): [M, E | null] => {
+    if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) clearPause(ctx.root);
+    if (x.status === "rejected") throw x.reason; // only ever a stop request
+    if (m.status === "rejected") throw m.reason;
+    return [m.value, x.value];
+  });
+  both.catch(() => {}); // awaited by the caller; never an unhandled rejection meanwhile
+  return { main: mainDone, both, release, cancel: () => cancel.abort() };
 }
 
 /**

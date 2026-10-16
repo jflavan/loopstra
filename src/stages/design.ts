@@ -1,6 +1,7 @@
 import { block, writeIntentPriority, type StepContext, type StepResult } from "../context";
 import { agentPhase } from "../phases";
 import { runArtifactStep, type ArtifactStage } from "./artifact";
+import { planAhead } from "./plan";
 
 const DESIGN: ArtifactStage<"design", "spec-check"> = {
   stage: "design", gate: "spec", artifact: "spec.md",
@@ -15,6 +16,7 @@ const DESIGN: ArtifactStage<"design", "spec-check"> = {
     vars: (a) => ({ intent: a.intent, spec: a.spec }),
     findings: (e) => e.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`),
   },
+  ahead: planAhead,
   rewritingNote: "The first spec did not pass its automatic check, so it is being written again.",
   // A decision for a person rather than a retry: two ways on.
   failedNote: "The spec did not pass its automatic check, even after being written a second time. Set status to spec-approved to accept the spec as it is, or to accepted to write it again.",
@@ -22,7 +24,8 @@ const DESIGN: ArtifactStage<"design", "spec-check"> = {
 
 /**
  * Stage 1 and 2. accepted/designing: intake, design, and the spec gate's checks in one step.
- * spec-review means the checks passed and a person is deciding; it never advances here.
+ * spec-review means the checks passed and a person is deciding; it never advances here. With
+ * speed.plan_ahead, the first plan may be written alongside spec-check (see planAhead).
  */
 export function runDesignStep(ctx: StepContext): Promise<StepResult> {
   return runArtifactStep(ctx, DESIGN);

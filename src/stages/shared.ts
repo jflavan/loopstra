@@ -1,4 +1,7 @@
-import { block, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, passOn } from "../git";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Status } from "../intents";
@@ -112,6 +115,49 @@ export function lastTested(ctx: StepContext): string | null {
 export async function alreadyTested(ctx: StepContext, wt: Git): Promise<boolean> {
   const passedAt = lastTested(ctx);
   return !!passedAt && (await wt.run(["diff", "--quiet", passedAt, "HEAD", "--", ".", ":(exclude)intent"], true)).code === 0;
+}
+
+/** An answer kept by work run ahead (see reviewAhead, planAhead): what it was asked (`key`), its report, and the whole file. */
+export type Kept<N extends PhaseName> = { key: string; envelope: Envelope<N>; saved: Record<string, unknown> };
+
+/**
+ * The answer kept in a run-folder file by work run ahead. It is used up at once, whatever happens
+ * next: the file is cleared before anything is checked. Undefined when there is none; null when it is
+ * not what was written (corrupt, from another Loopstra version, or a report that did not succeed).
+ */
+export function takeKept<N extends PhaseName>(ctx: StepContext, marker: string, name: N): Kept<N> | null | undefined {
+  const text = readMarker(ctx, marker);
+  if (text === null) return undefined;
+  clearMarker(ctx, marker);
+  let saved: unknown;
+  try { saved = JSON.parse(text); } catch { return null; }
+  if (typeof saved !== "object" || saved === null) return null;
+  const s = saved as Record<string, unknown>;
+  const envelope = Envelopes[name].safeParse(s.envelope);
+  if (!envelope.success || envelope.data.status !== "success" || typeof s.key !== "string") return null;
+  return { key: s.key, envelope: envelope.data as Envelope<N>, saved: s };
+}
+
+/** What is not the code: the loop's records and run folders, and its config (what of it a session sees is in its prompt). */
+const NOT_CODE = [":(exclude)intent", ":(exclude).loopstra", ":(exclude)loopstra/config.yaml"];
+
+/**
+ * A fingerprint of a checkout's code as it is now, measured from `base` (a commit): how its tracked
+ * files differ from base, staged or not, and each untracked file git does not ignore, with its
+ * contents. The same fingerprint from the same base means the same code, whatever was committed in
+ * between. Ignored files do not count. Null when base is not a commit there.
+ */
+export async function codeState(git: Git, base: string): Promise<string | null> {
+  const diff = await git.run(["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base, "--", ".", ...NOT_CODE], true);
+  if (diff.code !== 0) return null;
+  const untracked = (await git.run(["ls-files", "-z", "--others", "--exclude-standard", "--", ".", ...NOT_CODE])).out.split("\0").filter(Boolean).sort();
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(diff.out);
+  for (const path of untracked) {
+    hash.update(`\0${path}\0`);
+    try { hash.update(readFileSync(join(git.cwd, path))); } catch { hash.update("unreadable"); }
+  }
+  return hash.digest("hex");
 }
 
 export const TESTS_PASSED = "The test command passed after the latest change.";
