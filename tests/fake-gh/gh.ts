@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,21 @@ if (process.env.LOOPSTRA_FAKE_GH_HANG === "1") await new Promise(() => setInterv
 
 const args = Bun.argv.slice(2);
 const statePath = process.env.LOOPSTRA_FAKE_GH_STATE!;
+
+// One call at a time per state file, like one GitHub: changes running side by side call gh at the same
+// time, and two that read the state before either saved it would lose one's pull request.
+if (statePath) {
+  const lockDir = `${statePath}.lock`;
+  for (;;) {
+    try { mkdirSync(lockDir); break; } catch {
+      // A call that was killed leaves its lock behind; it is old by now.
+      try { if (Date.now() - statSync(lockDir).mtimeMs > 30_000) rmSync(lockDir, { recursive: true, force: true }); } catch { /* gone meanwhile */ }
+      await Bun.sleep(20);
+    }
+  }
+  process.on("exit", () => rmSync(lockDir, { recursive: true, force: true }));
+}
+
 const state: State = existsSync(statePath) ? JSON.parse(await Bun.file(statePath).text()) : { prs: {}, next: 1 };
 if (process.env.LOOPSTRA_FAKE_GH_LOG) appendFileSync(process.env.LOOPSTRA_FAKE_GH_LOG, JSON.stringify(args) + "\n");
 const save = () => Bun.write(statePath, JSON.stringify(state, null, 2));

@@ -218,7 +218,67 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
-  return mergeOnGitHub(ctx, gh, pr);
+  // With one change at a time nothing else merges meanwhile: merge as before.
+  if (ctx.cfg.speed.max_parallel_changes <= 1) return mergeOnGitHub(ctx, gh, pr);
+  return mergeWhenUpToDate(ctx, gh, pr);
+}
+
+/** The trace's plain line when a pull request was brought up to date before it could merge. */
+const BROUGHT_UP_TO_DATE = "Brought up to date with changes merged meanwhile; waiting for the automatic checks on GitHub again.";
+
+/** Whether a branch still has what it was checked against (see upToDate). */
+type Freshness = "up to date" | "main ahead" | "remote ahead" | "unreachable";
+
+/**
+ * With more than one change at a time, another change may have merged since this pull request's
+ * checks ran, so its checks never saw the two together. Under the merge lock: fetch, and merge on
+ * GitHub only when neither main here nor the remote's main gained code the branch lacks. When only
+ * the remote's main did, wait: the next tick's start brings it here. When main here did, bring the
+ * branch up to date outside the lock (the merge checks again, then a push that keeps the pull
+ * request open) and wait for GitHub's checks again. A step started between another change's phases
+ * waits for its own turn instead, since the checks may run tests and sessions.
+ */
+async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
+  const r = await oneMergeAtATime(ctx, async () => {
+    const seen = await upToDate(ctx);
+    return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr) : seen;
+  });
+  if (typeof r !== "string") return r;
+  if (r === "remote ahead") {
+    ctx.trace.event(ctx.slug, "command", { command: "up to date", waiting: `${ctx.cfg.main_branch} on GitHub has changes merged meanwhile; ${ctx.cfg.main_branch} here gets them at the start of the next check, and then this change is brought up to date` });
+  }
+  if (r !== "main ahead" || ctx.betweenPhases) return { ok: true, waiting: true };
+  return checkAgain(ctx, async () => {
+    const opened = await openPullRequest(ctx, false);
+    if (!opened.ok) return block(ctx, opened.note, opened);
+    ctx.trace.event(ctx.slug, "command", { command: "up to date", note: BROUGHT_UP_TO_DATE, pr: pr.number });
+    return { ok: true, waiting: true };
+  });
+}
+
+/**
+ * Fetches, then looks at main here and at the remote's main: is either one ahead of the branch with
+ * code outside intent/? A fetch that fails is traced; the step waits and looks again next time.
+ */
+async function upToDate(ctx: StepContext): Promise<Freshness> {
+  const remote = await ctx.git.remoteName();
+  if (!remote) return "unreachable";
+  const fetched = await ctx.git.run(["fetch", "--quiet", remote], true);
+  if (fetched.code !== 0) {
+    ctx.trace.event(ctx.slug, "error", { where: "up to date", error: (fetched.err || `exit ${fetched.code}`).trim(), note: "will look again on the next tick" });
+    return "unreachable";
+  }
+  const main = ctx.cfg.main_branch;
+  if (await outOfDate(ctx, main)) return "main ahead";
+  if (await outOfDate(ctx, `${remote}/${main}`)) return "remote ahead";
+  return "up to date";
+}
+
+/** True when `ref` has code (outside intent/) the branch lacks: it gained some since they parted. */
+async function outOfDate(ctx: StepContext, ref: string): Promise<boolean> {
+  if (await ctx.git.isAncestor(ref, ctx.branch)) return false;
+  const base = (await ctx.git.run(["merge-base", ref, ctx.branch], true)).out.trim();
+  return !base || (await ctx.git.gainedCodeSince(base, ref, ["intent/"]));
 }
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
@@ -358,6 +418,15 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   // A person may have set merge-approved (or edited the change's other files) without committing:
   // record the change's own folder first, so their edit is part of main before the checks run.
   await recordPersonEdits(ctx);
+  return checkAgain(ctx, () => mergeNow(ctx));
+}
+
+/**
+ * The merge gate once more, after the review step passed it: in the change's worktree, then
+ * `onPass`. Edits nobody reviewed waiting in the worktree are kept on the branch and reviewed
+ * first, and so are fixes the checks commit (status reviewing), so nothing merges unseen.
+ */
+async function checkAgain(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult> {
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return block(ctx, open.note, open);
   const wt = new Git(ctx.worktreeDir);
@@ -368,7 +437,7 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
     if (!kept.ok) return block(ctx, kept.note, kept);
     next = await anotherRound(ctx);
   } else {
-    next = await mergeGate(ctx, () => mergeNow(ctx));
+    next = await mergeGate(ctx, onPass);
   }
   if (next !== REVIEW_AGAIN) return next;
   await setStatus(ctx, "reviewing");

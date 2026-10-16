@@ -2,12 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configPath } from "../../src/config";
+import { configPath, loadConfig } from "../../src/config";
+import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { lanesRunning } from "../../src/lanes";
-import { tick } from "../../src/scheduler";
+import { runStepGuarded, tick } from "../../src/scheduler";
+import { syncMain } from "../../src/remote";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
@@ -495,4 +497,80 @@ describe("more than one change at a time, with a GitHub remote", () => {
     });
     r.cleanup();
   }, 240_000);
+
+  test("two ready pull requests: after the first merges, the second is brought up to date and checked again before it merges", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // both build
+      await tick(r.path); // both are reviewed and get a pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect(await statusOf(r.path, "beta")).toBe("merge-review");
+      await checksPass(r);
+    });
+    const prs = async (repo: RemoteRepo) => (await Bun.file(repo.state).json()).prs as Record<string, { checks: string; merged: boolean }>;
+
+    // One change at a time: both merge as before, with no second look.
+    const one = await copyRemoteRepo(r);
+    await commitWithLanes(one, 1);
+    await withEnv(one.env, async () => {
+      await tick(one.path);
+      await tick(one.path);
+      expect(await statusOf(one.path, "alpha")).toBe("merged");
+      expect(await statusOf(one.path, "beta")).toBe("merged");
+      inTrace(one.path, (trace) => {
+        for (const slug of ["alpha", "beta"]) {
+          expect(trace.events(slug).some((e) => e.payload.includes("Brought up to date"))).toBe(false);
+          expect(trace.phases(slug).some((p) => p.name === "merge-test-1")).toBe(false);
+        }
+      });
+    });
+    one.cleanup();
+
+    await withEnv(r.env, async () => {
+      // The first to take the merge lock merges on GitHub; the second waits, as GitHub's main has code it never saw.
+      await tick(r.path);
+      const merged = Object.entries(await prs(r)).filter(([, p]) => p.merged).map(([branch]) => branch.replace("intent/", ""));
+      expect(merged).toHaveLength(1);
+      const first = merged[0]!;
+      const second = first === "alpha" ? "beta" : "alpha";
+
+      // Started between another change's phases, a pull request that main here has overtaken waits for its own turn.
+      const cfg = await loadConfig(r.path);
+      const trace = Trace.open(r.path);
+      try {
+        await syncMain(r.path, cfg, trace);
+        const ctx = new StepContext(r.path, cfg, trace, await readIntent(r.path, second));
+        ctx.betweenPhases = true;
+        expect(await runStepGuarded(ctx)).toEqual({ ok: true, waiting: true });
+        expect(trace.phases(second).some((p) => p.name === "merge-test-1")).toBe(false);
+        expect(trace.events(second).some((e) => e.payload.includes("Brought up to date"))).toBe(false);
+      } finally { trace.close(); }
+
+      // Main here gets the first change at the next tick's start. The second is rebased onto it, tested
+      // again, and pushed again; its pull request stays open and it keeps its status.
+      await tick(r.path);
+      expect(await statusOf(r.path, first)).toBe("merged");
+      expect(await statusOf(r.path, second)).toBe("merge-review");
+      expect((await prs(r))[`intent/${second}`]!.merged).toBe(false);
+      expect((await run(["git", "cat-file", "-e", `intent/${second}:src/${first}.ts`], r.remote)).code).toBe(0);
+      inTrace(r.path, (trace) => {
+        const again = trace.events(second).filter((e) => e.payload.includes("Brought up to date with changes merged meanwhile; waiting for the automatic checks on GitHub again."));
+        expect(again).toHaveLength(1);
+        expect(trace.phases(second).some((p) => p.name === "merge-test-1")).toBe(true);
+      });
+
+      // GitHub runs the checks again; the pull request merges once they pass.
+      const s = await Bun.file(r.state).json();
+      s.prs[`intent/${second}`].checks = "pending";
+      await Bun.write(r.state, JSON.stringify(s));
+      await tick(r.path);
+      expect((await prs(r))[`intent/${second}`]!.merged).toBe(false);
+      await checksPass(r);
+      await tick(r.path);
+      expect((await prs(r))[`intent/${second}`]!.merged).toBe(true);
+      for (let i = 0; i < 2 && (await statusOf(r.path, second)) !== "merged"; i++) await tick(r.path);
+      expect(await statusOf(r.path, second)).toBe("merged");
+    });
+    r.cleanup();
+  }, 300_000);
 });

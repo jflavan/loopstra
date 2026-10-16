@@ -291,6 +291,23 @@ describe("Git across systems", () => {
     expect(chunks([], 2)).toEqual([]);
   });
 
+  test("gainedCodeSince: true only when the ref changed files outside the ignored folders since the base", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const base = await git.headSha();
+      expect(await git.gainedCodeSince(base, "main", ["intent/"])).toBe(false);
+      await Bun.write(join(repo.path, "intent", "x", "intent.md"), "a record\n");
+      await git.commitAll("a record");
+      expect(await git.gainedCodeSince(base, "main", ["intent/"])).toBe(false);
+      expect(await git.gainedCodeSince(base, "main")).toBe(true);
+      await Bun.write(join(repo.path, "src", "a.ts"), "code\n");
+      await git.commitAll("code");
+      expect(await git.gainedCodeSince(base, "main", ["intent/"])).toBe(true);
+      expect(await git.gainedCodeSince("main", "main", ["intent/"])).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
   test("containsChanges compares hundreds of long paths without one huge command line", async () => {
     const repo = await tempGitRepo();
     try {
