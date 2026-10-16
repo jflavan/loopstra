@@ -128,6 +128,8 @@ export const ConfigSchema = z.object({
     plan_ahead: z.boolean().default(true),
     /** A cheaper judge (claude.models.default) for the spec check, plan challenge and review. off: none. shadow: it judges alongside the strong judge and is only recorded. first: it decides a pass alone once its record has earned it. */
     cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow or first" }).default("off"),
+    /** How many changes may each run a step at the same time. 1 = one at a time (as before). */
+    max_parallel_changes: z.number().int("must be a whole number").min(1, "must be 1 or more").max(4, "must be 4 or less").default(1),
   }).strict().prefault({}),
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),

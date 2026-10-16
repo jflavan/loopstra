@@ -17,6 +17,7 @@ describe("the stamped config", () => {
         expect(String(parseDocument(text))).toBe(text);
         expect(parseDocument(text).getIn(["speed", "plan_ahead"])).toBe(true);
         expect(parseDocument(text).getIn(["speed", "cheap_judges"])).toBe("off");
+        expect(parseDocument(text).getIn(["speed", "max_parallel_changes"])).toBe(1);
 
         const scalar = parseDocument(text);
         scalar.setIn(["claude", "timeout_minutes"], 45);

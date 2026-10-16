@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { mainLockKey, onMainKey } from "./lanes";
 import { lastLine, spawnBounded } from "./shell";
 import { notTheStepsFault, StopRequested } from "./stop";
 
@@ -17,9 +18,13 @@ export const RUNTIME_EMAIL = "loopstra@localhost";
  * Settings for every commit the runtime makes (bookkeeping on main, saves in a worktree, merges,
  * rebases): its own identity, and never a signing prompt. Hooks are skipped with `--no-verify`
  * where the command has it; the gates run the configured checks instead of the owner's hooks.
+ * Git's automatic gc and maintenance are off: run after one change's commit, they could pack refs
+ * while another change commits or deletes a branch, and that one would fail with "cannot lock ref".
+ * The tick start runs gc itself while no step runs.
  */
 export const RUNTIME_COMMIT_CONFIG: readonly string[] = [
   "-c", `user.name=${RUNTIME_NAME}`, "-c", `user.email=${RUNTIME_EMAIL}`, "-c", "commit.gpgsign=false",
+  "-c", "gc.auto=0", "-c", "maintenance.auto=false",
 ];
 
 /**
@@ -131,24 +136,30 @@ export function samePath(a: string, b: string): boolean {
 export class Git {
   private readonly timeoutMs: number;
   private readonly stopGraceMs: number;
+  /** The main lock this checkout's commands take, or null for a folder inside `.loopstra` (a change's own worktree). */
+  private readonly lockKey: string | null;
   constructor(public readonly cwd: string, opts: { timeoutMs?: number; stopGraceMs?: number } = {}) {
     this.timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
     this.stopGraceMs = opts.stopGraceMs ?? STOP_GRACE_MS;
+    this.lockKey = mainLockKey(cwd);
   }
 
   /**
    * Runs one git command. Bounded: past the timeout it is stopped with everything it started and
    * GitTimeout is thrown. It never asks for credentials. It does not start after a stop request; a
    * stop during the call gives it a moment to finish, then kills it, and throws StopRequested.
-   * `allowFail` (or `true`) returns a non-zero exit instead of throwing.
+   * `allowFail` (or `true`) returns a non-zero exit instead of throwing. In the main checkout it
+   * runs under the main lock, so changes running side by side never run two git commands there at
+   * once; in a change's own worktree it takes no lock.
    */
   async run(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
     const timeoutMs = o.timeoutMs ?? this.timeoutMs;
-    const r = await spawnBounded({
+    const spawn = () => spawnBounded({
       cmd: ["git", ...args], cwd: this.cwd, env: gitEnv(this.cwd), timeoutMs,
       onStop: o.cleanup ? "ignore" : "grace", graceMs: this.stopGraceMs,
     });
+    const r = this.lockKey === null ? await spawn() : await onMainKey(this.lockKey, spawn);
     if (r.timedOut) throw new GitTimeout(args, timeoutMs);
     if (r.stopped) throw new StopRequested();
     const code = r.code ?? 1;

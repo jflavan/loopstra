@@ -54,11 +54,17 @@ stages:
 # both as an audit. Until then, first runs as shadow. shadow and audits need room in the day's
 # budget for both sessions (three beside the verifier or a plan written ahead), so never with
 # max_budget_usd_per_day and no max_budget_usd; then the strong judge decides alone.
+# max_parallel_changes: how many changes may each run a step at the same time (1 to 4). Raise it
+# only if the project's commands (test, lint, build, install) can run twice at once on this
+# machine: no fixed ports, no shared test database, no output outside the worktree. Each command
+# gets LOOPSTRA_SLUG, so it can pick its own port or database name. More changes at once also
+# spend the daily budget and the subscription's usage limits faster.
 speed:
   parallel_checks: false
   overlap_judges: true
   plan_ahead: true
   cheap_judges: off
+  max_parallel_changes: 1
 
 signals:
   main_health: { every_minutes: 30 }
