@@ -8,7 +8,7 @@ import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/early-review";
-import { PR_LEASE, REMOTE_AHEAD } from "../../src/stages/shared";
+import { PR_LEASE, PR_PUSHING, REMOTE_AHEAD } from "../../src/stages/shared";
 import { readMarker, writeMarker } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
@@ -113,9 +113,11 @@ describe("build stage", () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
     writeMarker(ctx, REMOTE_AHEAD, "");
     writeMarker(ctx, PR_LEASE, "0123456789abcdef0123456789abcdef01234567");
+    writeMarker(ctx, PR_PUSHING, "89abcdef0123456789abcdef0123456789abcdef");
     expect((await runBuildStep(ctx)).ok).toBe(true);
     expect(readMarker(ctx, REMOTE_AHEAD)).toBeNull();
     expect(readMarker(ctx, PR_LEASE)).toBeNull();
+    expect(readMarker(ctx, PR_PUSHING)).toBeNull();
     trace.close(); repo.cleanup();
   });
 

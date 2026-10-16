@@ -11,7 +11,7 @@ import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -131,7 +131,8 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
  * naming the artifacts and the review summary). The review goes on it as a comment when the pull
  * request is new or `newReview` says a review just passed. The number and link go to the trace.
  * The push overwrites only the commit recorded in PR_LEASE; a branch someone changed on GitHub is
- * left alone, and the change blocked in plain words.
+ * left alone, and the change blocked in plain words. A push cut short earlier is settled first
+ * (see adoptCutShortPush), and this one is recorded in PR_PUSHING until PR_LEASE has it.
  */
 async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
   let moved = false;
@@ -139,12 +140,15 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     // Main first, so the pull request's diff against it shows only the change, not the records.
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const head = (await ctx.git.run(["rev-parse", `refs/heads/${ctx.branch}`])).out.trim();
+    if (readMarker(ctx, PR_PUSHING)) adoptCutShortPush(ctx, await headOnGitHub(ctx));
+    writeMarker(ctx, PR_PUSHING, head);
     const pushed = await pushBranch(ctx.git, ctx.branch, readMarker(ctx, PR_LEASE)?.trim() || undefined);
     if (!pushed.ok) {
       moved = pushed.moved === true;
       throw new Error(pushed.detail);
     }
     writeMarker(ctx, PR_LEASE, head);
+    clearMarker(ctx, PR_PUSHING);
     writeMarker(ctx, PR_PUSHED, new Date().toISOString());
     const gh = new GitHub(ctx.root);
     const found = await gh.lookupPr(ctx.branch);
@@ -183,6 +187,26 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     detail: r.detail,
     retryFrom: mergeRetry(ctx),
   };
+}
+
+/**
+ * A push of the pull request's branch that a stop, a timeout or a crash cut short (PR_PUSHING left
+ * behind) may have reached GitHub all the same. When GitHub's copy (`theirs`) is that push's head,
+ * it is Loopstra's own work, not a person's: it becomes the lease, so the next push may go over it.
+ */
+function adoptCutShortPush(ctx: StepContext, theirs: string): void {
+  const pending = readMarker(ctx, PR_PUSHING)?.trim();
+  if (!pending || theirs !== pending) return;
+  writeMarker(ctx, PR_LEASE, pending);
+  clearMarker(ctx, PR_PUSHING);
+}
+
+/** The head of the pull request's branch on GitHub, asked of GitHub ("" when it has none, or cannot be asked). */
+async function headOnGitHub(ctx: StepContext): Promise<string> {
+  const remote = await ctx.git.remoteName();
+  if (!remote) return "";
+  const r = await ctx.git.run(["ls-remote", remote, `refs/heads/${ctx.branch}`], true);
+  return r.code === 0 ? r.out.trim().split(/\s+/)[0] ?? "" : "";
 }
 
 /**
@@ -289,24 +313,28 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
  * checks and the next push include them; when the branch here changed too, both changed. The
  * branch here has commits that copy lacks (a bring-up-to-date that stopped before its push): it is
  * not pushed. Otherwise, is main here or the remote's main ahead of that copy with code outside
- * intent/? A fetch that fails is traced; the step waits and looks again next time.
+ * intent/? Both branches are fetched by name, so this works whatever the remote's fetch setting
+ * covers (a single-branch clone fetches only main). A fetch that fails is traced; the step waits
+ * and looks again next time.
  */
 async function upToDate(ctx: StepContext): Promise<Freshness> {
   const remote = await ctx.git.remoteName();
   if (!remote) return "unreachable";
-  const fetched = await ctx.git.fetch(["--quiet", remote], true);
+  const main = ctx.cfg.main_branch;
+  const tracking = (b: string) => `+refs/heads/${b}:refs/remotes/${remote}/${b}`;
+  const fetched = await ctx.git.fetch(["--quiet", remote, tracking(main), tracking(ctx.branch)], true);
   if (fetched.code !== 0) {
     ctx.trace.event(ctx.slug, "error", { where: "up to date", error: (fetched.err || `exit ${fetched.code}`).trim(), note: "will look again on the next tick" });
     return "unreachable";
   }
   const pushed = `refs/remotes/${remote}/${ctx.branch}`;
   const theirs = (await ctx.git.run(["rev-parse", "--verify", "--quiet", pushed], true)).out.trim();
+  adoptCutShortPush(ctx, theirs);
   // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
   if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim() && !(await ctx.git.isAncestor(pushed, ctx.branch))) {
     if (!(await ctx.git.isAncestor(ctx.branch, pushed)) || !(await takePersonCommits(ctx, theirs))) return "both changed";
   }
   if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
-  const main = ctx.cfg.main_branch;
   if (await outOfDate(ctx, main, pushed)) return "main ahead";
   if (await outOfDate(ctx, `${remote}/${main}`, pushed)) return "remote ahead";
   return "up to date";
@@ -327,11 +355,15 @@ async function takePersonCommits(ctx: StepContext, sha: string): Promise<boolean
   return true;
 }
 
-/** True when `ref` has code (outside intent/) that `branch` lacks: it gained some since they parted. */
+/**
+ * True when `ref` has code (outside intent/) that `branch` lacks: it changed files since they
+ * parted. A comparison git cannot make (no common history) counts as out of date.
+ */
 async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise<boolean> {
   if (await ctx.git.isAncestor(ref, branch)) return false;
-  const base = (await ctx.git.run(["merge-base", ref, branch], true)).out.trim();
-  return !base || (await ctx.git.gainedCodeSince(base, ref, ["intent/"]));
+  const gained = await ctx.git.run(["diff", "--name-only", `${branch}...${ref}`], true);
+  if (gained.code !== 0) return true;
+  return gained.out.split(/\r?\n/).map((f) => f.trim()).some((f) => f && !f.startsWith("intent/"));
 }
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */

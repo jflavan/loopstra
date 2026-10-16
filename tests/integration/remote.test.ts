@@ -1,15 +1,18 @@
-import { describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
+import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
+
+afterEach(() => resetStop());
 const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
@@ -451,6 +454,57 @@ describe("the loop with a GitHub remote", () => {
       expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
       expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
       expect(await new Git(s.repo).branchExists(BRANCH)).toBe(false);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a push GitHub took just as a stop cut it short is Loopstra's own: the next push goes over it, and nothing is blocked", async () => {
+    const s = await remoteSetup();
+    const worktree = new Git(join(s.repo, ".loopstra", "worktrees", SLUG));
+    /** Main gains code, and the branch here is rebased onto it: a new head to push. */
+    const mainMoves = async (file: string) => {
+      await Bun.write(join(s.repo, "src", file), "export const x = 1;\n");
+      await new Git(s.repo).commitAll(`person: ${file}`);
+      await run(["git", "push", "-q", "origin", "main"], s.repo);
+      expect(await worktree.rebaseOnto("main")).toBe(true);
+    };
+    /** The pull request is gone from GitHub's list, so the merge step opens it again, pushing first. */
+    const dropPr = async () => {
+      const state = await Bun.file(join(s.remote, "fake-gh.json")).json();
+      delete state.prs[BRANCH];
+      await Bun.write(join(s.remote, "fake-gh.json"), JSON.stringify(state));
+    };
+    const onGitHub = async () => (await run(["git", "rev-parse", BRANCH], s.remote)).out.trim();
+    const here = async () => (await run(["git", "rev-parse", BRANCH], s.repo)).out.trim();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+
+      // GitHub takes the next push of the branch, then holds the push open until the stop ends it.
+      await mainMoves("one.ts");
+      await dropPr();
+      const received = join(s.remote, "received").replace(/\\/g, "/");
+      const hook = join(s.remote, "hooks", "post-receive");
+      await Bun.write(hook, `#!/bin/sh\nif grep -q refs/heads/intent/; then echo > "${received}"; sleep 4; fi\n`);
+      chmodSync(hook, 0o755);
+      const stopper = (async () => {
+        while (!existsSync(received)) await Bun.sleep(50);
+        requestStop();
+      })();
+      const t = await tick(s.repo);
+      await stopper;
+      expect(t.stopped).toBe(true);
+      expect(await onGitHub()).toBe(await here());
+      rmSync(hook);
+      resetStop();
+
+      // Main moves on again and the branch is rebased: the push that follows goes over GitHub's copy.
+      await mainMoves("two.ts");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
+      expect(await onGitHub()).toBe(await here());
+      expect((await s.pr()).state).toBe("OPEN");
     });
     s.cleanup();
   }, 180_000);

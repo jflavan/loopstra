@@ -190,6 +190,14 @@ export const REMOTE_AHEAD = "remote-ahead";
  */
 export const PR_LEASE = "pr-lease";
 
+/**
+ * Run-folder marker: the head of the push of the pull request's branch in progress, written before
+ * the push and cleared once PR_LEASE has it. Left behind when a stop, a timeout or a crash cut the
+ * push short, when GitHub may have taken it all the same: once GitHub is seen holding that head, it
+ * becomes the lease (see adoptCutShortPush).
+ */
+export const PR_PUSHING = "pr-pushing";
+
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {
   const n = Number.parseInt(readMarker(ctx, REVIEW_ROUND) ?? "", 10);

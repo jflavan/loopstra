@@ -229,7 +229,7 @@ running step is going. At N=1 there is always one lane, so nothing changes.
 const human = humanGates(cfg);
 const candidates = ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
 const lanes = lanesFor(cfg, trace);                     // 1..max_parallel_changes, see Budget
-traceLanes(trace, cfg, lanes);                          // only when fewer than configured: once a day per number
+traceLanes(trace, cfg, lanes);                          // only when fewer than configured: when the number changes, and again on a new day
 if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
 const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
 const started = Date.now();
@@ -374,7 +374,8 @@ tried again for a day, so a gc that cannot finish does not hold up every tick.
 - When `lanesFor` gives fewer lanes than configured, the trace says so once each time the
   number changes, and again on a new day: "Today's budget has room for 1 change at a time instead
   of 2." The number can go back up during a day (a killed session's hold stops counting once it
-  is stale, or the owner raises the day's budget), and then the line comes again when it drops.
+  is stale, or the owner raises the day's budget); the line comes again only when the number it
+names changes, so a drop back to the number last noted that day is not noted twice.
 - When the day runs out in the middle of a step, as it can today, that change ends with
   `LoopBudgetReached`, the other lanes start nothing new, and `afterDayBudget` handles every
   change that hit it.
@@ -398,12 +399,19 @@ first one's code. Its checks never saw the two together. In `runRemoteMerge`, on
 have passed (and approval, where needed), and just before `mergeOnGitHub`, this code
 (`mergeWhenUpToDate`) runs inside `oneMerge.run`:
 
-1. `git fetch` (main lock, no automatic gc or maintenance). If it fails, the failure is traced
-   and the step waits.
+1. `git fetch` of main and of the pull request's branch, each named with its own refspec into
+   `<remote>/<name>`, so a checkout whose fetch setting covers only main (a single-branch or
+   shallow clone) still sees the branch (main lock, no automatic gc or maintenance). If it fails,
+   the failure is traced and the step waits.
 2. What GitHub would merge is judged, not the branch here: the pull request's branch as GitHub
    has it, `<remote>/<branch>` after the fetch. When that copy has commits that neither the branch
    here nor Loopstra's last push (the `pr-lease` run-folder marker) has, a person added them (for
-   example a fix after GitHub's checks failed). If the branch here is part of that copy, it is
+   example a fix after GitHub's checks failed). A push that a stop, a timeout or a crash cut short
+   may have reached GitHub all the same: its head is kept in the `pr-pushing` marker, written just
+   before the push and cleared once `pr-lease` has it, and when GitHub's copy is that head it
+   becomes the lease, never a person's commits. `openPullRequest` does the same before it pushes
+   (asking GitHub with `git ls-remote`, only while a `pr-pushing` marker is left), so the next
+   push goes over it. If the branch here is part of that copy, it is
    fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
    moves to it, so the checks and the next push include the person's work. If the branch here
    changed too, the change is blocked with a plain note for an engineer, and nothing is
@@ -413,7 +421,8 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    head, which never met the other change.
 3. `outOfDate(ref, pushed)` for `main`, then for `<remote>/<main>`. A ref is out of date when
    GitHub's copy of the branch does not contain it and the ref gained code outside `intent/`
-   since their merge base. The new Git helper is `gainedCodeSince(base, ref, ["intent/"])`.
+   since their merge base: `git diff --name-only <pushed>...<ref>` lists a file outside
+   `intent/`, or git cannot compare the two.
 4. Neither ref is out of date: merge on GitHub as today, still inside the lock.
 5. Only the remote's main is ahead: wait. The next tick's sync brings it in. The trace says once
    (a run-folder marker, cleared when the change is brought up to date or merges, when its pull

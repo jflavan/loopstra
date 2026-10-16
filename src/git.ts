@@ -263,12 +263,6 @@ export class Git {
     return true;
   }
 
-  /** True when `ref` changed any file outside the `ignore` folders since `base` (an ancestor of it). */
-  async gainedCodeSince(base: string, ref: string, ignore: string[] = []): Promise<boolean> {
-    const changed = (await this.run(["diff", "--name-only", base, ref])).out.split(/\r?\n/).map((l) => l.trim());
-    return changed.some((f) => f && !ignore.some((p) => f.startsWith(p)));
-  }
-
   /** Commits on `a` that `b` does not have (0 when either cannot be read). */
   async countAhead(a: string, b: string): Promise<number> {
     const r = await this.run(["rev-list", "--count", `${b}..${a}`], true);

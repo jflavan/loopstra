@@ -11,6 +11,7 @@ import { lanesRunning } from "../../src/lanes";
 import { PROBE_AFTER, runStepGuarded, tick } from "../../src/scheduler";
 import { syncMain } from "../../src/remote";
 import { requestStop, resetStop } from "../../src/stop";
+import { PR_PUSHING } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
@@ -550,6 +551,58 @@ describe("more than one change at a time, with a GitHub remote", () => {
       });
       const s = await Bun.file(r.state).json();
       expect(Object.values(s.prs as Record<string, { merged: boolean }>).filter((p) => p.merged)).toHaveLength(1);
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("a main checkout that fetches only main from GitHub (a single-branch clone): a ready pull request still merges", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    await run(["git", "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"], r.path);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      await run(["git", "update-ref", "-d", "refs/remotes/origin/intent/alpha"], r.path);
+      await checksPass(r);
+      await tick(r.path);
+      expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(true);
+      inTrace(r.path, (trace) => expect(trace.events("alpha").some((e) => e.payload.includes("Brought up to date"))).toBe(false));
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("a push GitHub took although a stop cut it short is not taken for a person's commits when the pull request is looked at again", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    const worktree = new Git(join(r.path, ".loopstra", "worktrees", "alpha"));
+    const head = async () => (await run(["git", "rev-parse", "intent/alpha"], r.path)).out.trim();
+    /** Main gains code, and the branch here is rebased onto it. */
+    const mainMoves = async (file: string) => {
+      await Bun.write(join(r.path, "src", file), "export const x = 1;\n");
+      await new Git(r.path).commitAll(`person: ${file}`);
+      await run(["git", "push", "-q", "origin", "main"], r.path);
+      expect(await worktree.rebaseOnto("main")).toBe(true);
+    };
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      await checksPass(r);
+
+      // A push reached GitHub, but the stop that cut it short left it recorded only as in progress.
+      await mainMoves("one.ts");
+      const cutShort = await head();
+      writeFileSync(join(r.path, ".loopstra", "runs", "alpha", PR_PUSHING), cutShort);
+      await run(["git", "push", "-q", "--force", "origin", "intent/alpha"], r.path);
+      // Then main gained more code, and the branch here was rebased again before it was pushed.
+      await mainMoves("two.ts");
+
+      await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect((await run(["git", "rev-parse", "intent/alpha"], r.remote)).out.trim()).toBe(await head());
+      inTrace(r.path, (trace) => {
+        expect(trace.events("alpha").some((e) => e.payload.includes("\"take pull request commits\""))).toBe(false);
+        expect(trace.events("alpha").filter((e) => e.payload.includes("Brought up to date"))).toHaveLength(1);
+      });
     });
     r.cleanup();
   }, 180_000);
