@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runPlanStep } from "../../src/stages/plan";
 import type { Trace } from "../../src/trace";
-import { setupRepo, withEnv } from "../helpers";
+import { FAKE_CLAUDE, setupRepo, tempDir, withEnv } from "../helpers";
 
 const HUMAN_PLAN = "gates:\n  plan:\n    human: status\n";
 
@@ -133,3 +133,54 @@ describe("plan stage", () => {
     trace.close(); repo.cleanup();
   });
 });
+
+describe("cheaper judges on the plan challenge", () => {
+  const SHADOW = "speed:\n  cheap_judges: shadow\n";
+
+  test("shadow: a cheaper report that cannot be read is recorded as failed, and the strong judge decides", async () => {
+    const dir = fixtureDir({ "plan-challenge@sonnet": fixture("plan-challenge").replace("\"approved\":true,", "") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await specApproved(SHADOW);
+        await runPlanStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.judgeRows()).toMatchObject([{ judge: "plan-challenge", cheap: "failed", strong: "pass" }]);
+        expect(trace.phases("add-numbers").find((p) => p.name === "plan-challenge-cheap")?.status).toBe("fail");
+        expect(trace.gates("add-numbers").map((g) => `${g.check}:${g.result}`)).toEqual(["headings:pass", "files:pass", "plan-challenge:pass"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("shadow: a cheaper judge that cannot reach the assistant is dropped; the step passes on the strong verdict, unpaused", async () => {
+    const dir = fixtureDir({ "plan-challenge@sonnet": fixture("outage") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await specApproved(SHADOW);
+        expect((await runPlanStep(ctx)).ok).toBe(true);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.judgeRows()).toEqual([]);
+        const notes = trace.events("add-numbers").filter((e) => e.type === "command").map((e) => JSON.parse(e.payload) as { command: string; note?: string });
+        expect(notes.find((n) => n.command === "plan-challenge-cheap")?.note).toStartWith("dropped: ");
+        expect(existsSync(join(repo.path, ".loopstra", "paused.json"))).toBe(false);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+});
+
+/** A shipped fake-claude fixture's text. */
+function fixture(name: string): string {
+  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
+}
+
+/** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
+function fixtureDir(files: Record<string, string>): { path: string; cleanup: () => void } {
+  const dir = tempDir("loopstra-fixtures-");
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
+  return dir;
+}

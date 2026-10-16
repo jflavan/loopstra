@@ -118,12 +118,14 @@ export const ConfigSchema = z.object({
     review: stage.extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
     verify: stage.extend({ model: modelRef.default("default") }).prefault({}),
   }).strict().prefault({}),
-  // Work that runs at the same time. Neither setting changes what is checked or who decides.
+  // Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides: once earned, a cheaper judge's pass stands.
   speed: z.object({
     /** Test, lint, and build commands start together; off because some projects' commands share an output folder. */
     parallel_checks: z.boolean().default(false),
     /** The first review runs alongside the verifier, and lessons alongside the done-check. */
     overlap_judges: z.boolean().default(true),
+    /** A cheaper judge (claude.models.default) for the spec check, plan challenge and review. off: none. shadow: it judges alongside the strong judge and is only recorded. first: it decides a pass alone once its record has earned it. */
+    cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow or first" }).default("off"),
   }).strict().prefault({}),
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),

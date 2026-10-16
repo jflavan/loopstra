@@ -26,7 +26,18 @@ describe("loadConfig", () => {
     expect(cfg.stages.verify.model).toBe("default");
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     // Judges overlap by default; project commands share folders in some projects, so they do not.
-    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true });
+    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, cheap_judges: "off" });
+    t.cleanup();
+  });
+
+  test("speed.cheap_judges is off by default, takes shadow or first, and rejects anything else in plain words", async () => {
+    const t = tempDir();
+    for (const mode of ["shadow", "first", "off"]) {
+      await writeConfig(t.path, `version: 1\ncommands:\n  test: x\nspeed:\n  cheap_judges: ${mode}\n`);
+      expect((await loadConfig(t.path)).speed.cheap_judges).toBe(mode as "off");
+    }
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nspeed:\n  cheap_judges: sometimes\n");
+    await expect(loadConfig(t.path)).rejects.toThrow("speed.cheap_judges: must be off, shadow or first");
     t.cleanup();
   });
 

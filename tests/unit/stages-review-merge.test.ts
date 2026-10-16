@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
@@ -9,7 +9,9 @@ import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { copyRepo, FAKE_CLAUDE, lastCommit, openRepo, setEnv, setupRepo, withEnv } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, lastCommit, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { configPath } from "../../src/config";
+import { FIRST_NEEDS } from "../../src/judges";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 const PERSON_MERGES = "gates:\n  merge:\n    human: status\n";
@@ -76,6 +78,11 @@ async function build(config: string) {
 async function usePrompt(repo: string, name: string, text: string): Promise<void> {
   await Bun.write(join(repo, "loopstra", "prompts", `${name}.md`), text);
   await new Git(repo).commitAll(`test prompt ${name}`);
+}
+
+/** A shipped fake-claude fixture's text. */
+function fixture(name: string): string {
+  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
 }
 
 function phaseNames(trace: Trace): string[] {
@@ -235,6 +242,66 @@ describe("review", () => {
     expect(i.file.frontmatter.note).toContain("plan-approved");
     expect(i.file.frontmatter.note).not.toContain("intent/");
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("cheaper judges on the review", () => {
+  /** A built copy with a person on the merge gate, `config` added (committed), and no early review kept. */
+  async function builtWith(config: string) {
+    const s = await built(PERSON_MERGES);
+    s.trace.close();
+    await Bun.write(configPath(s.repo.path), `${await Bun.file(configPath(s.repo.path)).text()}${config}`);
+    await new Git(s.repo.path).commitAll("cheap judges");
+    const again = await openRepo(s.repo.path);
+    rmSync(join(again.ctx.runDir, EARLY_REVIEW));
+    return { repo: s.repo, ...again };
+  }
+
+  /** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
+  function fixtureDir(files: Record<string, string>) {
+    const dir = tempDir("loopstra-fixtures-");
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
+    return dir;
+  }
+
+  test("shadow: review.md, the revision's findings and the merge's findings check all follow the strong reviewer", async () => {
+    const dir = fixtureDir({ "review@sonnet": fixture("review"), "review@opus-1": fixture("review-reject"), "review@opus-2": fixture("review") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await builtWith("speed:\n  cheap_judges: shadow\n");
+        await runMergeStep(ctx);
+        expect(await status(repo.path)).toBe("merge-review");
+        const revise = trace.phases("add-numbers").find((p) => p.name === "revise-1")!;
+        expect(await Bun.file(join(ctx.runDir, "phases", `${revise.seq}-revise-1`, "prompt.md")).text()).toContain("does not handle NaN");
+        expect(gateRows(trace, "review")).toEqual(["findings:fail", "findings:pass"]);
+        expect(gateRows(trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+        expect(trace.judgeRows().map((r) => `${r.trace_name} ${r.cheap}/${r.strong}`)).toEqual(["review-1 pass/reject", "review-2 pass/pass"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("first, earned: a cheaper pass writes its review.md, and the gate says the cheaper judge decided", async () => {
+    const dir = fixtureDir({ "review@sonnet": fixture("review").replace("Looks good.", "Looks good to the cheaper judge.") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await builtWith("speed:\n  cheap_judges: first\n");
+        seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+        const before = phaseNames(trace).length;
+        await runMergeStep(ctx);
+        expect(await status(repo.path)).toBe("merge-review");
+        // No strong review session. (The merge checks run the tests again: the config commit changed main.)
+        expect(phaseNames(trace).slice(before).filter((n) => n.startsWith("review"))).toEqual(["review-1-cheap"]);
+        expect(await Bun.file(join(repo.path, "intent", "add-numbers", "review.md")).text()).toContain("Looks good to the cheaper judge.");
+        expect(trace.lastGate("add-numbers", "review", "findings")?.evidence).toEndWith("; decided by the cheaper judge (sonnet)");
+        expect(gateRows(trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
   });
 });
 

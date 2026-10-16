@@ -15,6 +15,7 @@ describe("the stamped config", () => {
         await init(repo.path);
         const text = readFileSync(configPath(repo.path), "utf8");
         expect(String(parseDocument(text))).toBe(text);
+        expect(parseDocument(text).getIn(["speed", "cheap_judges"])).toBe("off");
 
         const scalar = parseDocument(text);
         scalar.setIn(["claude", "timeout_minutes"], 45);

@@ -1,8 +1,10 @@
 import { headingsPresent } from "../checks";
 import { block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
+import { modelFor } from "../config";
 import { evaluateGate, type Check } from "../gates";
 import type { Status } from "../intents";
+import { passes, runJudge } from "../judges";
 import { agentPhase } from "../phases";
 import type { PromptVars } from "../prompts";
 import { artifacts, bullets, humanNote, runHookCommands, type Artifacts } from "./shared";
@@ -127,14 +129,17 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
   list.push({
     name: s.judge.name,
     run: async () => {
-      const r = await agentPhase(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) });
+      const r = await runJudge(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) });
       if (!r.ok) {
         return { result: "fail", evidence: `the ${s.judge.who} failed: ${r.reason}`, payload: { broken: { note: `The ${s.gate} could not be checked. ${r.note}`, detail: `${s.judge.name} failed: ${r.reason}` } } };
       }
-      const e: { approved: boolean; summary: string } = r.envelope;
+      // Findings always come from the envelope that decided: the strong judge's whenever it is a reject.
       const findings = s.judge.findings(r.envelope);
-      if (e.approved) return { result: "pass", evidence: e.summary };
-      return { result: "fail", evidence: findings.join("; ") || e.summary, payload: { findings } };
+      if (passes(s.judge.name, r.envelope)) {
+        const by = r.decidedBy === "cheap" ? ` (decided by the cheaper judge, ${modelFor(ctx.cfg, "default")})` : "";
+        return { result: "pass", evidence: `${r.envelope.summary}${by}` };
+      }
+      return { result: "fail", evidence: findings.join("; ") || r.envelope.summary, payload: { findings } };
     },
   });
   return list;

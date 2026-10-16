@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { buildState, resolveRunFile, serveUi } from "../../src/commands/ui";
 import { configPath } from "../../src/config";
 import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
+import { templateSha } from "../../src/judges";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
@@ -131,6 +132,51 @@ describe("ui state", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+describe("cheaper judges", () => {
+  /** A judges row for review with the current prompt; the cheaper judge passed what the strong one rejected. */
+  function falsePass(trace: Trace, root: string, slug: string): void {
+    trace.judge(slug, {
+      judge: "review", trace_name: "review-1", mode: "shadow", how: "shadow", cheap_model: "sonnet", strong_model: "opus",
+      template_sha: templateSha(root, "review")!, prompt_sha: slug, cheap: "pass", strong: "reject", cheap_usd: 0.1, strong_usd: 0.3, cheap_ms: 1000, strong_ms: 3000,
+    });
+  }
+
+  test("left out while the setting is off and nothing was compared; otherwise the report, with the newest five false passes", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      mkdirSync(join(t.path, "loopstra", "prompts"), { recursive: true });
+      await Bun.write(join(t.path, "loopstra", "prompts", "review.md"), "review prompt");
+      expect((await buildState(t.path, 0)).judges).toBeNull();
+
+      await config(t.path, "speed:\n  cheap_judges: shadow\n");
+      const shadow = (await buildState(t.path, 0)).judges!;
+      expect(shadow).toMatchObject({ setting: "shadow", cheapModel: "sonnet", strongModel: "opus", spentUsd: 0, falsePasses: [] });
+      expect(shadow.judges.map((j) => j.judge)).toEqual(["spec-check", "plan-challenge", "review"]);
+
+      await config(t.path);
+      const trace = Trace.open(t.path);
+      for (let i = 1; i <= 7; i++) falsePass(trace, t.path, `change-${i}`);
+      trace.close();
+      const off = (await buildState(t.path, 0)).judges!;
+      expect(off.setting).toBe("off");
+      expect(off.judges.find((j) => j.judge === "review")).toMatchObject({ compared: 7, falsePasses: 7 });
+      expect(off.falsePasses.map((p) => p.slug)).toEqual(["change-7", "change-6", "change-5", "change-4", "change-3"]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("the page shows the Cheaper judges table under the main branch, only when there is a report", async () => {
+    const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
+    expect(page).toContain('<section id="judges-section" hidden>');
+    expect(page).toContain("<h2>Cheaper judges</h2>");
+    expect(page.indexOf('id="judges-section"')).toBeGreaterThan(page.indexOf('<div id="health">'));
+    expect(page).toContain('document.getElementById("judges-section").hidden = !s.judges;');
+    expect(page).toContain("Passed what the strong judge rejected");
   });
 });
 
