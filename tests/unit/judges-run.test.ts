@@ -148,9 +148,12 @@ describe("runJudge shadow", () => {
       expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
       expect(phase(trace, "spec-check-cheap")).toMatchObject({ status: "success", kind: "cheap-judge" });
       expect(trace.judgeRows()).toEqual([expect.objectContaining({ how: "shadow", cheap: "reject", strong: "failed", strong_usd: null })]);
+      // Both started at once, in either order.
+      expect(fake.models().sort()).toEqual(["opus", "sonnet"]);
       // After the pause the same question asks only the strong judge; the row compares the two.
       expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
-      expect(fake.models()).toEqual(["opus", "sonnet", "opus"]);
+      expect(fake.models().at(-1)).toBe("opus");
+      expect(fake.models()).toHaveLength(3);
       expect(trace.judgeRows().at(-1)).toMatchObject({ how: "shadow", cheap: "reject", strong: "pass", cheap_usd: null, cheap_ms: null });
     });
   });
