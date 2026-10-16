@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
+import { claim, release } from "../../src/lanes";
 import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -199,6 +200,36 @@ describe("runJudge shadow", () => {
       expect(fake.models()).toEqual(["opus"]);
       expect(trace.judgeRows()).toEqual([]);
       expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    });
+  });
+
+  test("another change running a step counts: it keeps room for its own next session", async () => {
+    await withRepo(`${SHADOW}claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n`, {}, async ({ ctx, trace, fake }) => {
+      claim("say-goodbye");
+      try {
+        await runJudge(ctx, SPEC_CHECK);
+      } finally {
+        release("say-goodbye");
+      }
+      expect(fake.models()).toEqual(["opus"]);
+      expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    });
+  });
+
+  test("a due audit waits while another change running a step leaves no room for both judges", async () => {
+    // Room for two sessions (an audit alone) but not three (an audit beside another change's session).
+    await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n`, {}, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      const ask = (i: number) => runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } });
+      for (let i = 1; i < AUDIT_EVERY; i++) expect(await ask(i)).toMatchObject({ decidedBy: "cheap" });
+      claim("say-goodbye");
+      try {
+        expect(await ask(AUDIT_EVERY)).toMatchObject({ decidedBy: "strong" });
+      } finally {
+        release("say-goodbye");
+      }
+      expect(fake.models()).toEqual([...Array(AUDIT_EVERY - 1).fill("sonnet"), "opus"]);
+      expect(judgeNotes(trace).at(-1)).toBe("not compared: today's budget has no room for another session");
     });
   });
 

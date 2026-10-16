@@ -6,7 +6,8 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, ownTime, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
-import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { onMain, oneMerge } from "../../src/lanes";
 import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
@@ -315,6 +316,22 @@ describe("agentPhase failures", () => {
     expect(readPause(repo.path)?.failures).toBe(1);
     const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
+  test("a phase of another change getting through ends the wait but keeps the paused change's cause and repeats", async () => {
+    const { repo, ctx, trace } = await setup();
+    const cause = { slug: "other", phase: "build", line: "Claude usage limit reached" };
+    pauseAfterUnavailable(repo.path, new Date(), cause);
+    pauseAfterUnavailable(repo.path, new Date(), cause);
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toMatchObject({ ...cause, repeats: 2, failures: 0 });
+    expect(activePause(repo.path)).toBeNull();
+    // The paused change's own success clears it completely.
+    pauseAfterUnavailable(repo.path, new Date(), { ...cause, slug: "x" });
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   });
@@ -655,6 +672,57 @@ describe("alongside", () => {
     cheapMayEnd();
     await shadow!.rest();
     expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
+  test("a group belongs to its own step: a group in change A does not stop change B's boundary", async () => {
+    const { repo, ctx, trace } = await setup();
+    const b = new StepContext(repo.path, ctx.cfg, trace, await readIntent(repo.path, "x"));
+    const log: string[] = [];
+    setPhaseBoundary(async (c) => { log.push(c === ctx ? "boundary A" : "boundary B"); });
+    let open = () => {};
+    const held = new Promise<void>((r) => { open = r; });
+    try {
+      const group = alongside(ctx, () => held.then(() => 1), { what: "a2", run: () => held.then(() => 2), wanted: () => true });
+      await tick(5);
+      await codePhase(b, "b", async () => ({ ok: true as const }));
+      expect(log).toEqual(["boundary A", "boundary B"]);
+      open();
+      await group;
+    } finally {
+      open();
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("the boundary does nothing while the step holds the merge lock or a main lock", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      await oneMerge.run(() => codePhase(ctx, "under-merge", async () => ({ ok: true as const })), ctx.slug);
+      await onMain(repo.path, () => codePhase(ctx, "under-main", async () => ({ ok: true as const })));
+      expect(log).toEqual([]);
+      await codePhase(ctx, "free", async () => ({ ok: true as const }));
+      expect(log).toEqual(["boundary"]);
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("alongside under a lock, or a session under a main lock, is a programming error", async () => {
+    const { repo, ctx, trace } = await setup();
+    const pair = () => alongside(ctx, async () => 1, { what: "two", run: async () => 2, wanted: () => true });
+    expect(String(await oneMerge.run(pair, ctx.slug).catch((e: unknown) => e))).toContain("programming error");
+    expect(String(await onMain(repo.path, pair).catch((e: unknown) => e))).toContain("programming error");
+    const first = () => alongsideFirst(ctx, async () => 1, { what: "two", run: async () => 2, wanted: () => true });
+    expect(String(await onMain(repo.path, first).catch((e: unknown) => e))).toContain("programming error");
+    expect(String(await onMain(repo.path, () => intake(ctx)).catch((e: unknown) => e))).toContain("programming error");
+    expect(trace.phases("x")).toEqual([]);
+    // Sessions may run under the merge lock (the merge checks run fix sessions).
+    expect((await oneMerge.run(() => intake(ctx), ctx.slug)).ok).toBe(true);
     trace.close(); repo.cleanup();
   });
 

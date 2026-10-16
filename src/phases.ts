@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomFor, sessionCost, staleBefore, startOfToday } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, sessionCost, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -11,6 +11,7 @@ import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envel
 import { renderPrompt, type PromptVars } from "./prompts";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
+import { assertNoLock, assertNoMainLock, holdsLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
 /**
@@ -212,11 +213,13 @@ function othersRunning(g: Group | undefined): boolean {
 const boundaryClock = new AsyncLocalStorage<{ ms: number }>();
 
 /**
- * Runs the phase boundary, except while other work runs beside this call. Every phase runs it first;
- * a step runs it itself before deciding something on main's code (see takePlanAhead).
+ * Runs the phase boundary, except while other work runs beside this call, or while the step holds the
+ * merge lock or a main lock: a merge started there could wait on the lock this step holds while this
+ * step waits for it. Every phase runs it first; a step runs it itself before deciding something on
+ * main's code (see takePlanAhead).
  */
 export async function boundary(ctx: StepContext): Promise<void> {
-  if (!phaseBoundary || othersRunning(inGroup.getStore()?.group)) return;
+  if (!phaseBoundary || othersRunning(inGroup.getStore()?.group) || holdsLock()) return;
   const started = Date.now();
   try {
     await phaseBoundary(ctx);
@@ -251,12 +254,15 @@ function assistantReached(ctx: StepContext): void {
   let g = inGroup.getStore()?.group;
   while (g?.decided) g = g.parent;
   if (g) g.succeeded = true;
-  else clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
+  else clearPause(ctx.root, ctx.slug); // the assistant is back: the next outage starts the back-off afresh (see clearPause)
 }
 
-/** The judges may run alongside each other: speed.overlap_judges is on and the day's budget has room for two sessions. */
+/**
+ * The judges may run alongside each other: speed.overlap_judges is on and the day's budget has room
+ * for two sessions, beside one for each other change running a step (see roomBeside).
+ */
 export function mayOverlap(ctx: StepContext): boolean {
-  return ctx.cfg.speed.overlap_judges && roomFor(ctx.cfg, ctx.trace, 2);
+  return ctx.cfg.speed.overlap_judges && roomBeside(ctx.cfg, ctx.trace, ctx.slug, 2);
 }
 
 /**
@@ -320,6 +326,8 @@ export async function alongsideFirst<M, E>(
  * once both have, with alongside's rules. With `hold`, main counts as running until `release`.
  */
 async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>, hold: boolean) {
+  // Both pieces would think they hold the lock, so neither would wait for the other.
+  assertNoLock(`The ${extra.what} work run alongside`);
   await boundary(ctx);
   const outer = inGroup.getStore();
   const group: Group = { running: 2, succeeded: false, parent: outer?.group };
@@ -367,11 +375,16 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
   return { seq: held.seq, capUsd: held.heldUsd, fromDay: held.heldUsd < limitOf(c.max_budget_usd) };
 }
 
-/** The error on a phase row a stop request interrupted. */
-const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
+/** The error on a phase row a stop request interrupted, and the note of the step's `stop` event. */
+export const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
-/** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
+/**
+ * One traced run of a phase. The phase row always ends (never left running) and the raw log is always
+ * closed. Never under a main lock: a session takes minutes, and every other change's git in the main
+ * checkout would wait for it (under the merge lock is fine: the merge checks run fix sessions).
+ */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+  assertNoMainLock(`The ${traceName} session`);
   await boundary(ctx);
   throwIfStopping();
   const signal = cancelSignal();

@@ -131,11 +131,18 @@
   const time = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   const notAllowed = (d) => d.length + (d.length === 1 ? " command was" : " commands were") + " not allowed: " + d.join(", ");
 
+  // The loop line, then the running phases: "(build)" for one change, "(a: build; b: verify)" for several.
+  function loopText(loop) {
+    const working = (loop.working || []).filter((w) => w.phase);
+    if (!working.length) return loop.text;
+    const phases = (loop.working || []).length > 1 ? working.map((w) => w.slug + ": " + w.phase).join("; ") : working[0].phase;
+    return loop.text + " (" + phases + ")";
+  }
+
   function renderLoop(loop) {
     const el = document.getElementById("loop");
-    el.textContent = loop.text;
+    el.textContent = loopText(loop);
     el.className = "pill " + (loop.text.startsWith("Stopping") ? "stopping" : loop.state);
-    if (loop.current && loop.current.phase) el.textContent += " (" + loop.current.phase + ")";
   }
 
   function renderAttention(items) {

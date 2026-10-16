@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { readIntent, writeIntent } from "../../src/intents";
+import { claim, release } from "../../src/lanes";
 import { NEEDS_PERSON_DONE_NOTE, runVerifyStep } from "../../src/stages/verify";
 import { AssistantUnavailable } from "../../src/stop";
 import type { PhaseRow, Trace } from "../../src/trace";
@@ -86,6 +87,25 @@ describe("verify stage", () => {
       }
     } finally {
       restore();
+    }
+  });
+
+  test("with another change running a step, lessons runs alongside only when the day also has room for that change's session", async () => {
+    claim("say-goodbye");
+    try {
+      // Two of this change's sessions plus one of the other's: $6 needed.
+      for (const [config, overlaps] of [
+        ["claude:\n  max_budget_usd_per_day: 5\n  max_budget_usd: 2\n", false],
+        ["claude:\n  max_budget_usd_per_day: 7\n  max_budget_usd: 2\n", true],
+      ] as const) {
+        const { repo, ctx, trace } = await merged({ config });
+        await runVerifyStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
+        expect(lessonsRow(trace).name).toBe(overlaps ? "early-lessons" : "lessons");
+        trace.close(); repo.cleanup();
+      }
+    } finally {
+      release("say-goodbye");
     }
   });
 

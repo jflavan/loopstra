@@ -3,22 +3,29 @@ import { join } from "node:path";
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, passOn } from "../git";
+import { onMain } from "../lanes";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Status } from "../intents";
 import { errorText } from "../shell";
 
-/** Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the command and its output go to the trace. */
+/**
+ * Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the
+ * command and its output go to the trace. In the main checkout (the design, plan and verify stages)
+ * they run under its main lock, inside the phase: they may write files or run git there, and must
+ * never run alongside another change's commit, sync or merge. The command time limit bounds the wait.
+ */
 export async function runHookCommands(ctx: StepContext, which: "before" | "after", stage: keyof StepContext["cfg"]["stages"], cwd = ctx.root): Promise<StepResult> {
   const cmds = ctx.cfg.stages[stage][which];
   if (!cmds.length) return { ok: true };
   let timedOut = false;
-  const r = await codePhase(ctx, `${stage}-${which}`, async () => {
+  const runAll = async () => {
     for (const cmd of cmds) {
       const res = await projectCommand(ctx, cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage } });
       if (res.code !== 0) { timedOut = res.timedOut; throw new Error(`\`${cmd}\` failed: ${res.lastLine || `exit ${res.code}`}`); }
     }
     return { ok: true as const };
-  });
+  };
+  const r = await codePhase(ctx, `${stage}-${which}`, () => (cwd === ctx.root ? onMain(ctx.root, runAll) : runAll()));
   if (r.ok) return { ok: true };
   const what = timedOut ? "did not finish in time" : "failed";
   return block(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, { detail: r.detail });
@@ -173,6 +180,23 @@ export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
 
 /** Run-folder marker written just before merging (holds main's commit before the merge). */
 export const MERGING = "merging";
+
+/** Run-folder marker: the pull request waits for main here to get changes merged on GitHub (traced once). */
+export const REMOTE_AHEAD = "remote-ahead";
+
+/**
+ * Run-folder marker: the commit the pull request's branch on GitHub may be force-pushed over (what
+ * Loopstra last pushed there, or took from there). Anything else on that branch is a person's work.
+ */
+export const PR_LEASE = "pr-lease";
+
+/**
+ * Run-folder marker: the head of the push of the pull request's branch in progress, written before
+ * the push and cleared once PR_LEASE has it. Left behind when a stop, a timeout or a crash cut the
+ * push short, when GitHub may have taken it all the same: once GitHub is seen holding that head, it
+ * becomes the lease (see adoptCutShortPush).
+ */
+export const PR_PUSHING = "pr-pushing";
 
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {

@@ -29,21 +29,21 @@ function intents(repo: string): string[] {
 describe("main_health", () => {
   test("the first result is only recorded, even when red: nothing is opened without a green baseline", async () => {
     const { repo, cfg, trace } = await setup("  test: exit 1\n");
-    expect(await runMainHealth(repo.path, cfg, trace, null)).toBe("fail");
+    expect(await runMainHealth(repo.path, cfg, trace, [])).toBe("fail");
     expect(intents(repo.path)).toEqual([]);
-    expect(await runMainHealth(repo.path, cfg, trace, null)).toBe("fail");
+    expect(await runMainHealth(repo.path, cfg, trace, [])).toBe("fail");
     expect(intents(repo.path)).toEqual([]);
     trace.close(); repo.cleanup();
   });
 
   test("green stays quiet; green then red opens one draft intent in plain language, with the output in the trace", async () => {
     const { repo, cfg, trace } = await setup("  test: echo ok\n");
-    await runMainHealth(repo.path, cfg, trace, "add-numbers");
+    await runMainHealth(repo.path, cfg, trace, ["add-numbers"]);
     expect(trace.signals()[0]?.result).toBe("pass");
     expect(intents(repo.path)).toEqual([]);
 
     const red = await recommit(repo.path, "  test: echo the-failing-output && exit 1\n");
-    await runMainHealth(repo.path, red, trace, "add-numbers");
+    await runMainHealth(repo.path, red, trace, ["add-numbers"]);
     expect(trace.signals()[0]?.result).toBe("fail");
     expect(intents(repo.path)).toEqual(["fix-tests-after-add-numbers"]);
     const text = await Bun.file(join(repo.path, "intent", "fix-tests-after-add-numbers", "intent.md")).text();
@@ -58,27 +58,46 @@ describe("main_health", () => {
     expect(await new Git(repo.path).isDirty()).toBe(false);
 
     // A second red run does not open a duplicate.
-    await runMainHealth(repo.path, red, trace, "add-numbers");
+    await runMainHealth(repo.path, red, trace, ["add-numbers"]);
     expect(intents(repo.path)).toHaveLength(1);
+    trace.close(); repo.cleanup();
+  });
+
+  test("two merges leave both changes pending, once each, and a failing check opens one draft that names both", async () => {
+    const { repo, cfg, trace } = await setup("  test: echo ok\n");
+    await runMainHealth(repo.path, cfg, trace, []);
+    markHealthPending(repo.path, "add-numbers");
+    markHealthPending(repo.path, "say-goodbye");
+    markHealthPending(repo.path, "add-numbers");
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: true, afterSlugs: ["add-numbers", "say-goodbye"] });
+
+    const red = await recommit(repo.path, "  test: exit 1\n");
+    await runMainHealth(repo.path, red, trace, ["add-numbers", "say-goodbye"]);
+    expect(intents(repo.path)).toEqual(["fix-tests-after-add-numbers"]);
+    const text = await Bun.file(join(repo.path, "intent", "fix-tests-after-add-numbers", "intent.md")).text();
+    expect(text).toContain(`# Intent: tests broke after the changes "add-numbers" and "say-goodbye" merged`);
+    expect(trace.events("fix-tests-after-add-numbers").find((e) => e.type === "signal")?.payload).toContain(`"after":["add-numbers","say-goodbye"]`);
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlugs: [] });
+    expect(await new Git(repo.path).isDirty()).toBe(false);
     trace.close(); repo.cleanup();
   });
 
   test("a failed install records an error, opens nothing, and does not count as the baseline", async () => {
     const { repo, cfg, trace } = await setup("  test: echo ok\n");
-    await runMainHealth(repo.path, cfg, trace, null);
+    await runMainHealth(repo.path, cfg, trace, []);
     const broken = await recommit(repo.path, "  test: exit 1\n  install: exit 3\n");
-    expect(await runMainHealth(repo.path, broken, trace, null)).toBe("error");
+    expect(await runMainHealth(repo.path, broken, trace, [])).toBe("error");
     expect(intents(repo.path)).toEqual([]);
     // The baseline is still the green run, so red now is a breach.
     const red = await recommit(repo.path, "  test: exit 1\n");
-    expect(await runMainHealth(repo.path, red, trace, null)).toBe("fail");
+    expect(await runMainHealth(repo.path, red, trace, [])).toBe("fail");
     expect(intents(repo.path)).toEqual([`fix-tests-on-main-${localDate()}`]);
     trace.close(); repo.cleanup();
   });
 
   test("the check runs in its own worktree under .loopstra/health and leaves nothing behind", async () => {
     const { repo, cfg, trace } = await setup("  test: echo ok\n");
-    await runMainHealth(repo.path, cfg, trace, null);
+    await runMainHealth(repo.path, cfg, trace, []);
     expect(existsSync(join(repo.path, ".loopstra", "health", "main"))).toBe(false);
     expect((await new Git(repo.path).run(["worktree", "list"])).out.trim().split("\n")).toHaveLength(1);
     trace.close(); repo.cleanup();
@@ -86,13 +105,13 @@ describe("main_health", () => {
 
   test("due comes from disk and the trace: never run, a merge pending, or the interval passed", async () => {
     const { repo, cfg, trace } = await setup("  test: echo ok\n");
-    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: true, afterSlug: null });
-    await runMainHealth(repo.path, cfg, trace, null);
-    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlug: null });
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: true, afterSlugs: [] });
+    await runMainHealth(repo.path, cfg, trace, []);
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlugs: [] });
     markHealthPending(repo.path, "add-numbers");
-    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: true, afterSlug: "add-numbers" });
-    await runMainHealth(repo.path, cfg, trace, "add-numbers");
-    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlug: null });
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: true, afterSlugs: ["add-numbers"] });
+    await runMainHealth(repo.path, cfg, trace, ["add-numbers"]);
+    expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlugs: [] });
     const soon = { ...cfg, signals: { main_health: { every_minutes: 0 } } };
     expect(mainHealthDue(repo.path, soon, trace).due).toBe(true);
     trace.close(); repo.cleanup();

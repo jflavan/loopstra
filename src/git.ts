@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { mainLockKey, onMainKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded } from "./shell";
 import { notTheStepsFault, StopRequested } from "./stop";
 
@@ -14,12 +15,22 @@ export const RUNTIME_NAME = "Loopstra";
 export const RUNTIME_EMAIL = "loopstra@localhost";
 
 /**
+ * Turns off git's automatic gc and maintenance for one command. Commits, fetches and merges start
+ * them when they end, in the background: they could pack refs while another change commits or
+ * deletes a branch, and that one would fail with "cannot lock ref". The tick start runs gc itself
+ * while no step runs.
+ */
+export const NO_AUTO_MAINTENANCE: readonly string[] = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+
+/**
  * Settings for every commit the runtime makes (bookkeeping on main, saves in a worktree, merges,
  * rebases): its own identity, and never a signing prompt. Hooks are skipped with `--no-verify`
  * where the command has it; the gates run the configured checks instead of the owner's hooks.
+ * No automatic gc or maintenance (see NO_AUTO_MAINTENANCE).
  */
 export const RUNTIME_COMMIT_CONFIG: readonly string[] = [
   "-c", `user.name=${RUNTIME_NAME}`, "-c", `user.email=${RUNTIME_EMAIL}`, "-c", "commit.gpgsign=false",
+  ...NO_AUTO_MAINTENANCE,
 ];
 
 /**
@@ -119,36 +130,36 @@ export class WrongBranchError extends Error {
 
 /** True when two paths name the same directory (resolves links, 8.3 names, slashes, and case on Windows). */
 export function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    let r: string;
-    try { r = realpathSync.native(p); } catch { r = resolve(p); }
-    r = r.replace(/[\\/]+/g, "/").replace(/\/$/, "");
-    return process.platform === "win32" ? r.toLowerCase() : r;
-  };
-  return norm(a) === norm(b);
+  return realPathKey(a) === realPathKey(b);
 }
 
 export class Git {
   private readonly timeoutMs: number;
   private readonly stopGraceMs: number;
+  /** The main lock this checkout's commands take, or null for a folder inside `.loopstra` (a change's own worktree). */
+  private readonly lockKey: string | null;
   constructor(public readonly cwd: string, opts: { timeoutMs?: number; stopGraceMs?: number } = {}) {
     this.timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
     this.stopGraceMs = opts.stopGraceMs ?? STOP_GRACE_MS;
+    this.lockKey = mainLockKey(cwd);
   }
 
   /**
    * Runs one git command. Bounded: past the timeout it is stopped with everything it started and
    * GitTimeout is thrown. It never asks for credentials. It does not start after a stop request; a
    * stop during the call gives it a moment to finish, then kills it, and throws StopRequested.
-   * `allowFail` (or `true`) returns a non-zero exit instead of throwing.
+   * `allowFail` (or `true`) returns a non-zero exit instead of throwing. In the main checkout it
+   * runs under the main lock, so changes running side by side never run two git commands there at
+   * once; in a change's own worktree it takes no lock.
    */
   async run(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
     const timeoutMs = o.timeoutMs ?? this.timeoutMs;
-    const r = await spawnBounded({
+    const spawn = () => spawnBounded({
       cmd: ["git", ...args], cwd: this.cwd, env: gitEnv(this.cwd), timeoutMs,
       onStop: o.cleanup ? "ignore" : "grace", graceMs: this.stopGraceMs,
     });
+    const r = await this.section(spawn);
     if (r.timedOut) throw new GitTimeout(args, timeoutMs);
     if (r.stopped) throw new StopRequested();
     const code = r.code ?? 1;
@@ -156,10 +167,23 @@ export class Git {
     return { code, out: r.out, err: r.err };
   }
 
+  /**
+   * Runs `fn` as one main-lock section of this checkout: no other change's git command runs here
+   * until it ends (its own commands go straight in). In a change's own worktree it just runs `fn`.
+   */
+  section<T>(fn: () => Promise<T>): Promise<T> {
+    return this.lockKey === null ? fn() : onMainKey(this.lockKey, fn);
+  }
+
   /** Runs a command that makes commits, as the runtime: its identity, no signing, no hooks where `--no-verify` exists. */
   runtime(sub: "commit" | "commit-tree" | "merge" | "rebase", rest: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const noVerify = sub === "commit-tree" ? [] : ["--no-verify"];
     return this.run([...RUNTIME_COMMIT_CONFIG, sub, ...noVerify, ...rest], opts);
+  }
+
+  /** `git fetch` with these arguments, without the automatic gc or maintenance a fetch starts (see NO_AUTO_MAINTENANCE). */
+  fetch(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
+    return this.run([...NO_AUTO_MAINTENANCE, "fetch", ...args], opts);
   }
 
   /** The checked-out branch (`HEAD` when detached), or "" when it cannot be read. */
@@ -187,16 +211,19 @@ export class Git {
   /**
    * Makes `dir` a worktree of this repository checked out on `branch`. An existing directory is
    * reused only if it is itself a worktree root (not just a folder inside the main checkout) on
-   * `branch`; anything else is removed and the worktree is added again.
+   * `branch`; anything else is removed and the worktree is added again. One main-lock section, so
+   * another change's prune never removes this half-made worktree.
    */
-  async ensureWorktree(dir: string, branch: string): Promise<void> {
-    if (existsSync(dir)) {
-      const there = new Git(dir);
-      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
-      await this.run(["worktree", "remove", "--force", dir], true);
-      rmSync(dir, { recursive: true, force: true });
-    }
-    await this.worktreeAdd(dir, branch);
+  ensureWorktree(dir: string, branch: string): Promise<void> {
+    return this.section(async () => {
+      if (existsSync(dir)) {
+        const there = new Git(dir);
+        if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
+        await this.run(["worktree", "remove", "--force", dir], true);
+        rmSync(dir, { recursive: true, force: true });
+      }
+      await this.worktreeAdd(dir, branch);
+    });
   }
 
   /** Throws unless the checkout at this path is on `expected`. Call before committing. */
@@ -308,7 +335,7 @@ export class Git {
         throw new GitError(["merge", branch], "", `${branch} does not contain the current commit; bring it up to date first`, 1);
       }
       const sha = (await this.runtime("commit-tree", [`${branch}^{tree}`, "-p", head, "-m", message])).out.trim();
-      await this.run(["merge", "--ff-only", "-q", sha]);
+      await this.run([...NO_AUTO_MAINTENANCE, "merge", "--ff-only", "-q", sha]);
       return;
     }
     try {
@@ -354,26 +381,34 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
   return removed;
 }
 
-/** Removes a worktree directory however it can: git first, then the file system, then prunes git's record of it. */
-export async function removeWorktree(git: Git, dir: string): Promise<void> {
-  if (existsSync(dir)) {
-    try {
-      await git.worktreeRemove(dir);
-    } catch {
-      rmSync(dir, { recursive: true, force: true });
+/**
+ * Removes a worktree directory however it can: git first, then the file system, then prunes git's
+ * record of it. One main-lock section of `git`'s checkout.
+ */
+export function removeWorktree(git: Git, dir: string): Promise<void> {
+  return git.section(async () => {
+    if (existsSync(dir)) {
+      try {
+        await git.worktreeRemove(dir);
+      } catch {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
-  }
-  await git.run(["worktree", "prune"], true);
+    await git.run(["worktree", "prune"], true);
+  });
 }
 
 /**
  * Runs `fn` in a throwaway detached worktree of `ref` at `dir` (never the owner's checkout), and
- * always removes it afterwards. A leftover directory from an earlier run is removed first.
+ * always removes it afterwards. A leftover directory from an earlier run is removed first. The setup
+ * and the teardown are each one main-lock section; `fn` (a session) runs outside the lock.
  */
 export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  await removeWorktree(git, dir);
-  mkdirSync(dirname(dir), { recursive: true });
-  await git.run(["worktree", "add", "--detach", dir, ref]);
+  await git.section(async () => {
+    await removeWorktree(git, dir);
+    mkdirSync(dirname(dir), { recursive: true });
+    await git.run(["worktree", "add", "--detach", dir, ref]);
+  });
   try {
     return await fn(dir);
   } finally {

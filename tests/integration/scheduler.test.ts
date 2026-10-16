@@ -240,6 +240,41 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("the start of a tick packs the repository when git thinks it is time", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    const git = new Git(repo.path);
+    // Three packs, and a limit of two: git's own --auto rule says to pack them into one.
+    for (const n of [1, 2, 3]) {
+      await Bun.write(join(repo.path, `note-${n}.txt`), `${n}\n`);
+      await git.commitAll(`note ${n}`);
+      await git.run(["repack", "-q"]);
+    }
+    await git.run(["config", "gc.autoPackLimit", "2"]);
+    const packs = () => [...new Bun.Glob("*.pack").scanSync(join(repo.path, ".git", "objects", "pack"))].length;
+    expect(packs()).toBe(3);
+    await tick(repo.path);
+    expect(packs()).toBe(1);
+    expect(trace.events("_loop").some((e) => e.type === "error" && e.payload.includes("\"where\":\"gc\""))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a git gc that fails at the start of a tick is traced once and not tried again on every tick", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    // gc refuses to run with a setting it cannot read; other git commands do not read it.
+    const git = new Git(repo.path);
+    await git.run(["config", "gc.pruneExpire", "bogus"]);
+    try {
+      await tick(repo.path);
+      await tick(repo.path);
+      const failures = trace.events("_loop").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"gc\""));
+      expect(failures).toHaveLength(1);
+      expect(JSON.parse(failures[0]!.payload).note).toContain("tried again tomorrow");
+    } finally {
+      await git.run(["config", "--unset", "gc.pruneExpire"], true);
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("start keeps going after a problem and a stop cuts its sleep short", async () => {
     const { repo, trace } = await setupRepo("draft");
     await Bun.write(configPath(repo.path), "version: 1\nbogus: true\n");

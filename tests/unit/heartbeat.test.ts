@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, heartbeatState, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readPause, startHeartbeat, writeHeartbeat, type Heartbeat,
+  activePause, clearPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readPause, startHeartbeat, writeHeartbeat, type Heartbeat,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -36,7 +36,7 @@ describe("heartbeatState", () => {
     const s = heartbeatState(hb({ current: { slug: "add-numbers" } }), 60, NOW);
     expect(s.state).toBe("running");
     expect(s.text).toBe("Running — working on add-numbers, last check 20s ago");
-    expect(s.current).toEqual({ slug: "add-numbers" });
+    expect(s.working).toEqual([{ slug: "add-numbers" }]);
   });
 
   test("no heartbeat, or a clean stop, is stopped", () => {
@@ -61,7 +61,7 @@ describe("heartbeatState", () => {
   test("a stale heartbeat whose process is gone did not shut down cleanly; a live one is not responding", () => {
     const stale = { lastTickAt: ago(8 * 3600), lastBeatAt: ago(8 * 3600) };
     expect(heartbeatState(hb({ ...stale, pid: DEAD_PID }), 60, NOW))
-      .toMatchObject({ state: "stopped", text: "Stopped — it did not shut down cleanly (last check 8 h ago)", current: null });
+      .toMatchObject({ state: "stopped", text: "Stopped — it did not shut down cleanly (last check 8 h ago)", working: [] });
     expect(heartbeatState(hb(stale), 60, NOW, { alive: () => true })).toMatchObject({ state: "not-responding", text: "Not responding (last check 8 h ago)" });
     expect(heartbeatState(hb(stale), 60, NOW, { alive: () => false }).state).toBe("stopped");
   });
@@ -77,6 +77,23 @@ describe("heartbeatState", () => {
       .toBe(`Stopped — it did not shut down cleanly (last check 1 h ago). ${wait}`);
     // A pause that has run out says nothing more.
     expect(heartbeatState(null, 60, NOW, { pause: { ...pause, until: ago(1) } }).text).toBe("Stopped");
+  });
+
+  test("names every change being worked on, in the order they started", () => {
+    const two = heartbeatState(hb({ current: { slug: "add-numbers" }, working: ["add-numbers", "say-goodbye"] }), 60, NOW);
+    expect(two.text).toBe("Running — working on add-numbers and say-goodbye, last check 20s ago");
+    expect(two.working).toEqual([{ slug: "add-numbers" }, { slug: "say-goodbye" }]);
+    expect(heartbeatState(hb({ current: { slug: "a" }, working: ["a", "b", "c"] }), 60, NOW).text)
+      .toBe("Running — working on a, b and c, last check 20s ago");
+    // An empty list is working on nothing, whatever an older field says.
+    expect(heartbeatState(hb({ working: [] }), 60, NOW)).toMatchObject({ text: "Running — last check 20s ago", working: [] });
+  });
+
+  test("an older heartbeat with only the current change still shows it", () => {
+    const s = heartbeatState(hb({ current: { slug: "add-numbers" } }), 60, NOW);
+    expect(s.working).toEqual([{ slug: "add-numbers" }]);
+    expect(s.text).toBe("Running — working on add-numbers, last check 20s ago");
+    expect(heartbeatState(hb({ current: { slug: "big" }, stopping: true }), 60, NOW).working).toEqual([{ slug: "big" }]);
   });
 
   test("a requested stop shows as stopping while the step winds down", () => {
@@ -120,6 +137,47 @@ describe("pause after the assistant was unavailable", () => {
       expect(pauseAfterUnavailable(t.path, NOW, { ...same, line: "API Error: 529 Overloaded" })).toMatchObject({ repeats: 1, failures: 3 });
       expect(pauseAfterUnavailable(t.path, NOW, { ...same, line: "API Error: 529 Overloaded", phase: "design" })).toMatchObject({ repeats: 1, failures: 4 });
       expect(pauseAfterUnavailable(t.path, NOW)).toMatchObject({ slug: null, phase: null, line: null, repeats: 1, failures: 5 });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("another change getting through ends the wait and the back-off, but keeps the cause and its repeats", () => {
+    const t = tempDir();
+    try {
+      const cause = { slug: "add-numbers", phase: "build", line: "Claude usage limit reached" };
+      pauseAfterUnavailable(t.path, NOW, cause);
+      pauseAfterUnavailable(t.path, NOW, cause);
+      clearPause(t.path, "say-goodbye", NOW);
+      const kept = readPause(t.path)!;
+      expect(kept).toMatchObject({ ...cause, repeats: 2, failures: 0 });
+      expect(activePause(t.path, NOW)).toBeNull();
+      // The next pause for the same cause counts on, and the back-off starts again at one minute.
+      const next = pauseAfterUnavailable(t.path, NOW, cause);
+      expect(next).toMatchObject({ repeats: 3, failures: 1 });
+      expect((Date.parse(next.until) - NOW.getTime()) / 60_000).toBe(1);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("the paused change itself getting through, or a pause with no cause, clears the pause completely", () => {
+    const t = tempDir();
+    try {
+      const cause = { slug: "add-numbers", phase: "build", line: "Claude usage limit reached" };
+      pauseAfterUnavailable(t.path, NOW, cause);
+      pauseAfterUnavailable(t.path, NOW, cause);
+      clearPause(t.path, "add-numbers", NOW);
+      expect(readPause(t.path)).toBeNull();
+      expect(pauseAfterUnavailable(t.path, NOW, cause)).toMatchObject({ repeats: 1, failures: 1 });
+      // Without a recorded cause, any change getting through clears it.
+      clearPause(t.path);
+      pauseAfterUnavailable(t.path, NOW);
+      clearPause(t.path, "say-goodbye", NOW);
+      expect(readPause(t.path)).toBeNull();
+      // Nothing to clear is fine.
+      clearPause(t.path, "say-goodbye", NOW);
+      expect(readPause(t.path)).toBeNull();
     } finally {
       t.cleanup();
     }
@@ -175,10 +233,43 @@ describe("heartbeat file", () => {
       requestStop();
       expect(readHeartbeat(t.path)).toMatchObject({ stopping: true, stopped: false });
       beat.tickEnded();
-      expect(readHeartbeat(t.path)!.current).toBeNull();
+      expect(readHeartbeat(t.path)).toMatchObject({ current: null, working: [] });
     } finally {
       beat.stopped();
-      expect(readHeartbeat(t.path)).toMatchObject({ stopping: false, stopped: true, current: null });
+      expect(readHeartbeat(t.path)).toMatchObject({ stopping: false, stopped: true, current: null, working: [] });
+      t.cleanup();
+    }
+  });
+
+  test("the loop beat lists every change being worked on, and drops each one when its step ends", () => {
+    const t = tempDir();
+    const beat = startHeartbeat(t.path, 60_000);
+    try {
+      beat.tickStarted();
+      beat.workingOn("a");
+      beat.workingOn("b");
+      // Older readers still see the first change.
+      expect(readHeartbeat(t.path)).toMatchObject({ working: ["a", "b"], current: { slug: "a" } });
+      expect(heartbeatState(readHeartbeat(t.path), 60).text).toMatch(/^Running — working on a and b, last check \d+s ago$/);
+      beat.workingOn("a"); // listed once
+      expect(readHeartbeat(t.path)!.working).toEqual(["a", "b"]);
+      beat.doneWith("a");
+      expect(readHeartbeat(t.path)).toMatchObject({ working: ["b"], current: { slug: "b" } });
+      beat.doneWith("b");
+      expect(readHeartbeat(t.path)).toMatchObject({ working: [], current: null });
+      beat.workingOn("c");
+      beat.tickEnded();
+      expect(readHeartbeat(t.path)).toMatchObject({ working: [], current: null });
+      beat.workingOn("d");
+      beat.tickStarted();
+      expect(readHeartbeat(t.path)).toMatchObject({ working: [], current: null });
+      // The scheduler's lanes reach the same beat by the repository's folder.
+      heartbeatWorkingOn(t.path, "e");
+      heartbeatWorkingOn(t.path, "f");
+      heartbeatDoneWith(t.path, "e");
+      expect(readHeartbeat(t.path)!.working).toEqual(["f"]);
+    } finally {
+      beat.stopped();
       t.cleanup();
     }
   });

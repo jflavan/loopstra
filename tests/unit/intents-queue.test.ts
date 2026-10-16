@@ -5,6 +5,7 @@ import {
   checkConsistency, dependencyNote, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
   type Intent,
 } from "../../src/intents";
+import { sameFileHolds } from "../../src/scheduler";
 import { tempDir } from "../helpers";
 
 async function mk(root: string, slug: string, fm: string, extra: Record<string, string> = {}) {
@@ -282,6 +283,64 @@ describe("scan and queue", () => {
     expect(waitingOn(by("after-build"), intents)).toEqual(["build-blocked"]);
     expect(waitingOn(by("already-merged"), intents)).toEqual([]);
     expect(dependencyNote(by("already-merged"), intents)).toBeNull();
+    t.cleanup();
+  });
+});
+
+describe("same files: a change waits instead of building into a conflict (more than one change at a time)", () => {
+  /** A plan listing these files, or with no Files that change section (null). */
+  const plan = (files: string[] | null) => `# Plan\n\n${files ? `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n` : ""}## Order of work\n1. x\n`;
+  const planned = (files: string[] | null) => ({ "spec.md": "# Spec\n", "plan.md": plan(files) });
+  const holdsIn = async (root: string, lanes = 2) => sameFileHolds(lanes, orderQueue((await scanRepo(root)).intents));
+  const rowOf = (md: string, slug: string) => md.split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
+
+  test("a plan-approved change that lists a file a building change lists waits for it, and the queue says why", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: building", planned(["src/math.ts", "src/add.ts (new)"]));
+    await mk(t.path, "say-goodbye", "status: plan-approved", planned(["src/greet.ts", "src/math.ts"]));
+    await mk(t.path, "elsewhere", "status: plan-approved", planned(["src/other.ts"]));
+    const holds = await holdsIn(t.path);
+    expect([...holds]).toEqual([["say-goodbye", "add-numbers"]]);
+    const md = renderQueue(orderQueue((await scanRepo(t.path)).intents), [], undefined, holds);
+    expect(rowOf(md, "say-goodbye")).toContain("Waits for add-numbers to be merged first, because both change the same files.");
+    expect(rowOf(md, "elsewhere")).not.toContain("Waits for");
+    t.cleanup();
+  });
+
+  test("of two plan-approved changes listing one file, the earlier in the queue holds the later", async () => {
+    const t = tempDir();
+    await mk(t.path, "later", "status: plan-approved\npriority: low", planned(["src/math.ts"]));
+    await mk(t.path, "earlier", "status: plan-approved\npriority: high", planned(["./src/math.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([["later", "earlier"]]);
+    t.cleanup();
+  });
+
+  test("a blocked, closed or merged change, or one waiting on its own depends_on, holds nobody", async () => {
+    const t = tempDir();
+    await mk(t.path, "stuck", "status: blocked\nresume_from: building\nnote: n", planned(["src/math.ts"]));
+    await mk(t.path, "gone", "status: closed", planned(["src/math.ts"]));
+    await mk(t.path, "landed", "status: merged", planned(["src/math.ts"]));
+    await mk(t.path, "first-of-all", "status: accepted");
+    await mk(t.path, "waits-first", "status: plan-approved\npriority: urgent\ndepends_on: [first-of-all]", planned(["src/math.ts"]));
+    await mk(t.path, "free", "status: plan-approved", planned(["src/math.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([]);
+    t.cleanup();
+  });
+
+  test("a plan with no file list never waits and holds nobody", async () => {
+    const t = tempDir();
+    await mk(t.path, "unlisted-builder", "status: building", planned(null));
+    await mk(t.path, "unlisted", "status: plan-approved\npriority: high", planned(null));
+    await mk(t.path, "listed", "status: plan-approved", planned(["src/math.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([]);
+    t.cleanup();
+  });
+
+  test("with one change at a time nothing waits for this", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: building", planned(["src/math.ts"]));
+    await mk(t.path, "say-goodbye", "status: plan-approved", planned(["src/math.ts"]));
+    expect([...(await holdsIn(t.path, 1))]).toEqual([]);
     t.cleanup();
   });
 });

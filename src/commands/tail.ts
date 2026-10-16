@@ -5,7 +5,7 @@ import { Trace, type EventRow } from "../trace";
 export interface TailCursor {
   /** The newest event id printed so far. */
   lastId: number;
-  /** The loop's state, stopping flag, and current change as last printed, to print only changes. */
+  /** The loop's state, stopping flag, and the changes worked on as last printed, to print only changes. */
   loopKey: string | null;
 }
 
@@ -17,7 +17,7 @@ export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: 
   const out: string[] = [];
   const hb = readHeartbeat(root);
   const loop = heartbeatState(hb, opts.pollSeconds, opts.now, { pause: readPause(root) });
-  const key = `${loop.state}|${hb?.stopping ? "stopping" : ""}|${loop.current?.slug ?? ""}`;
+  const key = `${loop.state}|${hb?.stopping ? "stopping" : ""}|${loop.working.map((w) => w.slug).join(",")}`;
   if (key !== cursor.loopKey) {
     out.push(`${clock(opts.now ?? new Date())} ${"loop".padEnd(24)} ${"heartbeat".padEnd(13)} ${loop.text}`);
     cursor.loopKey = key;

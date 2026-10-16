@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,9 +8,27 @@ type State = { prs: Record<string, Pr>; next: number };
 
 // Test knob: behave like a gh that never answers.
 if (process.env.LOOPSTRA_FAKE_GH_HANG === "1") await new Promise(() => setInterval(() => {}, 1_000));
+// Test knob: every call waits until this file exists, so a test decides when GitHub answers.
+const waitFor = process.env.LOOPSTRA_FAKE_GH_WAIT_FOR;
+if (waitFor) while (!existsSync(waitFor)) await Bun.sleep(20);
 
 const args = Bun.argv.slice(2);
 const statePath = process.env.LOOPSTRA_FAKE_GH_STATE!;
+
+// One call at a time per state file, like one GitHub: changes running side by side call gh at the same
+// time, and two that read the state before either saved it would lose one's pull request.
+if (statePath) {
+  const lockDir = `${statePath}.lock`;
+  for (;;) {
+    try { mkdirSync(lockDir); break; } catch {
+      // A call that was killed leaves its lock behind; it is old by now.
+      try { if (Date.now() - statSync(lockDir).mtimeMs > 30_000) rmSync(lockDir, { recursive: true, force: true }); } catch { /* gone meanwhile */ }
+      await Bun.sleep(20);
+    }
+  }
+  process.on("exit", () => rmSync(lockDir, { recursive: true, force: true }));
+}
+
 const state: State = existsSync(statePath) ? JSON.parse(await Bun.file(statePath).text()) : { prs: {}, next: 1 };
 if (process.env.LOOPSTRA_FAKE_GH_LOG) appendFileSync(process.env.LOOPSTRA_FAKE_GH_LOG, JSON.stringify(args) + "\n");
 const save = () => Bun.write(statePath, JSON.stringify(state, null, 2));
@@ -76,9 +94,17 @@ if (cmd === "view") {
       return r.stdout.toString().trim();
     };
     git("clone", "-q", remote, ".");
-    if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
-    else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
-    git("push", "-q", "origin", "HEAD");
+    // Like GitHub, the merge lands on main as it is at that moment: when main moves on while this
+    // merges (Loopstra sharing its records), merge again on top of it.
+    for (let attempt = 1; ; attempt++) {
+      if (args.includes("--squash")) { git("merge", "--squash", `origin/${branch}`); git("commit", "-q", "-m", pr.title ?? branch); }
+      else git("merge", "--no-ff", "-m", pr.title ?? branch, `origin/${branch}`);
+      const pushed = Bun.spawnSync({ cmd: ["git", "push", "-q", "origin", "HEAD"], cwd: dir, stdout: "pipe", stderr: "pipe" });
+      if (pushed.exitCode === 0) break;
+      if (attempt >= 5) { console.error(`fake gh: git push failed: ${pushed.stderr.toString()}`); rmSync(dir, { recursive: true, force: true }); process.exit(1); }
+      git("fetch", "-q", "origin");
+      git("reset", "-q", "--hard", `origin/${git("rev-parse", "--abbrev-ref", "HEAD")}`);
+    }
     pr.mergeCommit = git("rev-parse", "HEAD");
     if (args.includes("--delete-branch")) git("push", "-q", "origin", "--delete", branch);
     rmSync(dir, { recursive: true, force: true });

@@ -39,6 +39,17 @@ describe("tail", () => {
       const denied = tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now });
       expect(denied.at(-1)).toContain("2 commands were not allowed: Bash(git tag v1), Bash(git push)");
 
+      // A second change joining, or one leaving, is a change too; the same set again is not.
+      const beat = (working: string[]) => writeHeartbeat(t.path, {
+        pid: 1, startedAt: now.toISOString(), lastTickAt: now.toISOString(), lastBeatAt: now.toISOString(),
+        current: working[0] ? { slug: working[0] } : null, working, stopping: false, stopped: false,
+      });
+      beat(["one", "two"]);
+      expect(tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now })).toEqual([expect.stringContaining("Running — working on one and two")]);
+      expect(tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now })).toEqual([]);
+      beat(["two"]);
+      expect(tailLines(t.path, trace, only, { slug: "two", pollSeconds: 60, now })).toEqual([expect.stringContaining("Running — working on two,")]);
+
       // A pause is a heartbeat change like any other.
       const reason = "The assistant is unavailable (sign-in, usage limit, or network). Retrying at 12:05.";
       writeHeartbeat(t.path, { pid: 1, startedAt: now.toISOString(), lastTickAt: now.toISOString(), lastBeatAt: now.toISOString(), current: null, stopping: false, stopped: false, pausedUntil: new Date(now.getTime() + 60_000).toISOString(), pauseReason: reason });

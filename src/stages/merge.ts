@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { assertRootOnMain, block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
-import { bookkeeping, Git, passOn } from "../git";
+import { bookkeeping, Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
+import { lanesRunning, oneMerge, onMain } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, pushBranch, shareMain, syncMain } from "../remote";
@@ -10,7 +11,7 @@ import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, MERGING, openBranchWorktree, readRound, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -22,6 +23,8 @@ const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
 const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
 const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
 const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
+const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
+const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
@@ -128,13 +131,30 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
  * Shares main, pushes the branch, and makes sure it has an open pull request (title `<slug>: <title>`, a body
  * naming the artifacts and the review summary). The review goes on it as a comment when the pull
  * request is new or `newReview` says a review just passed. The number and link go to the trace.
+ * The push overwrites only the commit recorded in PR_LEASE; a branch someone changed on GitHub is
+ * left alone, and the change blocked in plain words. GitHub is asked for its copy first (see
+ * settleLease): a branch it no longer has (a person deleted it) must still be missing when the push
+ * lands. A push cut short earlier is settled before this one is recorded in PR_PUSHING, which it is
+ * until PR_LEASE has it; when GitHub cannot be asked, this attempt fails and the record is kept.
  */
 async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
+  let moved = false;
   const r = await codePhase(ctx, "pull-request", async () => {
     // Main first, so the pull request's diff against it shows only the change, not the records.
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
-    const pushed = await pushBranch(ctx.git, ctx.branch);
-    if (!pushed.ok) throw new Error(pushed.detail);
+    const head = (await ctx.git.run(["rev-parse", `refs/heads/${ctx.branch}`])).out.trim();
+    const theirs = await headOnGitHub(ctx);
+    if (theirs === null && readMarker(ctx, PR_PUSHING)) throw new Error(`GitHub could not be asked for ${ctx.branch}, to settle a push of it that was cut short`);
+    if (theirs !== null) await settleLease(ctx, theirs);
+    writeMarker(ctx, PR_PUSHING, head);
+    // GitHub has no such branch: it must still have none (an empty lease), whatever was pushed before.
+    const pushed = await pushBranch(ctx.git, ctx.branch, theirs === "" ? "" : readMarker(ctx, PR_LEASE)?.trim() || undefined);
+    if (!pushed.ok) {
+      moved = pushed.moved === true;
+      throw new Error(pushed.detail);
+    }
+    writeMarker(ctx, PR_LEASE, head);
+    clearMarker(ctx, PR_PUSHING);
     writeMarker(ctx, PR_PUSHED, new Date().toISOString());
     const gh = new GitHub(ctx.root);
     const found = await gh.lookupPr(ctx.branch);
@@ -166,12 +186,43 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     return { ok: true as const };
   });
   if (r.ok) return { ok: true };
+  if (moved) return { ok: false, note: PR_BRANCH_MOVED_NOTE, detail: r.detail, retryFrom: mergeRetry(ctx) };
   return {
     ok: false,
     note: "The pull request for this change could not be opened on GitHub. An engineer should check that GitHub can be reached.",
     detail: r.detail,
     retryFrom: mergeRetry(ctx),
   };
+}
+
+/**
+ * A push of the pull request's branch that a stop, a timeout or a crash cut short (PR_PUSHING left
+ * behind) may have reached GitHub all the same. When GitHub's copy (`theirs`) is that push's head,
+ * it is Loopstra's own work, not a person's: it becomes the lease, so the next push may go over it.
+ */
+function adoptCutShortPush(ctx: StepContext, theirs: string): void {
+  const pending = readMarker(ctx, PR_PUSHING)?.trim();
+  if (!pending || theirs !== pending) return;
+  writeMarker(ctx, PR_LEASE, pending);
+  clearMarker(ctx, PR_PUSHING);
+}
+
+/**
+ * GitHub's copy of the pull request's branch (`theirs`, "" when it has none) becomes the lease when
+ * the next push may go over it: it is Loopstra's own push that was cut short, or the branch here
+ * already contains it (an engineer brought a person's commits in), so the push only adds to it.
+ */
+async function settleLease(ctx: StepContext, theirs: string): Promise<void> {
+  adoptCutShortPush(ctx, theirs);
+  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim() && (await ctx.git.isAncestor(theirs, ctx.branch))) writeMarker(ctx, PR_LEASE, theirs);
+}
+
+/** The head of the pull request's branch on GitHub, asked of GitHub: "" when it has none, null when it cannot be asked. */
+async function headOnGitHub(ctx: StepContext): Promise<string | null> {
+  const remote = await ctx.git.remoteName();
+  if (!remote) return null;
+  const r = await ctx.git.run(["ls-remote", remote, `refs/heads/${ctx.branch}`], true);
+  return r.code === 0 ? r.out.trim().split(/\s+/)[0] ?? "" : null;
 }
 
 /**
@@ -191,7 +242,10 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   }
   const pr = found.pr;
   if (pr?.merged) return finishRemoteMerge(ctx, pr);
-  if (pr?.state === "CLOSED") return block(ctx, PR_CLOSED_NOTE, { detail: { pr: pr.number, url: pr.url } });
+  if (pr?.state === "CLOSED") {
+    clearMarker(ctx, REMOTE_AHEAD); // a later wait, after a person sorts this out, is traced again
+    return block(ctx, PR_CLOSED_NOTE, { detail: { pr: pr.number, url: pr.url } });
+  }
   if (!pr) {
     // No pull request yet (for example GitHub could not be reached when the review passed): open it.
     if (!(await ctx.git.branchExists(ctx.branch))) {
@@ -211,13 +265,127 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const where = `pull request #${pr.number} ${pr.url}`;
   if (checks === "fail") {
     ctx.trace.gate(ctx.slug, "merge", "pr-checks", "fail", where);
+    clearMarker(ctx, REMOTE_AHEAD);
     return block(ctx, PR_CHECKS_FAILED_NOTE, { detail: { pr: pr.number, url: pr.url }, retryFrom: mergeRetry(ctx) });
   }
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
-  return mergeOnGitHub(ctx, gh, pr);
+  // With one change at a time nothing else merges meanwhile: merge as before.
+  if (ctx.cfg.speed.max_parallel_changes <= 1) return mergeOnGitHub(ctx, gh, pr);
+  return mergeWhenUpToDate(ctx, gh, pr);
+}
+
+/** The trace's plain line when a pull request was brought up to date before it could merge. */
+const BROUGHT_UP_TO_DATE = "Brought up to date with changes merged meanwhile; waiting for the automatic checks on GitHub again.";
+
+/**
+ * Whether the pull request's branch on GitHub still has what it was checked against (see upToDate).
+ * `not pushed`: the branch here has commits GitHub's copy lacks (a bring-up-to-date that stopped
+ * before its push). `both changed`: on top of that, a person added commits to GitHub's copy.
+ */
+type Freshness = "up to date" | "main ahead" | "not pushed" | "remote ahead" | "both changed" | "unreachable";
+
+/**
+ * With more than one change at a time, another change may have merged since this pull request's
+ * checks ran, so its checks never saw the two together. Under the merge lock: fetch, and merge on
+ * GitHub only when the pull request's branch there is the branch here and neither main here nor
+ * the remote's main gained code it lacks. When only the remote's main did, wait (traced once): the
+ * next tick's start brings it here. When main here did, or the branch here was brought up to date
+ * but not pushed, bring it up to date outside the lock (the merge checks again, then a push that
+ * keeps the pull request open) and wait for GitHub's checks again. A step started between another
+ * change's phases waits for its own turn instead, since the checks may run tests and sessions.
+ * Commits a person added to the pull request are kept: taken into the branch here, or, when the
+ * branch here changed too, the change is blocked for an engineer.
+ */
+async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
+  const r = await oneMergeAtATime(ctx, async () => {
+    const seen = await upToDate(ctx);
+    if (typeof seen !== "string") return block(ctx, seen.note, { ...seen, retryFrom: mergeRetry(ctx) });
+    return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr) : seen;
+  });
+  const main = ctx.cfg.main_branch;
+  if (r === "remote ahead") {
+    if (onceMarker(ctx, REMOTE_AHEAD)) {
+      ctx.trace.event(ctx.slug, "command", { command: "up to date", waiting: `${main} on GitHub has changes merged meanwhile; ${main} here gets them at the start of the next check, and then this change is brought up to date (if it does not, the main_sync signal says why)` });
+    }
+    return { ok: true, waiting: true };
+  }
+  if (r !== "unreachable") clearMarker(ctx, REMOTE_AHEAD);
+  if (typeof r !== "string") return r;
+  if (r === "both changed") return block(ctx, PR_BRANCH_MOVED_NOTE, { detail: `${ctx.branch} here and on GitHub each have commits the other lacks`, retryFrom: mergeRetry(ctx) });
+  if (r === "unreachable" || ctx.betweenPhases) return { ok: true, waiting: true };
+  return checkAgain(ctx, async () => {
+    const opened = await openPullRequest(ctx, false);
+    if (!opened.ok) return block(ctx, opened.note, opened);
+    ctx.trace.event(ctx.slug, "command", { command: "up to date", note: BROUGHT_UP_TO_DATE, pr: pr.number });
+    return { ok: true, waiting: true };
+  });
+}
+
+/**
+ * Fetches, then judges what GitHub would merge: the pull request's branch as GitHub has it. A copy
+ * the branch here may be pushed over becomes the lease (see settleLease). Commits a person added to
+ * that copy are taken into the branch here first (see takePersonCommits), so the checks and the
+ * next push include them; when the branch here changed too, both changed, and when the workspace
+ * cannot take them, the failure to block with is returned. The
+ * branch here has commits that copy lacks (a bring-up-to-date that stopped before its push): it is
+ * not pushed. Otherwise, is main here or the remote's main ahead of that copy with code outside
+ * intent/? Both branches are fetched by name, so this works whatever the remote's fetch setting
+ * covers (a single-branch clone fetches only main). A fetch that fails is traced; the step waits
+ * and looks again next time.
+ */
+async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
+  const remote = await ctx.git.remoteName();
+  if (!remote) return "unreachable";
+  const main = ctx.cfg.main_branch;
+  const tracking = (b: string) => `+refs/heads/${b}:refs/remotes/${remote}/${b}`;
+  const fetched = await ctx.git.fetch(["--quiet", remote, tracking(main), tracking(ctx.branch)], true);
+  if (fetched.code !== 0) {
+    ctx.trace.event(ctx.slug, "error", { where: "up to date", error: (fetched.err || `exit ${fetched.code}`).trim(), note: "will look again on the next tick" });
+    return "unreachable";
+  }
+  const pushed = `refs/remotes/${remote}/${ctx.branch}`;
+  const theirs = (await ctx.git.run(["rev-parse", "--verify", "--quiet", pushed], true)).out.trim();
+  await settleLease(ctx, theirs);
+  // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
+  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim()) {
+    if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "both changed";
+    const taken = await takePersonCommits(ctx, theirs);
+    if (!taken.ok) return taken;
+  }
+  if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
+  if (await outOfDate(ctx, main, pushed)) return "main ahead";
+  if (await outOfDate(ctx, `${remote}/${main}`, pushed)) return "remote ahead";
+  return "up to date";
+}
+
+/**
+ * Moves the branch here forward to `sha`, GitHub's copy, which has commits a person added on top of
+ * it (in the worktree, so its files follow). From then on the pull request's branch may be pushed
+ * over `sha`: the person's work is part of the branch here. A failure to block with when the
+ * workspace cannot be prepared, or cannot take them (for example unsaved edits there to the same files).
+ */
+async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: true } | Failure> {
+  const open = await openBranchWorktree(ctx);
+  if (!open.ok) return open;
+  const r = await new Git(ctx.worktreeDir).run([...NO_AUTO_MAINTENANCE, "merge", "--ff-only", "-q", sha], true);
+  if (r.code !== 0) return { ok: false, note: PERSON_COMMITS_NOT_TAKEN_NOTE, detail: `git merge --ff-only ${sha} in ${ctx.branch}'s workspace: ${(r.err || r.out).trim()}` };
+  writeMarker(ctx, PR_LEASE, sha);
+  ctx.trace.event(ctx.slug, "command", { command: "take pull request commits", note: "Commits someone added to the pull request on GitHub were taken into the branch here.", head: sha });
+  return { ok: true };
+}
+
+/**
+ * True when `ref` has code (outside intent/) that `branch` lacks: it changed files since they
+ * parted. A comparison git cannot make (no common history) counts as out of date.
+ */
+async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise<boolean> {
+  if (await ctx.git.isAncestor(ref, branch)) return false;
+  const gained = await ctx.git.run(["diff", "--name-only", `${branch}...${ref}`], true);
+  if (gained.code !== 0) return true;
+  return gained.out.split(/\r?\n/).map((f) => f.trim()).some((f) => f && !f.startsWith("intent/"));
 }
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
@@ -255,17 +423,25 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  * contains the pull request's merge commit, or the branch's changes when gh does not name one.
  */
 async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
-  // A status a person saved without committing would keep the sync from touching main. Off main,
-  // the sync is skipped anyway and says so.
-  if ((await ctx.git.currentBranch()) === ctx.cfg.main_branch) await recordPersonEdits(ctx);
-  await syncMain(ctx.root, ctx.cfg, ctx.trace);
   const main = ctx.cfg.main_branch;
-  const hasIt = pr.mergeCommit
-    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
-    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+  // While other changes are worked on, main is not rebased here: a session of theirs may be reading it.
+  const rebase = lanesRunning() <= 1;
+  // One main-lock section: nothing commits between the person's edits, the sync and the look at main.
+  const hasIt = await onMain(ctx.root, async () => {
+    // A status a person saved without committing would keep the sync from touching main. Off main,
+    // the sync is skipped anyway and says so.
+    if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
+    await syncMain(ctx.root, ctx.cfg, ctx.trace, { rebase });
+    return pr.mergeCommit
+      ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
+      : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+  });
   if (!hasIt) {
     if (onceMarker(ctx, MAIN_BEHIND)) {
-      ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting: `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`, pr: pr.number, mergeCommit: pr.mergeCommit });
+      const waiting = rebase
+        ? `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`
+        : `the pull request is merged; ${main} here is brought up to date at the start of the next check, because other changes are being worked on`;
+      ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting, pr: pr.number, mergeCommit: pr.mergeCommit });
     }
     return { ok: true, waiting: true };
   }
@@ -281,12 +457,32 @@ const REVIEW_AGAIN = "review-again";
  * passMergeGate) and the merge step (merge-approved, or merge-review with no person; `onPass`
  * merges): its automated checks run, and then `onPass`. Fixes the checks committed go back for one
  * more review round (see anotherRound), so nothing reaches main that a review did not see.
+ *
+ * Without a remote it holds the merge lock from the checks to the merge: one change at a time is
+ * checked and merged, so between its checks and its merge main only gains records under intent/.
+ * The next change is checked against main with the first one's code, and its tests run again. With
+ * a remote the checks only open a pull request; the lock is taken where it merges (runRemoteMerge).
  */
 async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult | typeof REVIEW_AGAIN> {
-  const verdict = await checkMerge(ctx);
-  if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
-  if (verdict.result === "pass") return onPass();
-  return anotherRound(ctx);
+  const gate = async () => {
+    const verdict = await checkMerge(ctx);
+    if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
+    if (verdict.result === "pass") return onPass();
+    return anotherRound(ctx);
+  };
+  return (await ctx.git.remoteName()) === null ? oneMergeAtATime(ctx, gate) : gate();
+}
+
+/**
+ * Runs `fn` under the merge lock, as this change. When another change holds it, the trace says so
+ * once, before waiting: "waits for add-numbers to finish merging first".
+ */
+function oneMergeAtATime<T>(ctx: StepContext, fn: () => Promise<T>): Promise<T> {
+  if (!oneMerge.heldHere() && oneMerge.busy()) {
+    const holder = oneMerge.holder();
+    ctx.trace.event(ctx.slug, "command", { command: "merge lock", waiting: `waits for ${holder && holder !== ctx.slug ? holder : "another change"} to finish merging first` });
+  }
+  return oneMerge.run(fn, ctx.slug);
 }
 
 /**
@@ -329,6 +525,15 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   // A person may have set merge-approved (or edited the change's other files) without committing:
   // record the change's own folder first, so their edit is part of main before the checks run.
   await recordPersonEdits(ctx);
+  return checkAgain(ctx, () => mergeNow(ctx));
+}
+
+/**
+ * The merge gate once more, after the review step passed it: in the change's worktree, then
+ * `onPass`. Edits nobody reviewed waiting in the worktree are kept on the branch and reviewed
+ * first, and so are fixes the checks commit (status reviewing), so nothing merges unseen.
+ */
+async function checkAgain(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult> {
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return block(ctx, open.note, open);
   const wt = new Git(ctx.worktreeDir);
@@ -339,26 +544,36 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
     if (!kept.ok) return block(ctx, kept.note, kept);
     next = await anotherRound(ctx);
   } else {
-    next = await mergeGate(ctx, () => mergeNow(ctx));
+    next = await mergeGate(ctx, onPass);
   }
   if (next !== REVIEW_AGAIN) return next;
   await setStatus(ctx, "reviewing");
   return { ok: true };
 }
 
-/** Commits the change's own folder on main (a person's uncommitted edits to it). Nothing else is touched. */
-async function recordPersonEdits(ctx: StepContext): Promise<void> {
-  await assertRootOnMain(ctx);
-  await ctx.git.commitPaths([`intent/${ctx.slug}`], bookkeeping(`loopstra(${ctx.slug}): record edits made by a person`));
+/** Commits the change's own folder on main (a person's uncommitted edits to it), as one main-lock section. Nothing else is touched. */
+function recordPersonEdits(ctx: StepContext): Promise<void> {
+  return onMain(ctx.root, async () => {
+    await assertRootOnMain(ctx);
+    await ctx.git.commitPaths([`intent/${ctx.slug}`], bookkeeping(`loopstra(${ctx.slug}): record edits made by a person`));
+  });
 }
 
 /**
  * Merges the intent branch into main in the root checkout, in one step that either lands whole or
  * not at all (see Git.merge). Only when the root is on main, nothing is staged, and no tracked file
  * outside intent/ has unsaved changes, so a person's work there is never touched. Unsaved edits
- * inside intent/ (an owner's status lines) never block it; the merge takes only the branch.
+ * inside intent/ (an owner's status lines) never block it; the merge takes only the branch. The look
+ * at the checkout, the catch-up rebase, the marker and the merge are one main-lock section, so no
+ * other change commits on main in between.
  */
 async function mergeNow(ctx: StepContext): Promise<StepResult> {
+  const landed = await onMain(ctx.root, () => mergeIntoMain(ctx));
+  return landed === true ? finishMerge(ctx) : landed;
+}
+
+/** mergeNow's section: true when the merge landed, else the block it recorded. */
+async function mergeIntoMain(ctx: StepContext): Promise<true | StepResult> {
   const root = await rootReady(ctx);
   if (!root.ok) return block(ctx, DIRTY_ROOT_NOTE, { detail: root.detail });
 
@@ -385,7 +600,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
     clearMarker(ctx, MERGING);
     return block(ctx, "The change could not be merged; main was left untouched. An engineer needs to look at it.", { detail: merged.ok ? `merge of ${ctx.branch} into ${main} refused` : merged.detail });
   }
-  return finishMerge(ctx);
+  return true;
 }
 
 /**
@@ -426,6 +641,7 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
   await setStatus(ctx, "merged");
   clearMarker(ctx, MERGING);
   clearMarker(ctx, REVIEW_ROUND);
+  clearMarker(ctx, REMOTE_AHEAD);
   return { ok: true };
 }
 
@@ -435,9 +651,15 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
  * The branch is deleted only when main already has its changes. Otherwise (a person set merged by
  * hand, or main is not synced yet) the worktree and branch are left as they are, and the reason is
  * traced once. Files under intent/ are not compared: main's own record of the change moves on after
- * the merge (status, outcome), and the branch only holds an older copy of it.
+ * the merge (status, outcome), and the branch only holds an older copy of it. One main-lock
+ * section, so main cannot move between the look at the branch and its removal.
  */
-export async function cleanupChange(ctx: StepContext): Promise<boolean> {
+export function cleanupChange(ctx: StepContext): Promise<boolean> {
+  return onMain(ctx.root, () => removeMergedWork(ctx));
+}
+
+/** cleanupChange's section. */
+async function removeMergedWork(ctx: StepContext): Promise<boolean> {
   const main = ctx.cfg.main_branch;
   if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) {
     if (onceMarker(ctx, BRANCH_KEPT)) {

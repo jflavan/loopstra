@@ -2,12 +2,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { Config } from "./config";
 import { bookkeeping, Git } from "./git";
+import { onMain } from "./lanes";
 import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
 import type { Trace } from "./trace";
 import { errorText } from "./shell";
 
 export class StepContext {
   readonly git: Git;
+  /** The step was started by the between-phases merge, inside another change's step (see mergeReadyChanges). */
+  betweenPhases = false;
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
@@ -92,17 +95,24 @@ async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["fro
   }
 }
 
+/**
+ * Writes the status and commits it. One main-lock section, from the branch check to the commit, so
+ * no other change's sync, commit or merge lands in between: a sync would find the status written
+ * but not committed and wait, and the branch check would find main half rebased.
+ */
 export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
-  const from = ctx.intent.file.frontmatter.status;
-  const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
-  // resume_from always follows the approved state being left, even if it was already set:
-  // a person may have set an approved status by hand, and the marker must follow.
-  if (APPROVED.has(status)) patch.resume_from = status;
-  else if (APPROVED.has(from)) patch.resume_from = from;
-  await writeForStep(ctx, patch);
-  ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
-  ctx.trace.statusChange(ctx.slug, from, status, note);
-  await commitArtifacts(ctx, `${from} → ${status}`);
+  await onMain(ctx.root, async () => {
+    const from = ctx.intent.file.frontmatter.status;
+    const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
+    // resume_from always follows the approved state being left, even if it was already set:
+    // a person may have set an approved status by hand, and the marker must follow.
+    if (APPROVED.has(status)) patch.resume_from = status;
+    else if (APPROVED.has(from)) patch.resume_from = from;
+    await writeForStep(ctx, patch);
+    ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
+    ctx.trace.statusChange(ctx.slug, from, status, note);
+    await commitArtifacts(ctx, `${from} → ${status}`);
+  });
 }
 
 /** True when a note already tells the person which status to set. */
@@ -188,11 +198,14 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
   return existsSync(p) ? await Bun.file(p).text() : null;
 }
 
+/** Writes an artifact on main and commits it, as one main-lock section (see setStatus). */
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
-  await assertRootOnMain(ctx);
-  await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
-  ctx.intent.artifacts.add(name);
-  await commitArtifacts(ctx, `write ${name}`);
+  await onMain(ctx.root, async () => {
+    await assertRootOnMain(ctx);
+    await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
+    ctx.intent.artifacts.add(name);
+    await commitArtifacts(ctx, `write ${name}`);
+  });
 }
 
 /** Run-folder file: the agent sessions to resume, by key. */
@@ -218,13 +231,20 @@ export function clearSession(ctx: StepContext, key: string): void {
 }
 
 
-/** Records a priority only when the owner stated none; an owner's own priority is never overwritten. */
+/**
+ * Records a priority only when the owner stated none; an owner's own priority is never overwritten.
+ * It is committed at once, as one main-lock section: left unsaved through the design session, it
+ * would hold up another change's sync or merge (main would have unsaved changes).
+ */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
-  await assertRootOnMain(ctx);
-  // The owner may have stated one while the step ran: read what the file says now.
-  const now = await readIntent(ctx.root, ctx.slug);
-  if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
-  if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return; }
-  await writeForStep(ctx, { priority });
-  ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
+  await onMain(ctx.root, async () => {
+    await assertRootOnMain(ctx);
+    // The owner may have stated one while the step ran: read what the file says now.
+    const now = await readIntent(ctx.root, ctx.slug);
+    if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
+    if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return; }
+    await writeForStep(ctx, { priority });
+    ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
+    await commitArtifacts(ctx, "record priority");
+  });
 }

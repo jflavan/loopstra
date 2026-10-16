@@ -1,4 +1,5 @@
 import type { Config } from "./config";
+import { othersRunning } from "./lanes";
 import type { Trace } from "./trace";
 
 /** The trace slug every chat turn and writer run is recorded under. */
@@ -80,6 +81,29 @@ export function roomFor(cfg: Config, trace: Trace, sessions: number, now = new D
   if (sessions <= 1) return true;
   const left = loopDayLeft(cfg, trace, now);
   return left === Infinity || left >= sessions * limitOf(cfg.claude.max_budget_usd);
+}
+
+/**
+ * roomFor `sessions` of this change's own, plus one session for each other change running a step now
+ * (speed.max_parallel_changes), so one change's overlap never takes the budget another running change
+ * needs for its next session. A change already holding a session is counted twice, on purpose. With
+ * one change at a time it is roomFor(sessions).
+ */
+export function roomBeside(cfg: Config, trace: Trace, slug: string, sessions: number, now = new Date()): boolean {
+  return roomFor(cfg, trace, sessions + othersRunning(slug), now);
+}
+
+/**
+ * How many changes may run a step at once this tick: speed.max_parallel_changes, as far as what is
+ * left of the day covers a whole session (claude.max_budget_usd) for each, and never fewer than 1.
+ * With a daily budget and no session cap, 1: the first session would hold the rest of the day.
+ * Worked out once per tick, so every lane can start its first session.
+ */
+export function lanesFor(cfg: Config, trace: Trace, now = new Date()): number {
+  const n = cfg.speed.max_parallel_changes;
+  if (n === 1 || cfg.claude.max_budget_usd_per_day === undefined) return n;
+  if (noSessionCap(cfg)) return 1;
+  return Math.min(n, Math.max(1, Math.floor(loopDayLeft(cfg, trace, now) / limitOf(cfg.claude.max_budget_usd))));
 }
 
 /** A daily budget and no session cap: two of the loop's sessions never have room at once (see roomFor). */

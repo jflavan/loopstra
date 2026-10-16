@@ -5,7 +5,7 @@ import { agentPhase, alongside, codePhase, mayOverlap, projectCommand } from "..
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_PUSHING, RECONCILED_PLAN, REMOTE_AHEAD, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -13,11 +13,18 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
   clearMarker(ctx, RECONCILED_PLAN); // nor is it compared with a plan reconciled for an earlier build
   clearMarker(ctx, EARLY_REVIEW); // nor reviewed by a review of an earlier build
+  clearMarker(ctx, REMOTE_AHEAD); // nor waiting like an earlier build's pull request
+  clearMarker(ctx, PR_LEASE); // nor tied to what was pushed for it (a person may have deleted that branch on GitHub)
+  clearMarker(ctx, PR_PUSHING); // nor an earlier build's push that was cut short
 
   const branch = await codePhase(ctx, "branch", async () => {
-    if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
-    // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
-    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    // One main-lock section: the branch and its worktree are made while no other change touches refs or worktrees.
+    await ctx.git.section(async () => {
+      if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
+      // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
+      await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    });
+    // In the change's own worktree, so no lock.
     if (ctx.cfg.commands.install) {
       const r = await projectCommand(ctx, ctx.cfg.commands.install, ctx.worktreeDir);
       if (r.code !== 0) throw new Error(`install failed: ${r.lastLine}`);

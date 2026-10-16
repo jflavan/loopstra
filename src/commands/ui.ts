@@ -67,9 +67,7 @@ export async function buildState(root: string, afterEventId: number, now: Date =
     const intents = ordered.map((i) => intentView(root, trace, i, ordered, now));
     const beat = readHeartbeat(root);
     const hb = heartbeatState(beat, "problem" in config ? 60 : config.poll_seconds, now, { pause: readPause(root) });
-    const loop: LoopStatus = hb.current
-      ? { ...hb, current: { slug: hb.current.slug, phase: runningPhase(intents, hb.current.slug, beat?.lastTickAt ?? null) } }
-      : hb;
+    const loop: LoopStatus = { ...hb, working: hb.working.map((w) => ({ slug: w.slug, phase: runningPhase(intents, w.slug, beat?.lastTickAt ?? null) })) };
     const health = healthView(trace, now);
     const events = trace.recentEvents(afterEventId, 200).map((e) => ({ ...e, payload: parsePayload(e.payload) }));
     const lastEventId = events.length ? Math.max(...events.map((e) => e.id)) : afterEventId;

@@ -1,15 +1,19 @@
-import { describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
+import { PR_PUSHING } from "../../src/stages/shared";
+import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
+
+afterEach(() => resetStop());
 const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
@@ -451,6 +455,129 @@ describe("the loop with a GitHub remote", () => {
       expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
       expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
       expect(await new Git(s.repo).branchExists(BRANCH)).toBe(false);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a pull request closed without merging, whose branch a person then deleted on GitHub: a rebuild opens a new one", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      await s.setPr({ state: "CLOSED" });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).note).toContain("The pull request was closed without merging.");
+
+      // GitHub's "Delete branch" button; the branch here still remembers it as pushed.
+      expect((await run(["git", "branch", "-D", BRANCH], s.remote)).code).toBe(0);
+      expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${BRANCH}`], s.repo)).code).toBe(0);
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "plan-approved", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: rebuild");
+
+      await tick(s.repo); // build again
+      await tick(s.repo); // review, a new pull request
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
+      expect((await run(["git", "rev-parse", BRANCH], s.remote)).out.trim()).toBe((await run(["git", "rev-parse", BRANCH], s.repo)).out.trim());
+      expect((await s.pr()).state).toBe("OPEN");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a push cut short that GitHub took is still known as Loopstra's own after GitHub could not be asked about it once", async () => {
+    const s = await remoteSetup();
+    const worktree = new Git(join(s.repo, ".loopstra", "worktrees", SLUG));
+    const pushing = join(s.repo, ".loopstra", "runs", SLUG, PR_PUSHING);
+    const mainMoves = async (file: string) => {
+      await Bun.write(join(s.repo, "src", file), "export const x = 1;\n");
+      await new Git(s.repo).commitAll(`person: ${file}`);
+      await run(["git", "push", "-q", "origin", "main"], s.repo);
+      expect(await worktree.rebaseOnto("main")).toBe(true);
+    };
+    const here = async () => (await run(["git", "rev-parse", BRANCH], s.repo)).out.trim();
+    const onGitHub = async () => (await run(["git", "rev-parse", BRANCH], s.remote)).out.trim();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+
+      // A push GitHub took, recorded only as in progress (a stop cut it short).
+      await mainMoves("one.ts");
+      const cutShort = await here();
+      writeFileSync(pushing, cutShort);
+      await run(["git", "push", "-q", "--force", "origin", BRANCH], s.repo);
+      // Main moves on and the branch is rebased again; the pull request is gone from GitHub's list,
+      // so the merge step opens it again, pushing first. GitHub cannot be reached this time.
+      await mainMoves("two.ts");
+      const state = await Bun.file(join(s.remote, "fake-gh.json")).json();
+      delete state.prs[BRANCH];
+      await Bun.write(join(s.remote, "fake-gh.json"), JSON.stringify(state));
+      await run(["git", "remote", "set-url", "origin", join(s.remote, "gone")], s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("blocked");
+      expect(readFileSync(pushing, "utf8").trim()).toBe(cutShort);
+
+      // GitHub is back and a person retries: the push goes over Loopstra's own commit.
+      await run(["git", "remote", "set-url", "origin", s.remote], s.repo);
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "merge-review", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "" });
+      expect(await onGitHub()).toBe(await here());
+      expect((await s.pr()).state).toBe("OPEN");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a push GitHub took just as a stop cut it short is Loopstra's own: the next push goes over it, and nothing is blocked", async () => {
+    const s = await remoteSetup();
+    const worktree = new Git(join(s.repo, ".loopstra", "worktrees", SLUG));
+    /** Main gains code, and the branch here is rebased onto it: a new head to push. */
+    const mainMoves = async (file: string) => {
+      await Bun.write(join(s.repo, "src", file), "export const x = 1;\n");
+      await new Git(s.repo).commitAll(`person: ${file}`);
+      await run(["git", "push", "-q", "origin", "main"], s.repo);
+      expect(await worktree.rebaseOnto("main")).toBe(true);
+    };
+    /** The pull request is gone from GitHub's list, so the merge step opens it again, pushing first. */
+    const dropPr = async () => {
+      const state = await Bun.file(join(s.remote, "fake-gh.json")).json();
+      delete state.prs[BRANCH];
+      await Bun.write(join(s.remote, "fake-gh.json"), JSON.stringify(state));
+    };
+    const onGitHub = async () => (await run(["git", "rev-parse", BRANCH], s.remote)).out.trim();
+    const here = async () => (await run(["git", "rev-parse", BRANCH], s.repo)).out.trim();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+
+      // GitHub takes the next push of the branch, then holds the push open until the stop ends it.
+      await mainMoves("one.ts");
+      await dropPr();
+      const received = join(s.remote, "received").replace(/\\/g, "/");
+      const hook = join(s.remote, "hooks", "post-receive");
+      await Bun.write(hook, `#!/bin/sh\nif grep -q refs/heads/intent/; then echo > "${received}"; sleep 4; fi\n`);
+      chmodSync(hook, 0o755);
+      const stopper = (async () => {
+        while (!existsSync(received)) await Bun.sleep(50);
+        requestStop();
+      })();
+      const t = await tick(s.repo);
+      await stopper;
+      expect(t.stopped).toBe(true);
+      expect(await onGitHub()).toBe(await here());
+      rmSync(hook);
+      resetStop();
+
+      // Main moves on again and the branch is rebased: the push that follows goes over GitHub's copy.
+      await mainMoves("two.ts");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
+      expect(await onGitHub()).toBe(await here());
+      expect((await s.pr()).state).toBe("OPEN");
     });
     s.cleanup();
   }, 180_000);

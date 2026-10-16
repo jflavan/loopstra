@@ -4,6 +4,8 @@
 // $LOOPSTRA_FAKE_FIXTURE_DIR/<$LOOPSTRA_PHASE>.jsonl, fixtures/<$LOOPSTRA_PHASE>.jsonl, fixtures/simple-success.jsonl.
 // A fixture line {"type":"fake_action","write":{"path":"...","content":"..."}} writes a file
 // under the current directory before the remaining lines are emitted, so a fake "build" can change code.
+// A fixture line {"type":"fake_action","wait_for":"<absolute path>"} holds the session until that file exists,
+// so a test decides when it ends (judging what happens meanwhile by order, not by time).
 // A fixture line {"type":"fake_action","refuse":"<path>"} records <path> in $LOOPSTRA_PROTECTED_LOG, as the
 // protect-tests hook does when it refuses an edit.
 // A fixture line {"type":"fake_exit","code":1,"stderr":"..."} writes that line to stderr and exits
@@ -20,6 +22,9 @@
 // One model (the --model argument): before everything above, $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>@<model>-<n>.jsonl
 // (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. Two sessions of one phase
 // that start together race on the plain sequence's counter, so a test that runs both judges uses these.
+// One change: when $LOOPSTRA_FAKE_FIXTURE_DIR/<$LOOPSTRA_SLUG>/ exists, every sequence and <phase>.jsonl above is
+// looked up (and counted) in that folder instead, with the shared <phase>.jsonl as a fallback, so sessions of
+// one phase in two changes that run at the same time each get their own fixtures.
 // Like the real CLI, the process exits 1 after a result event with is_error.
 // $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap);
 // as "<phase>=<ms>,..." only those phases' sessions, and as "<phase>@<model>=<ms>" only that phase on that model.
@@ -55,7 +60,11 @@ const model = modelAt >= 0 ? args[modelAt + 1] : undefined;
 let sequenced: string | undefined;
 let modelSequenced: string | undefined;
 let modelFixture: string | undefined;
-const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
+const sharedDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
+const slug = process.env.LOOPSTRA_SLUG;
+// One change's own folder, when there is one, takes the shared folder's place for the sequences.
+const slugDir = sharedDir && slug ? join(sharedDir, slug) : undefined;
+const fixtureDir = slugDir && existsSync(slugDir) ? slugDir : sharedDir;
 if (fixtureDir && phase) {
   sequenced = join(fixtureDir, `${phase}-${await nextCall(fixtureDir, phase)}.jsonl`);
   if (model) {
@@ -72,7 +81,8 @@ const candidates = [
   process.env.LOOPSTRA_FAKE_FIXTURE,
   sequenced,
   named ? join(here, `${named}.jsonl`) : undefined,
-  process.env.LOOPSTRA_FAKE_FIXTURE_DIR && phase ? join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR, `${phase}.jsonl`) : undefined,
+  fixtureDir && phase ? join(fixtureDir, `${phase}.jsonl`) : undefined,
+  sharedDir && phase ? join(sharedDir, `${phase}.jsonl`) : undefined,
   phase ? join(here, `${phase}.jsonl`) : undefined,
   join(here, "simple-success.jsonl"),
 ].filter((p): p is string => !!p && existsSync(p));
@@ -109,7 +119,11 @@ if (delayMs) await Bun.sleep(Number(delayMs));
 let failed = false;
 for (const line of (await Bun.file(fixture).text()).split("\n")) {
   if (!line.trim()) continue;
-  const e = JSON.parse(line) as { type: string; is_error?: boolean; write?: { path: string; content: string }; refuse?: string; code?: number; stderr?: string };
+  const e = JSON.parse(line) as { type: string; is_error?: boolean; write?: { path: string; content: string }; refuse?: string; wait_for?: string; code?: number; stderr?: string };
+  if (e.type === "fake_action" && e.wait_for) {
+    while (!existsSync(e.wait_for)) await Bun.sleep(50);
+    continue;
+  }
   if (e.type === "fake_action" && e.refuse) {
     if (process.env.LOOPSTRA_PROTECTED_LOG) appendFileSync(process.env.LOOPSTRA_PROTECTED_LOG, `${e.refuse}\n`);
     continue;

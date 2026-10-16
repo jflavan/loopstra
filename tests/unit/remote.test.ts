@@ -5,9 +5,9 @@ import { loadConfig } from "../../src/config";
 import { setStatus, StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
+import { pushBranch, shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
-import { run, tempDir, tempGitRepo } from "../helpers";
+import { run, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 /** A repo with a bare remote holding its main, a second clone of that remote, and a trace. */
 async function setup() {
@@ -186,11 +186,111 @@ describe("syncMain", () => {
     s.cleanup();
   });
 
+  test("asked not to rebase (other changes are being worked on), it fetches, leaves main as it is, waits, and records no signal", async () => {
+    const s = await setup();
+    await syncMain(s.repo, s.cfg, s.trace);
+    const signals = () => s.trace.signals().filter((x) => x.name === SYNC_SIGNAL).length;
+    const before = signals();
+    await pushFromOther(s.other, "theirs.md", "theirs\n");
+    const head = (await run(["git", "rev-parse", "main"], s.repo)).out.trim();
+    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("waiting");
+    expect((await run(["git", "rev-parse", "main"], s.repo)).out.trim()).toBe(head);
+    expect(existsSync(join(s.repo, "theirs.md"))).toBe(false);
+    // Fetched: the remote's main is known here, ready for the next sync.
+    expect((await run(["git", "cat-file", "-e", "origin/main:theirs.md"], s.repo)).code).toBe(0);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "pass", output: SYNC_TEXT.inStep });
+    expect(signals()).toBe(before);
+    expect(syncErrors(s.trace)).toEqual([]);
+    expect(s.trace.events("_loop").some((e) => e.payload.includes("\"sync main\""))).toBe(false);
+
+    // Not behind: the same as an ordinary sync.
+    expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
+    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("pass");
+    s.cleanup();
+  });
+
+  test("its fetch and rebase never start git's automatic gc or maintenance (other changes may be committing meanwhile)", async () => {
+    const s = await setup();
+    const log = join(s.other, "..", `git-trace-${Date.now()}.log`);
+    try {
+      await pushFromOther(s.other, "theirs.md", "theirs\n");
+      await withEnv({ GIT_TRACE: log }, () => syncMain(s.repo, s.cfg, s.trace));
+      expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
+      expect(await Bun.file(log).text()).not.toMatch(/maintenance run --auto|gc --auto/);
+    } finally { rmSync(log, { force: true }); s.cleanup(); }
+  });
+
   test("a remote that cannot be reached is traced and never throws", async () => {
     const s = await setup();
     rmSync(s.remote, { recursive: true, force: true });
     await syncMain(s.repo, s.cfg, s.trace);
     expect(syncErrors(s.trace)).toEqual(["fetch failed"]);
     s.cleanup();
+  });
+});
+
+describe("pushBranch", () => {
+  test("overwrites only what Loopstra pushed last: a commit a person added is kept, even after a fetch", async () => {
+    const s = await setup();
+    try {
+      const git = new Git(s.repo);
+      const sha = async () => (await git.run(["rev-parse", "intent/x"])).out.trim();
+      /** Gives the branch here a new head in place of its last commit, as a rebase does. */
+      const rewrite = async (text: string) => {
+        await run(["git", "checkout", "-q", "intent/x"], s.repo);
+        await Bun.write(join(s.repo, "x.md"), text);
+        await run(["git", "commit", "-q", "-a", "--amend", "-m", text], s.repo);
+        await run(["git", "checkout", "-q", "main"], s.repo);
+      };
+      await run(["git", "checkout", "-q", "-b", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "first\n");
+      await run(["git", "add", "x.md"], s.repo);
+      await run(["git", "commit", "-q", "-m", "first"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+
+      // Rewritten here: Loopstra's own last push is overwritten.
+      const first = await sha();
+      await rewrite("second\n");
+      expect(await pushBranch(git, "intent/x", first)).toEqual({ ok: true });
+
+      // A person adds a commit on GitHub; the branch here is rewritten again and the remote fetched.
+      const second = await sha();
+      await run(["git", "fetch", "-q", "origin"], s.other);
+      await run(["git", "checkout", "-q", "-b", "intent/x", "origin/intent/x"], s.other);
+      await Bun.write(join(s.other, "fix.md"), "fix\n");
+      await run(["git", "add", "fix.md"], s.other);
+      await run(["git", "commit", "-q", "-m", "fix"], s.other);
+      await run(["git", "push", "-q", "origin", "intent/x"], s.other);
+      await rewrite("third\n");
+      await git.fetch(["--quiet", "origin"]);
+      const refused = await pushBranch(git, "intent/x", second);
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.moved).toBe(true);
+      expect((await run(["git", "cat-file", "-e", "intent/x:fix.md"], s.remote)).code).toBe(0);
+    } finally { s.cleanup(); }
+  });
+
+  test("an empty lease: pushes while the remote has no such branch, though a fetch saw one, and is refused once it has one", async () => {
+    const s = await setup();
+    try {
+      const git = new Git(s.repo);
+      await run(["git", "checkout", "-q", "-b", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "first\n");
+      await run(["git", "add", "x.md"], s.repo);
+      await run(["git", "commit", "-q", "-m", "first"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+      // Deleted on the remote; the remote-tracking ref here still has it.
+      await run(["git", "branch", "-D", "intent/x"], s.remote);
+      expect((await pushBranch(git, "intent/x")).ok).toBe(false);
+      expect(await pushBranch(git, "intent/x", "")).toEqual({ ok: true });
+      await run(["git", "checkout", "-q", "intent/x"], s.repo);
+      await Bun.write(join(s.repo, "x.md"), "second\n");
+      await run(["git", "commit", "-q", "-a", "-m", "second"], s.repo);
+      await run(["git", "checkout", "-q", "main"], s.repo);
+      const refused = await pushBranch(git, "intent/x", "");
+      expect(!refused.ok && refused.moved).toBe(true);
+    } finally { s.cleanup(); }
   });
 });

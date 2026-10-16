@@ -430,9 +430,47 @@ function dependsOn(from: Intent, target: string, intents: Intent[], seen = new S
   });
 }
 
-/** The note shown for a change: why it waits for others, if it does, then its own note. */
-export function shownNote(intent: Intent, intents: Intent[]): string {
-  return [dependencyNote(intent, intents), intent.file.frontmatter.note].filter(Boolean).join(" ");
+/**
+ * The note shown for a change: why it waits for others, if it does, then its own note. `heldBy`: the
+ * change it waits for because both change the same files (see fileHolds).
+ */
+export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): string {
+  const sameFiles = heldBy ? `Waits for ${heldBy} to be merged first, because both change the same files.` : null;
+  return [dependencyNote(intent, intents), sameFiles, intent.file.frontmatter.note].filter(Boolean).join(" ");
+}
+
+/** Statuses whose change holds the files its plan lists until it merges. */
+const HOLDS_FILES: ReadonlySet<Status> = new Set(["building", "reviewing", "merge-review", "merge-approved"]);
+
+/** True when fileHolds needs this change's planned files: it may wait (plan-approved), or hold others. */
+export function planFilesNeeded(status: Status): boolean {
+  return status === "plan-approved" || HOLDS_FILES.has(status);
+}
+
+/**
+ * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
+ * lists a file that another change's plan lists, and that change is building, in review or waiting to
+ * merge, or is at plan-approved earlier in the queue and not waiting on its own depends_on. Building
+ * both would end in a rebase conflict, which needs an engineer. No deadlock: a holder is past
+ * plan-approved, or earlier in the queue and free to go. `files` gives each change's planned files
+ * (null or missing: the plan has no file list, so it never waits and holds nobody). Gives the change
+ * each waiting change waits for (the first in queue order).
+ */
+export function fileHolds(ordered: Intent[], files: ReadonlyMap<string, string[] | null>): Map<string, string> {
+  const holds = new Map<string, string>();
+  const listed = (i: Intent) => files.get(i.slug) ?? null;
+  ordered.forEach((i, at) => {
+    const mine = listed(i);
+    if (i.file.frontmatter.status !== "plan-approved" || !mine?.length) return;
+    const holder = ordered.find((h, hat) => {
+      if (h === i) return false;
+      const s = h.file.frontmatter.status;
+      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !waitingOn(h, ordered).length);
+      return holding && (listed(h) ?? []).some((f) => mine.includes(f));
+    });
+    if (holder) holds.set(i.slug, holder.slug);
+  });
+  return holds;
 }
 
 const STATUS_CLASS: Record<Status, number> = {
@@ -475,14 +513,14 @@ const NOBODY: HumanGates = { spec: "none", plan: "none", merge: "none", done: "n
 /**
  * The generated queue.md. "Needs a person" holds every change waiting for one (blocked, drafts, and
  * reviews with a person on the gate; see waitsForPerson) and intents whose intent.md cannot be read,
- * with their plain problem.
+ * with their plain problem. `holds`: the same-file waits (see fileHolds), each shown in its note.
  */
-export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY): string {
+export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map()): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
   const waiting = ordered.filter((i) => waitsForPerson(i, human));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
-  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered))} |`;
+  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug)))} |`;
   const badRow = (u: Unreadable) => `| ${u.slug} | - | ${plainStatus("blocked")} | ${cell(u.problem)} |`;
   const table = (rows: string[]) => rows.length
     ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows].join("\n")

@@ -3,10 +3,13 @@ import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
+import { claim, release } from "../../src/lanes";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/early-review";
+import { PR_LEASE, PR_PUSHING, REMOTE_AHEAD } from "../../src/stages/shared";
+import { readMarker, writeMarker } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -103,6 +106,18 @@ describe("build stage", () => {
     // early-review runs alongside the first verify (see "the first review alongside the verifier").
     expect(withoutEarlyReview(trace)).toEqual(["branch", "build", "drift", "test-1", "verify"]);
     expect(JSON.parse(await Bun.file(join(ctx.runDir, "sessions.json")).text())).toEqual({ build: "fake-build" });
+    trace.close(); repo.cleanup();
+  });
+
+  test("a rebuild forgets the earlier pull request's wait and what Loopstra last pushed for it", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    writeMarker(ctx, REMOTE_AHEAD, "");
+    writeMarker(ctx, PR_LEASE, "0123456789abcdef0123456789abcdef01234567");
+    writeMarker(ctx, PR_PUSHING, "89abcdef0123456789abcdef0123456789abcdef");
+    expect((await runBuildStep(ctx)).ok).toBe(true);
+    expect(readMarker(ctx, REMOTE_AHEAD)).toBeNull();
+    expect(readMarker(ctx, PR_LEASE)).toBeNull();
+    expect(readMarker(ctx, PR_PUSHING)).toBeNull();
     trace.close(); repo.cleanup();
   });
 
@@ -486,6 +501,22 @@ describe("the first review alongside the verifier", () => {
     expect(earlyNotes(trace)).toEqual(["not used: it was decided by the cheaper judge, which is no longer trusted to decide alone"]);
     expect(reviews(trace)).toEqual(["review-1"]);
     trace.close(); repo.cleanup();
+  });
+
+  test("with another change running a step, the review runs during the build only when the day also has room for that change's session", async () => {
+    // Two of this change's sessions plus one of the other's: $6 needed.
+    for (const [day, early] of [[5, false], [7, true]] as const) {
+      const { repo, ctx, trace } = await planned({ test: "bun test" }, `claude:\n  max_budget_usd_per_day: ${day}\n  max_budget_usd: 2\n`);
+      claim("say-goodbye");
+      try {
+        await runBuildStep(ctx);
+      } finally {
+        release("say-goodbye");
+      }
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+      expect(earlyReviews(trace).length > 0).toBe(early);
+      trace.close(); repo.cleanup();
+    }
   });
 
   for (const [what, config] of [

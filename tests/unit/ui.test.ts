@@ -115,7 +115,7 @@ describe("ui state", () => {
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "stopped", text: "Stopped" });
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
       const s = await buildState(t.path, 0, now);
-      expect(s.loop).toMatchObject({ state: "running", text: "Running — working on one, last check 20s ago", current: { slug: "one", phase: "build" } });
+      expect(s.loop).toMatchObject({ state: "running", text: "Running — working on one, last check 20s ago", working: [{ slug: "one", phase: "build" }] });
       // Two phases at once (verify with the early review): both are named, in the order they started.
       // A row left running before this tick (its process was killed) is not named.
       setStarted(t.path, "one", 1, iso(60));
@@ -123,7 +123,7 @@ describe("ui state", () => {
       t2.phaseStart("one", "verify", "agent");
       t2.phaseStart("one", "early-review", "agent");
       t2.close();
-      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ current: { slug: "one", phase: "verify + early-review" } });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ working: [{ slug: "one", phase: "verify + early-review" }] });
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
       expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "not-responding", text: "Not responding (last check 14 min ago)" });
       // The same, from a process that is gone: it did not shut down cleanly.
@@ -146,7 +146,44 @@ describe("ui state", () => {
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
-      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "running", current: { slug: "one", phase: "spec-check + early-plan" } });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "running", working: [{ slug: "one", phase: "spec-check + early-plan" }] });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("several changes worked on at once are each named with their running phases", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "poll_seconds: 60\n");
+      await intent(t.path, "add-numbers", "status: building");
+      await intent(t.path, "say-goodbye", "status: building");
+      await intent(t.path, "idle", "status: accepted");
+      const trace = Trace.open(t.path);
+      trace.phaseStart("add-numbers", "build", "agent");
+      trace.phaseStart("say-goodbye", "verify", "agent");
+      trace.phaseStart("say-goodbye", "early-review", "agent");
+      trace.close();
+      const now = new Date();
+      const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
+      writeHeartbeat(t.path, {
+        pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1),
+        current: { slug: "add-numbers" }, working: ["add-numbers", "say-goodbye"], stopping: false, stopped: false,
+      });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({
+        state: "running", text: "Running — working on add-numbers and say-goodbye, last check 20s ago",
+        working: [{ slug: "add-numbers", phase: "build" }, { slug: "say-goodbye", phase: "verify + early-review" }],
+      });
+      // The page's pill: one change's phases as before, several changes each named beside theirs.
+      const page = await Bun.file(join(import.meta.dir, "..", "..", "src", "ui", "index.html")).text();
+      const source = page.match(/function loopText\(loop\) \{[\s\S]*?\n {2}\}/)?.[0];
+      expect(source).toBeDefined();
+      const loopText = new Function(`${source}; return loopText;`)() as (loop: unknown) => string;
+      expect(loopText({ text: "Running — x", working: [{ slug: "a", phase: "build" }] })).toBe("Running — x (build)");
+      expect(loopText({ text: "Running — x", working: [{ slug: "a", phase: "build" }, { slug: "b", phase: "verify + early-review" }] }))
+        .toBe("Running — x (a: build; b: verify + early-review)");
+      expect(loopText({ text: "Running — x", working: [{ slug: "a", phase: null }, { slug: "b", phase: "verify" }] })).toBe("Running — x (b: verify)");
+      expect(loopText({ text: "Stopped", working: [] })).toBe("Stopped");
     } finally {
       t.cleanup();
     }

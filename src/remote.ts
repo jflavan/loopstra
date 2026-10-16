@@ -1,5 +1,6 @@
 import type { Config } from "./config";
 import { Git, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL } from "./git";
+import { onMain } from "./lanes";
 import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -23,7 +24,8 @@ export const SYNC_TEXT = {
   unexpected: "Something unexpected went wrong bringing main up to date with GitHub; an engineer can find the details in the trace.",
 } as const;
 
-type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown> };
+/** `quiet`: not a sync problem (main was left behind on purpose), so no signal is recorded. */
+type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown>; quiet?: boolean };
 
 /**
  * Records the sync outcome as the `main_sync` signal, only when it differs from the last one, so a
@@ -31,7 +33,7 @@ type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?:
  * tick. The technical detail goes with it into the trace.
  */
 function recordSync(trace: Trace, o: SyncOutcome | null): void {
-  if (!o) return;
+  if (!o || o.quiet) return;
   const last = trace.lastSignal(SYNC_SIGNAL);
   if (last && last.result === o.result && last.output === o.text) return;
   trace.signal(SYNC_SIGNAL, o.result, o.text);
@@ -45,23 +47,30 @@ function recordSync(trace: Trace, o: SyncOutcome | null): void {
  * shareMain). Runs only when the checkout is on main with no staged or unstaged changes to tracked
  * files (the generated queue.md aside), so a person's work there is never touched. Never throws
  * (except for a stop request) and never stops the tick: the outcome is the `main_sync` signal, and a
- * rebase that conflicts is aborted. Returns the outcome's result (null without a remote).
+ * rebase that conflicts is aborted. Returns the outcome's result (null without a remote). It is one
+ * main-lock section: no other change commits on main while it is checked, fetched, rebased and pushed.
+ *
+ * `rebase: false` (while other changes are being worked on): main is fetched but never rebased, since
+ * a session of another change may be reading the main checkout, and during a rebase it briefly lacks
+ * the records not pushed yet. When main is behind, it waits ("waiting", with no signal: nothing is
+ * wrong), and the next tick's start brings it up to date while no change runs.
  */
-export async function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
-  const git = new Git(root);
-  const main = cfg.main_branch;
-  let outcome: SyncOutcome | null;
-  try {
-    outcome = await sync(git, main, trace);
-  } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
-  }
-  recordSync(trace, outcome);
-  return outcome?.result ?? null;
+export function syncMain(root: string, cfg: Config, trace: Trace, opts: { rebase?: boolean } = {}): Promise<SyncOutcome["result"] | null> {
+  return onMain(root, async () => {
+    const git = new Git(root);
+    let outcome: SyncOutcome | null;
+    try {
+      outcome = await sync(git, cfg.main_branch, trace, opts.rebase ?? true);
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
+    }
+    recordSync(trace, outcome);
+    return outcome?.result ?? null;
+  });
 }
 
-async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome | null> {
+async function sync(git: Git, main: string, trace: Trace, rebase: boolean): Promise<SyncOutcome | null> {
   const remote = await git.remoteName();
   if (!remote) return null;
   const branch = await git.currentBranch();
@@ -73,7 +82,7 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
   // queue.md is generated and rewritten later in this tick; its unsaved copy never holds up the sync.
   if (changed.length) await git.run(["checkout", "--", QUEUE], true);
 
-  const fetched = await git.run(["fetch", "--quiet", remote], true);
+  const fetched = await git.fetch(["--quiet", remote], true);
   if (fetched.code !== 0) return { result: "fail", text: SYNC_TEXT.unreachable, detail: { what: "fetch failed", remote, error: lastLine(fetched.err) || `exit ${fetched.code}` } };
 
   const upstream = `${remote}/${main}`;
@@ -81,6 +90,7 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
     return { result: "fail", text: SYNC_TEXT.noMain, detail: { what: "remote has no main", upstream } };
   }
   const behind = await git.countAhead(upstream, main);
+  if (behind > 0 && !rebase) return { result: "waiting", text: "", quiet: true };
   if (behind > 0) {
     const rebased = await rebaseMain(git, upstream);
     if (!rebased.ok) return { result: "fail", text: SYNC_TEXT.clash, detail: { what: "rebase onto the remote failed and was aborted; main is not synced", upstream, error: rebased.error } };
@@ -94,23 +104,25 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
  * once at the end of each tick, and before a pull request's branch is pushed. Main is pushed only when every commit the remote does not have is
  * Loopstra's own: a person's unpushed commits are theirs to share, so then nothing is pushed and
  * the signal waits. A push the remote refuses (a protected branch) is a `main_sync` failure; the
- * loop carries on. Never throws, except for a stop request.
+ * loop carries on. Never throws, except for a stop request. One main-lock section, like syncMain.
  */
-export async function shareMain(root: string, cfg: Config, trace: Trace): Promise<void> {
-  const git = new Git(root);
-  let outcome: SyncOutcome | null;
-  try {
-    const remote = await git.remoteName();
-    if (!remote) return;
-    const upstream = `refs/remotes/${remote}/${cfg.main_branch}`;
-    // Without the remote's main, the tick's sync reports it; nothing to compare with here.
-    if ((await git.run(["rev-parse", "--verify", "--quiet", upstream], true)).code !== 0) return;
-    outcome = await push(git, remote, cfg.main_branch, trace);
-  } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
-  }
-  recordSync(trace, outcome);
+export function shareMain(root: string, cfg: Config, trace: Trace): Promise<void> {
+  return onMain(root, async () => {
+    const git = new Git(root);
+    let outcome: SyncOutcome | null;
+    try {
+      const remote = await git.remoteName();
+      if (!remote) return;
+      const upstream = `refs/remotes/${remote}/${cfg.main_branch}`;
+      // Without the remote's main, the tick's sync reports it; nothing to compare with here.
+      if ((await git.run(["rev-parse", "--verify", "--quiet", upstream], true)).code !== 0) return;
+      outcome = await push(git, remote, cfg.main_branch, trace);
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
+    }
+    recordSync(trace, outcome);
+  });
 }
 
 /** Pushes main when only Loopstra's commits are ahead of the remote's main. Null: nothing new to record. */
@@ -175,14 +187,19 @@ async function replayMain(git: Git, upstream: string): Promise<{ ok: true; tookR
 
 /**
  * Pushes an intent branch to the remote for its pull request. The branch is Loopstra's own and the
- * merge checks may have rebased it, so it is force-pushed, but only over what Loopstra pushed last
- * time (`--force-with-lease`): work a person added on GitHub is never overwritten.
+ * merge checks may have rebased it, so it is force-pushed, but only when the remote's branch is still
+ * `lease` (the commit Loopstra last pushed there, or took from there): work a person added on GitHub
+ * is never overwritten, even when a fetch has seen it since. An empty lease: the remote must have no
+ * such branch. Without a lease (the first push of a build) the remote's branch must be what the last
+ * fetch saw. `moved`: refused because the remote's branch has changed.
  */
-export async function pushBranch(git: Git, branch: string): Promise<{ ok: true } | { ok: false; detail: string }> {
+export async function pushBranch(git: Git, branch: string, lease?: string): Promise<{ ok: true } | { ok: false; detail: string; moved?: true }> {
   const remote = await git.remoteName();
   if (!remote) return { ok: false, detail: "no remote" };
-  const r = await git.run(["push", "--quiet", "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
-  return r.code === 0 ? { ok: true } : { ok: false, detail: `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}` };
+  const r = await git.run(["push", "--quiet", lease !== undefined ? `--force-with-lease=${branch}:${lease}` : "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
+  if (r.code === 0) return { ok: true };
+  const detail = `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}`;
+  return /\(stale info\)/i.test(r.err) ? { ok: false, detail, moved: true } : { ok: false, detail };
 }
 
 /**

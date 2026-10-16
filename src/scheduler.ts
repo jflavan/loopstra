@@ -1,16 +1,18 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
+import { lanesFor, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { activePause, clearPause, heartbeatDayPause, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
-import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
+import { claim, laneEnded, laneStarted, oneMerge, release } from "./lanes";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, namesText, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { ownerNote, probeAssistant, setPhaseBoundary, STOPPED_NOTE } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { applyChatRequests } from "./chat/requests";
 import { runBuildStep } from "./stages/build";
@@ -23,7 +25,13 @@ import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStep
 import { Trace, type EventType } from "./trace";
 
 export interface TickResult {
+  /**
+   * The change of the first lane's last step, and what that step gave: with one change at a time,
+   * the step that did real work (or the last one that only looked). Every step is in `steps`.
+   */
   picked: string | null; result?: StepResult; signal?: string;
+  /** Every step the tick ran, lane by lane, each lane's in the order they ran. */
+  steps?: LaneStep[];
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
   /**
@@ -36,6 +44,18 @@ export interface TickResult {
   /** The tick itself hit an unexpected problem; the detail is in the trace. */
   crashed?: string;
 }
+
+/**
+ * One step a lane ran: the change, what the step gave, and how long it took. No result when a stop,
+ * an outage or the day's budget ended it (`stopped` says it was a stop).
+ */
+export interface LaneStep { slug: string; result?: StepResult; durationMs: number; stopped?: boolean }
+
+/** What ended a lane's step without a result. Handled once for the whole tick, after every lane has ended. */
+interface LaneProblem { slug: string; error: unknown }
+
+/** What the lanes of one tick share: the changes taken this tick, whether to start no more steps, and the problems met. */
+interface TickLanes { taken: Set<string>; halt: boolean; problems: LaneProblem[] }
 
 /** Statuses after a merge: the change's worktree and branch are no longer needed. */
 const MERGED_STATUSES = new Set(["merged", "verifying", "done"]);
@@ -82,7 +102,7 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
-    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlug);
+    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
@@ -99,8 +119,11 @@ export async function tick(root: string): Promise<TickResult> {
     }
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg)));
+    // With more than one change at a time, a change that would build into another's files waits.
+    const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     await cleanupLeftovers(root, cfg, trace, ordered);
+    await packWhileNoLaneRuns(root, trace);
 
     // The assistant was unavailable a moment ago: no step runs until the pause runs out.
     const pause = activePause(root);
@@ -120,30 +143,42 @@ export async function tick(root: string): Promise<TickResult> {
     }
     heartbeatDayPause(root, null);
 
-    // Pick and run one step. A step that only looked and found nothing to do yet (a pull request
-    // still waiting on GitHub) does not hold up the next change: it runs in the same tick. A change
-    // whose depends_on names one not merged yet waits, so it is never built on a main without it.
+    // Run steps for up to speed.max_parallel_changes changes at once, each in its own lane; the
+    // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
+    // never built on a main without it, and so does one waiting for another to merge the same files.
     const human = humanGates(cfg);
+    const candidates = ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
+    const lanes = lanesFor(cfg, trace);
+    traceLanes(trace, cfg, lanes);
     // With a remote, a pull request whose checks pass while another change's step runs merges
     // between that step's phases, not only on the next tick.
     if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
-    for (const next of ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length)) {
-      out.picked = next.slug;
-      heartbeatWorkingOn(root, next.slug);
-      out.result = await runStepGuarded(new StepContext(root, cfg, trace, next));
-      // Only merge steps wait, so a change merged between this step's phases is never run again from `ordered`.
-      if (!(out.result.ok && out.result.waiting)) break;
+    const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
+    const started = Date.now();
+    // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
+    const settled = await Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    const perLane = settled.map((s) => laneSteps(s, shared));
+    out.steps = perLane.flat();
+    // With one lane, as before: the step that did real work, or the last one that only looked.
+    const last = perLane.find((l) => l.length)?.at(-1);
+    out.picked = last?.slug ?? null;
+    out.result = last?.result;
+    if (lanes > 1 && out.steps.length) {
+      trace.event("_loop", "command", {
+        command: "changes worked on together", lanes, steps: out.steps.map((s) => s.slug),
+        durationMs: Date.now() - started, busyMs: out.steps.reduce((sum, s) => sum + s.durationMs, 0),
+      });
     }
-    return out;
+    return await afterLanes(root, cfg, trace, out, shared.problems, candidates);
   } catch (e) {
     if (e instanceof StopRequested) {
       // Not the intent's fault: it keeps its in-progress status and the step resumes on the next start.
-      trace.event(out.picked ?? "_loop", "stop", { note: "stopped by request; the step resumes on the next start" });
+      trace.event("_loop", "stop", { note: STOPPED_NOTE });
       out.stopped = true;
       return out;
     }
-    if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, e);
-    if (e instanceof LoopBudgetReached) return await afterDayBudget(root, cfg, trace, out);
+    if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, null, e);
+    if (e instanceof LoopBudgetReached) return await afterDayBudget(root, cfg, trace, out, []);
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
@@ -151,6 +186,180 @@ export async function tick(root: string): Promise<TickResult> {
     setPhaseBoundary(null);
     await endOfTick(root, cfg, trace, out, share);
     trace.close();
+  }
+}
+
+/**
+ * One lane: the pick loop over the tick's runnable changes (as one change at a time always ran it).
+ * It runs one step after another until a step does real work; a step that only looked and found
+ * nothing to do yet (a pull request still waiting on GitHub) lets it take the next change. The lanes
+ * share the list, and a change is taken and claimed in one go, so two lanes never run one change and
+ * the between-phases merge never runs a change a lane is running. A stop, an outage or the day's
+ * budget ends the lane, and no lane starts another step; the tick handles them once every lane has
+ * ended (afterLanes). It rejects only when the trace cannot be written while it records a problem
+ * (a full disk, a database held too long); see laneSteps.
+ */
+async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
+  const done: LaneStep[] = [];
+  laneStarted();
+  try {
+    for (;;) {
+      if (shared.halt || stopRequested()) return done;
+      const next = candidates.find((i) => takeChange(shared, i.slug));
+      if (!next) return done;
+      heartbeatWorkingOn(root, next.slug);
+      const t0 = Date.now();
+      try {
+        // Read again: a between-phases merge may have moved it since the scan.
+        const fresh = await readFresh(root, trace, next.slug);
+        if (!fresh || !isRunnable(fresh, human, hasRemote)) continue;
+        const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
+        done.push({ slug: next.slug, result, durationMs: Date.now() - t0 });
+        if (!(result.ok && result.waiting)) return done;
+      } catch (e) {
+        done.push(laneProblem(trace, shared, next.slug, e, Date.now() - t0));
+        return done;
+      } finally {
+        release(next.slug);
+        heartbeatDoneWith(root, next.slug);
+      }
+    }
+  } finally {
+    laneEnded();
+  }
+}
+
+/**
+ * A lane's steps once every lane has ended. A lane that rejected (see runLane) gives none, and its
+ * error marks the tick as crashed.
+ */
+function laneSteps(settled: PromiseSettledResult<LaneStep[]>, shared: TickLanes): LaneStep[] {
+  if (settled.status === "fulfilled") return settled.value;
+  shared.problems.push({ slug: "_loop", error: settled.reason });
+  return [];
+}
+
+/**
+ * Takes a change for a lane: false when a lane took it this tick already, or when it is claimed (the
+ * between-phases merge is running it). Either way no lane takes it again this tick. Synchronous, so
+ * two lanes never take one change.
+ */
+function takeChange(shared: TickLanes, slug: string): boolean {
+  if (shared.taken.has(slug)) return false;
+  shared.taken.add(slug);
+  return claim(slug);
+}
+
+/** A change read again from disk, or null (traced) when it cannot be read now; the next scan reports it. */
+async function readFresh(root: string, trace: Trace, slug: string): Promise<Intent | null> {
+  try {
+    return await readIntent(root, slug);
+  } catch (e) {
+    trace.event(slug, "error", { where: "lane", problem: "the change could not be read", error: errorText(e) });
+    return null;
+  }
+}
+
+/**
+ * A step ended with a stop, an outage, the day's budget, or (never expected) another problem. No
+ * lane starts another step. A stop, and a problem that is not an outage or the day's budget, are
+ * traced for the change now; an outage and the day's budget are handled once the lanes have ended
+ * (afterLanes).
+ */
+function laneProblem(trace: Trace, shared: TickLanes, slug: string, e: unknown, durationMs: number): LaneStep {
+  shared.halt = true;
+  shared.problems.push({ slug, error: e });
+  if (e instanceof StopRequested) {
+    // Not the change's fault: it keeps its in-progress status and the step resumes on the next start.
+    trace.event(slug, "stop", { note: STOPPED_NOTE });
+    return { slug, durationMs, stopped: true };
+  }
+  if (!notTheStepsFault(e)) trace.event(slug, "error", { where: "lane", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
+  return { slug, durationMs };
+}
+
+/**
+ * Once every lane has ended: a stop ends the tick; an outage is handled once, with the first change
+ * in queue order that met it as its cause, so back-off grows one step per tick however many lanes
+ * met it, and the probe never runs beside a step; the day's budget is handled for each change that
+ * ran out. Another problem marks the tick as crashed.
+ */
+async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResult, problems: LaneProblem[], candidates: Intent[]): Promise<TickResult> {
+  if (problems.some((p) => p.error instanceof StopRequested)) {
+    out.stopped = true;
+    return out;
+  }
+  const crash = problems.find((p) => !notTheStepsFault(p.error));
+  if (crash) out.crashed = errorText(crash.error).split("\n")[0] ?? "";
+  const place = (slug: string) => candidates.findIndex((i) => i.slug === slug);
+  const outage = problems.filter((p) => p.error instanceof AssistantUnavailable).sort((a, b) => place(a.slug) - place(b.slug))[0];
+  if (outage) await afterUnavailable(root, cfg, trace, out, outage.slug, outage.error as AssistantUnavailable);
+  const outOfDay = problems.filter((p) => p.error instanceof LoopBudgetReached).map((p) => p.slug);
+  if (outOfDay.length) await afterDayBudget(root, cfg, trace, out, outOfDay);
+  return out;
+}
+
+/**
+ * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
+ * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
+ * counts as one with no file list.
+ */
+export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
+  if (lanes <= 1) return new Map();
+  const files = new Map<string, string[] | null>();
+  for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
+    const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
+    files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
+  }
+  return fileHolds(ordered, files);
+}
+
+/** The trace's command name for fewer changes at a time than configured. */
+const FEWER_LANES = "changes at a time";
+
+/**
+ * Says when the day's budget gives fewer lanes than speed.max_parallel_changes (see lanesFor): once
+ * each time the number changes, and again on a new day, not on every tick. The number going back up
+ * to speed.max_parallel_changes during the day (a bigger day, a session's hold gone stale) is said
+ * too, so a later drop counts as a change.
+ */
+function traceLanes(trace: Trace, cfg: Config, lanes: number): void {
+  const configured = cfg.speed.max_parallel_changes;
+  const changes = (n: number) => `${n} change${n === 1 ? "" : "s"}`;
+  const last = trace.lastEvent("_loop", "command", `"command":"${FEWER_LANES}"`);
+  const today = last && last.ts >= startOfToday() ? (JSON.parse(last.payload) as { note?: string; lanes?: number; configured?: number }) : null;
+  if (lanes >= configured) {
+    if (today && (today.lanes ?? 0) < (today.configured ?? 0)) {
+      trace.event("_loop", "command", { command: FEWER_LANES, note: `Today's budget has room for ${changes(configured)} at a time again.`, lanes: configured, configured });
+    }
+    return;
+  }
+  const note = `Today's budget has room for ${changes(lanes)} at a time instead of ${configured}.`;
+  if (today?.note === note) return;
+  trace.event("_loop", "command", { command: FEWER_LANES, note, lanes, configured });
+}
+
+/** How long the tick start's git gc may take: a full repack of a large repository takes a while. */
+const GC_TIMEOUT_MS = 60 * 60_000;
+/** After a git gc failed, the next try waits this long, so a gc that cannot finish does not hold up every tick. */
+const GC_RETRY_MS = 24 * 60 * 60_000;
+
+/**
+ * Lets git pack the repository when it thinks it is time, while no lane runs. Runtime commits never
+ * do it themselves (gc.auto=0): a pack of the refs during one change's commit could make another
+ * change's commit fail. Traced only when it fails, and then not tried again for a day; never stops
+ * the tick.
+ */
+async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
+  const failed = trace.lastEvent("_loop", "error", '"where":"gc"');
+  if (failed && failed.ts > new Date(Date.now() - GC_RETRY_MS).toISOString()) return;
+  const note = "git could not pack the repository; it is tried again tomorrow";
+  try {
+    const r = await new Git(root).run(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"], { allowFail: true, timeoutMs: GC_TIMEOUT_MS });
+    if (r.code !== 0) trace.event("_loop", "error", { where: "gc", error: (r.err || r.out).trim(), note });
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event("_loop", "error", { where: "gc", error: errorText(e), note });
   }
 }
 
@@ -162,9 +371,11 @@ let mergingBetweenPhases = false;
 /**
  * Runs before each phase of a step (with a remote): the merge step of every other change that is
  * watching its pull request, so one whose checks passed (or that was approved) merges now rather
- * than after the whole running step. The queue is read again from disk each time. Not during a
- * merge step itself (those run one after another in the tick), nor inside one started here. A
- * problem is traced and never stops the running step; only a stop request passes through.
+ * than after the whole running step. The queue is read again from disk each time, and each change
+ * again just before its step. Not during a merge step itself, nor inside one started here, nor for
+ * a change a lane is running (claimed). While another change is merging, the pass is skipped and
+ * those changes merge later. A problem is traced and never stops the running step; only a stop
+ * request passes through.
  */
 async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, running: StepContext): Promise<void> {
   if (mergingBetweenPhases || WATCHING_PR.has(running.intent.file.frontmatter.status)) return;
@@ -177,8 +388,13 @@ async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, runnin
     for (const i of ordered) {
       if (i.slug === running.slug || !WATCHING_PR.has(i.file.frontmatter.status)) continue;
       if (!isRunnable(i, human, true) || waitingOn(i, ordered).length) continue;
-      const r = await runStepGuarded(new StepContext(root, cfg, trace, i));
-      if (!(r.ok && r.waiting)) trace.event(i.slug, "command", { command: "merge step between phases", during: running.slug, ok: r.ok });
+      if (!claim(i.slug)) continue;
+      try {
+        const ran = await oneMerge.tryRun(() => mergeBetweenPhases(root, cfg, trace, i.slug, running.slug), i.slug);
+        if (ran === null) return;
+      } finally {
+        release(i.slug);
+      }
     }
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -189,6 +405,21 @@ async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, runnin
 }
 
 /**
+ * The merge step of one watched change, run between another change's phases (under the merge lock
+ * and the change's claim). The change is read again first: it may have moved since the scan. Gives
+ * true once it is done with the change, so the merge lock's tryRun can tell it from "busy".
+ */
+async function mergeBetweenPhases(root: string, cfg: Config, trace: Trace, slug: string, during: string): Promise<true> {
+  const fresh = await readIntent(root, slug);
+  if (!WATCHING_PR.has(fresh.file.frontmatter.status) || !isRunnable(fresh, humanGates(cfg), true)) return true;
+  const ctx = new StepContext(root, cfg, trace, fresh);
+  ctx.betweenPhases = true;
+  const r = await runStepGuarded(ctx);
+  if (!(r.ok && r.waiting)) trace.event(slug, "command", { command: "merge step between phases", during, ok: r.ok });
+  return true;
+}
+
+/**
  * After the step: queue.md is brought up to date (uncommitted; the next runtime commit takes it
  * along), and with a remote, main is shared once for the whole tick. Best effort; not after a stop.
  * `share` is null when the tick stopped before it knew the checkout was on main.
@@ -196,9 +427,11 @@ async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, runnin
 async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResult, share: boolean | null): Promise<void> {
   if (share === null || stopRequested()) return;
   try {
-    if (out.picked) {
+    if (out.steps?.length) {
       const scan = await scanRepo(root);
-      await writeQueue(root, trace, renderQueue(orderQueue(scan.intents), scan.unreadable, humanGates(cfg)));
+      const ordered = orderQueue(scan.intents);
+      const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     }
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {
@@ -235,12 +468,12 @@ export const PROBE_AFTER = 3;
  * off before trying again. When the same phase keeps failing with the same line, a tiny probe
  * session tells an outage from the phase's own failure: the probe gets through → the pause ends
  * and the change is blocked like any crash (the detail, probe included, goes to the trace); the
- * probe does not → the loop keeps backing off.
+ * probe does not → the loop keeps backing off. `slug` is the change whose step met it (null outside a step).
  */
-async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, e: AssistantUnavailable): Promise<TickResult> {
-  const cause = out.picked && e.phase ? { slug: out.picked, phase: e.phase, line: e.line } : null;
+async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, slug: string | null, e: AssistantUnavailable): Promise<TickResult> {
+  const cause = slug && e.phase ? { slug, phase: e.phase, line: e.line } : null;
   const p = pauseAfterUnavailable(root, new Date(), cause);
-  trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
+  trace.event(slug ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
   out.paused = p.reason;
   if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
   // The probe is a session too: with the loop's day used up, keep backing off instead.
@@ -258,7 +491,7 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
       where: "probe", phase: cause.phase, line: cause.line, repeats: p.repeats,
       detail: `the ${cause.phase} phase failed ${p.repeats} times in a row with the same line, but a probe session reached the assistant, so the failure is the phase's own (crash)`,
     });
-    out.result = await blockSafely(ctx, ownerNote("crash"));
+    stepEnded(out, cause.slug, await blockSafely(ctx, ownerNote("crash")));
   } catch (err) {
     if (err instanceof StopRequested) { out.stopped = true; return out; }
     trace.event(cause.slug, "error", { where: "probe", error: errorText(err) });
@@ -292,30 +525,53 @@ const HAD_THE_DAY = 0.9;
  * with a note that says so, when it would start over and run out every day: the change's previous
  * such pause was on an earlier day at the same status, its status has not changed since (no status
  * change in the trace after it), and on both days the change itself spent at least HAD_THE_DAY of the day.
+ * `slugs` are the changes whose steps ran out (none when it happened outside a step); the day's note is
+ * written once.
  */
-async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult): Promise<TickResult> {
+async function afterDayBudget(root: string, cfg: Config, trace: Trace, out: TickResult, slugs: string[]): Promise<TickResult> {
   const spent = loopDaySpent(cfg, trace);
-  const slug = out.picked;
-  let intent: Intent | null = null;
-  if (slug && spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
-  const status = intent?.file.frontmatter.status;
-  const dayUsd = cfg.claude.max_budget_usd_per_day ?? 0;
-  const spentUsd = slug ? trace.costSince(slug, startOfToday(), { endedOnly: true }) : 0;
-  const hadTheDay = (usd: number | undefined, limit: number | undefined) => usd !== undefined && limit !== undefined && usd >= HAD_THE_DAY * limit;
-  if (slug && intent && hadTheDay(spentUsd, dayUsd)) {
-    const last = trace.lastEvent(slug, "pause", '"dayBudget":true');
-    const earlier = last ? (JSON.parse(last.payload) as { status?: string; spentUsd?: number; dayUsd?: number }) : null;
-    const moves: EventType[] = ["status_change", "person-changed-status"];
-    const movedSince = !!last && moves.some((t) => (trace.lastEvent(slug, t)?.id ?? 0) > last.id);
-    if (last && earlier && last.ts < startOfToday() && earlier.status === status && !movedSince && hadTheDay(earlier.spentUsd, earlier.dayUsd)) {
-      const ctx = new StepContext(root, cfg, trace, intent);
-      out.result = await blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, spentUsd, dayUsd, earlierPause: last.ts, earlierSpentUsd: earlier.spentUsd } });
-      return out;
-    }
+  let reason: string | undefined;
+  const paused = (): string => (reason ??= out.paused = dayPaused(root, cfg, spent));
+  if (!slugs.length) trace.event("_loop", "pause", { reason: paused() });
+  for (const slug of slugs) {
+    let intent: Intent | null = null;
+    if (spent) { try { intent = await readIntent(root, slug); } catch { /* unreadable now: only pause */ } }
+    const status = intent?.file.frontmatter.status;
+    const dayUsd = cfg.claude.max_budget_usd_per_day ?? 0;
+    const spentUsd = trace.costSince(slug, startOfToday(), { endedOnly: true });
+    const blocked = intent ? await blockOverTheDay(root, cfg, trace, intent, spentUsd, dayUsd) : null;
+    if (blocked) { stepEnded(out, slug, blocked); continue; }
+    trace.event(slug, "pause", intent ? { reason: paused(), dayBudget: true, status, spentUsd, dayUsd } : { reason: paused() });
   }
-  const reason = out.paused = dayPaused(root, cfg, spent);
-  trace.event(slug ?? "_loop", "pause", intent ? { reason, dayBudget: true, status, spentUsd, dayUsd } : { reason });
   return out;
+}
+
+/**
+ * Blocks a change whose step ran out of the day partway again (see afterDayBudget), and gives the
+ * result; null when it only pauses.
+ */
+async function blockOverTheDay(root: string, cfg: Config, trace: Trace, intent: Intent, spentUsd: number, dayUsd: number): Promise<StepResult | null> {
+  const hadTheDay = (usd: number | undefined, limit: number | undefined) => usd !== undefined && limit !== undefined && usd >= HAD_THE_DAY * limit;
+  if (!hadTheDay(spentUsd, dayUsd)) return null;
+  const slug = intent.slug;
+  const status = intent.file.frontmatter.status;
+  const last = trace.lastEvent(slug, "pause", '"dayBudget":true');
+  const earlier = last ? (JSON.parse(last.payload) as { status?: string; spentUsd?: number; dayUsd?: number }) : null;
+  const moves: EventType[] = ["status_change", "person-changed-status"];
+  const movedSince = !!last && moves.some((t) => (trace.lastEvent(slug, t)?.id ?? 0) > last.id);
+  if (!(last && earlier && last.ts < startOfToday() && earlier.status === status && !movedSince && hadTheDay(earlier.spentUsd, earlier.dayUsd))) return null;
+  const ctx = new StepContext(root, cfg, trace, intent);
+  return blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, spentUsd, dayUsd, earlierPause: last.ts, earlierSpentUsd: earlier.spentUsd } });
+}
+
+/**
+ * A step that ended without a result got one after the lanes (blocked by the probe or the day's
+ * rule). It is the tick's `result` only when that step is the one `picked` names.
+ */
+function stepEnded(out: TickResult, slug: string, result: StepResult): void {
+  if (slug === out.picked) out.result = result;
+  const step = out.steps?.findLast((s) => s.slug === slug);
+  if (step) step.result = result;
 }
 
 /**
@@ -486,6 +742,12 @@ async function sleepUnlessStopped(ms: number): Promise<void> {
   }
 }
 
+/** What a step gave, for the console line. */
+function stepText(r: StepResult): string {
+  if (!r.ok) return r.note;
+  return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
+}
+
 function log(line: string): void {
   console.log(`${new Date().toISOString()} ${line}`);
 }
@@ -507,11 +769,14 @@ export async function start(root: string, opts: { once: boolean; installSignals?
         beat.tickStarted();
         const r = await tick(root);
         if (r.error) console.error(`Config problem, will retry next tick:\n${r.error}`);
-        else if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
-        else if (r.stopped) log(`stopped${r.picked ? ` during ${r.picked}; it resumes on the next start` : ""}`);
-        else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
-        else if (r.picked) log(`${r.picked}: ${r.result?.ok ? (r.result.waiting ? "waiting for GitHub" : r.result.personChanged ? "a person changed the status; it is picked up next" : "step done") : r.result?.note}`);
-        else log("idle");
+        else {
+          for (const s of r.steps ?? []) if (s.result) log(`${s.slug}: ${stepText(s.result)}`);
+          const stopped = (r.steps ?? []).filter((s) => s.stopped).map((s) => s.slug);
+          if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
+          else if (r.stopped) log(`stopped${stopped.length ? ` during ${namesText(stopped)}; ${stopped.length > 1 ? "they resume" : "it resumes"} on the next start` : ""}`);
+          else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
+          else if (!r.steps?.length) log("idle");
+        }
         lastPaused = r.paused ?? "";
       } catch (e) {
         log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);

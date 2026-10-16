@@ -26,7 +26,19 @@ describe("loadConfig", () => {
     expect(cfg.stages.verify.model).toBe("default");
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     // Judges overlap by default; project commands share folders in some projects, so they do not.
-    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off" });
+    // One change at a time unless the owner says the project's commands can run side by side.
+    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off", max_parallel_changes: 1 });
+    t.cleanup();
+  });
+
+  test("speed.max_parallel_changes takes 1 to 4, and says so in plain words otherwise", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nspeed:\n  max_parallel_changes: 3\n");
+    expect((await loadConfig(t.path)).speed.max_parallel_changes).toBe(3);
+    for (const [value, error] of [["0", "must be 1 or more"], ["1.5", "must be a whole number"], ["5", "must be 4 or less"]]) {
+      await writeConfig(t.path, `version: 1\ncommands:\n  test: x\nspeed:\n  max_parallel_changes: ${value}\n`);
+      await expect(loadConfig(t.path)).rejects.toThrow(`speed.max_parallel_changes: ${error}`);
+    }
     t.cleanup();
   });
 

@@ -7,7 +7,7 @@ import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
   StepContext, block, blockNote, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
-  readArtifact, setStatus, writeArtifact, loadSessions, saveSession,
+  readArtifact, setStatus, writeArtifact, writeIntentPriority, loadSessions, saveSession,
 } from "../../src/context";
 import { lastCommit, tempGitRepo } from "../helpers";
 
@@ -137,6 +137,16 @@ describe("StepContext", () => {
     const i = await readIntent(repo.path, "x");
     expect(i.file.frontmatter.note).toBe("A project command failed. When that is sorted out, set status to accepted to try again.");
     expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("bun run lint"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("writeIntentPriority commits the priority at once (record priority) and leaves main clean", async () => {
+    const { repo, ctx, trace } = await setup();
+    await setStatus(ctx, "designing");
+    await writeIntentPriority(ctx, "high");
+    expect((await readIntent(repo.path, "x")).file.frontmatter.priority).toBe("high");
+    expect(await lastCommit(repo.path)).toContain("loopstra(x): record priority");
+    expect(await new Git(repo.path).isDirty()).toBe(false);
     trace.close(); repo.cleanup();
   });
 
