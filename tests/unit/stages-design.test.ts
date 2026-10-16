@@ -8,7 +8,7 @@ import { PLAN_AHEAD } from "../../src/stages/plan";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FIRST_NEEDS } from "../../src/judges";
-import { FAKE_CLAUDE, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { FAKE_CLAUDE, judgeNotes, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -452,8 +452,6 @@ describe("plan ahead", () => {
 });
 
 describe("cheaper judges on the spec check", () => {
-  const judgeNotes = (trace: Trace) => trace.events("add-numbers").filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
-
   test("shadow: a cheaper pass of a spec the strong judge rejects changes nothing; the rewrite gets the strong judge's findings", async () => {
     const dir = fixtureDir({ "spec-check@sonnet": fixture("spec-check"), "spec-check@opus-1": fixture("spec-check-reject") });
     try {

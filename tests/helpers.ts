@@ -116,6 +116,11 @@ export function seedCaught(root: string, trace: Trace, judge: JudgeName, n: numb
   }
 }
 
+/** The notes of a change's `judge` events, oldest first. */
+export function judgeNotes(trace: Trace, slug = "add-numbers"): string[] {
+  return trace.events(slug).filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
+}
+
 /** Sets environment variables and returns a function that puts back what was there before. */
 export function setEnv(vars: Record<string, string>): () => void {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));

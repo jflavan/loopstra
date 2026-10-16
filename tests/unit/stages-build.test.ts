@@ -10,7 +10,7 @@ import { reviewAhead } from "../../src/stages/early-review";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
-import { openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -378,7 +378,6 @@ describe("the first review alongside the verifier", () => {
     trace.close(); repo.cleanup();
   });
 
-  const judgeNotes = (trace: Trace) => trace.events("add-numbers").filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
   const earlyNotes = (trace: Trace) => trace.events("add-numbers").map((e) => JSON.parse(e.payload) as { command?: string; note?: string })
     .filter((p) => p.command === "early review").map((p) => p.note);
 

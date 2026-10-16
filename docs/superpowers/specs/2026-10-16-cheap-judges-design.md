@@ -19,7 +19,8 @@ It builds on part A as merged (`alongside(ctx, main, { what, run, wanted })`, ca
 an `AbortSignal`, `early-…` rows, `loopDayLeft` and `mayOverlap`), and on part F (the plan written
 while the spec check runs: `alongsideFirst`, the `early-plan` row). F pairs spec-check with the plan
 written ahead, so the judge runs beside other work there and calls
-`runJudge(ctx, phase, { alongside: 1 })`, as the early review does.
+`judgeFirst(ctx, phase, { alongside: 1 })`. The spec check and the plan challenge call `judgeFirst`;
+the review rounds and the early review (which passes `{ alongside: 1 }` too) call `runJudge`.
 
 ## Which judges
 
@@ -269,7 +270,9 @@ Why this rule:
 
 ### src/judges.ts (new)
 
-`JudgeName`, `passes`, `contradicts`, `runJudge`, `firstStanding`, `cheapMayDecide(ctx, phase, prompt)`
+`JudgeName`, `passes`, `contradicts`, `runJudge`, `judgeFirst` and `JudgeAnswer` (the verdict as
+soon as the deciding judge has it, with `rest` to wait for the comparison and `cancel` to call it
+off; `runJudge` is `judgeFirst` then `rest`), `firstStanding`, `cheapMayDecide(ctx, phase, prompt)`
 (first is on and earned now, for the early review) and `judgeReport(cfg, rows, templates)` (pure,
 for the report; `templates` maps each judge to the sha256 of its current prompt template).
 

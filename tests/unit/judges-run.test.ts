@@ -7,7 +7,7 @@ import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judge
 import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, seedCaught, setupRepo, tempDir, withEnv } from "../helpers";
+import { FAKE_CLAUDE, judgeNotes, seedCaught, setupRepo, tempDir, withEnv } from "../helpers";
 
 const SHADOW = "speed:\n  cheap_judges: shadow\n";
 const FIRST = "speed:\n  cheap_judges: first\n";
@@ -39,10 +39,6 @@ function readLines(path: string) {
   } catch {
     return [];
   }
-}
-
-function judgeNotes(trace: Trace): string[] {
-  return trace.events("add-numbers").filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
 }
 
 function phase(trace: Trace, name: string) {
