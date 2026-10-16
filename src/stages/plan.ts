@@ -1,4 +1,4 @@
-import { roomForTwo } from "../budget";
+import { roomFor } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor } from "../config";
 import { clearMarker, readMarker, writeMarker, type StepContext, type StepResult } from "../context";
@@ -62,7 +62,7 @@ async function planKey(ctx: StepContext, phase: AgentPhaseSpec): Promise<string 
  */
 function plansAhead(ctx: StepContext): boolean {
   const cfg = ctx.cfg;
-  return cfg.speed.plan_ahead && cfg.gates.spec.human === "none" && cfg.stages.plan.before.length === 0 && roomForTwo(cfg, ctx.trace);
+  return cfg.speed.plan_ahead && cfg.gates.spec.human === "none" && cfg.stages.plan.before.length === 0 && roomFor(cfg, ctx.trace, 2);
 }
 
 /**

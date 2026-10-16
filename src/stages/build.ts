@@ -1,7 +1,7 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { roomForTwo } from "../budget";
+import { roomFor } from "../budget";
 import { agentPhase, codePhase, optional, projectCommand, together } from "../phases";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./review";
 import type { CommandResult } from "../shell";
@@ -115,7 +115,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
   const { speed, stages } = ctx.cfg;
   if (!speed.overlap_judges || stages.build.after.length || stages.review.before.length) return false;
-  return roomForTwo(ctx.cfg, ctx.trace) && !(await wt.isDirty());
+  return roomFor(ctx.cfg, ctx.trace, 2) && !(await wt.isDirty());
 }
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */

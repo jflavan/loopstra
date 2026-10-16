@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
-import { roomForTwo } from "../budget";
+import { roomFor } from "../budget";
 import { agentPhase, optional, projectCommand, together } from "../phases";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
@@ -42,7 +42,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   });
   // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
   // is optional: an unavailable assistant or the day's budget leaves it to run after the done-check.
-  const [judged, early] = ctx.cfg.speed.overlap_judges && roomForTwo(ctx.cfg, ctx.trace)
+  const [judged, early] = ctx.cfg.speed.overlap_judges && roomFor(ctx.cfg, ctx.trace, 2)
     ? await together(ctx, [() => doneCheck(ctx, a), () => optional(ctx, "lessons", learn)] as const)
     : [await doneCheck(ctx, a), null];
   if (!judged.ok) return block(ctx, judged.note, judged);

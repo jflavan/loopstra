@@ -6,7 +6,7 @@ import { errorText } from "./shell";
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
   | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
-  | "chat-message" | "chat-request" | "chat-pr";
+  | "chat-message" | "chat-request" | "chat-pr" | "judge";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -22,6 +22,23 @@ export interface PhaseRow {
   started: string; ended: string | null; cost_usd: number; session_id: string | null; error: string | null;
 }
 
+/**
+ * One question a cheaper judge was asked (see src/judges.ts). `mode` is the setting (shadow or first);
+ * `how` is what ran: shadow (both judges, the strong one decided), alone (the cheaper judge passed and
+ * decided), or escalated (the cheaper judge did not pass, then the strong one decided). `strong` is null
+ * when the cheaper judge decided alone. Costs and times are null for a session that did not end ok.
+ */
+export interface JudgeRow {
+  id: number; slug: string; judge: string; trace_name: string; ts: string;
+  mode: "shadow" | "first"; how: "shadow" | "alone" | "escalated";
+  cheap_model: string; strong_model: string; template_sha: string; prompt_sha: string;
+  cheap: "pass" | "unsure" | "reject" | "failed"; strong: "pass" | "reject" | "failed" | null;
+  cheap_usd: number | null; strong_usd: number | null; cheap_ms: number | null; strong_ms: number | null;
+}
+
+/** A judges row as written: the trace adds the id, the change and the time. */
+export type NewJudgeRow = Omit<JudgeRow, "id" | "slug" | "ts">;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS intents (slug TEXT PRIMARY KEY, status TEXT NOT NULL, priority TEXT NOT NULL, updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS phases (slug TEXT NOT NULL, seq INTEGER NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
@@ -34,7 +51,40 @@ CREATE TABLE IF NOT EXISTS gates (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEX
   "check" TEXT NOT NULL, result TEXT NOT NULL, evidence TEXT NOT NULL, ts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ts TEXT NOT NULL,
   result TEXT NOT NULL, output TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS judges (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL,
+  judge TEXT NOT NULL, trace_name TEXT NOT NULL, ts TEXT NOT NULL, mode TEXT NOT NULL, how TEXT NOT NULL,
+  cheap_model TEXT NOT NULL, strong_model TEXT NOT NULL, template_sha TEXT NOT NULL, prompt_sha TEXT NOT NULL,
+  cheap TEXT NOT NULL, strong TEXT,
+  cheap_usd REAL, strong_usd REAL, cheap_ms INTEGER, strong_ms INTEGER);
 `;
+
+const JUDGE_COLUMNS = ["slug", "judge", "trace_name", "ts", "mode", "how", "cheap_model", "strong_model", "template_sha", "prompt_sha",
+  "cheap", "strong", "cheap_usd", "strong_usd", "cheap_ms", "strong_ms"] as const;
+
+/** "passed", "rejected", "could not answer": a strong verdict in words. */
+function decided(verdict: "pass" | "reject" | "failed"): string {
+  return verdict === "pass" ? "passed" : verdict === "reject" ? "rejected" : "could not answer";
+}
+
+/** What the cheaper judge did, in words: "rejected", "was unsure", "could not answer". */
+function cheapDid(verdict: "unsure" | "reject" | "failed"): string {
+  return verdict === "reject" ? "rejected" : verdict === "unsure" ? "was unsure" : "could not answer";
+}
+
+/** The plain note on a judge event: who decided, and whether the two judges agreed. */
+export function judgeNote(row: NewJudgeRow): string {
+  const cheap = `the cheaper judge (${row.cheap_model})`;
+  const strong = `the strong judge (${row.strong_model})`;
+  if (row.how === "alone" || row.strong === null) return `decided by ${cheap}: passed`;
+  if (row.how === "escalated") return `${cheap} ${row.cheap === "pass" ? "passed" : cheapDid(row.cheap)}, so ${strong} decided: ${decided(row.strong)}`;
+  if (row.strong === "failed") return `${strong} could not answer, so nothing was compared`;
+  if (row.cheap === "failed") return `${cheap} could not answer; ${strong} decided: ${decided(row.strong)}`;
+  if (row.cheap === "pass" && row.strong === "pass") return `${cheap} agreed with ${strong}: passed`;
+  if (row.cheap === "reject" && row.strong === "reject") return `${cheap} agreed with ${strong}: rejected`;
+  if (row.cheap === "unsure" && row.strong === "reject") return `${cheap} was unsure and ${strong} rejected; counted as agreed`;
+  if (row.cheap === "pass") return `${cheap} passed what ${strong} rejected; the strong judge decided`;
+  return `${cheap} ${row.cheap === "unsure" ? "was unsure of" : "rejected"} what ${strong} passed; the strong judge decided`;
+}
 
 const now = () => new Date().toISOString();
 
@@ -198,6 +248,19 @@ export class Trace {
     this.event(slug, "gate_check", { gate, check, result, evidence });
   }
 
+  /** Records one question a cheaper judge was asked, and a `judge` event: the row plus a plain note. */
+  judge(slug: string, row: NewJudgeRow): void {
+    const full = { slug, ts: now(), ...row };
+    this.db.run(`INSERT INTO judges (${JUDGE_COLUMNS.join(", ")}) VALUES (${JUDGE_COLUMNS.map(() => "?").join(", ")})`, JUDGE_COLUMNS.map((c) => full[c]));
+    // The note first: `loopstra tail` shortens long lines, and the note is what a person reads.
+    this.event(slug, "judge", { note: judgeNote(row), ...row });
+  }
+
+  /** Every judges row, oldest first. They are few; src/judges.ts filters them. */
+  judgeRows(): JudgeRow[] {
+    return this.db.query<JudgeRow, []>("SELECT * FROM judges ORDER BY id").all();
+  }
+
   signal(name: string, result: "pass" | "fail" | "error" | "waiting", output: string): void {
     this.db.run("INSERT INTO signals (name, ts, result, output) VALUES (?, ?, ?, ?)", [name, now(), result, output]);
     this.event("_signals", "signal", { name, result, output });
@@ -273,7 +336,8 @@ export class Trace {
     const i = this.db.query<{ slug: string; status: string; priority: string; updated: string }, [string]>("SELECT * FROM intents WHERE slug = ?").get(slug);
     if (!i) return null;
     const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
-    const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? ORDER BY seq DESC LIMIT 1").get(slug);
+    // A cheaper judge's row is never where a change is: it only runs beside (or before) the judge that decides.
+    const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? AND name NOT LIKE '%-cheap' ORDER BY seq DESC LIMIT 1").get(slug);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);
     return {
       slug: i.slug, status: i.status, priority: i.priority, updated: i.updated,

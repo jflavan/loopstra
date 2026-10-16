@@ -126,6 +126,8 @@ export const ConfigSchema = z.object({
     overlap_judges: z.boolean().default(true),
     /** The first plan is written while the spec's check runs; kept only if the spec passes, used only if nothing it read changed. */
     plan_ahead: z.boolean().default(true),
+    /** A cheaper judge (claude.models.default) for the spec check, plan challenge and review. off: none. shadow: it judges alongside the strong judge and is only recorded. first: it decides a pass alone once its record has earned it. */
+    cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow or first" }).default("off"),
   }).strict().prefault({}),
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),

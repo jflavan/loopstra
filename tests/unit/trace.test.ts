@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { Trace, useJournal } from "../../src/trace";
+import { judgeNote, Trace, useJournal, type NewJudgeRow } from "../../src/trace";
 import { tempDir } from "../helpers";
 
 describe("Trace", () => {
@@ -101,5 +101,69 @@ describe("Trace", () => {
       expect(useJournal(memory)).toContain("journal_mode=DELETE");
       memory.exec("CREATE TABLE t (x INTEGER)");
     } finally { memory.close(); }
+  });
+});
+
+describe("the judges table", () => {
+  const row = (over: Partial<NewJudgeRow> = {}): NewJudgeRow => ({
+    judge: "spec-check", trace_name: "spec-check", mode: "shadow", how: "shadow",
+    cheap_model: "sonnet", strong_model: "opus", template_sha: "t1", prompt_sha: "p1",
+    cheap: "pass", strong: "reject", cheap_usd: 0.1, strong_usd: 0.3, cheap_ms: 1000, strong_ms: 2000, ...over,
+  });
+
+  test("an old database gains the judges table when it is opened", () => {
+    const t = tempDir();
+    mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+    const old = new Database(join(t.path, ".loopstra", "trace.db"));
+    old.exec("CREATE TABLE intents (slug TEXT PRIMARY KEY, status TEXT NOT NULL, priority TEXT NOT NULL, updated TEXT NOT NULL)");
+    old.exec("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
+    old.close();
+    const trace = Trace.open(t.path);
+    try {
+      expect(trace.judgeRows()).toEqual([]);
+      trace.judge("x", row());
+      expect(trace.judgeRows()).toHaveLength(1);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("judge() writes the row and a judge event with a plain note to events.jsonl; judgeRows() reads them oldest first", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.judge("add-numbers", row());
+      trace.judge("other", row({ judge: "review", trace_name: "review-1", how: "alone", mode: "first", cheap: "pass", strong: null, strong_usd: null, strong_ms: null }));
+      const rows = trace.judgeRows();
+      expect(rows.map((r) => [r.slug, r.trace_name, r.how, r.strong])).toEqual([["add-numbers", "spec-check", "shadow", "reject"], ["other", "review-1", "alone", null]]);
+      expect(rows[0]).toMatchObject({ cheap_model: "sonnet", strong_model: "opus", template_sha: "t1", prompt_sha: "p1", cheap: "pass", cheap_usd: 0.1, strong_usd: 0.3, cheap_ms: 1000, strong_ms: 2000 });
+      expect(rows[0]!.ts).toMatch(/^\d{4}-/);
+      const jsonl = readFileSync(join(t.path, ".loopstra", "runs", "add-numbers", "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      expect(jsonl.map((e) => e.type)).toEqual(["judge"]);
+      expect(jsonl[0].payload).toMatchObject({ judge: "spec-check", cheap: "pass", strong: "reject",
+        note: "the cheaper judge (sonnet) passed what the strong judge (opus) rejected; the strong judge decided" });
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("a judge event's note says who decided, in plain words", () => {
+    expect(judgeNote(row({ cheap: "reject", strong: "reject" }))).toBe("the cheaper judge (sonnet) agreed with the strong judge (opus): rejected");
+    expect(judgeNote(row({ cheap: "pass", strong: "pass" }))).toBe("the cheaper judge (sonnet) agreed with the strong judge (opus): passed");
+    expect(judgeNote(row({ how: "alone", cheap: "pass", strong: null }))).toBe("decided by the cheaper judge (sonnet): passed");
+    expect(judgeNote(row({ how: "escalated", cheap: "unsure", strong: "reject" }))).toBe("the cheaper judge (sonnet) was unsure, so the strong judge (opus) decided: rejected");
+    expect(judgeNote(row({ cheap: "failed", strong: "pass" }))).toBe("the cheaper judge (sonnet) could not answer; the strong judge (opus) decided: passed");
+    expect(judgeNote(row({ cheap: "pass", strong: "failed" }))).toBe("the strong judge (opus) could not answer, so nothing was compared");
+  });
+
+  test("a change's last phase leaves out the cheaper judge's rows; its cost still counts them", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.upsertIntent("x", "designing", "normal");
+      const strong = trace.phaseStart("x", "spec-check", "agent");
+      const cheap = trace.phaseStart("x", "spec-check-cheap", "agent");
+      trace.phaseEnd("x", strong, { status: "success", costUsd: 0.3 });
+      trace.phaseEnd("x", cheap, { status: "fail", costUsd: 0.1, error: "invalid-envelope: x" });
+      const summary = trace.intentSummary("x")!;
+      expect([summary.lastPhase, summary.lastPhaseStatus]).toEqual(["spec-check", "success"]);
+      expect(summary.costUsd).toBeCloseTo(0.4);
+    } finally { trace.close(); t.cleanup(); }
   });
 });

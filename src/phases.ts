@@ -35,6 +35,8 @@ export interface AgentPhaseSpec {
   env?: Record<string, string>;
   /** Names of skills to mention at the top of the prompt. */
   skills?: string[];
+  /** false: a timeout or crash is not tried again (the cheaper judge: the strong judge stands behind it). Default true. */
+  retry?: boolean;
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
@@ -165,7 +167,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);
-  if (first.ok || !RETRIED.has(first.reason)) return first;
+  if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
   ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }

@@ -45,7 +45,17 @@ stages:
 # check. When the verifier fails, that review is thrown away and runs again after the fix.
 # plan_ahead: the first plan is written while the spec is being checked; it is thrown away if the
 # spec does not pass, and used only if nothing it read has changed.
-speed: { parallel_checks: false, overlap_judges: true, plan_ahead: true }
+# cheap_judges: off | shadow | first. A cheaper judge (claude.models.default) for the spec check,
+# the plan challenge and the review. shadow: it judges alongside the strong one on the same question
+# and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the
+# cheaper judge has also rejected the last 30 things the strong one rejected, it judges alone and a
+# pass stands; anything it rejects or is unsure of goes to the strong judge. Until then, first runs
+# as shadow.
+speed:
+  parallel_checks: false
+  overlap_judges: true
+  plan_ahead: true
+  cheap_judges: off
 
 signals:
   main_health: { every_minutes: 30 }

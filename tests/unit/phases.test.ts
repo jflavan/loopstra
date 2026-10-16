@@ -222,6 +222,20 @@ describe("agentPhase failures", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("with retry: false, a crash or a timeout is not retried", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:crash");
+      const crashed = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, retry: false });
+      expect(crashed.ok || crashed.reason).toBe("crash");
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:hang");
+      ctx.cfg.claude.timeout_minutes = 0.02;
+      const timedOut = await agentPhase(ctx, { name: "intake", traceName: "intake-2", model: "cheap", permissionMode: "default", tools: "read", vars: {}, retry: false });
+      expect(timedOut.ok || timedOut.reason).toBe("timeout");
+      expect(trace.phases("x").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:fail", "intake-2:fail"]);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
   test("a budget failure is not retried", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:budget");
