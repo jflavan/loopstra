@@ -26,7 +26,16 @@ describe("loadConfig", () => {
     expect(cfg.stages.verify.model).toBe("default");
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     // Judges overlap by default; project commands share folders in some projects, so they do not.
-    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true });
+    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true });
+    t.cleanup();
+  });
+
+  test("speed.plan_ahead can be switched off; an unknown speed key is still rejected", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nspeed:\n  plan_ahead: false\n");
+    expect((await loadConfig(t.path)).speed.plan_ahead).toBe(false);
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nspeed:\n  plan_early: true\n");
+    await expect(loadConfig(t.path)).rejects.toThrow(/plan_early/);
     t.cleanup();
   });
 

@@ -1,6 +1,10 @@
+import { roomForTwo } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
-import type { StepContext, StepResult } from "../context";
-import { runArtifactStep, type ArtifactStage } from "./artifact";
+import { modelFor } from "../config";
+import { writeMarker, type StepContext, type StepResult } from "../context";
+import { agentPhase, phasePrompt, type AgentPhaseSpec } from "../phases";
+import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
+import type { Artifacts } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
@@ -35,3 +39,48 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
 export function runPlanStep(ctx: StepContext): Promise<StepResult> {
   return runArtifactStep(ctx, PLAN);
 }
+
+/**
+ * Run-folder file: the first plan, written while spec-check judged the spec (see planAhead), with what
+ * it was asked (`key`) and the commit main was on when it started (`base`), as JSON.
+ */
+export const PLAN_AHEAD = "plan.ahead";
+
+/** What a plan session is asked: its model and the whole prompt (intent, spec, concerns, skills, template). Null without a prompt file. */
+async function planKey(ctx: StepContext, phase: AgentPhaseSpec): Promise<string | null> {
+  const prompt = await phasePrompt(ctx, phase);
+  return prompt === null ? null : [modelFor(ctx.cfg, phase.model), prompt].join("\n");
+}
+
+/**
+ * A plan is written ahead only when it is likely to be used and cannot starve the judge: the switch is
+ * on, no person is on the spec gate (they may take days and edit the spec), no plan before commands
+ * would run between the gate and the plan (the key cannot see what they change), and the day has room
+ * for two sessions.
+ */
+function plansAhead(ctx: StepContext): boolean {
+  const cfg = ctx.cfg;
+  return cfg.speed.plan_ahead && cfg.gates.spec.human === "none" && cfg.stages.plan.before.length === 0 && roomForTwo(cfg, ctx.trace);
+}
+
+/**
+ * The first plan, written on the spec the judge was given, by the same session the plan step would
+ * start (LOOPSTRA_PHASE stays plan). Returns what to keep if the spec passes, or null when the session
+ * did not finish (the plan step then plans as usual).
+ */
+async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | null> {
+  const phase = { ...writerPhase(ctx, PLAN, a, ""), traceName: "plan-ahead" }; // traceName is not part of the prompt
+  const key = await planKey(ctx, phase);
+  const base = await ctx.git.headSha(); // taken before the session starts, so any change after it counts
+  const r = await agentPhase(ctx, phase);
+  return key !== null && r.ok ? JSON.stringify({ key, base, envelope: r.envelope }) : null;
+}
+
+/** Keeps the plan written ahead for the plan step (see planAheadRun). */
+function keepPlanAhead(ctx: StepContext, kept: string): void {
+  writeMarker(ctx, PLAN_AHEAD, kept);
+  ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "kept for the plan step" });
+}
+
+/** The design step's spec-check runs this alongside (see ArtifactStage.ahead). */
+export const planAhead: AheadWork = { what: "plan ahead", when: plansAhead, run: planAheadRun, keep: keepPlanAhead };

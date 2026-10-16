@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
+import { PLAN_AHEAD } from "../../src/stages/plan";
 import type { Trace } from "../../src/trace";
-import { setupRepo, withEnv } from "../helpers";
+import { setEnv, setupRepo, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -15,6 +16,19 @@ function statusesSeen(trace: Trace): string[] {
 
 function phaseNames(trace: Trace): string[] {
   return trace.phases("add-numbers").map((p) => p.name);
+}
+
+/** The phases without the plan written alongside each spec-check (there must be one per spec-check). */
+function withoutPlanAhead(trace: Trace): string[] {
+  const names = phaseNames(trace);
+  expect(names.filter((n) => n === "plan-ahead")).toHaveLength(names.filter((n) => n === "spec-check").length);
+  return names.filter((n) => n !== "plan-ahead");
+}
+
+/** What the trace says happened to plans written ahead, in order. */
+function planAheadNotes(trace: Trace): string[] {
+  return trace.events("add-numbers").filter((e) => e.type === "command").map((e) => JSON.parse(e.payload) as { command: string; note?: string })
+    .filter((p) => p.command === "plan ahead").map((p) => p.note ?? "");
 }
 
 describe("design stage", () => {
@@ -73,8 +87,9 @@ describe("design stage", () => {
     await runDesignStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("blocked");
-    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check"]);
+    expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check"]);
     expect(i.file.frontmatter.note).toContain("could not be checked");
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
     trace.close(); repo.cleanup();
   });
 
@@ -145,6 +160,15 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("with speed.plan_ahead off, the phases are exactly as before", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  plan_ahead: false\n" });
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check"]);
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("intake's question is the note, with how to continue; nothing else runs", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-question");
@@ -153,5 +177,32 @@ describe("design stage", () => {
     expect(i.file.frontmatter.note).toBe("Which portal page should show the status? Update intent.md, then set status to accepted.");
     expect(phaseNames(trace)).toEqual(["intake"]);
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("plan ahead", () => {
+  test("the first plan is written while spec-check runs, and kept in the run folder when the spec passes", async () => {
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    try {
+      const { repo, ctx, trace } = await setupRepo("accepted");
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(withoutPlanAhead(trace)).toEqual(["intake", "design", "spec-check"]);
+      const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
+      // Judged by start order: on a slow machine the two sessions need not overlap in time.
+      expect(byName("plan-ahead").started < byName("spec-check").ended!).toBe(true);
+      const kept = JSON.parse(await Bun.file(join(ctx.runDir, PLAN_AHEAD)).text()) as { key: string; base: string; envelope: { plan_markdown: string } };
+      expect(kept.key).toContain(await Bun.file(join(repo.path, "intent", "add-numbers", "spec.md")).text());
+      expect(kept.base).toMatch(/^[0-9a-f]{40}$/);
+      expect(kept.envelope.plan_markdown).toContain("## Files that change");
+      expect(existsSync(join(repo.path, "intent", "add-numbers", "plan.md"))).toBe(false);
+      expect(planAheadNotes(trace)).toEqual(["kept for the plan step"]);
+      // The session written ahead is the plan session: same phase for hooks and the fake.
+      const prompt = await Bun.file(join(ctx.runDir, "phases", `${byName("plan-ahead").seq}-plan-ahead`, "prompt.md")).text();
+      expect(prompt).toContain("add(1, 2) returns 3");
+      trace.close(); repo.cleanup();
+    } finally {
+      restore();
+    }
   });
 });
