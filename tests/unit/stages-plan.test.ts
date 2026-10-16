@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { configPath } from "../../src/config";
 import type { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
@@ -8,9 +8,9 @@ import { readIntent } from "../../src/intents";
 import { setPhaseBoundary } from "../../src/phases";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD, runPlanStep } from "../../src/stages/plan";
-import { requestStop, resetStop } from "../../src/stop";
+import { resetStop } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, openRepo, setupRepo, tempDir, withEnv } from "../helpers";
+import { fixture, fixtureDir, openRepo, setupRepo, stopAfterPass, withEnv } from "../helpers";
 
 const HUMAN_PLAN = "gates:\n  plan:\n    human: status\n";
 
@@ -296,9 +296,8 @@ describe("plan written ahead", () => {
   });
 
   test("a plan written ahead that plan-challenge rejects is written again by a fresh plan session, told the concerns", async () => {
-    const dir = tempDir("loopstra-fixtures-");
+    const dir = fixtureDir({ "plan-challenge-1": fixture("plan-challenge-reject") });
     try {
-      writeFileSync(join(dir.path, "plan-challenge-1.jsonl"), readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", "plan-challenge-reject.jsonl")));
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
         const { repo, ctx, trace, designPhases } = await designed();
         await runPlanStep(ctx);
@@ -350,23 +349,14 @@ describe("cheaper judges on the plan challenge", () => {
   test("shadow: a stop after the strong judge passed the plan, while the cheaper judge still runs, keeps the pass", async () => {
     await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "plan-challenge@sonnet=60000" }, async () => {
       const { repo, ctx, trace } = await specApproved(SHADOW);
-      const passed = () => trace.phases("add-numbers").some((p) => p.name === "plan-challenge" && p.status === "success");
-      const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repo.path }).stdout.toString().includes("→ plan-approved");
-      // Stop a moment after the pass is committed, or a few seconds after the strong judge passed when it is not.
-      let since: number | null = null;
-      let asked = false;
-      const watch = setInterval(() => {
-        if (asked || !passed()) return;
-        since ??= Date.now();
-        if (committed() || Date.now() - since > 5000) { asked = true; setTimeout(requestStop, 300); }
-      }, 50);
+      const stopWatching = stopAfterPass(trace, repo.path, "plan-challenge", "plan-approved");
       try {
         expect(await runPlanStep(ctx)).toEqual({ ok: true });
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
         expect(trace.phases("add-numbers").find((p) => p.name === "plan-challenge-cheap")?.status).toBe("interrupted");
         expect(trace.judgeRows()).toEqual([]);
       } finally {
-        clearInterval(watch);
+        stopWatching();
         resetStop();
         trace.close(); repo.cleanup();
       }
@@ -391,15 +381,3 @@ describe("cheaper judges on the plan challenge", () => {
     }
   });
 });
-
-/** A shipped fake-claude fixture's text. */
-function fixture(name: string): string {
-  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
-}
-
-/** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
-function fixtureDir(files: Record<string, string>): { path: string; cleanup: () => void } {
-  const dir = tempDir("loopstra-fixtures-");
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
-  return dir;
-}

@@ -51,17 +51,20 @@ cheap_judges: z.enum(["off", "shadow", "first"], { error: "must be off, shadow o
 # once earned, a cheaper judge's pass stands.
 # parallel_checks: ...            (unchanged)
 # overlap_judges: ...             (unchanged)
+# plan_ahead: the first plan is written while the spec is being checked; it is stopped if the spec
+# does not pass, and used only if the code it read has not changed (files git ignores are not compared).
 # cheap_judges: off | shadow | first. A cheaper judge (claude.models.default) for the spec check,
 # the plan challenge and the review. shadow: it judges alongside the strong one on the same question
 # and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the
 # cheaper judge has also rejected the last 30 things the strong one rejected, it judges alone and a
 # pass stands; anything it rejects or is unsure of goes to the strong judge, and every 5th call runs
 # both as an audit. Until then, first runs as shadow. shadow and audits need room in the day's
-# budget for both sessions, so never with max_budget_usd_per_day and no max_budget_usd; then the
-# strong judge decides alone.
+# budget for both sessions (three beside the verifier or a plan written ahead), so never with
+# max_budget_usd_per_day and no max_budget_usd; then the strong judge decides alone.
 speed:
   parallel_checks: false
   overlap_judges: true
+  plan_ahead: true
   cheap_judges: off
 ```
 

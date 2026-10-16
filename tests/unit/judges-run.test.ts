@@ -1,27 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
 import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, judgeNotes, seedCaught, setupRepo, tempDir, withEnv } from "../helpers";
+import { fixture, fixtureDir, judgeNotes, seedCaught, setupRepo, withEnv } from "../helpers";
 
 const SHADOW = "speed:\n  cheap_judges: shadow\n";
 const FIRST = "speed:\n  cheap_judges: first\n";
 const SPEC_CHECK: AgentPhaseSpec & { name: "spec-check" } = { name: "spec-check", model: "strong", permissionMode: "default", tools: "read", vars: { intent: "add numbers", spec: "# Spec" } };
 
-/** A shipped fake-claude fixture's text. */
-function fixture(name: string): string {
-  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
-}
-
 /** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text), plus the calls and prompts files. */
 function fakeDir(files: Record<string, string>) {
-  const dir = tempDir("loopstra-fixtures-");
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
+  const dir = fixtureDir(files);
   const calls = join(dir.path, "calls.jsonl");
   const prompts = join(dir.path, "prompts.jsonl");
   return {

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
@@ -9,7 +9,7 @@ import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { copyRepo, FAKE_CLAUDE, lastCommit, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv } from "../helpers";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
 
@@ -78,11 +78,6 @@ async function build(config: string) {
 async function usePrompt(repo: string, name: string, text: string): Promise<void> {
   await Bun.write(join(repo, "loopstra", "prompts", `${name}.md`), text);
   await new Git(repo).commitAll(`test prompt ${name}`);
-}
-
-/** A shipped fake-claude fixture's text. */
-function fixture(name: string): string {
-  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
 }
 
 function phaseNames(trace: Trace): string[] {
@@ -255,13 +250,6 @@ describe("cheaper judges on the review", () => {
     const again = await openRepo(s.repo.path);
     rmSync(join(again.ctx.runDir, EARLY_REVIEW));
     return { repo: s.repo, ...again };
-  }
-
-  /** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
-  function fixtureDir(files: Record<string, string>) {
-    const dir = tempDir("loopstra-fixtures-");
-    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
-    return dir;
   }
 
   test("shadow: review.md, the revision's findings and the merge's findings check all follow the strong reviewer", async () => {

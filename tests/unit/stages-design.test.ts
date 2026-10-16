@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
@@ -8,7 +8,7 @@ import { PLAN_AHEAD } from "../../src/stages/plan";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FIRST_NEEDS } from "../../src/judges";
-import { FAKE_CLAUDE, judgeNotes, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { fixture, fixtureDir, judgeNotes, seedCaught, setEnv, setupRepo, stopAfterPass, withEnv } from "../helpers";
 
 const HUMAN_SPEC = "gates:\n  spec:\n    human: status\n";
 
@@ -513,17 +513,7 @@ describe("cheaper judges on the spec check", () => {
     await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "spec-check@sonnet=60000" }, async () => {
       const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\n" });
       await hangingPlan(repo.path);
-      const passed = () => trace.phases("add-numbers").some((p) => p.name === "spec-check" && p.status === "success");
-      const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repo.path }).stdout.toString().includes("→ spec-approved");
-      // Stop a moment after the pass is committed. A step that does not commit it while the cheaper
-      // judge runs is stopped a few seconds after the strong judge passed, so it fails here.
-      let since: number | null = null;
-      let asked = false;
-      const watch = setInterval(() => {
-        if (asked || !passed()) return;
-        since ??= Date.now();
-        if (committed() || Date.now() - since > 5000) { asked = true; setTimeout(requestStop, 300); }
-      }, 50);
+      const stopWatching = stopAfterPass(trace, repo.path, "spec-check", "spec-approved");
       try {
         expect(await runDesignStep(ctx)).toEqual({ ok: true });
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
@@ -535,7 +525,7 @@ describe("cheaper judges on the spec check", () => {
         expect(judgeNotes(trace)).toEqual(["not compared: stopped by request"]);
         expect(planAheadNotes(trace)).toEqual(["not kept: stopped by request"]);
       } finally {
-        clearInterval(watch);
+        stopWatching();
         resetStop();
         trace.close(); repo.cleanup();
       }
@@ -575,15 +565,3 @@ describe("cheaper judges on the spec check", () => {
     trace.close(); repo.cleanup();
   });
 });
-
-/** A shipped fake-claude fixture's text. */
-function fixture(name: string): string {
-  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
-}
-
-/** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
-function fixtureDir(files: Record<string, string>): { path: string; cleanup: () => void } {
-  const dir = tempDir("loopstra-fixtures-");
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
-  return dir;
-}

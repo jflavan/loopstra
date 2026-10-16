@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FAKE_CLAUDE_ENV } from "../src/claude";
 import { configPath, loadConfig } from "../src/config";
@@ -8,6 +8,7 @@ import { StepContext } from "../src/context";
 import { Git } from "../src/git";
 import { readIntent } from "../src/intents";
 import { templateSha, type JudgeName } from "../src/judges";
+import { requestStop } from "../src/stop";
 import { Trace, type NewJudgeRow } from "../src/trace";
 
 /** The fake `claude` executable and the shipped prompt templates, as file system paths. */
@@ -17,6 +18,18 @@ export const TEMPLATES = fileURLToPath(new URL("../templates/prompts", import.me
 export function tempDir(prefix = "loopstra-"): { path: string; cleanup: () => void } {
   const path = mkdtempSync(join(tmpdir(), prefix));
   return { path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
+}
+
+/** A shipped fake-claude fixture's text. */
+export function fixture(name: string): string {
+  return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");
+}
+
+/** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text). */
+export function fixtureDir(files: Record<string, string>): { path: string; cleanup: () => void } {
+  const dir = tempDir("loopstra-fixtures-");
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir.path, `${name}.jsonl`), text);
+  return dir;
 }
 
 export async function run(cmd: string[], cwd: string): Promise<{ code: number; out: string; err: string }> {
@@ -119,6 +132,25 @@ export function seedCaught(root: string, trace: Trace, judge: JudgeName, n: numb
 /** The notes of a change's `judge` events, oldest first. */
 export function judgeNotes(trace: Trace, slug = "add-numbers"): string[] {
   return trace.events(slug).filter((e) => e.type === "judge").map((e) => (JSON.parse(e.payload) as { note: string }).note);
+}
+
+/**
+ * Asks the loop to stop a moment after `phase` passed and the commit moving the change to `status`
+ * is on main. A step that does not commit the pass while other sessions still run is stopped a few
+ * seconds after the phase passed anyway, so a test of "the pass is kept" fails there. Gives the
+ * function that ends the watching; call it in a finally, with resetStop.
+ */
+export function stopAfterPass(trace: Trace, repoPath: string, phase: string, status: string): () => void {
+  const passed = () => trace.phases("add-numbers").some((p) => p.name === phase && p.status === "success");
+  const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repoPath }).stdout.toString().includes(`→ ${status}`);
+  let since: number | null = null;
+  let asked = false;
+  const watch = setInterval(() => {
+    if (asked || !passed()) return;
+    since ??= Date.now();
+    if (committed() || Date.now() - since > 5000) { asked = true; setTimeout(requestStop, 300); }
+  }, 50);
+  return () => clearInterval(watch);
 }
 
 /** Sets environment variables and returns a function that puts back what was there before. */
