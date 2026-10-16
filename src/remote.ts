@@ -24,7 +24,8 @@ export const SYNC_TEXT = {
   unexpected: "Something unexpected went wrong bringing main up to date with GitHub; an engineer can find the details in the trace.",
 } as const;
 
-type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown> };
+/** `quiet`: not a sync problem (main was left behind on purpose), so no signal is recorded. */
+type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown>; quiet?: boolean };
 
 /**
  * Records the sync outcome as the `main_sync` signal, only when it differs from the last one, so a
@@ -32,7 +33,7 @@ type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?:
  * tick. The technical detail goes with it into the trace.
  */
 function recordSync(trace: Trace, o: SyncOutcome | null): void {
-  if (!o) return;
+  if (!o || o.quiet) return;
   const last = trace.lastSignal(SYNC_SIGNAL);
   if (last && last.result === o.result && last.output === o.text) return;
   trace.signal(SYNC_SIGNAL, o.result, o.text);
@@ -48,13 +49,18 @@ function recordSync(trace: Trace, o: SyncOutcome | null): void {
  * (except for a stop request) and never stops the tick: the outcome is the `main_sync` signal, and a
  * rebase that conflicts is aborted. Returns the outcome's result (null without a remote). It is one
  * main-lock section: no other change commits on main while it is checked, fetched, rebased and pushed.
+ *
+ * `rebase: false` (while other changes are being worked on): main is fetched but never rebased, since
+ * a session of another change may be reading the main checkout, and during a rebase it briefly lacks
+ * the records not pushed yet. When main is behind, it waits ("waiting", with no signal: nothing is
+ * wrong), and the next tick's start brings it up to date while no change runs.
  */
-export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
+export function syncMain(root: string, cfg: Config, trace: Trace, opts: { rebase?: boolean } = {}): Promise<SyncOutcome["result"] | null> {
   return onMain(root, async () => {
     const git = new Git(root);
     let outcome: SyncOutcome | null;
     try {
-      outcome = await sync(git, cfg.main_branch, trace);
+      outcome = await sync(git, cfg.main_branch, trace, opts.rebase ?? true);
     } catch (e) {
       if (e instanceof StopRequested) throw e;
       outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
@@ -64,7 +70,7 @@ export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncO
   });
 }
 
-async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome | null> {
+async function sync(git: Git, main: string, trace: Trace, rebase: boolean): Promise<SyncOutcome | null> {
   const remote = await git.remoteName();
   if (!remote) return null;
   const branch = await git.currentBranch();
@@ -84,6 +90,7 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
     return { result: "fail", text: SYNC_TEXT.noMain, detail: { what: "remote has no main", upstream } };
   }
   const behind = await git.countAhead(upstream, main);
+  if (behind > 0 && !rebase) return { result: "waiting", text: "", quiet: true };
   if (behind > 0) {
     const rebased = await rebaseMain(git, upstream);
     if (!rebased.ok) return { result: "fail", text: SYNC_TEXT.clash, detail: { what: "rebase onto the remote failed and was aborted; main is not synced", upstream, error: rebased.error } };

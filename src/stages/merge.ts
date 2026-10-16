@@ -3,7 +3,7 @@ import { assertRootOnMain, block, clearMarker, onceMarker, readArtifact, readMar
 import { evaluateGate, type Check } from "../gates";
 import { bookkeeping, Git, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
-import { onMain } from "../lanes";
+import { lanesRunning, oneMerge, onMain } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, pushBranch, shareMain, syncMain } from "../remote";
@@ -257,19 +257,24 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  */
 async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
   const main = ctx.cfg.main_branch;
+  // While other changes are worked on, main is not rebased here: a session of theirs may be reading it.
+  const rebase = lanesRunning() <= 1;
   // One main-lock section: nothing commits between the person's edits, the sync and the look at main.
   const hasIt = await onMain(ctx.root, async () => {
     // A status a person saved without committing would keep the sync from touching main. Off main,
     // the sync is skipped anyway and says so.
     if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
-    await syncMain(ctx.root, ctx.cfg, ctx.trace);
+    await syncMain(ctx.root, ctx.cfg, ctx.trace, { rebase });
     return pr.mergeCommit
       ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
       : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
   });
   if (!hasIt) {
     if (onceMarker(ctx, MAIN_BEHIND)) {
-      ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting: `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`, pr: pr.number, mergeCommit: pr.mergeCommit });
+      const waiting = rebase
+        ? `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`
+        : `the pull request is merged; ${main} here is brought up to date at the start of the next check, because other changes are being worked on`;
+      ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting, pr: pr.number, mergeCommit: pr.mergeCommit });
     }
     return { ok: true, waiting: true };
   }
@@ -285,12 +290,32 @@ const REVIEW_AGAIN = "review-again";
  * passMergeGate) and the merge step (merge-approved, or merge-review with no person; `onPass`
  * merges): its automated checks run, and then `onPass`. Fixes the checks committed go back for one
  * more review round (see anotherRound), so nothing reaches main that a review did not see.
+ *
+ * Without a remote it holds the merge lock from the checks to the merge: one change at a time is
+ * checked and merged, so between its checks and its merge main only gains records under intent/.
+ * The next change is checked against main with the first one's code, and its tests run again. With
+ * a remote the checks only open a pull request; the lock is taken where it merges (runRemoteMerge).
  */
 async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult | typeof REVIEW_AGAIN> {
-  const verdict = await checkMerge(ctx);
-  if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
-  if (verdict.result === "pass") return onPass();
-  return anotherRound(ctx);
+  const gate = async () => {
+    const verdict = await checkMerge(ctx);
+    if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
+    if (verdict.result === "pass") return onPass();
+    return anotherRound(ctx);
+  };
+  return (await ctx.git.remoteName()) === null ? oneMergeAtATime(ctx, gate) : gate();
+}
+
+/**
+ * Runs `fn` under the merge lock, as this change. When another change holds it, the trace says so
+ * once, before waiting: "waits for add-numbers to finish merging first".
+ */
+function oneMergeAtATime<T>(ctx: StepContext, fn: () => Promise<T>): Promise<T> {
+  if (!oneMerge.heldHere() && oneMerge.busy()) {
+    const holder = oneMerge.holder();
+    ctx.trace.event(ctx.slug, "command", { command: "merge lock", waiting: `waits for ${holder && holder !== ctx.slug ? holder : "another change"} to finish merging first` });
+  }
+  return oneMerge.run(fn, ctx.slug);
 }
 
 /**

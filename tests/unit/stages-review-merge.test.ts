@@ -12,6 +12,7 @@ import type { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv } from "../helpers";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
+import { oneMerge } from "../../src/lanes";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 const PERSON_MERGES = "gates:\n  merge:\n    human: status\n";
@@ -308,6 +309,32 @@ describe("merge", () => {
     // The next tick checks main's health, attributed to this change.
     expect(await Bun.file(join(repo.path, ".loopstra", "health-pending")).text()).toBe("add-numbers");
     expect(await new Git(repo.path).isDirty()).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("without a remote the merge checks wait for another change's merge to finish, and the trace says so once", async () => {
+    const { repo, ctx, trace } = await built();
+    let release = () => {};
+    const otherMerging = new Promise<void>((resolve) => { release = resolve; });
+    const held = oneMerge.run(() => otherMerging, "say-goodbye");
+    const step = runMergeStep(ctx);
+    let checkedMeanwhile: string[];
+    try {
+      // The review runs first; the merge checks then wait for the lock.
+      const until = Date.now() + 20_000;
+      while (Date.now() < until && !trace.events("add-numbers").some((e) => e.payload.includes("\"merge lock\""))) await Bun.sleep(20);
+      await Bun.sleep(200);
+      checkedMeanwhile = gateRows(trace, "merge");
+    } finally {
+      release();
+    }
+    await held;
+    await step;
+    expect(checkedMeanwhile).toEqual([]);
+    expect(await status(repo.path)).toBe("merged");
+    const waits = trace.events("add-numbers").filter((e) => e.payload.includes("\"merge lock\""));
+    expect(waits.map((e) => JSON.parse(e.payload).waiting)).toEqual(["waits for say-goodbye to finish merging first"]);
+    expect(oneMerge.busy()).toBe(false);
     trace.close(); repo.cleanup();
   });
 

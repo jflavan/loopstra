@@ -186,6 +186,29 @@ describe("syncMain", () => {
     s.cleanup();
   });
 
+  test("asked not to rebase (other changes are being worked on), it fetches, leaves main as it is, waits, and records no signal", async () => {
+    const s = await setup();
+    await syncMain(s.repo, s.cfg, s.trace);
+    const signals = () => s.trace.signals().filter((x) => x.name === SYNC_SIGNAL).length;
+    const before = signals();
+    await pushFromOther(s.other, "theirs.md", "theirs\n");
+    const head = (await run(["git", "rev-parse", "main"], s.repo)).out.trim();
+    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("waiting");
+    expect((await run(["git", "rev-parse", "main"], s.repo)).out.trim()).toBe(head);
+    expect(existsSync(join(s.repo, "theirs.md"))).toBe(false);
+    // Fetched: the remote's main is known here, ready for the next sync.
+    expect((await run(["git", "cat-file", "-e", "origin/main:theirs.md"], s.repo)).code).toBe(0);
+    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "pass", output: SYNC_TEXT.inStep });
+    expect(signals()).toBe(before);
+    expect(syncErrors(s.trace)).toEqual([]);
+    expect(s.trace.events("_loop").some((e) => e.payload.includes("\"sync main\""))).toBe(false);
+
+    // Not behind: the same as an ordinary sync.
+    expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
+    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("pass");
+    s.cleanup();
+  });
+
   test("a remote that cannot be reached is traced and never throws", async () => {
     const s = await setup();
     rmSync(s.remote, { recursive: true, force: true });

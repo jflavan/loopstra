@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath } from "../../src/config";
@@ -10,46 +10,66 @@ import { lanesRunning } from "../../src/lanes";
 import { tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
 afterEach(() => resetStop());
 
-interface Change { slug: string; status: string; dependsOn?: string[] }
+/**
+ * A change in a test repository. `writes`: the files its build writes (path → content); by default
+ * only its own src/<slug>.ts, so changes never conflict. Its plan lists them. `planFiles`: the plan's
+ * file list instead (null: a plan with no Files that change section).
+ */
+interface Change { slug: string; status: string; dependsOn?: string[]; writes?: Record<string, string>; planFiles?: string[] | null }
 
-/** A plan whose only file is the change's own. */
-const planFor = (slug: string) => `# Plan: ${slug}\n\n## Files that change\n- src/${slug}.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n`;
+/** The files a change's build writes. */
+const writesOf = (c: Change) => c.writes ?? { [`src/${c.slug}.ts`]: "export function add(a: number, b: number): number {\n  return a + b;\n}\n" };
+
+/** A plan that lists the files the change's build writes (or `planFiles`). */
+function planFor(c: Change): string {
+  const files = c.planFiles === undefined ? Object.keys(writesOf(c)) : c.planFiles;
+  const list = files === null ? "" : `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n`;
+  return `# Plan: ${c.slug}\n\n${list}## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n`;
+}
+
+/** The change's build session, as a fake fixture: it writes the change's files. */
+function buildFixture(c: Change): string {
+  const lines = fixture("build").split("\n").filter((l) => l.trim());
+  const writes = Object.entries(writesOf(c)).map(([path, content]) => JSON.stringify({ type: "fake_action", write: { path, content } }));
+  return [lines[0], ...writes, lines.at(-1)].join("\n") + "\n";
+}
 
 /** Statuses at which a change already has its spec and plan. */
 const PLANNED = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
 
+/** Writes a change's intent (and spec and plan at the planned statuses), and its own build fixture. Not committed. */
+async function writeChange(path: string, fixtures: string, c: Change): Promise<void> {
+  const dir = join(path, "intent", c.slug);
+  mkdirSync(dir, { recursive: true });
+  const deps = c.dependsOn ? `depends_on: [${c.dependsOn.join(", ")}]\n` : "";
+  await Bun.write(join(dir, "intent.md"), `---\nstatus: ${c.status}\n${deps}---\n# Intent: ${c.slug}\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n`);
+  if (PLANNED.has(c.status)) {
+    await Bun.write(join(dir, "spec.md"), "# Spec\n\n## Summary\ns\n");
+    await Bun.write(join(dir, "plan.md"), planFor(c));
+  }
+  mkdirSync(join(fixtures, c.slug), { recursive: true });
+  writeFileSync(join(fixtures, c.slug, "build.jsonl"), buildFixture(c));
+}
+
 /**
- * A repository with Loopstra set up, `max_parallel_changes: n`, and these changes. Each change's
- * build writes its own file (src/<slug>.ts), from its own fixture folder, so changes never conflict.
+ * A repository with Loopstra set up, `max_parallel_changes: n`, these changes, and `files` committed
+ * on main. Each change's build comes from its own fixture folder.
  */
-async function lanesRepo(n: number, changes: Change[], config = "") {
+async function lanesRepo(n: number, changes: Change[], config = "", files: Record<string, string> = {}) {
   const repo = await tempGitRepo();
   mkdirSync(join(repo.path, "loopstra"), { recursive: true });
   cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
   await Bun.write(configPath(repo.path), `version: 1\ncommands:\n  test: echo ok\nspeed:\n  max_parallel_changes: ${n}\n${config}`);
-  for (const c of changes) {
-    const dir = join(repo.path, "intent", c.slug);
-    mkdirSync(dir, { recursive: true });
-    const deps = c.dependsOn ? `depends_on: [${c.dependsOn.join(", ")}]\n` : "";
-    await Bun.write(join(dir, "intent.md"), `---\nstatus: ${c.status}\n${deps}---\n# Intent: ${c.slug}\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n`);
-    if (PLANNED.has(c.status)) {
-      await Bun.write(join(dir, "spec.md"), "# Spec\n\n## Summary\ns\n");
-      await Bun.write(join(dir, "plan.md"), planFor(c.slug));
-    }
-  }
-  await new Git(repo.path).commitAll("setup");
+  for (const [path, content] of Object.entries(files)) await Bun.write(join(repo.path, path), content);
   const fixtures = tempDir("loopstra-fixtures-");
-  for (const c of changes) {
-    mkdirSync(join(fixtures.path, c.slug), { recursive: true });
-    const build = fixture("build").replace('"path":"src/add.ts"', `"path":"src/${c.slug}.ts"`).split("\n").filter((l) => !l.includes("tests/add.test.ts")).join("\n");
-    writeFileSync(join(fixtures.path, c.slug, "build.jsonl"), build);
-  }
+  for (const c of changes) await writeChange(repo.path, fixtures.path, c);
+  await new Git(repo.path).commitAll("setup");
   const env: Record<string, string> = { LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path };
   return { path: repo.path, fixtures: fixtures.path, env, cleanup: () => { repo.cleanup(); fixtures.cleanup(); } };
 }
@@ -71,6 +91,24 @@ async function expirePause(repo: string): Promise<void> {
 }
 
 const payloadOf = <T>(e: { payload: string }) => JSON.parse(e.payload) as T;
+
+/** A file of 20 numbered lines, with `edit` replacing some of them (by line number). */
+function numbered(edit: Record<number, string> = {}): string {
+  return Array.from({ length: 20 }, (_, i) => edit[i + 1] ?? `line ${i + 1}`).join("\n") + "\n";
+}
+
+/** The id of the event that ended a change's (first) phase called `name`. */
+function phaseEndId(trace: Trace, slug: string, name: string): number {
+  const events = trace.events(slug);
+  const start = events.findIndex((e) => e.type === "phase_start" && payloadOf<{ name: string }>(e).name === name);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return events.slice(start).find((e) => e.type === "phase_end")!.id;
+}
+
+/** The changes in the order their merge phases ended. */
+function mergeOrder(trace: Trace, slugs: string[]): string[] {
+  return [...slugs].sort((a, b) => phaseEndId(trace, a, "merge") - phaseEndId(trace, b, "merge"));
+}
 
 describe("more than one change at a time (speed.max_parallel_changes)", () => {
   test("two accepted changes both reach their next status in one tick; the second starts before the first ends", async () => {
@@ -250,6 +288,51 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     roomy.cleanup();
   }, 180_000);
 
+  test("two changes reaching a local merge together merge one at a time: the second is tested again on a main with the first", async () => {
+    const r = await lanesRepo(2, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 20: "beta" }) } },
+    ], "", { "src/shared.ts": numbered() });
+    await withEnv(r.env, async () => {
+      await tick(r.path); // both build
+      expect(await statusOf(r.path, "alpha")).toBe("reviewing");
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      await tick(r.path); // both are reviewed and merge
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      expect(await statusOf(r.path, "beta")).toBe("merged");
+      expect((await new Git(r.path).run(["show", "main:src/shared.ts"])).out).toBe(numbered({ 1: "alpha", 20: "beta" }));
+      inTrace(r.path, (trace) => {
+        const [first, second] = mergeOrder(trace, ["alpha", "beta"]) as [string, string];
+        // The second's merge checks ran after the first had merged, and ran the tests again: the code changed.
+        const retest = trace.events(second).find((e) => e.type === "phase_start" && payloadOf<{ name: string }>(e).name === "merge-test-1");
+        expect(retest).toBeDefined();
+        expect(retest!.id).toBeGreaterThan(phaseEndId(trace, first, "merge"));
+        expect(trace.phases(first).some((p) => p.name === "merge-test-1")).toBe(false);
+      });
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("two changes that clash: the first merges, the second is blocked as out of date, and main keeps only the first", async () => {
+    const r = await lanesRepo(2, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) } },
+    ], "", { "src/shared.ts": numbered() });
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      await tick(r.path);
+      const first = (await statusOf(r.path, "alpha")) === "merged" ? "alpha" : "beta";
+      const second = first === "alpha" ? "beta" : "alpha";
+      expect(await statusOf(r.path, first)).toBe("merged");
+      expect(await statusOf(r.path, second)).toBe("blocked");
+      expect((await readIntent(r.path, second)).file.frontmatter.note).toMatch(/^The change overlaps with other recent changes/);
+      const git = new Git(r.path);
+      expect((await git.run(["show", "main:src/shared.ts"])).out).toBe(numbered({ 1: first }));
+      expect((await git.run(["status", "--porcelain"])).out.trim()).toMatch(/^(M intent\/queue\.md)?$/);
+    });
+    r.cleanup();
+  }, 180_000);
+
   test("three changes at once through every step: no index.lock error, nothing blocked, main clean, every status change committed", async () => {
     const slugs = ["alpha", "beta", "gamma"];
     const r = await lanesRepo(3, slugs.map((slug) => ({ slug, status: "accepted" })));
@@ -274,43 +357,142 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
   }, 300_000);
 });
 
+type LanesRepo = Awaited<ReturnType<typeof lanesRepo>>;
+type RemoteRepo = LanesRepo & { remote: string; state: string };
+
+/** The fake gh's settings for a repository whose remote is the bare repository `remote`. */
+function ghEnv(env: Record<string, string>, remote: string): Record<string, string> {
+  return { ...env, LOOPSTRA_GH_EXECUTABLE: FAKE_GH, LOOPSTRA_FAKE_GH_STATE: join(remote, "fake-gh.json"), LOOPSTRA_FAKE_GH_REMOTE: remote };
+}
+
+/** lanesRepo with a bare repository as its GitHub remote, and the fake gh, which merges there for real. */
+async function remoteLanesRepo(n: number, changes: Change[], config = ""): Promise<RemoteRepo> {
+  const remote = tempDir("loopstra-remote-");
+  await run(["git", "init", "-q", "--bare", "-b", "main"], remote.path);
+  const r = await lanesRepo(n, changes, config);
+  await run(["git", "remote", "add", "origin", remote.path], r.path);
+  await run(["git", "push", "-q", "-u", "origin", "main"], r.path);
+  return { ...r, remote: remote.path, state: join(remote.path, "fake-gh.json"), env: ghEnv(r.env, remote.path), cleanup: () => { r.cleanup(); remote.cleanup(); } };
+}
+
+/** A copy of a remote repository and of its remote (with the fake gh's pull requests), wired to each other. */
+async function copyRemoteRepo(r: RemoteRepo): Promise<RemoteRepo> {
+  const repo = await copyRepo(r.path);
+  const remote = tempDir("loopstra-remote-");
+  cpSync(r.remote, remote.path, { recursive: true });
+  await run(["git", "remote", "set-url", "origin", remote.path], repo.path);
+  return { ...r, path: repo.path, remote: remote.path, state: join(remote.path, "fake-gh.json"), env: ghEnv(r.env, remote.path), cleanup: () => { repo.cleanup(); remote.cleanup(); } };
+}
+
+/** Every open pull request's checks have passed on GitHub. */
+async function checksPass(r: RemoteRepo): Promise<void> {
+  const s = await Bun.file(r.state).json();
+  for (const pr of Object.values(s.prs) as { checks: string }[]) pr.checks = "pass";
+  await Bun.write(r.state, JSON.stringify(s));
+}
+
+/** Sets speed.max_parallel_changes, commits everything, and pushes main. */
+async function commitWithLanes(r: RemoteRepo, n: number): Promise<void> {
+  await Bun.write(configPath(r.path), (await Bun.file(configPath(r.path)).text()).replace(/max_parallel_changes: \d/, `max_parallel_changes: ${n}`));
+  await new Git(r.path).commitAll(`${n} at a time`);
+  await run(["git", "push", "-q", "origin", "main"], r.path);
+}
+
+/** A held session: the change's `phase` session waits until the returned `release` is called, then replays `answer`. */
+function holdSession(r: LanesRepo, slug: string, phase: string, answer = phase): () => void {
+  const release = join(r.fixtures, `release-${slug}-${phase}`);
+  mkdirSync(join(r.fixtures, slug), { recursive: true });
+  writeFileSync(join(r.fixtures, slug, `${phase}.jsonl`), `${JSON.stringify({ type: "fake_action", wait_for: release })}\n${fixture(answer)}`);
+  return () => writeFileSync(release, "");
+}
+
+/** Waits until `done` is true of the trace (read afresh each time), or a minute has passed. */
+async function traceShows(repo: string, done: (t: Trace) => boolean): Promise<void> {
+  const until = Date.now() + 60_000;
+  while (Date.now() < until && !inTrace(repo, done)) await Bun.sleep(100);
+}
+
 describe("more than one change at a time, with a GitHub remote", () => {
   test("a change merging in one lane is never also run by the other lane's between-phases merge", async () => {
-    const remote = tempDir("loopstra-remote-");
-    await run(["git", "init", "-q", "--bare", "-b", "main"], remote.path);
-    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }]);
-    await run(["git", "remote", "add", "origin", remote.path], r.path);
-    await run(["git", "push", "-q", "-u", "origin", "main"], r.path);
-    const state = join(remote.path, "fake-gh.json");
-    const env = { ...r.env, LOOPSTRA_GH_EXECUTABLE: FAKE_GH, LOOPSTRA_FAKE_GH_STATE: state, LOOPSTRA_FAKE_GH_REMOTE: remote.path };
-    await withEnv(env, async () => {
+    const r = await remoteLanesRepo(1, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
       await tick(r.path); // build
       await tick(r.path); // review, pull request
       expect(await statusOf(r.path, "alpha")).toBe("merge-review");
 
       // Another change to build, two lanes, and alpha's checks pass.
-      mkdirSync(join(r.path, "intent", "beta"), { recursive: true });
-      await Bun.write(join(r.path, "intent", "beta", "intent.md"), "---\nstatus: plan-approved\n---\n# Intent: beta\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
-      await Bun.write(join(r.path, "intent", "beta", "spec.md"), "# Spec\n\n## Summary\ns\n");
-      await Bun.write(join(r.path, "intent", "beta", "plan.md"), planFor("beta"));
-      mkdirSync(join(r.fixtures, "beta"), { recursive: true });
-      writeFileSync(join(r.fixtures, "beta", "build.jsonl"), readFileSync(join(r.fixtures, "alpha", "build.jsonl"), "utf8").replace("src/alpha.ts", "src/beta.ts"));
-      await Bun.write(configPath(r.path), (await Bun.file(configPath(r.path)).text()).replace("max_parallel_changes: 1", "max_parallel_changes: 2"));
-      await new Git(r.path).commitAll("another change, two at a time");
-      await run(["git", "push", "-q", "origin", "main"], r.path);
-      const s = await Bun.file(state).json();
-      for (const pr of Object.values(s.prs) as { checks: string }[]) pr.checks = "pass";
-      await Bun.write(state, JSON.stringify(s));
+      await writeChange(r.path, r.fixtures, { slug: "beta", status: "plan-approved" });
+      await commitWithLanes(r, 2);
+      await checksPass(r);
 
       await tick(r.path);
-      expect(await statusOf(r.path, "alpha")).toBe("merged");
       expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      // Merged on GitHub in alpha's own lane. While beta's lane runs, main here is not brought up to
+      // date, so the merge may be recorded only by the next look (between beta's phases once alpha's
+      // lane has ended, or on the next tick).
+      if ((await statusOf(r.path, "alpha")) !== "merged") await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
       inTrace(r.path, (trace) => {
         const merges = trace.events("alpha").filter((e) => e.type === "status_change" && payloadOf<{ to: string }>(e).to === "merged");
         expect(merges).toHaveLength(1);
-        expect(trace.events("alpha").some((e) => e.payload.includes("\"merge step between phases\""))).toBe(false);
+        // Never run twice at once: one merge on GitHub, by one step.
+        expect(trace.phases("alpha").filter((p) => p.name === "merge")).toHaveLength(1);
       });
+      const s = await Bun.file(r.state).json();
+      expect(Object.values(s.prs as Record<string, { merged: boolean }>).filter((p) => p.merged)).toHaveLength(1);
     });
-    r.cleanup(); remote.cleanup();
+    r.cleanup();
   }, 180_000);
+
+  test("a pull request merged while another change's session runs: main is not rebased during the tick, and the merge is recorded on the next", async () => {
+    const r = await remoteLanesRepo(1, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      await checksPass(r);
+    });
+
+    // One change at a time: the merge is recorded in the same tick, as before.
+    const one = await copyRemoteRepo(r);
+    await withEnv(one.env, async () => {
+      await tick(one.path);
+      expect(await statusOf(one.path, "alpha")).toBe("merged");
+    });
+    one.cleanup();
+
+    // Two at a time: beta's intake runs until alpha's step has looked at main. It ends with a question,
+    // so beta's step has no later phase: with one lane left, a merge between beta's phases could
+    // rightly bring main up to date in this tick.
+    await writeChange(r.path, r.fixtures, { slug: "beta", status: "accepted" });
+    const release = holdSession(r, "beta", "intake", "intake-question");
+    await commitWithLanes(r, 2);
+    await withEnv(r.env, async () => {
+      const looked = (t: Trace) => t.events("alpha").some((e) => e.payload.includes("\"finish merge\"") || (e.type === "status_change" && e.payload.includes("merged")));
+      const running = tick(r.path);
+      try {
+        await traceShows(r.path, looked);
+      } finally {
+        release();
+      }
+      await running;
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect(await statusOf(r.path, "beta")).toBe("blocked");
+      const git = new Git(r.path);
+      expect((await git.run(["cat-file", "-e", "main:src/alpha.ts"], true)).code).not.toBe(0);
+      inTrace(r.path, (trace) => {
+        const waited = trace.events("alpha").filter((e) => e.payload.includes("\"finish merge\""));
+        expect(waited).toHaveLength(1);
+        expect(payloadOf<{ waiting: string }>(waited[0]!).waiting).toContain("because other changes are being worked on");
+        expect(trace.events("_loop").some((e) => e.payload.includes("\"sync main\""))).toBe(false);
+      });
+
+      // The next tick's start brings main up to date, and the merge watch records the merge.
+      await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      expect((await git.run(["cat-file", "-e", "main:src/alpha.ts"], true)).code).toBe(0);
+      inTrace(r.path, (trace) => expect(trace.events("_loop").some((e) => e.payload.includes("\"sync main\""))).toBe(true));
+    });
+    r.cleanup();
+  }, 240_000);
 });

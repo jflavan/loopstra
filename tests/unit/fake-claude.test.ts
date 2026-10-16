@@ -70,6 +70,23 @@ describe("the fake claude's fixtures for one model", () => {
     } finally { dir.cleanup(); }
   });
 
+  test("a wait_for line holds the session until that file exists, so a test decides when it ends", async () => {
+    const dir = tempDir();
+    try {
+      const release = join(dir.path, "release");
+      writeFileSync(join(dir.path, "intake.jsonl"), [
+        JSON.stringify({ type: "fake_action", wait_for: release }),
+        JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "held", total_cost_usd: 0, usage: {} }),
+      ].join("\n") + "\n");
+      let ended = false;
+      const session = replayed(dir.path, "intake", "opus").then((id) => { ended = true; return id; });
+      await Bun.sleep(1500);
+      expect(ended).toBe(false);
+      writeFileSync(release, "");
+      expect(await session).toBe("held");
+    } finally { dir.cleanup(); }
+  });
+
   test("the plain <phase>-<n> sequence still counts every call of the phase", async () => {
     const dir = tempDir();
     try {
