@@ -371,6 +371,40 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 180_000);
 
+  test("design commands that run in the main checkout run one at a time, and nothing commits on main while one runs", async () => {
+    // The command notes, in order, when it starts and ends and where main is at each moment. It keeps
+    // running a while, so another change's commit, or the other change's command, has time to land.
+    const out = tempDir("loopstra-hooks-");
+    const script = join(out.path, "hook.ts").replaceAll("\\", "/");
+    const log = join(out.path, "hook.log").replaceAll("\\", "/");
+    writeFileSync(script, [
+      `import { appendFileSync } from "node:fs";`,
+      `const head = () => Bun.spawnSync(["git", "rev-parse", "HEAD"]).stdout.toString().trim();`,
+      `const note = (what: string) => appendFileSync(process.argv[2]!, what + " " + process.env.LOOPSTRA_SLUG + " " + head() + "\\n");`,
+      `note("start");`,
+      `await Bun.sleep(1500);`,
+      `note("end");`,
+    ].join("\n"));
+    const r = await lanesRepo(2, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }],
+      `stages:\n  design:\n    before:\n      - 'bun "${script}" "${log}"'\n`);
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("spec-approved");
+      expect(await statusOf(r.path, "beta")).toBe("spec-approved");
+    });
+    const lines = (await Bun.file(log).text()).trim().split("\n").map((l) => l.split(" ") as [string, string, string]);
+    // Each run's start is followed by its own end: the two runs never overlap.
+    expect(lines.map(([what]) => what)).toEqual(["start", "end", "start", "end"]);
+    expect(lines.map(([, slug]) => slug).sort()).toEqual(["alpha", "alpha", "beta", "beta"]);
+    for (const i of [0, 2]) {
+      expect(lines[i + 1]![1]).toBe(lines[i]![1]);
+      // Main did not move while the command ran.
+      expect(lines[i + 1]![2]).toBe(lines[i]![2]);
+    }
+    r.cleanup();
+    out.cleanup();
+  }, 120_000);
+
   test("three changes at once through every step: no index.lock error, nothing blocked, main clean, every status change committed", async () => {
     const slugs = ["alpha", "beta", "gamma"];
     const r = await lanesRepo(3, slugs.map((slug) => ({ slug, status: "accepted" })));
