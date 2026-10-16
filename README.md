@@ -235,10 +235,11 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 - `claude`: models (default, cheap, strong), `timeout_minutes`, optional spending limits (`max_budget_usd` per session, `max_budget_usd_per_day` for the loop's sessions together; unset means no limit), and `allowed_tools` for build sessions (the configured commands are always added; anything else a build needs, like `"Bash(make *)"`, goes here)
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, skills, `before`/`after` commands, and loop limits
+- `speed`: work that runs at the same time, without changing what is checked. `overlap_judges` (on) runs the first review alongside the verifier, and lessons alongside the final check; a review that ran while the verifier failed is thrown away. `parallel_checks` (off) starts test, lint and build together; leave it off if they write the same folder.
 - `signals`: how often main's health check runs
 - `chat`: the orchestrator's model, optional spending limits (`max_budget_usd_per_day`, `max_budget_usd_per_session`), and the Slack and Discord bots under `transports` (see Chat)
 
-`loopstra setup` asks about the commands, spending limits, gates, merging, chat and models; edit the file by hand for the rest (`poll_seconds`, `allowed_tools`, stage skills and commands, signals).
+`loopstra setup` asks about the commands, spending limits, gates, merging, chat and models; edit the file by hand for the rest (`poll_seconds`, `allowed_tools`, stage skills and commands, speed, signals).
 
 **Budgets.** No spending limit is set by default: on a subscription the dollar figures are only an estimate, and `timeout_minutes` already ends a stuck session. Set limits with `loopstra setup budgets`, as minutes (`30m`, `2h`, turned into dollars at $0.20 a minute unless you give another rate in that run) or dollars (`$6`); `none` removes one, and amounts are shown with two decimals. Its check uses the same rate and warns when `claude.max_budget_usd` runs out before `timeout_minutes`, when a session limit is above its day limit, or when `chat.max_budget_usd_per_day` is set without `chat.max_budget_usd_per_session`. A config from the old template (every limit there is `5` or `2` as it wrote them, and no `claude.max_budget_usd_per_day`) shows them as old defaults, and Enter, or `--defaults`, removes them; any other mix counts as chosen and is kept.
 

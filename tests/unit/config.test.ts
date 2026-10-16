@@ -25,6 +25,8 @@ describe("loadConfig", () => {
     // The cheap model often ends a verify session without calling the structured-output tool (#7).
     expect(cfg.stages.verify.model).toBe("default");
     expect(cfg.signals.main_health.every_minutes).toBe(30);
+    // Judges overlap by default; project commands share folders in some projects, so they do not.
+    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true });
     t.cleanup();
   });
 

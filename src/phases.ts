@@ -147,15 +147,21 @@ export function ownerNote(reason: BlockingReason): string {
 /** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
 const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
-export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
+/** The prompt a phase would be sent, or null when its prompt file is missing. */
+export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
   const promptPath = join(ctx.root, "loopstra", "prompts", `${spec.name}.md`);
-  if (!existsSync(promptPath)) {
+  if (!existsSync(promptPath)) return null;
+  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
+  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
+  return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
+}
+
+export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
+  const prompt = await phasePrompt(ctx, spec);
+  if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
-  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
-  const prompt = withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);
@@ -174,6 +180,34 @@ let phaseBoundary: PhaseBoundary | null = null;
  */
 export function setPhaseBoundary(fn: PhaseBoundary | null): void {
   phaseBoundary = fn;
+}
+
+/** Groups running now (see together): inside one, phases skip the boundary. */
+let groups = 0;
+
+/** Runs the phase boundary unless a group already ran it for this phase. */
+async function boundary(ctx: StepContext): Promise<void> {
+  if (phaseBoundary && groups === 0) await phaseBoundary(ctx);
+}
+
+/**
+ * Runs phase functions at the same time and returns their results in order. The phase boundary runs
+ * once, before them, and not inside the group, so no merge touches main while they run. It waits for
+ * every function to settle, so each phase ends its own row; if any threw, it throws the first error
+ * in list order (a stop or an outage still reaches the scheduler).
+ */
+export async function together<T extends readonly unknown[]>(ctx: StepContext, fns: { [K in keyof T]: () => Promise<T[K]> }): Promise<T> {
+  await boundary(ctx);
+  groups++;
+  let settled: PromiseSettledResult<unknown>[];
+  try {
+    settled = await Promise.allSettled((fns as ReadonlyArray<() => Promise<unknown>>).map((f) => f()));
+  } finally {
+    groups--;
+  }
+  const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (failed) throw failed.reason;
+  return settled.map((s) => (s as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
 /**
@@ -195,7 +229,7 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 
 /** One traced run of a phase. The phase row always ends (never left running) and the raw log is always closed. */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
-  if (phaseBoundary) await phaseBoundary(ctx);
+  await boundary(ctx);
   throwIfStopping();
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   const started = Date.now();
@@ -350,7 +384,7 @@ export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: strin
 
 /** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
-  if (phaseBoundary) await phaseBoundary(ctx);
+  await boundary(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
     const r = await fn(seq);

@@ -59,9 +59,10 @@ export async function buildState(root: string, afterEventId: number, now: Date =
   const trace = Trace.open(root);
   try {
     const intents = ordered.map((i) => intentView(root, trace, i, ordered, now));
-    const hb = heartbeatState(readHeartbeat(root), "problem" in config ? 60 : config.poll_seconds, now, { pause: readPause(root) });
+    const beat = readHeartbeat(root);
+    const hb = heartbeatState(beat, "problem" in config ? 60 : config.poll_seconds, now, { pause: readPause(root) });
     const loop: LoopStatus = hb.current
-      ? { ...hb, current: { slug: hb.current.slug, phase: runningPhase(intents, hb.current.slug) } }
+      ? { ...hb, current: { slug: hb.current.slug, phase: runningPhase(intents, hb.current.slug, beat?.lastTickAt ?? null) } }
       : hb;
     const health = healthView(trace, now);
     const events = trace.recentEvents(afterEventId, 200).map((e) => ({ ...e, payload: parsePayload(e.payload) }));
@@ -119,9 +120,13 @@ function statusSince(trace: Trace, i: Intent): string | null {
   try { return statSync(join(i.dir, "intent.md")).mtime.toISOString(); } catch { return null; }
 }
 
-function runningPhase(intents: IntentView[], slug: string): string | null {
+/**
+ * The phases running now, in the order they started ("verify + review-1" when two run at once). Only
+ * those started since the tick began (`since`): a row a killed process left running is not current.
+ */
+function runningPhase(intents: IntentView[], slug: string, since: string | null): string | null {
   const phases = intents.find((i) => i.slug === slug)?.phases ?? [];
-  return [...phases].reverse().find((p) => p.status === "running")?.name ?? null;
+  return phases.filter((p) => p.status === "running" && (!since || p.started >= since)).map((p) => p.name).join(" + ") || null;
 }
 
 function totals(phases: Array<Pick<PhaseView, "started" | "costUsd">>, now: Date): UiState["totals"] {

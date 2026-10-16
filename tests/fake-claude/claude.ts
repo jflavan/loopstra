@@ -18,6 +18,7 @@
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
 // each prompt as one JSON line ({phase, args, prompt}).
 // Like the real CLI, the process exits 1 after a result event with is_error.
+// $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap).
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -80,6 +81,8 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
 // "linger": emit the result, then keep running with a grandchild that holds stdout open,
 // the way a real session can leave a background process behind.
 const linger = fixture.endsWith("linger.jsonl");
+
+if (process.env.LOOPSTRA_FAKE_DELAY_MS) await Bun.sleep(Number(process.env.LOOPSTRA_FAKE_DELAY_MS));
 
 let failed = false;
 for (const line of (await Bun.file(fixture).text()).split("\n")) {

@@ -1,7 +1,8 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase, codePhase, projectCommand } from "../phases";
+import { agentPhase, codePhase, projectCommand, together } from "../phases";
+import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./review";
 import type { CommandResult } from "../shell";
 import { artifacts, bullets, buildSession, MERGING, RECONCILED_PLAN, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
@@ -10,6 +11,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
   clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
   clearMarker(ctx, RECONCILED_PLAN); // nor is it compared with a plan reconciled for an earlier build
+  clearMarker(ctx, EARLY_REVIEW); // nor reviewed by a review of an earlier build
 
   const branch = await codePhase(ctx, "branch", async () => {
     if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
@@ -73,8 +75,12 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (!tested.ok) return block(ctx, tested.note, tested);
 
   // The verifier. A verify failure gets exactly one fix (then the tests again), then blocks.
-  const verified = await verifyChange(ctx, a.spec, plan, "verify");
+  // Round 1's review may judge the same tested commit meanwhile; it is kept only if verify passes.
+  const [verified, early] = reviewsAhead(ctx)
+    ? await together(ctx, [() => verifyChange(ctx, a.spec, plan, "verify"), () => reviewAhead(ctx, a.spec, plan)] as const)
+    : [await verifyChange(ctx, a.spec, plan, "verify"), null];
   if (!verified.ok) return block(ctx, verified.note, verified);
+  if (verified.passed && early) keepEarlyReview(ctx, early);
   if (!verified.passed) {
     const fix = await buildSession(ctx, {
       name: "fix", traceName: "fix-after-verify", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -97,6 +103,14 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, REVIEW_ROUND); // a new build gets fresh review rounds
   await setStatus(ctx, "reviewing");
   return { ok: true };
+}
+
+/**
+ * Whether round 1's review runs alongside the verifier: on with speed.overlap_judges, unless commands
+ * must run between the two (after the build stage, or before the review stage).
+ */
+function reviewsAhead(ctx: StepContext): boolean {
+  return ctx.cfg.speed.overlap_judges && !ctx.cfg.stages.build.after.length && !ctx.cfg.stages.review.before.length;
 }
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
@@ -154,19 +168,33 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
 }
 
 /**
- * Runs test, lint, build in order in the worktree. Returns the first failure, or null when all
+ * Runs test, lint, build in the worktree: in order, stopping at the first failure, or with
+ * `speed.parallel_checks` all at once. Returns the first failure in that order, or null when all
  * pass. The phase is recorded as failed when a command fails.
  */
 export async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
   const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
   let failed = null as CommandResult | null;
   const r = await codePhase(ctx, phaseName, async (seq) => {
-    for (const cmd of cmds) {
-      const res = await projectCommand(ctx, cmd, ctx.worktreeDir, { seq });
-      if (res.code !== 0) {
-        failed = res;
-        throw new Error(`${cmd} exited ${res.code}: ${res.lastLine}`);
+    const run = (cmd: string) => projectCommand(ctx, cmd, ctx.worktreeDir, { seq });
+    const results: CommandResult[] = [];
+    if (ctx.cfg.speed.parallel_checks) {
+      // Wait for all of them, so none is still running when the phase ends.
+      const settled = await Promise.allSettled(cmds.map(run));
+      const thrown = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+      if (thrown) throw thrown.reason;
+      results.push(...settled.map((s) => (s as PromiseFulfilledResult<CommandResult>).value));
+    } else {
+      for (const cmd of cmds) {
+        const res = await run(cmd);
+        results.push(res);
+        if (res.code !== 0) break;
       }
+    }
+    const res = results.find((x) => x.code !== 0);
+    if (res) {
+      failed = res;
+      throw new Error(`${res.command} exited ${res.code}: ${res.lastLine}`);
     }
     return { ok: true as const };
   });

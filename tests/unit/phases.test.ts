@@ -5,7 +5,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, setPhaseBoundary, together, toolsFor, withContract } from "../../src/phases";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AssistantUnavailable } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -330,6 +330,43 @@ describe("codePhase", () => {
     const odd = await codePhase(ctx, "odd", async () => { throw null; });
     expect(odd.ok).toBe(false);
     if (!odd.ok) expect(odd.detail).toContain("null");
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("together", () => {
+  const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("starts every function before any finishes, runs the phase boundary once before them and never inside", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      const r = await together(ctx, [
+        () => codePhase(ctx, "a", async () => { log.push("a start"); await tick(30); log.push("a end"); return { ok: true as const, v: 1 }; }),
+        () => codePhase(ctx, "b", async () => { log.push("b start"); await tick(5); log.push("b end"); return { ok: true as const, v: 2 }; }),
+      ]);
+      expect(r.map((x) => x.ok && x.v)).toEqual([1, 2]);
+      expect(log).toEqual(["boundary", "a start", "b start", "b end", "a end"]);
+      // Outside a group the boundary runs before each phase again.
+      await codePhase(ctx, "c", async () => ({ ok: true as const }));
+      expect(log.at(-1)).toBe("boundary");
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("when one throws, it waits for the others to settle, then throws the first error in list order", async () => {
+    const { repo, ctx, trace } = await setup();
+    let slowEnded = false;
+    const err = await together(ctx, [
+      async () => { await tick(30); slowEnded = true; return 1; },
+      async () => { throw new AssistantUnavailable("down"); },
+      async () => { throw new Error("later"); },
+    ]).catch((e) => e);
+    expect(err).toBeInstanceOf(AssistantUnavailable);
+    expect(slowEnded).toBe(true);
     trace.close(); repo.cleanup();
   });
 });

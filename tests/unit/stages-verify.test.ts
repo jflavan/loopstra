@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { NEEDS_PERSON_DONE_NOTE, runVerifyStep } from "../../src/stages/verify";
-import { setupRepo } from "../helpers";
+import type { PhaseRow } from "../../src/trace";
+import { setEnv, setupRepo } from "../helpers";
 
 async function merged(opts: { config?: string; doneCheck?: string } = {}) {
   const s = await setupRepo("merged", { config: opts.config });
@@ -25,7 +26,40 @@ async function lessonsOf(repo: string): Promise<string> {
   return Bun.file(join(repo, "intent", "add-numbers", "lessons.md")).text();
 }
 
+/** Whether two traced phases ran at the same time. */
+function overlapped(a: PhaseRow, b: PhaseRow): boolean {
+  return a.started < b.ended! && b.started < a.ended!;
+}
+
 describe("verify stage", () => {
+  test("lessons runs alongside the done-check; with speed.overlap_judges off, after it", async () => {
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    try {
+      for (const on of [true, false]) {
+        const { repo, ctx, trace } = await merged({ config: `speed:
+  overlap_judges: ${on}
+` });
+        await runVerifyStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
+        const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
+        expect(overlapped(byName("done-check"), byName("lessons"))).toBe(on);
+        expect(await lessonsOf(repo.path)).toContain("doc comment");
+        trace.close(); repo.cleanup();
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  test("when the done-check cannot be completed, the change blocks and the lessons that ran alongside are not written", async () => {
+    const { repo, ctx, trace } = await merged({ doneCheck: "crash" });
+    await runVerifyStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+    expect(existsSync(join(repo.path, "intent", "add-numbers", "lessons.md"))).toBe(false);
+    expect(trace.phases("add-numbers").some((p) => p.name === "lessons")).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
   test("merged → done: outcome.md for the owner, lessons.md for engineers, both written by the runtime and committed", async () => {
     const { repo, ctx, trace } = await merged({ config: "stages:\n  verify:\n    skills:\n      - checking-results\n" });
     await runVerifyStep(ctx);
@@ -67,7 +101,9 @@ describe("verify stage", () => {
     const { repo, ctx, trace } = await merged({ config: "stages:\n  verify:\n    before:\n      - echo before\n    after:\n      - echo after\n" });
     await runVerifyStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
-    expect(trace.phases("add-numbers").map((p) => p.name)).toEqual(["verify-before", "done-check", "lessons", "verify-after"]);
+    const names = trace.phases("add-numbers").map((p) => p.name);
+    // done-check and lessons run at the same time, so either may start first.
+    expect([names[0], new Set(names.slice(1, 3)), names[3]]).toEqual(["verify-before", new Set(["done-check", "lessons"]), "verify-after"]);
     trace.close(); repo.cleanup();
   });
 
@@ -81,7 +117,8 @@ describe("verify stage", () => {
     const outcome = await outcomeOf(repo.path);
     expect(outcome).toContain("## Evidence");
     expect(await lessonsOf(repo.path)).toContain("## Lessons");
-    expect(trace.phases("add-numbers").map((p) => p.name)).toEqual(["done-check", "lessons", "verify-after"]);
+    expect(trace.phases("add-numbers").map((p) => p.name).sort()).toEqual(["done-check", "lessons", "verify-after"]);
+    expect(trace.phases("add-numbers").at(-1)!.name).toBe("verify-after");
 
     // Stepping the waiting status does nothing.
     await ctx.reload();
