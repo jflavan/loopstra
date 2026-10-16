@@ -46,7 +46,7 @@ function workingOf(hb: Heartbeat): Array<{ slug: string }> {
 }
 
 /** "a", "a and b", "a, b and c". */
-function namesText(names: string[]): string {
+export function namesText(names: string[]): string {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 

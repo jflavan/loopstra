@@ -9,6 +9,8 @@ import { errorText } from "./shell";
 
 export class StepContext {
   readonly git: Git;
+  /** The step was started by the between-phases merge, inside another change's step (see mergeReadyChanges). */
+  betweenPhases = false;
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
