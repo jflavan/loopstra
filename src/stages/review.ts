@@ -1,6 +1,8 @@
 import { block, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase, phasePrompt } from "../phases";
+import { modelFor } from "../config";
+import { passes, runJudge } from "../judges";
+import { phasePrompt } from "../phases";
 import { testLoop } from "./build";
 import { reviewPhase, takeEarlyReview } from "./early-review";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
@@ -41,15 +43,17 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     writeRound(ctx, round);
     const phase = await reviewPhase(ctx, round, a.spec, a.currentPlan);
     const prompt = await phasePrompt(ctx, phase);
-    const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
+    const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await runJudge(ctx, phase, { prompt });
     if (!review.ok) return block(ctx, review.note);
+    // review.md, the gate row and the findings all come from the review that decided.
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
 
     // The runtime decides: the change passes when there are no important findings. The
     // reviewer's own approved flag is kept in the trace only.
     const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.finding}`);
-    const pass = important.length === 0;
-    const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}`;
+    const pass = passes("review", review.envelope);
+    const by = review.decidedBy === "cheap" ? `; decided by the cheaper judge (${modelFor(ctx.cfg, "default")})` : "";
+    const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}${by}`;
     ctx.trace.gate(ctx.slug, "review", "findings", pass ? "pass" : "fail", summary);
 
     if (pass) {

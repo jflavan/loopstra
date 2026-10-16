@@ -3,7 +3,7 @@ import { block, setStatus, writeArtifact, type Failure, type StepContext, type S
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
 import { agentPhase, alongside, mayOverlap, projectCommand } from "../phases";
-import { EARLY } from "../trace";
+import { besideWork, EARLY } from "../trace";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
 
@@ -35,9 +35,9 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   if (!before.ok) return before;
   const a = await artifacts(ctx);
 
-  // The fix history lessons is shown: the phases that failed, less work that ran alongside another
-  // (optional, so its failures never mattered to the change).
-  const history = () => ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail" && !p.name.startsWith(EARLY)).map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
+  // The fix history lessons is shown: the phases that failed, less work that ran beside the one that
+  // decided (work run alongside, a cheaper judge; see besideWork), whose failures never mattered to the change.
+  const history = () => ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail" && !besideWork(p.name)).map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
   const learn = (traceName?: string) => agentPhase(ctx, {
     name: "lessons", traceName, model: "cheap", permissionMode: "default", tools: "read",
     vars: { review: a.review, previous: history() }, skills: ctx.cfg.stages.verify.skills,

@@ -17,13 +17,14 @@ const HELP = `loopstra <command>
             Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
+  judges    how often the cheaper judges agreed with the strong ones
   ui        local dashboard with a chat panel (--port <n>, default 4646; --no-chat)
   chat      talk to the orchestrator: updates, and new changes written up
             as intents (--no-terminal to run only the Slack/Discord bots)
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
 `;
 
-/** status, tail, ui, and chat read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, judges, ui, and chat read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
@@ -72,6 +73,14 @@ async function main(): Promise<number> {
       const { tail } = await import("./commands/tail");
       await tail(root, rest[0]);
       return 0;
+    }
+    case "judges": {
+      if (!setUp()) return 1;
+      const { renderJudges } = await import("./commands/judges");
+      try {
+        process.stdout.write(await renderJudges(root));
+        return 0;
+      } catch (e) { console.error(errorText(e)); return 1; }
     }
     case "ui": {
       if (!setUp()) return 1;

@@ -9,14 +9,23 @@ const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
 const NOT_SET_UP = "This folder is not set up for Loopstra. Run loopstra init first.";
 
 describe("the command line outside a set-up repo", () => {
-  test("status, tail, and ui say the folder is not set up, and create nothing", async () => {
+  test("status, tail, ui, and judges say the folder is not set up, and create nothing", async () => {
     const t = tempDir();
     try {
-      for (const cmd of ["status", "tail", "ui"]) {
+      for (const cmd of ["status", "tail", "ui", "judges"]) {
         const r = await run([process.execPath, CLI, cmd], t.path);
         expect({ cmd, code: r.code, said: (r.out + r.err).trim() }).toEqual({ cmd, code: 1, said: NOT_SET_UP });
       }
       expect(readdirSync(t.path)).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("help lists judges", async () => {
+    const t = tempDir();
+    try {
+      expect((await run([process.execPath, CLI, "help"], t.path)).out).toContain("\n  judges    how often the cheaper judges agreed with the strong ones\n");
     } finally {
       t.cleanup();
     }

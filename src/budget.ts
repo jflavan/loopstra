@@ -71,13 +71,20 @@ export function loopDayUsedUp(cfg: Config, trace: Trace, now = new Date()): bool
 }
 
 /**
- * Two of the loop's sessions can run at once without one taking budget the other needs: there is no
- * daily budget, or what is left of it covers two whole sessions (claude.max_budget_usd). With no session
- * cap, the first session holds the rest of the day and the second could not start.
+ * That many of the loop's sessions can run at once without one taking budget another needs: there is
+ * no daily budget, or what is left of it covers that many whole sessions (claude.max_budget_usd). With
+ * no session cap, the first session holds the rest of the day and the next could not start. One
+ * session always has room: it is what the step runs anyway.
  */
-export function roomForTwo(cfg: Config, trace: Trace, now = new Date()): boolean {
+export function roomFor(cfg: Config, trace: Trace, sessions: number, now = new Date()): boolean {
+  if (sessions <= 1) return true;
   const left = loopDayLeft(cfg, trace, now);
-  return left === Infinity || left >= 2 * limitOf(cfg.claude.max_budget_usd);
+  return left === Infinity || left >= sessions * limitOf(cfg.claude.max_budget_usd);
+}
+
+/** A daily budget and no session cap: two of the loop's sessions never have room at once (see roomFor). */
+export function noSessionCap(cfg: Config): boolean {
+  return cfg.claude.max_budget_usd_per_day !== undefined && cfg.claude.max_budget_usd === undefined;
 }
 
 /**

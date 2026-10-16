@@ -1,8 +1,10 @@
 import { headingsPresent } from "../checks";
 import { block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
+import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
 import type { Status } from "../intents";
+import { judgeFirst, passes, type JudgeResult } from "../judges";
 import { agentPhase, alongsideFirst, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
@@ -113,8 +115,14 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
 /** What a check hands back through the gate: the judge could not run, or what it found. */
 type JudgePayload = { broken: { note: string; detail: string } } | { findings: string[] };
 
-/** Work for the next stage beside a judge (see ahead and alongsideFirst), for settle to keep or call off. */
-interface Beside { work: AheadWork; rest: () => Promise<string | null>; cancel: () => void }
+/** Work still running once the judge answered (see alongsideFirst and judgeFirst): `rest` waits for it, `cancel` calls it off. */
+interface Later<T> { rest: () => Promise<T>; cancel: () => void }
+
+/** Work for the next stage beside a judge (see ahead), for settle to keep or call off. */
+interface Beside extends Later<string | null> { work: AheadWork }
+
+/** What still runs once the gate's checks answered: the cheaper judge's comparison, and the work for the next stage. */
+interface Pending { comparison: Later<void> | null; ahead: Beside | null }
 
 /**
  * The gate timing rule. Pass with no person on the gate → approved; pass with a person → the
@@ -124,32 +132,35 @@ interface Beside { work: AheadWork; rest: () => Promise<string | null>; cancel: 
  */
 async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>): Promise<StepResult> {
   for (;;) {
-    const ahead: { now: Beside | null } = { now: null };
+    const pending: Pending = { comparison: null, ahead: null };
     let outcome: GateOutcome<JudgePayload>;
     try {
-      outcome = await evaluateGate(ctx, s.gate, await checks(ctx, s, ahead));
+      outcome = await evaluateGate(ctx, s.gate, await checks(ctx, s, pending));
     } catch (e) {
-      await callOff(ahead.now);
+      await callOff(pending);
       throw e;
     }
     if (outcome.result === "pass") {
       clearMarker(ctx, s.marker);
       const human = ctx.cfg.gates[s.gate].human;
       // The gate's result is recorded first, then the work beside the judge is waited for: a stop or a
-      // crash meanwhile loses only that work (the next stage then does it as usual).
+      // crash meanwhile loses only that work (the next stage then does it as usual) and the comparison.
       try {
         if (human === "none") await setStatus(ctx, s.approved);
         else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human));
       } catch (e) {
-        await callOff(ahead.now);
+        await callOff(pending);
         throw e;
       }
-      await keepAhead(ctx, ahead.now);
+      // The comparison first: until the work's rest is called, no merge runs while the cheaper judge reads.
+      await finishComparison(ctx, s, pending.comparison);
+      await keepAhead(ctx, pending.ahead);
       return { ok: true };
     }
+    await finishComparison(ctx, s, pending.comparison);
     const p = outcome.payload;
     // The work beside the judge was for this artifact, which did not pass (alongsideFirst called it off).
-    await dropAhead(ctx, ahead.now, p && "broken" in p ? `the ${s.gate} could not be checked` : `the ${s.gate} did not pass its check`);
+    await dropAhead(ctx, pending.ahead, p && "broken" in p ? `the ${s.gate} could not be checked` : `the ${s.gate} did not pass its check`);
     // The judge could not run at all (its agent failed): no point rewriting; a person decides.
     if (p && "broken" in p) return block(ctx, p.broken.note, { detail: p.broken.detail });
     // The findings go back to the writer: the judge's, else the failing check's evidence.
@@ -190,11 +201,24 @@ async function dropAhead(ctx: StepContext, b: Beside | null, why: string): Promi
   if (b && (await b.rest()) !== null) ctx.trace.event(ctx.slug, "command", { command: b.work.what, note: `not kept: ${why}` });
 }
 
-/** On an error: calls off the work beside the judge and waits for it to end, so its row ends before the error goes on. */
-async function callOff(b: Beside | null): Promise<void> {
-  if (!b) return;
-  b.cancel();
-  await b.rest().catch(() => {});
+/**
+ * Waits for the cheaper judge of a shadow, which records the comparison. A stop meanwhile loses only
+ * the comparison: the gate's result stands, and the stop ends the tick at its next phase or git command.
+ */
+async function finishComparison<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, c: Later<void> | null): Promise<void> {
+  try {
+    await c?.rest();
+  } catch (e) {
+    if (!(e instanceof StopRequested)) throw e;
+    ctx.trace.event(ctx.slug, "judge", { note: "not compared: stopped by request", judge: s.judge.name, trace_name: s.judge.name });
+  }
+}
+
+/** On an error: calls off what still runs beside the checks and waits for it to end, so its rows end before the error goes on. */
+async function callOff(p: Pending): Promise<void> {
+  const running = [p.comparison, p.ahead].filter((l) => l !== null);
+  for (const l of running) l.cancel();
+  await Promise.all(running.map((l) => l.rest().catch(() => {})));
 }
 
 /** The stage's work beside the judge, when it runs now. It is optional: trouble deciding means it does not. */
@@ -209,8 +233,11 @@ async function aheadNow<W extends Writer, J extends Judge>(ctx: StepContext, s: 
   }
 }
 
-/** The headings, the stage's own checks, and the judge when the gate has one. Work the judge runs beside goes in `ahead`. */
-async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, ahead: { now: Beside | null }): Promise<Check<JudgePayload>[]> {
+/**
+ * The headings, the stage's own checks, and the judge when the gate has one. The judge answers as soon
+ * as the deciding judge has (see judgeFirst); what still runs beside it then goes in `pending`.
+ */
+async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, pending: Pending): Promise<Check<JudgePayload>[]> {
   const a = await artifacts(ctx);
   const text = (await readArtifact(ctx, s.artifact)) ?? "";
   const list: Check<JudgePayload>[] = [
@@ -227,25 +254,33 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
   list.push({
     name: s.judge.name,
     run: async () => {
-      const judge = () => agentPhase(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) });
       // Work for the next stage runs alongside on the same artifact the judge reads; it is optional,
       // so an outage or the day's budget drops it and the judge meets the same trouble on its own.
       // The check ends with an approving judge while the work still runs; settle keeps the work.
       const work = await aheadNow(ctx, s);
-      let r: AgentPhaseResult<J>;
+      // Beside that work, a cheaper judge in shadow needs room for a third session. The strong judge's
+      // verdict comes back without waiting for the cheaper one, so a rejection calls the work off at once.
+      const judge = async () => {
+        const j = await judgeFirst(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
+        pending.comparison = j;
+        return j.result;
+      };
+      let r: JudgeResult<J>;
       if (work) {
-        const b = await alongsideFirst(ctx, judge, { what: work.what, run: () => work.run(ctx, a), wanted: (j) => j.ok && j.envelope.approved });
-        ahead.now = { work, rest: b.rest, cancel: b.cancel };
+        const b = await alongsideFirst(ctx, judge, { what: work.what, run: () => work.run(ctx, a), wanted: (j) => j.ok && passes(s.judge.name, j.envelope) });
+        pending.ahead = { work, rest: b.rest, cancel: b.cancel };
         r = b.result;
       } else r = await judge();
       if (!r.ok) {
         return { result: "fail", evidence: `the ${s.judge.who} failed: ${r.reason}`, payload: { broken: { note: `The ${s.gate} could not be checked. ${r.note}`, detail: `${s.judge.name} failed: ${r.reason}` } } };
       }
-      const e: { approved: boolean; summary: string } = r.envelope;
+      // Findings always come from the envelope that decided: the strong judge's whenever it is a reject.
       const findings = s.judge.findings(r.envelope);
-      if (e.approved) return { result: "pass", evidence: e.summary };
-      return { result: "fail"
-, evidence: findings.join("; ") || e.summary, payload: { findings } };
+      if (passes(s.judge.name, r.envelope)) {
+        const by = r.decidedBy === "cheap" ? ` (decided by the cheaper judge, ${modelFor(ctx.cfg, "default")})` : "";
+        return { result: "pass", evidence: `${r.envelope.summary}${by}` };
+      }
+      return { result: "fail", evidence: findings.join("; ") || r.envelope.summary, payload: { findings } };
     },
   });
   return list;

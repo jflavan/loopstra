@@ -1,4 +1,4 @@
-import { roomForTwo } from "../budget";
+import { roomFor } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor, type Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
@@ -85,7 +85,7 @@ function mayMergeFirst(cfg: Config, status: Status): boolean {
  */
 async function plansAhead(ctx: StepContext): Promise<boolean> {
   const cfg = ctx.cfg;
-  if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomForTwo(cfg, ctx.trace)) return false;
+  if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomFor(cfg, ctx.trace, 2)) return false;
   const others = (await scanRepo(ctx.root)).intents.filter((i) => i.slug !== ctx.slug);
   return !others.some((i) => mayMergeFirst(cfg, i.file.frontmatter.status));
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHAT_SLUG, limitOf, sessionCost, staleBefore, startOfTomorrow, USD_PER_MINUTE } from "../../src/budget";
+import { CHAT_SLUG, limitOf, roomFor, sessionCost, staleBefore, startOfTomorrow, USD_PER_MINUTE } from "../../src/budget";
 import { validateConfig } from "../../src/config";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -85,5 +85,48 @@ describe("budget pools", () => {
   test("a budget that is not set is no limit", () => {
     expect(limitOf(undefined)).toBe(Infinity);
     expect(limitOf(4)).toBe(4);
+  });
+});
+
+describe("room for several sessions at once", () => {
+  const cfgWith = (claude: Record<string, number>) => validateConfig({ version: 1, commands: { test: "x" }, claude });
+
+  test("with no daily budget there is always room, however many sessions", () => {
+    withTrace((trace) => {
+      expect(roomFor(cfgWith({}), trace, 2)).toBe(true);
+      expect(roomFor(cfgWith({ max_budget_usd: 2 }), trace, 3)).toBe(true);
+    });
+  });
+
+  test("with a daily budget and no session cap, the first session holds the rest of the day: no room for two or three", () => {
+    withTrace((trace) => {
+      const cfg = cfgWith({ max_budget_usd_per_day: 100 });
+      expect(roomFor(cfg, trace, 2)).toBe(false);
+      expect(roomFor(cfg, trace, 3)).toBe(false);
+    });
+  });
+
+  test("with both limits, there is room while what is left covers that many whole sessions", () => {
+    withTrace((trace) => {
+      const cfg = cfgWith({ max_budget_usd_per_day: 10, max_budget_usd: 2 });
+      spent(trace, "a", 3);
+      // $7 left: two sessions of $2 and three of $2 fit, four do not.
+      expect(roomFor(cfg, trace, 2)).toBe(true);
+      expect(roomFor(cfg, trace, 3)).toBe(true);
+      expect(roomFor(cfg, trace, 4)).toBe(false);
+      trace.phaseStart("b", "x", "agent", 2);
+      // A running session holds its cap: $5 left fits two, not three.
+      expect(roomFor(cfg, trace, 2)).toBe(true);
+      expect(roomFor(cfg, trace, 3)).toBe(false);
+    });
+  });
+
+  test("one session (or none) always has room: it is what the step runs anyway", () => {
+    withTrace((trace) => {
+      const cfg = cfgWith({ max_budget_usd_per_day: 1 });
+      spent(trace, "a", 1);
+      expect(roomFor(cfg, trace, 1)).toBe(true);
+      expect(roomFor(cfg, trace, 0)).toBe(true);
+    });
   });
 });

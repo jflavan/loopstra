@@ -152,6 +152,24 @@ describe("verify stage", () => {
     }
   });
 
+  test("lessons are told the change's failed phases, but never a cheaper judge's failure", async () => {
+    const { repo, ctx, trace } = await merged();
+    const fail = (name: string, error: string) => trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, "agent"), { status: "fail", error });
+    fail("spec-check-cheap", "invalid envelope from the cheaper judge");
+    fail("build", "the build broke");
+    await runVerifyStep(ctx);
+    // Lessons ran alongside the done-check (early-lessons), and again after it only if the history changed.
+    const told = trace.phases("add-numbers").filter((x) => x.name.endsWith("lessons"));
+    expect(told.length).toBeGreaterThan(0);
+    for (const p of told) {
+      const prompt = await promptOf(ctx.runDir, p);
+      expect(prompt).toContain("build: the build broke");
+      expect(prompt).not.toContain("spec-check-cheap");
+      expect(prompt).not.toContain("invalid envelope from the cheaper judge");
+    }
+    trace.close(); repo.cleanup();
+  });
+
   test("merged → done: outcome.md for the owner, lessons.md for engineers, both written by the runtime and committed", async () => {
     const { repo, ctx, trace } = await merged({ config: "stages:\n  verify:\n    skills:\n      - checking-results\n" });
     await runVerifyStep(ctx);

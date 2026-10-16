@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { configPath } from "../../src/config";
 import type { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
@@ -8,8 +8,9 @@ import { readIntent } from "../../src/intents";
 import { setPhaseBoundary } from "../../src/phases";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD, runPlanStep } from "../../src/stages/plan";
+import { resetStop } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, openRepo, setupRepo, tempDir, withEnv } from "../helpers";
+import { fixture, fixtureDir, openRepo, setupRepo, stopAfterPass, withEnv } from "../helpers";
 
 const HUMAN_PLAN = "gates:\n  plan:\n    human: status\n";
 
@@ -295,9 +296,8 @@ describe("plan written ahead", () => {
   });
 
   test("a plan written ahead that plan-challenge rejects is written again by a fresh plan session, told the concerns", async () => {
-    const dir = tempDir("loopstra-fixtures-");
+    const dir = fixtureDir({ "plan-challenge-1": fixture("plan-challenge-reject") });
     try {
-      writeFileSync(join(dir.path, "plan-challenge-1.jsonl"), readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", "plan-challenge-reject.jsonl")));
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
         const { repo, ctx, trace, designPhases } = await designed();
         await runPlanStep(ctx);
@@ -323,5 +323,61 @@ describe("plan written ahead", () => {
     expect(planAheadNotes(trace).at(-1)).toBe(USES);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("cheaper judges on the plan challenge", () => {
+  const SHADOW = "speed:\n  cheap_judges: shadow\n";
+
+  test("shadow: a cheaper report that cannot be read is recorded as failed, and the strong judge decides", async () => {
+    const dir = fixtureDir({ "plan-challenge@sonnet": fixture("plan-challenge").replace("\"approved\":true,", "") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await specApproved(SHADOW);
+        await runPlanStep(ctx);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.judgeRows()).toMatchObject([{ judge: "plan-challenge", cheap: "failed", strong: "pass" }]);
+        expect(trace.phases("add-numbers").find((p) => p.name === "plan-challenge-cheap")?.status).toBe("fail");
+        expect(trace.gates("add-numbers").map((g) => `${g.check}:${g.result}`)).toEqual(["headings:pass", "files:pass", "plan-challenge:pass"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("shadow: a stop after the strong judge passed the plan, while the cheaper judge still runs, keeps the pass", async () => {
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "plan-challenge@sonnet=60000" }, async () => {
+      const { repo, ctx, trace } = await specApproved(SHADOW);
+      const stopWatching = stopAfterPass(trace, repo.path, "plan-challenge", "plan-approved");
+      try {
+        expect(await runPlanStep(ctx)).toEqual({ ok: true });
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.phases("add-numbers").find((p) => p.name === "plan-challenge-cheap")?.status).toBe("interrupted");
+        expect(trace.judgeRows()).toEqual([]);
+      } finally {
+        stopWatching();
+        resetStop();
+        trace.close(); repo.cleanup();
+      }
+    });
+  });
+
+  test("shadow: a cheaper judge that cannot reach the assistant is dropped; the step passes on the strong verdict, unpaused", async () => {
+    const dir = fixtureDir({ "plan-challenge@sonnet": fixture("outage") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await specApproved(SHADOW);
+        expect((await runPlanStep(ctx)).ok).toBe(true);
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.judgeRows()).toEqual([]);
+        const notes = trace.events("add-numbers").filter((e) => e.type === "command").map((e) => JSON.parse(e.payload) as { command: string; note?: string });
+        expect(notes.find((n) => n.command === "plan-challenge-cheap")?.note).toStartWith("dropped: ");
+        expect(existsSync(join(repo.path, ".loopstra", "paused.json"))).toBe(false);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
   });
 });

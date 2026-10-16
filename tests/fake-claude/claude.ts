@@ -17,9 +17,12 @@
 // A sequence: $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>-<n>.jsonl is used for the n-th call of that phase
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
 // each prompt as one JSON line ({phase, args, prompt, cwd}).
+// One model (the --model argument): before everything above, $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>@<model>-<n>.jsonl
+// (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. Two sessions of one phase
+// that start together race on the plain sequence's counter, so a test that runs both judges uses these.
 // Like the real CLI, the process exits 1 after a result event with is_error.
 // $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap);
-// as "<phase>=<ms>,..." only those phases' sessions.
+// as "<phase>=<ms>,..." only those phases' sessions, and as "<phase>@<model>=<ms>" only that phase on that model.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -39,18 +42,33 @@ if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CA
 
 if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt, cwd: process.cwd() }) + "\n");
 
-let sequenced: string | undefined;
-const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
-if (fixtureDir && phase) {
-  const countPath = join(fixtureDir, `.count-${phase}`);
+/** Counts one more call of `name` in <dir>/.count-<name> and gives the count. */
+async function nextCall(dir: string, name: string): Promise<number> {
+  const countPath = join(dir, `.count-${name}`);
   const n = (existsSync(countPath) ? Number(await Bun.file(countPath).text()) : 0) + 1;
   await Bun.write(countPath, String(n));
-  sequenced = join(fixtureDir, `${phase}-${n}.jsonl`);
+  return n;
+}
+
+const modelAt = args.indexOf("--model");
+const model = modelAt >= 0 ? args[modelAt + 1] : undefined;
+let sequenced: string | undefined;
+let modelSequenced: string | undefined;
+let modelFixture: string | undefined;
+const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
+if (fixtureDir && phase) {
+  sequenced = join(fixtureDir, `${phase}-${await nextCall(fixtureDir, phase)}.jsonl`);
+  if (model) {
+    modelSequenced = join(fixtureDir, `${phase}@${model}-${await nextCall(fixtureDir, `${phase}@${model}`)}.jsonl`);
+    modelFixture = join(fixtureDir, `${phase}@${model}.jsonl`);
+  }
 }
 
 const here = join(dirname(Bun.main), "fixtures");
 const named = /FIXTURE:([a-z0-9-]+)/.exec(prompt)?.[1];
 const candidates = [
+  modelSequenced,
+  modelFixture,
   process.env.LOOPSTRA_FAKE_FIXTURE,
   sequenced,
   named ? join(here, `${named}.jsonl`) : undefined,
@@ -84,7 +102,8 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
 const linger = fixture.endsWith("linger.jsonl");
 
 const delay = process.env.LOOPSTRA_FAKE_DELAY_MS ?? "";
-const delayMs = delay.includes("=") ? delay.split(",").map((d) => d.split("=")).find(([p]) => p === phase)?.[1] : delay;
+const delays = delay.split(",").map((d) => d.split("="));
+const delayMs = delay.includes("=") ? (delays.find(([p]) => p === `${phase}@${model}`) ?? delays.find(([p]) => p === phase))?.[1] : delay;
 if (delayMs) await Bun.sleep(Number(delayMs));
 
 let failed = false;

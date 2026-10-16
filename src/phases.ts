@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomForTwo, sessionCost, staleBefore, startOfToday } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomFor, sessionCost, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -36,6 +36,10 @@ export interface AgentPhaseSpec {
   env?: Record<string, string>;
   /** Names of skills to mention at the top of the prompt. */
   skills?: string[];
+  /** false: a timeout or crash is not tried again (the cheaper judge: the strong judge stands behind it). Default true. */
+  retry?: boolean;
+  /** false: getting through does not end an outage pause, since another model may still be out (the cheaper judge). Default true. */
+  endsPause?: boolean;
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
@@ -167,7 +171,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 
   const traceName = spec.traceName ?? spec.name;
   const first = await attempt(ctx, spec, prompt, traceName);
-  if (first.ok || !RETRIED.has(first.reason)) return first;
+  if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
   ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }
@@ -184,39 +188,75 @@ export function setPhaseBoundary(fn: PhaseBoundary | null): void {
   phaseBoundary = fn;
 }
 
-/** Two pieces of work running at once (see alongside): how many still run, and whether a session in them succeeded. */
-interface Group { running: number; succeeded: boolean }
+/**
+ * Two pieces of work running at once (see alongside): how many still run, whether a session in them
+ * succeeded, whether it has decided about the pause (both ended), and the group it runs inside of, if
+ * any (a judge's shadow inside the early review, or inside spec-check beside the plan written ahead).
+ */
+interface Group { running: number; succeeded: boolean; decided?: boolean; parent?: Group }
 
 /**
- * The group the current call runs in, and the signal that cancels its work (none for the main work).
- * Kept per call chain, not per process: work outside the group (another change's phases) never sees it.
+ * The group the current call runs in, and the signal that cancels its work (none for the main work
+ * of a group that is not itself cancellable). Kept per call chain, not per process: work outside the
+ * group (another change's phases) never sees it.
  */
 const inGroup = new AsyncLocalStorage<{ group: Group; signal?: AbortSignal }>();
 
-/**
- * Runs the phase boundary, except while other work of the same group still runs. Every phase runs it
- * first; a step runs it itself before deciding something on main's code (see takePlanAhead).
- */
-export async function boundary(ctx: StepContext): Promise<void> {
-  const g = inGroup.getStore()?.group;
-  if (phaseBoundary && !(g && g.running > 1)) await phaseBoundary(ctx);
+/** Other work still runs beside this call, in its own group or in one it runs inside of. */
+function othersRunning(g: Group | undefined): boolean {
+  for (; g; g = g.parent) if (g.running > 1) return true;
+  return false;
 }
 
-/** What cancels the current call's sessions and commands: set for the extra work of alongside. */
+/** The time the phase boundary took inside a call that `ownTime` measures. */
+const boundaryClock = new AsyncLocalStorage<{ ms: number }>();
+
+/**
+ * Runs the phase boundary, except while other work runs beside this call. Every phase runs it first;
+ * a step runs it itself before deciding something on main's code (see takePlanAhead).
+ */
+export async function boundary(ctx: StepContext): Promise<void> {
+  if (!phaseBoundary || othersRunning(inGroup.getStore()?.group)) return;
+  const started = Date.now();
+  try {
+    await phaseBoundary(ctx);
+  } finally {
+    const clock = boundaryClock.getStore();
+    if (clock) clock.ms += Date.now() - started;
+  }
+}
+
+/**
+ * Runs `fn` and says how long it took, less the phase boundary run inside it (merging other changes
+ * whose pull requests became ready), so a session's time is its own (the cheaper judges' report).
+ */
+export async function ownTime<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }> {
+  const clock = { ms: 0 };
+  const started = Date.now();
+  const value = await boundaryClock.run(clock, fn);
+  return { value, ms: Date.now() - started - clock.ms };
+}
+
+/** What cancels the current call's sessions and commands: set for the extra work of alongside, and for work inside it. */
 function cancelSignal(): AbortSignal | undefined {
   return inGroup.getStore()?.signal;
 }
 
-/** A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once both ended. */
+/**
+ * A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once
+ * both ended. A group that already decided passes it on (a shadow's comparison can end after the work
+ * of the group it ran in: see judgeFirst).
+ */
 function assistantReached(ctx: StepContext): void {
-  const g = inGroup.getStore()?.group;
+  let g = inGroup.getStore()?.group;
+  while (g?.decided) g = g.parent;
   if (g) g.succeeded = true;
   else clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
 }
 
 /** The judges may run alongside each other: speed.overlap_judges is on and the day's budget has room for two sessions. */
 export function mayOverlap(ctx: StepContext): boolean {
-  return ctx.cfg.speed.overlap_judges && roomForTwo(ctx.cfg, ctx.trace);
+  return ctx.cfg.speed.overlap_judges && roomFor(ctx.cfg, ctx.trace, 2);
 }
 
 /**
@@ -234,6 +274,10 @@ export function mayOverlap(ctx: StepContext): boolean {
  *   the loop stops rather than pauses), else main's error.
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
+ * - It may run inside another alongside or alongsideFirst (a judge's shadow inside the early review,
+ *   or inside spec-check beside the plan written ahead): no boundary runs while the outer work runs,
+ *   cancelling the outer extra cancels both, and a success inside counts for the outer group, which
+ *   decides about the pause.
  */
 export async function alongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>): Promise<[M, E | null]> {
   return (await startAlongside(ctx, main, extra, false)).both;
@@ -277,23 +321,27 @@ export async function alongsideFirst<M, E>(
  */
 async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>, hold: boolean) {
   await boundary(ctx);
-  const group: Group = { running: 2, succeeded: false };
+  const outer = inGroup.getStore();
+  const group: Group = { running: 2, succeeded: false, parent: outer?.group };
   const cancel = new AbortController();
+  const extraSignal = outer?.signal ? AbortSignal.any([outer.signal, cancel.signal]) : cancel.signal;
   let held = hold;
   const release = () => { if (held) { held = false; group.running--; } };
   const member = <T>(fn: () => Promise<T>, signal?: AbortSignal, holds = false): Promise<T> =>
     inGroup.run({ group, signal }, async () => { try { return await fn(); } finally { if (!holds) group.running--; } });
-  const mainDone = member(main, undefined, hold).then(
+  const mainDone = member(main, outer?.signal, hold).then(
     (m) => { if (!extra.wanted(m)) cancel.abort(); return m; },
     (e: unknown) => { cancel.abort(); throw e; },
   );
-  const extraDone = member(extra.run, cancel.signal).catch((e: unknown) => {
+  const extraDone = member(extra.run, extraSignal).catch((e: unknown) => {
     if (e instanceof StopRequested) throw e;
     ctx.trace.event(ctx.slug, "command", { command: extra.what, note: e instanceof Cancelled ? e.message : `dropped: ${errorText(e)}` });
     return null;
   });
   const both = Promise.allSettled([mainDone, extraDone]).then(([m, x]): [M, E | null] => {
-    if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) clearPause(ctx.root);
+    // Inside another group this marks that group, which decides about the pause once its work ended.
+    if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) assistantReached(ctx);
+    group.decided = true;
     if (x.status === "rejected") throw x.reason; // only ever a stop request
     if (m.status === "rejected") throw m.reason;
     return [m.value, x.value];
@@ -393,7 +441,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
-    assistantReached(ctx);
+    if (spec.endsPause !== false) assistantReached(ctx);
     return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
   } catch (e) {
     if (e instanceof StopRequested || e instanceof Cancelled) {
