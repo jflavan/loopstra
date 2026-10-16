@@ -69,17 +69,24 @@ function lock(name: string): Lock {
 }
 
 /**
- * The key of a folder's main lock: its real path (links, slashes, and case on Windows resolved), or
- * null for a folder inside a `.loopstra` folder (a change's worktree, the done-check and health
- * copies of main). A worktree's index and branch belong to one change, and a change runs one step
- * at a time, so they need no lock.
+ * A folder's real path as one string to compare: links and 8.3 names resolved, forward slashes, no
+ * trailing slash, and lower case on Windows.
+ */
+export function realPathKey(path: string): string {
+  let real: string;
+  try { real = realpathSync.native(path); } catch { real = resolve(path); }
+  const key = real.replace(/[\\/]+/g, "/").replace(/\/$/, "");
+  return process.platform === "win32" ? key.toLowerCase() : key;
+}
+
+/**
+ * The key of a folder's main lock: its real path (see realPathKey), or null for a folder inside a
+ * `.loopstra` folder (a change's worktree, the done-check and health copies of main). A worktree's
+ * index and branch belong to one change, and a change runs one step at a time, so they need no lock.
  */
 export function mainLockKey(cwd: string): string | null {
-  let real: string;
-  try { real = realpathSync.native(cwd); } catch { real = resolve(cwd); }
-  const key = real.replace(/[\\/]+/g, "/").replace(/\/$/, "");
-  if (key.split("/").includes(".loopstra")) return null;
-  return process.platform === "win32" ? key.toLowerCase() : key;
+  const key = realPathKey(cwd);
+  return key.split("/").includes(".loopstra") ? null : key;
 }
 
 const mainLocks = new Map<string, Lock>();

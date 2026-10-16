@@ -226,28 +226,41 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
 /** The trace's plain line when a pull request was brought up to date before it could merge. */
 const BROUGHT_UP_TO_DATE = "Brought up to date with changes merged meanwhile; waiting for the automatic checks on GitHub again.";
 
-/** Whether a branch still has what it was checked against (see upToDate). */
-type Freshness = "up to date" | "main ahead" | "remote ahead" | "unreachable";
+/**
+ * Whether the pull request's branch on GitHub still has what it was checked against (see upToDate).
+ * `not pushed`: the branch here has commits GitHub's copy lacks (a bring-up-to-date that stopped
+ * before its push).
+ */
+type Freshness = "up to date" | "main ahead" | "not pushed" | "remote ahead" | "unreachable";
+
+/** Run-folder marker: the pull request waits for main here to get changes merged on GitHub (traced once). */
+const REMOTE_AHEAD = "remote-ahead";
 
 /**
  * With more than one change at a time, another change may have merged since this pull request's
  * checks ran, so its checks never saw the two together. Under the merge lock: fetch, and merge on
- * GitHub only when neither main here nor the remote's main gained code the branch lacks. When only
- * the remote's main did, wait: the next tick's start brings it here. When main here did, bring the
- * branch up to date outside the lock (the merge checks again, then a push that keeps the pull
- * request open) and wait for GitHub's checks again. A step started between another change's phases
- * waits for its own turn instead, since the checks may run tests and sessions.
+ * GitHub only when the pull request's branch there is the branch here and neither main here nor
+ * the remote's main gained code it lacks. When only the remote's main did, wait (traced once): the
+ * next tick's start brings it here. When main here did, or the branch here was brought up to date
+ * but not pushed, bring it up to date outside the lock (the merge checks again, then a push that
+ * keeps the pull request open) and wait for GitHub's checks again. A step started between another
+ * change's phases waits for its own turn instead, since the checks may run tests and sessions.
  */
 async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
   const r = await oneMergeAtATime(ctx, async () => {
     const seen = await upToDate(ctx);
     return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr) : seen;
   });
-  if (typeof r !== "string") return r;
+  const main = ctx.cfg.main_branch;
   if (r === "remote ahead") {
-    ctx.trace.event(ctx.slug, "command", { command: "up to date", waiting: `${ctx.cfg.main_branch} on GitHub has changes merged meanwhile; ${ctx.cfg.main_branch} here gets them at the start of the next check, and then this change is brought up to date` });
+    if (onceMarker(ctx, REMOTE_AHEAD)) {
+      ctx.trace.event(ctx.slug, "command", { command: "up to date", waiting: `${main} on GitHub has changes merged meanwhile; ${main} here gets them at the start of the next check, and then this change is brought up to date (if it does not, the main_sync signal says why)` });
+    }
+    return { ok: true, waiting: true };
   }
-  if (r !== "main ahead" || ctx.betweenPhases) return { ok: true, waiting: true };
+  if (r !== "unreachable") clearMarker(ctx, REMOTE_AHEAD);
+  if (typeof r !== "string") return r;
+  if (r === "unreachable" || ctx.betweenPhases) return { ok: true, waiting: true };
   return checkAgain(ctx, async () => {
     const opened = await openPullRequest(ctx, false);
     if (!opened.ok) return block(ctx, opened.note, opened);
@@ -257,27 +270,31 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
 }
 
 /**
- * Fetches, then looks at main here and at the remote's main: is either one ahead of the branch with
- * code outside intent/? A fetch that fails is traced; the step waits and looks again next time.
+ * Fetches, then judges what GitHub would merge: the pull request's branch as GitHub has it. The
+ * branch here has commits that copy lacks (a bring-up-to-date that stopped before its push): it is
+ * not pushed. Otherwise, is main here or the remote's main ahead of that copy with code outside
+ * intent/? A fetch that fails is traced; the step waits and looks again next time.
  */
 async function upToDate(ctx: StepContext): Promise<Freshness> {
   const remote = await ctx.git.remoteName();
   if (!remote) return "unreachable";
-  const fetched = await ctx.git.run(["fetch", "--quiet", remote], true);
+  const fetched = await ctx.git.fetch(["--quiet", remote], true);
   if (fetched.code !== 0) {
     ctx.trace.event(ctx.slug, "error", { where: "up to date", error: (fetched.err || `exit ${fetched.code}`).trim(), note: "will look again on the next tick" });
     return "unreachable";
   }
+  const pushed = `refs/remotes/${remote}/${ctx.branch}`;
+  if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
   const main = ctx.cfg.main_branch;
-  if (await outOfDate(ctx, main)) return "main ahead";
-  if (await outOfDate(ctx, `${remote}/${main}`)) return "remote ahead";
+  if (await outOfDate(ctx, main, pushed)) return "main ahead";
+  if (await outOfDate(ctx, `${remote}/${main}`, pushed)) return "remote ahead";
   return "up to date";
 }
 
-/** True when `ref` has code (outside intent/) the branch lacks: it gained some since they parted. */
-async function outOfDate(ctx: StepContext, ref: string): Promise<boolean> {
-  if (await ctx.git.isAncestor(ref, ctx.branch)) return false;
-  const base = (await ctx.git.run(["merge-base", ref, ctx.branch], true)).out.trim();
+/** True when `ref` has code (outside intent/) that `branch` lacks: it gained some since they parted. */
+async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise<boolean> {
+  if (await ctx.git.isAncestor(ref, branch)) return false;
+  const base = (await ctx.git.run(["merge-base", ref, branch], true)).out.trim();
   return !base || (await ctx.git.gainedCodeSince(base, ref, ["intent/"]));
 }
 
@@ -534,6 +551,7 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
   await setStatus(ctx, "merged");
   clearMarker(ctx, MERGING);
   clearMarker(ctx, REVIEW_ROUND);
+  clearMarker(ctx, REMOTE_AHEAD);
   return { ok: true };
 }
 

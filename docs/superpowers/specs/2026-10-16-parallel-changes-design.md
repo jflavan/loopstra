@@ -326,7 +326,7 @@ the shared-state table). It may fail; a failure is only traced.
 | `recordPersonEdits` | One writer | A main-lock section. In `finishRemoteMerge` it shares one section with the sync. |
 | Local merge (`mergeNow`) | No commit lands between the checks and the merge | The merge lock from the checks to the merge, and the main lock across `mergeNow`. |
 | Worktree and branch admin (shared `.git/worktrees`, refs, `packed-refs`) | One caller | Root commands are locked automatically. `ensureWorktree`, `removeWorktree`, the `withDetachedWorktree` setup and teardown, and `cleanupChange` are sections. |
-| Commands inside worktrees (`saveWork`, `rebaseOnto`) | n/a | Each worktree has its own index and HEAD, so no lock is needed. Automatic `git gc` is turned off for runtime commits (`-c gc.auto=0 -c maintenance.auto=false` in `RUNTIME_COMMIT_CONFIG`). Otherwise one change's commit could pack refs while another change commits or deletes a branch, and fail with "cannot lock ref". The tick start runs `git gc --auto --quiet` itself while no lane runs (allowed to fail, traced only on failure). |
+| Commands inside worktrees (`saveWork`, `rebaseOnto`) | n/a | Each worktree has its own index and HEAD, so no lock is needed. Automatic `git gc` and maintenance are turned off for runtime commits, fetches and the fast-forward of a local merge (`-c gc.auto=0 -c maintenance.auto=false`, `NO_AUTO_MAINTENANCE`, part of `RUNTIME_COMMIT_CONFIG`); a fetch would otherwise start it in the background, outliving its main-lock section. Otherwise one change's commit could pack refs while another change commits or deletes a branch, and fail with "cannot lock ref". The tick start runs `git gc --auto --quiet` itself while no lane runs (allowed to fail, traced only on failure). |
 | Read-only git on root (`isAncestor`, `ls-files`, `ls-tree`) | n/a | They go through the same per-command lock. They are short, so this costs little. |
 | Run folders, `.loopstra/verify/<slug>`, `sessions.json`, phase folders | n/a | Each belongs to one change. Nothing to do. |
 | `phaseBoundary`, `alongside` groups, `mergingBetweenPhases`, `mergeReadyChanges` | One step | See "Module-level state" above. |
@@ -369,9 +369,10 @@ the shared-state table). It may fail; a failure is only traced.
   One change's overlap can then never take the cap another running change needs for its next
   session. This counts a change already holding a session twice, on purpose. At N=1 it is
   exactly `roomFor(cfg, trace, sessions)`, as before.
-- When `lanesFor` gives fewer lanes than configured, the trace says so at most once a day for
-  each number: "Today's budget has room for 1 change at a time instead of 2." The budget only
-  shrinks during a day, so this is once each time the number changes.
+- When `lanesFor` gives fewer lanes than configured, the trace says so once each time the
+  number changes, and again on a new day: "Today's budget has room for 1 change at a time instead
+  of 2." The number can go back up during a day (a killed session's hold stops counting once it
+  is stale, or the owner raises the day's budget), and then the line comes again when it drops.
 - When the day runs out in the middle of a step, as it can today, that change ends with
   `LoopBudgetReached`, the other lanes start nothing new, and `afterDayBudget` handles every
   change that hit it.
@@ -395,14 +396,22 @@ first one's code. Its checks never saw the two together. In `runRemoteMerge`, on
 have passed (and approval, where needed), and just before `mergeOnGitHub`, this code
 (`mergeWhenUpToDate`) runs inside `oneMerge.run`:
 
-1. `git fetch` (main lock). If it fails, the failure is traced and the step waits.
-2. `outOfDate(ref)` for `main`, then for `<remote>/<main>`. A ref is out of date when the branch
-   does not contain it and the ref gained code outside `intent/` since `merge-base(ref, branch)`.
-   The new Git helper is `gainedCodeSince(base, ref, ["intent/"])`.
-3. Neither ref is out of date: merge on GitHub as today, still inside the lock.
-4. Only the remote's main is ahead: wait. The next tick's sync brings it in. The trace says that
-   main here gets those changes at the start of the next check.
-5. Local main is ahead:
+1. `git fetch` (main lock, no automatic gc or maintenance). If it fails, the failure is traced
+   and the step waits.
+2. What GitHub would merge is judged, not the branch here: the pull request's branch as GitHub
+   has it, `<remote>/<branch>` after the fetch. When the branch here has commits that copy lacks
+   (`not pushed`: a bring-up-to-date rebased it, then a stop, an outage, the day's budget or a
+   failed push ended the step before its push), go to step 6. Otherwise GitHub would merge the old
+   head, which never met the other change.
+3. `outOfDate(ref, pushed)` for `main`, then for `<remote>/<main>`. A ref is out of date when
+   GitHub's copy of the branch does not contain it and the ref gained code outside `intent/`
+   since their merge base. The new Git helper is `gainedCodeSince(base, ref, ["intent/"])`.
+4. Neither ref is out of date: merge on GitHub as today, still inside the lock.
+5. Only the remote's main is ahead: wait. The next tick's sync brings it in. The trace says once
+   (a run-folder marker, cleared when the change is brought up to date or merges) that main here
+   gets those changes at the start of the next check, and that the `main_sync` signal says why if
+   it does not.
+6. Local main is ahead, or the branch here is not pushed:
    - If this step was started between another change's phases (`ctx.betweenPhases`), it waits
      for its own turn.
    - Otherwise it leaves the lock and runs the merge checks again through `checkAgain`, the
@@ -645,6 +654,9 @@ Integration (`LOOPSTRA_FAKE_DELAY_MS`):
     `merge-review`, and the trace has the "brought up to date" line.
   - It merges on a later tick once the checks pass.
   - Started between another change's phases, it waits for its own turn instead.
+  - Looked at again while only the remote's main is ahead, it waits and the wait is traced once.
+  - A branch rebased here but never pushed (a re-check that stopped before its push) is checked
+    again and pushed, never merged with GitHub's old head.
   - With N=1 the behaviour is unchanged.
 - **Claims:** with N=2, a `merge-review` change in one lane is never also run by the other lane's
   between-phases merge: exactly one `merge` phase and one change to `merged` for it, with up to
@@ -663,6 +675,11 @@ Integration (`LOOPSTRA_FAKE_DELAY_MS`):
   - B keeps moving.
   - When both lanes fail, one pause is written per tick (failures + 1, not + 2) and no new change
     starts in that tick.
+  - With a remote: a lane whose step only looked at a pull request (checks pending, GitHub's
+    answer held until the other lane met the outage) starts no further change. This is the case
+    the halt is for: any other lane ends after its own problem anyway.
+  - The probe blocks a change that ran in the second lane: the tick's `picked` and `result` stay
+    the first lane's step, and the block is on the second lane's step in `steps`.
 - **Budget:** day $3, cap $2, N=2 gives one lane (the trace says "room for 1 change at a time
   instead of 2", once). Day $8 gives two lanes, and no lane hits `LoopBudgetReached` on its first
   session. (A $4 day gives floor(4/2) = 2 lanes on a fresh day.)
@@ -735,7 +752,7 @@ Integration (`LOOPSTRA_FAKE_DELAY_MS`):
 - max_parallel_changes is capped at 4 (Design 2 proposed 8): subscription usage limits and contention between worktrees make more than 4 unlikely to help, and the cap can be raised later.
 - No LOOPSTRA_LANE variable: LOOPSTRA_SLUG already gives project commands a stable way to keep changes apart.
 - writeIntentPriority commits at once instead of making syncMain ignore Loopstra's own unsaved edits: one more bookkeeping commit per change is simpler than a second dirty-file rule, and it also helps at N=1.
-- Runtime commits turn off automatic git gc (gc.auto=0, maintenance.auto=false), and the tick start runs git gc --auto while no lane runs. Otherwise a pack-refs run during one change's commit can make another change's save fail and block it for an engineer.
+- Runtime commits, fetches and the fast-forward of a local merge turn off automatic git gc and maintenance (gc.auto=0, maintenance.auto=false), and the tick start runs git gc --auto while no lane runs. Otherwise a pack-refs run during one change's commit can make another change's save fail and block it for an engineer.
 - health-pending becomes a list of slugs, so the draft opened for failing tests names every change merged since the last check: plain-language accuracy matters to the owner, and the change is about 10 lines.
 - Groups stay per call chain, as parts A and D already made them (an AsyncLocalStorage, with nested groups knowing their parent), so no StepContext.groups is added. The boundary also skips while the context holds either lock (from Design 2): this prevents a boundary/merge-lock deadlock once the merge checks hold the merge lock.
 - Rejected from Design 2: reloading the config on every refill, a fresh scan on every launch, locking record reads, a step_start/step_end EventType, and the alreadyTested re-check inside mergeNow. Each adds code for a case that rule 4, the batch model or the merge lock already rules out.

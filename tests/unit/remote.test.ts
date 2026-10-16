@@ -7,7 +7,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
-import { run, tempDir, tempGitRepo } from "../helpers";
+import { run, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 /** A repo with a bare remote holding its main, a second clone of that remote, and a trace. */
 async function setup() {
@@ -207,6 +207,17 @@ describe("syncMain", () => {
     expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
     expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("pass");
     s.cleanup();
+  });
+
+  test("its fetch and rebase never start git's automatic gc or maintenance (other changes may be committing meanwhile)", async () => {
+    const s = await setup();
+    const log = join(s.other, "..", `git-trace-${Date.now()}.log`);
+    try {
+      await pushFromOther(s.other, "theirs.md", "theirs\n");
+      await withEnv({ GIT_TRACE: log }, () => syncMain(s.repo, s.cfg, s.trace));
+      expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
+      expect(await Bun.file(log).text()).not.toMatch(/maintenance run --auto|gc --auto/);
+    } finally { rmSync(log, { force: true }); s.cleanup(); }
   });
 
   test("a remote that cannot be reached is traced and never throws", async () => {

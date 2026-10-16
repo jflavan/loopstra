@@ -8,6 +8,9 @@ type State = { prs: Record<string, Pr>; next: number };
 
 // Test knob: behave like a gh that never answers.
 if (process.env.LOOPSTRA_FAKE_GH_HANG === "1") await new Promise(() => setInterval(() => {}, 1_000));
+// Test knob: every call waits until this file exists, so a test decides when GitHub answers.
+const waitFor = process.env.LOOPSTRA_FAKE_GH_WAIT_FOR;
+if (waitFor) while (!existsSync(waitFor)) await Bun.sleep(20);
 
 const args = Bun.argv.slice(2);
 const statePath = process.env.LOOPSTRA_FAKE_GH_STATE!;

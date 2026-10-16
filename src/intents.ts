@@ -442,6 +442,11 @@ export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): s
 /** Statuses whose change holds the files its plan lists until it merges. */
 const HOLDS_FILES: ReadonlySet<Status> = new Set(["building", "reviewing", "merge-review", "merge-approved"]);
 
+/** True when fileHolds needs this change's planned files: it may wait (plan-approved), or hold others. */
+export function planFilesNeeded(status: Status): boolean {
+  return status === "plan-approved" || HOLDS_FILES.has(status);
+}
+
 /**
  * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
  * lists a file that another change's plan lists, and that change is building, in review or waiting to

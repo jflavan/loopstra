@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { mainLockKey, onMainKey } from "./lanes";
+import { mainLockKey, onMainKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded } from "./shell";
 import { notTheStepsFault, StopRequested } from "./stop";
 
@@ -15,16 +15,22 @@ export const RUNTIME_NAME = "Loopstra";
 export const RUNTIME_EMAIL = "loopstra@localhost";
 
 /**
+ * Turns off git's automatic gc and maintenance for one command. Commits, fetches and merges start
+ * them when they end, in the background: they could pack refs while another change commits or
+ * deletes a branch, and that one would fail with "cannot lock ref". The tick start runs gc itself
+ * while no step runs.
+ */
+export const NO_AUTO_MAINTENANCE: readonly string[] = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+
+/**
  * Settings for every commit the runtime makes (bookkeeping on main, saves in a worktree, merges,
  * rebases): its own identity, and never a signing prompt. Hooks are skipped with `--no-verify`
  * where the command has it; the gates run the configured checks instead of the owner's hooks.
- * Git's automatic gc and maintenance are off: run after one change's commit, they could pack refs
- * while another change commits or deletes a branch, and that one would fail with "cannot lock ref".
- * The tick start runs gc itself while no step runs.
+ * No automatic gc or maintenance (see NO_AUTO_MAINTENANCE).
  */
 export const RUNTIME_COMMIT_CONFIG: readonly string[] = [
   "-c", `user.name=${RUNTIME_NAME}`, "-c", `user.email=${RUNTIME_EMAIL}`, "-c", "commit.gpgsign=false",
-  "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+  ...NO_AUTO_MAINTENANCE,
 ];
 
 /**
@@ -124,13 +130,7 @@ export class WrongBranchError extends Error {
 
 /** True when two paths name the same directory (resolves links, 8.3 names, slashes, and case on Windows). */
 export function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    let r: string;
-    try { r = realpathSync.native(p); } catch { r = resolve(p); }
-    r = r.replace(/[\\/]+/g, "/").replace(/\/$/, "");
-    return process.platform === "win32" ? r.toLowerCase() : r;
-  };
-  return norm(a) === norm(b);
+  return realPathKey(a) === realPathKey(b);
 }
 
 export class Git {
@@ -179,6 +179,11 @@ export class Git {
   runtime(sub: "commit" | "commit-tree" | "merge" | "rebase", rest: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const noVerify = sub === "commit-tree" ? [] : ["--no-verify"];
     return this.run([...RUNTIME_COMMIT_CONFIG, sub, ...noVerify, ...rest], opts);
+  }
+
+  /** `git fetch` with these arguments, without the automatic gc or maintenance a fetch starts (see NO_AUTO_MAINTENANCE). */
+  fetch(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
+    return this.run([...NO_AUTO_MAINTENANCE, "fetch", ...args], opts);
   }
 
   /** The checked-out branch (`HEAD` when detached), or "" when it cannot be read. */
@@ -336,7 +341,7 @@ export class Git {
         throw new GitError(["merge", branch], "", `${branch} does not contain the current commit; bring it up to date first`, 1);
       }
       const sha = (await this.runtime("commit-tree", [`${branch}^{tree}`, "-p", head, "-m", message])).out.trim();
-      await this.run(["merge", "--ff-only", "-q", sha]);
+      await this.run([...NO_AUTO_MAINTENANCE, "merge", "--ff-only", "-q", sha]);
       return;
     }
     try {

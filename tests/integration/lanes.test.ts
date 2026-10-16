@@ -8,7 +8,7 @@ import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { lanesRunning } from "../../src/lanes";
-import { runStepGuarded, tick } from "../../src/scheduler";
+import { PROBE_AFTER, runStepGuarded, tick } from "../../src/scheduler";
 import { syncMain } from "../../src/remote";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -250,6 +250,28 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     });
     r.cleanup();
   }, 180_000);
+
+  test("a change the probe blocks in the second lane: the tick's picked and result stay the first lane's step", async () => {
+    const r = await lanesRepo(2, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }]);
+    writeFileSync(join(r.fixtures, "beta", "intake.jsonl"), fixture("outage"));
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      expect(readPause(r.path)).toMatchObject({ slug: "beta", phase: "intake", repeats: 1 });
+      // One more repeat reaches the probe. beta is set back to accepted, so it is again second in the queue and runs in the second lane.
+      await Bun.write(join(r.path, ".loopstra", "paused.json"), JSON.stringify({ ...readPause(r.path)!, repeats: PROBE_AFTER - 1, until: new Date(Date.now() - 1000).toISOString() }));
+      const intent = join(r.path, "intent", "beta", "intent.md");
+      await Bun.write(intent, (await Bun.file(intent).text()).replace("status: designing", "status: accepted"));
+      await new Git(r.path).commitAll("beta back to accepted");
+
+      const t = await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("plan-approved");
+      expect(await statusOf(r.path, "beta")).toBe("blocked");
+      expect(t.picked).toBe("alpha");
+      expect(t.result?.ok).toBe(true);
+      expect(t.steps?.find((s) => s.slug === "beta")?.result).toMatchObject({ ok: false });
+    });
+    r.cleanup();
+  }, 120_000);
 
   test("when every lane meets the outage, one pause is written per tick and no further change starts", async () => {
     const r = await lanesRepo(2, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }, { slug: "gamma", status: "accepted" }]);
@@ -608,10 +630,16 @@ describe("more than one change at a time, with a GitHub remote", () => {
       const first = merged[0]!;
       const second = first === "alpha" ? "beta" : "alpha";
 
-      // Started between another change's phases, a pull request that main here has overtaken waits for its own turn.
       const cfg = await loadConfig(r.path);
       const trace = Trace.open(r.path);
       try {
+        // Looked at again before main here has the first change: it still waits, and the wait is traced once.
+        const remoteAheadWaits = () => trace.events(second).filter((e) => e.type === "command" && payloadOf<{ command: string; waiting?: string }>(e).command === "up to date" && e.payload.includes("\"waiting\""));
+        expect(remoteAheadWaits()).toHaveLength(1);
+        expect(await runStepGuarded(new StepContext(r.path, cfg, trace, await readIntent(r.path, second)))).toEqual({ ok: true, waiting: true });
+        expect(remoteAheadWaits()).toHaveLength(1);
+
+        // Started between another change's phases, a pull request that main here has overtaken waits for its own turn.
         await syncMain(r.path, cfg, trace);
         const ctx = new StepContext(r.path, cfg, trace, await readIntent(r.path, second));
         ctx.betweenPhases = true;
@@ -619,6 +647,24 @@ describe("more than one change at a time, with a GitHub remote", () => {
         expect(trace.phases(second).some((p) => p.name === "merge-test-1")).toBe(false);
         expect(trace.events(second).some((e) => e.payload.includes("Brought up to date"))).toBe(false);
       } finally { trace.close(); }
+
+      // A re-check that rebased the branch here but stopped before its push (a stop, an outage, a
+      // failed push): the pull request on GitHub still has the old head, which never met the first
+      // change. It is checked again and pushed, never merged as it is.
+      const stale = await copyRemoteRepo(r);
+      try {
+        expect(await new Git(join(stale.path, ".loopstra", "worktrees", second)).rebaseOnto("main")).toBe(true);
+        await withEnv(stale.env, async () => {
+          const staleTrace = Trace.open(stale.path);
+          try {
+            const ctx = new StepContext(stale.path, await loadConfig(stale.path), staleTrace, await readIntent(stale.path, second));
+            expect(await runStepGuarded(ctx)).toEqual({ ok: true, waiting: true });
+            expect(staleTrace.events(second).filter((e) => e.payload.includes("Brought up to date"))).toHaveLength(1);
+          } finally { staleTrace.close(); }
+        });
+        expect((await prs(stale))[`intent/${second}`]!.merged).toBe(false);
+        expect((await run(["git", "cat-file", "-e", `intent/${second}:src/${first}.ts`], stale.remote)).code).toBe(0);
+      } finally { stale.cleanup(); }
 
       // Main here gets the first change at the next tick's start. The second is rebased onto it, tested
       // again, and pushed again; its pull request stays open and it keeps its status.
@@ -647,4 +693,32 @@ describe("more than one change at a time, with a GitHub remote", () => {
     });
     r.cleanup();
   }, 300_000);
+
+  test("an outage in one lane: the other lane, whose step only looked at a pull request, starts no further change", async () => {
+    // alpha's pull request has its checks pending, so its step only looks, and its lane would then
+    // take the next change. GitHub answers that look only once beta has met the outage in the other lane.
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "merge-review" }, { slug: "beta", status: "accepted" }, { slug: "gamma", status: "accepted" }]);
+    await Bun.write(r.state, JSON.stringify({ prs: { "intent/alpha": { number: 1, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, comments: [] } }, next: 2 }));
+    const answer = join(r.fixtures, "github-answers");
+    const outage = join(import.meta.dir, "..", "fake-claude", "fixtures", "outage.jsonl");
+    await withEnv({ ...r.env, LOOPSTRA_FAKE_GH_WAIT_FOR: answer, LOOPSTRA_FAKE_FIXTURE: outage }, async () => {
+      const running = tick(r.path);
+      try {
+        await traceShows(r.path, (t) => t.phases("beta").some((p) => p.status === "interrupted"));
+        // A moment for beta's lane to pass the outage on (GitHub's answer takes two gh calls anyway).
+        await Bun.sleep(300);
+      } finally {
+        writeFileSync(answer, "");
+      }
+      const t = await running;
+      expect(t.paused).toMatch(/^The assistant is unavailable/);
+      expect(t.steps?.map((s) => s.slug).sort()).toEqual(["alpha", "beta"]);
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      inTrace(r.path, (trace) => {
+        expect(trace.phases("beta").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
+        expect(trace.phases("gamma")).toEqual([]);
+      });
+    });
+    r.cleanup();
+  }, 120_000);
 });

@@ -82,7 +82,7 @@ async function sync(git: Git, main: string, trace: Trace, rebase: boolean): Prom
   // queue.md is generated and rewritten later in this tick; its unsaved copy never holds up the sync.
   if (changed.length) await git.run(["checkout", "--", QUEUE], true);
 
-  const fetched = await git.run(["fetch", "--quiet", remote], true);
+  const fetched = await git.fetch(["--quiet", remote], true);
   if (fetched.code !== 0) return { result: "fail", text: SYNC_TEXT.unreachable, detail: { what: "fetch failed", remote, error: lastLine(fetched.err) || `exit ${fetched.code}` } };
 
   const upstream = `${remote}/${main}`;

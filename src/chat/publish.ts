@@ -82,7 +82,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       return done;
     }
     const main = o.cfg.main_branch;
-    await git.run(["fetch", "-q", remote, main]);
+    await git.fetch(["-q", remote, main]);
     const dir = join(chatDir(o.root), "worktrees", `handoff-${Date.now()}-${process.pid}`);
     mkdirSync(join(chatDir(o.root), "worktrees"), { recursive: true });
     return await withDetachedWorktree(git, dir, `${remote}/${main}`, async (wt): Promise<HandoffOutcome> => {

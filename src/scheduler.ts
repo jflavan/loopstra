@@ -11,7 +11,7 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, setPhaseBoundary } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, intentRoot, isRunnable, orderQueue, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, intentRoot, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { applyChatRequests } from "./chat/requests";
@@ -286,9 +286,6 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
   return out;
 }
 
-/** Statuses whose plan's file list the same-file wait reads. */
-const READS_PLAN_FILES = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
-
 /**
  * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
  * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
@@ -297,7 +294,7 @@ const READS_PLAN_FILES = new Set(["plan-approved", "building", "reviewing", "mer
 export async function sameFileHolds(root: string, lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
   if (lanes <= 1) return new Map();
   const files = new Map<string, string[] | null>();
-  for (const i of ordered.filter((x) => READS_PLAN_FILES.has(x.file.frontmatter.status))) {
+  for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
     const path = join(intentRoot(root), i.slug, "plan.md");
     const plan = existsSync(path) ? await Bun.file(path).text().catch(() => null) : null;
     files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
@@ -310,7 +307,7 @@ const FEWER_LANES = "changes at a time";
 
 /**
  * Says when the day's budget gives fewer lanes than speed.max_parallel_changes (see lanesFor): once
- * a day for each number, not on every tick.
+ * each time the number changes, and again on a new day, not on every tick.
  */
 function traceLanes(trace: Trace, cfg: Config, lanes: number): void {
   const configured = cfg.speed.max_parallel_changes;
@@ -537,9 +534,12 @@ async function blockOverTheDay(root: string, cfg: Config, trace: Trace, intent: 
   return blockSafely(ctx, stepOverDayNote(cfg), { detail: { where: "day budget", status, spentUsd, dayUsd, earlierPause: last.ts, earlierSpentUsd: earlier.spentUsd } });
 }
 
-/** A step that ended without a result got one after the lanes (blocked by the probe or the day's rule). */
+/**
+ * A step that ended without a result got one after the lanes (blocked by the probe or the day's
+ * rule). It is the tick's `result` only when that step is the one `picked` names.
+ */
 function stepEnded(out: TickResult, slug: string, result: StepResult): void {
-  out.result = result;
+  if (slug === out.picked) out.result = result;
   const step = out.steps?.findLast((s) => s.slug === slug);
   if (step) step.result = result;
 }

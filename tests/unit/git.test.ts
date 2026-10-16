@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { onMain } from "../../src/lanes";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
-import { lastCommit, run, setEnv, tempGitRepo } from "../helpers";
+import { lastCommit, run, setEnv, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 afterEach(() => resetStop());
 
@@ -174,6 +174,30 @@ describe("Git", () => {
       expect((await git.run([...RUNTIME_COMMIT_CONFIG, "config", "--get", "gc.auto"])).out.trim()).toBe("0");
       expect((await git.run([...RUNTIME_COMMIT_CONFIG, "config", "--get", "maintenance.auto"])).out.trim()).toBe("false");
     } finally { repo.cleanup(); }
+  });
+
+  test("fetches and fast-forward merges in the main checkout never start git's automatic gc or maintenance", async () => {
+    const remote = tempDir("loopstra-remote-");
+    const repo = await tempGitRepo();
+    const log = join(remote.path, "..", `git-trace-${Date.now()}.log`);
+    try {
+      await run(["git", "init", "-q", "--bare", "-b", "main"], remote.path);
+      await run(["git", "remote", "add", "origin", remote.path], repo.path);
+      await run(["git", "push", "-q", "origin", "main"], repo.path);
+      const git = new Git(repo.path);
+      await git.createBranch("feature", "main");
+      const feature = (await git.run([...RUNTIME_COMMIT_CONFIG, "commit-tree", "main^{tree}", "-p", "main", "-m", "feature"])).out.trim();
+      await git.run(["update-ref", "refs/heads/feature", feature]);
+      const started = (what: () => Promise<unknown>) => withEnv({ GIT_TRACE: log }, async () => {
+        rmSync(log, { force: true });
+        await what();
+        return existsSync(log) && /maintenance run --auto|gc --auto/.test(await Bun.file(log).text());
+      });
+      // What the test looks for: a plain fetch does start it.
+      expect(await started(() => git.run(["fetch", "--quiet", "origin"]))).toBe(true);
+      expect(await started(() => git.fetch(["--quiet", "origin"]))).toBe(false);
+      expect(await started(() => git.merge("feature", "squash", "feature"))).toBe(false);
+    } finally { rmSync(log, { force: true }); repo.cleanup(); remote.cleanup(); }
   });
 
   test("a git error names the real problem, not git's line-ending warnings", () => {
