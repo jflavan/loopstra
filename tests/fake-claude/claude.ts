@@ -16,9 +16,10 @@
 // $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
 // A sequence: $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>-<n>.jsonl is used for the n-th call of that phase
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
-// each prompt as one JSON line ({phase, args, prompt}).
+// each prompt as one JSON line ({phase, args, prompt, cwd}).
 // Like the real CLI, the process exits 1 after a result event with is_error.
-// $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap).
+// $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap);
+// as "<phase>=<ms>,..." only those phases' sessions.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -36,7 +37,7 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
 
-if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt }) + "\n");
+if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt, cwd: process.cwd() }) + "\n");
 
 let sequenced: string | undefined;
 const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
@@ -82,7 +83,9 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "missing-session") {
 // the way a real session can leave a background process behind.
 const linger = fixture.endsWith("linger.jsonl");
 
-if (process.env.LOOPSTRA_FAKE_DELAY_MS) await Bun.sleep(Number(process.env.LOOPSTRA_FAKE_DELAY_MS));
+const delay = process.env.LOOPSTRA_FAKE_DELAY_MS ?? "";
+const delayMs = delay.includes("=") ? delay.split(",").map((d) => d.split("=")).find(([p]) => p === phase)?.[1] : delay;
+if (delayMs) await Bun.sleep(Number(delayMs));
 
 let failed = false;
 for (const line of (await Bun.file(fixture).text()).split("\n")) {

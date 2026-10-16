@@ -1,6 +1,6 @@
 import { MIN_SESSION_USD } from "./budget";
 import { lastLine, spawnBounded, withBunOnPath } from "./shell";
-import { StopRequested } from "./stop";
+import { Cancelled, StopRequested } from "./stop";
 
 export interface StreamEvent {
   type: string;
@@ -142,6 +142,8 @@ export interface RunPhaseInput {
   onEvent?: (e: StreamEvent) => void;
   /** How long the process gets to exit after its result event (and after a kill). Defaults to EXIT_GRACE_MS (tests shorten it). */
   exitGraceMs?: number;
+  /** Aborting it kills the session; runPhase then throws Cancelled. */
+  signal?: AbortSignal;
 }
 
 export type RunPhaseResult = Collected & {
@@ -173,7 +175,8 @@ export function resolveClaude(override?: string): string | null {
  * Runs one `claude -p` session. Everything it awaits is bounded by the deadline (`timeoutMs`)
  * plus a short grace: it stops reading stdout at the prompt's result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
- * After a stop request it does not start, or it kills the running session, and throws StopRequested.
+ * After a stop request it does not start, or it kills the running session, and throws StopRequested;
+ * likewise Cancelled for `signal`.
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   const started = Date.now();
@@ -232,7 +235,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     const resumeArgs = resume ? ["--resume", resume] : [];
     r = await spawnBounded({
       cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env, stdin,
-      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
+      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal: input.signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
       // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
       onLine: (line) => {
         const e = collector.push(line);
@@ -240,7 +243,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
         return e?.type === "result" && !answersNotification(e);
       },
     });
-    if (r.stopped || !r.started || r.timedOut) break;
+    if (r.stopped || r.cancelled || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
       if (budgetArgs(earlierCostUsd + c.costUsd) === null) break; // nothing left to ask with
@@ -262,6 +265,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     collector = new StreamCollector();
   }
   if (r.stopped) throw new StopRequested();
+  if (r.cancelled) throw new Cancelled();
   if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
   const { code: exitCode, err: stderr, timedOut } = r;
 

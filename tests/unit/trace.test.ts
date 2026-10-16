@@ -32,6 +32,22 @@ describe("Trace", () => {
     t.cleanup();
   });
 
+  test("the summary's last phase passes over work that ran alongside one: it says where the change is", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    trace.upsertIntent("a-b", "blocked", "high");
+    const verify = trace.phaseStart("a-b", "verify", "agent");
+    const early = trace.phaseStart("a-b", "early-review", "agent");
+    trace.phaseEnd("a-b", verify, { status: "fail", error: "crash: x" });
+    trace.phaseEnd("a-b", early, { status: "success" });
+    expect(trace.intentSummary("a-b")).toMatchObject({ lastPhase: "verify", lastPhaseStatus: "fail" });
+    // Once a phase comes after, it is the last one as usual.
+    trace.phaseEnd("a-b", trace.phaseStart("a-b", "fix-after-verify", "agent"), { status: "success" });
+    expect(trace.intentSummary("a-b")?.lastPhase).toBe("fix-after-verify");
+    trace.close();
+    t.cleanup();
+  });
+
   test("lastGate returns the newest row for one gate check only", () => {
     const t = tempDir();
     const trace = Trace.open(t.path);
