@@ -132,6 +132,24 @@ describe("ui state", () => {
       t.cleanup();
     }
   });
+
+  test("the plan written while the spec is checked is named next to spec-check", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "poll_seconds: 60\n");
+      await intent(t.path, "one", "status: designing");
+      const trace = Trace.open(t.path);
+      trace.phaseStart("one", "spec-check", "agent");
+      trace.phaseStart("one", "plan-ahead", "agent");
+      trace.close();
+      const now = new Date();
+      const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, stopping: false, stopped: false });
+      expect((await buildState(t.path, 0, now)).loop).toMatchObject({ state: "running", current: { slug: "one", phase: "spec-check + plan-ahead" } });
+    } finally {
+      t.cleanup();
+    }
+  });
 });
 
 describe("needs attention", () => {

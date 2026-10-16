@@ -1,8 +1,9 @@
 import { roomForTwo } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor } from "../config";
-import { writeMarker, type StepContext, type StepResult } from "../context";
-import { agentPhase, phasePrompt, type AgentPhaseSpec } from "../phases";
+import { clearMarker, readMarker, writeMarker, type StepContext, type StepResult } from "../context";
+import { Envelopes, type Envelope } from "../envelopes";
+import { agentPhase, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
 import type { Artifacts } from "./shared";
 
@@ -10,6 +11,7 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
   entry: "spec-approved", working: "planning", review: "plan-review", approved: "plan-approved",
   marker: "replanned",
+  take: takePlanAhead,
   vars: (a, concerns) => ({ intent: a.intent, spec: a.spec, concerns }),
   text: (e) => e.plan_markdown,
   headings: ["Files that change", "Order of work", "Risks", "Proof"],
@@ -84,3 +86,49 @@ function keepPlanAhead(ctx: StepContext, kept: string): void {
 
 /** The design step's spec-check runs this alongside (see ArtifactStage.ahead). */
 export const planAhead: AheadWork = { what: "plan ahead", when: plansAhead, run: planAheadRun, keep: keepPlanAhead };
+
+/**
+ * The plan written ahead, in place of the plan session, when it asked exactly what that session
+ * would ask, of the same code. It is used once, whatever happens: the file is cleared before the
+ * checks. Null (the plan step plans as usual) when there is none, or with the reason in the trace.
+ */
+async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "plan" }): Promise<AgentPhaseResult<"plan"> | null> {
+  const saved = readMarker(ctx, PLAN_AHEAD);
+  if (saved === null) return null;
+  clearMarker(ctx, PLAN_AHEAD);
+  const r = await checkKept(ctx, phase, saved);
+  if ("why" in r) {
+    ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: `not used: ${r.why}` });
+    return null;
+  }
+  ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "the plan step uses the plan written while the spec was being checked" });
+  // Plan sessions are never resumed, so a missing session id loses nothing.
+  return { ok: true, envelope: r.envelope, sessionId: null, costUsd: 0 };
+}
+
+/** The kept plan's report when every rule holds; otherwise, in plain words, the first rule that does not. */
+async function checkKept(ctx: StepContext, phase: AgentPhaseSpec, saved: string): Promise<{ envelope: Envelope<"plan"> } | { why: string }> {
+  const kept = readKept(saved);
+  if (!kept) return { why: "it could not be read" };
+  if (!ctx.cfg.speed.plan_ahead) return { why: "speed.plan_ahead is switched off" };
+  if (ctx.cfg.stages.plan.before.length) return { why: "the plan stage has before commands" };
+  if (kept.key !== await planKey(ctx, phase)) return { why: "the intent, the spec, the plan prompt or its model changed" };
+  // The main checkout's tracked files against the commit it started from. The loop's own commits
+  // (statuses, artifacts, the queue) are all under intent/; a missing base commit fails too.
+  const diff = await ctx.git.run(["diff", "--quiet", kept.base, "--", ".", ":(exclude)intent"], true);
+  if (diff.code !== 0) return { why: "the code on main changed" };
+  return { envelope: kept.envelope };
+}
+
+/** The plan.ahead file's contents, or null when it is not what planAheadRun wrote (corrupt, or from another Loopstra version). */
+function readKept(saved: string): { key: string; base: string; envelope: Envelope<"plan"> } | null {
+  let raw: { key?: unknown; base?: unknown; envelope?: unknown };
+  try {
+    raw = JSON.parse(saved) as typeof raw;
+  } catch {
+    return null;
+  }
+  const envelope = Envelopes.plan.safeParse(raw?.envelope);
+  if (!envelope.success || typeof raw.key !== "string" || typeof raw.base !== "string") return null;
+  return { key: raw.key, base: raw.base, envelope: envelope.data };
+}
