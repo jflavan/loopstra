@@ -518,20 +518,26 @@ describe("alongside", () => {
     const { repo, ctx, trace } = await setup();
     const log: string[] = [];
     setPhaseBoundary(async () => { log.push("boundary"); });
+    // Signals rather than sleeps, so a slow machine keeps the order: verify runs until strong-retry has
+    // started, and strong-retry starts only after the cheaper one has ended.
+    let retryStarted = () => {};
+    const retrying = new Promise<void>((r) => { retryStarted = r; });
+    let cheapEnded = () => {};
+    const cheapDone = new Promise<void>((r) => { cheapEnded = r; });
     try {
       await alongside(
         ctx,
-        () => codePhase(ctx, "verify", async () => { log.push("verify"); await tick(150); return { ok: true as const }; }),
+        () => codePhase(ctx, "verify", async () => { log.push("verify"); await retrying; return { ok: true as const }; }),
         {
           what: "early review", wanted: () => true,
           run: () => alongside(
             ctx,
             async () => {
               await codePhase(ctx, "strong", async () => { log.push("strong"); return { ok: true as const }; });
-              await tick(40); // the cheaper one has ended, but verify still runs: no merge yet
-              return codePhase(ctx, "strong-retry", async () => { log.push("strong-retry"); return { ok: true as const }; });
+              await cheapDone; // the cheaper one has ended, but verify still runs: no merge yet
+              return codePhase(ctx, "strong-retry", async () => { log.push("strong-retry"); retryStarted(); return { ok: true as const }; });
             },
-            { what: "cheap", run: () => codePhase(ctx, "cheap", async () => { log.push("cheap"); return { ok: true as const }; }), wanted: () => true },
+            { what: "cheap", run: () => codePhase(ctx, "cheap", async () => { log.push("cheap"); return { ok: true as const }; }).finally(cheapEnded), wanted: () => true },
           ),
         },
       );
