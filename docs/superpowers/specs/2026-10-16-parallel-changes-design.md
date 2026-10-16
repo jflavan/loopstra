@@ -319,9 +319,10 @@ line per entry in `r.steps` that has a result, worded as today, so at N=1 a merg
 waited followed by a real step now gives two lines instead of one.
 
 The tick start also runs `git -c gc.autoDetach=false gc --auto --quiet` while no lane runs (see
-the shared-state table), with a time limit of an hour instead of git's usual five minutes, since a
-full repack of a large repository takes a while. It may fail; a failure is traced, and gc is not
-tried again for a day, so a gc that cannot finish does not hold up every tick.
+the shared-state table), with a time limit of an hour instead of the five minutes Loopstra gives
+every other git command (`GIT_TIMEOUT_MS` in `src/git.ts`), since a full repack of a large
+repository takes a while. It may fail; a failure is traced, and gc is not tried again for a day,
+so a gc that cannot finish does not hold up every tick.
 
 ## Shared state, one item at a time
 
@@ -482,7 +483,7 @@ waits and holds nobody.
 - **No deadlock:** a holder is either past `plan-approved` (and never waits for this reason) or
   earlier in the queue and free of dependency waits.
 - **Where it is computed:** the pure rule is `fileHolds(ordered, files)` in `src/intents.ts`.
-  `sameFileHolds(root, lanes, ordered)` in `src/scheduler.ts` reads the plans and calls it (it
+  `sameFileHolds(lanes, ordered)` in `src/scheduler.ts` reads the plans and calls it (it
   takes `speed.max_parallel_changes` as a number and returns nothing at 1). It is async, because
   it reads `plan.md`, and runs before `writeQueue` and again in `endOfTick`. It returns
   `Map<slug, holder>`. A plan that cannot be read counts as one with no file list.

@@ -291,7 +291,7 @@ describe("same files: a change waits instead of building into a conflict (more t
   /** A plan listing these files, or with no Files that change section (null). */
   const plan = (files: string[] | null) => `# Plan\n\n${files ? `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n` : ""}## Order of work\n1. x\n`;
   const planned = (files: string[] | null) => ({ "spec.md": "# Spec\n", "plan.md": plan(files) });
-  const holdsIn = async (root: string, lanes = 2) => sameFileHolds(root, lanes, orderQueue((await scanRepo(root)).intents));
+  const holdsIn = async (root: string, lanes = 2) => sameFileHolds(lanes, orderQueue((await scanRepo(root)).intents));
   const rowOf = (md: string, slug: string) => md.split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
 
   test("a plan-approved change that lists a file a building change lists waits for it, and the queue says why", async () => {

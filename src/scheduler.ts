@@ -11,7 +11,7 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, setPhaseBoundary, STOPPED_NOTE } from "./phases";
 import { shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, intentRoot, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { applyChatRequests } from "./chat/requests";
@@ -120,7 +120,7 @@ export async function tick(root: string): Promise<TickResult> {
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
     // With more than one change at a time, a change that would build into another's files waits.
-    const holds = await sameFileHolds(root, cfg.speed.max_parallel_changes, ordered);
+    const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     await cleanupLeftovers(root, cfg, trace, ordered);
     await packWhileNoLaneRuns(root, trace);
@@ -304,12 +304,11 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
  * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
  * counts as one with no file list.
  */
-export async function sameFileHolds(root: string, lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
+export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
   if (lanes <= 1) return new Map();
   const files = new Map<string, string[] | null>();
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
-    const path = join(intentRoot(root), i.slug, "plan.md");
-    const plan = existsSync(path) ? await Bun.file(path).text().catch(() => null) : null;
+    const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
     files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   }
   return fileHolds(ordered, files);
@@ -431,7 +430,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
     if (out.steps?.length) {
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(root, cfg.speed.max_parallel_changes, ordered);
+      const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
       await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     }
     if (share) await shareMain(root, cfg, trace);
