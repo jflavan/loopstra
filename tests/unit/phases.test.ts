@@ -557,6 +557,81 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a shadow inside alongsideFirst's main (spec-check beside the plan written ahead) gets no boundary while the plan runs", async () => {
+    const { repo, ctx, trace } = await setup();
+    const log: string[] = [];
+    setPhaseBoundary(async () => { log.push("boundary"); });
+    try {
+      const b = await alongsideFirst(
+        ctx,
+        () => alongside(
+          ctx,
+          async () => {
+            await codePhase(ctx, "strong", async () => { log.push("strong"); return { ok: true as const }; });
+            await tick(40); // the cheaper one has ended, but the plan still runs: no merge yet
+            return codePhase(ctx, "strong-retry", async () => { log.push("strong-retry"); return { ok: true as const }; });
+          },
+          { what: "cheap", run: () => codePhase(ctx, "cheap", async () => { log.push("cheap"); return { ok: true as const }; }), wanted: () => true },
+        ),
+        { what: "plan ahead", wanted: () => true, run: () => codePhase(ctx, "plan", async () => { log.push("plan"); await tick(150); return { ok: true as const }; }) },
+      );
+      expect(b.result[0].ok).toBe(true);
+      await b.rest();
+      expect(log.filter((l) => l === "boundary")).toEqual(["boundary"]);
+      expect(log[0]).toBe("boundary");
+      expect(log).toContain("strong-retry");
+    } finally {
+      setPhaseBoundary(null);
+    }
+    trace.close(); repo.cleanup();
+  });
+
+  test("a strong judge that throws inside alongsideFirst's main cancels its cheaper judge and the plan beside it", async () => {
+    const { repo, ctx, trace } = await setup();
+    const started = Date.now();
+    const slow = (name: string) => () => codePhase(ctx, name, async () => { await projectCommand(ctx, LONG, repo.path); return { ok: true as const }; });
+    const err = await alongsideFirst(
+      ctx,
+      () => alongside(ctx, async () => { await tick(300); throw new Error("strong broke"); }, { what: "cheap", run: slow("cheap"), wanted: () => true }),
+      { what: "plan ahead", run: slow("plan"), wanted: () => true },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("strong broke");
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(trace.phases("x").map((p) => `${p.name}:${p.status}`).sort()).toEqual(["cheap:interrupted", "plan:interrupted"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("inside alongsideFirst's main, a success counts for the outer group, which alone decides about the pause", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}}\n");
+    pauseAfterUnavailable(repo.path);
+    pauseAfterUnavailable(repo.path);
+    // The cheaper judge got through, then the strong judge found the assistant unavailable.
+    let cheapEnded = () => {};
+    const ended = new Promise<void>((r) => { cheapEnded = r; });
+    const err = await alongsideFirst(
+      ctx,
+      () => alongside(ctx, async () => { await ended; return intake(ctx, "FIXTURE:usage-limit"); }, { what: "cheap", run: () => intake(ctx).finally(cheapEnded), wanted: () => true }),
+      { what: "plan ahead", run: () => intake(ctx), wanted: () => true },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AssistantUnavailable);
+    expect(readPause(repo.path)?.failures).toBe(2);
+    // Both judges got through, then main met an outage: the pause survives, as the outer main decides.
+    const later = await alongsideFirst(
+      ctx,
+      async () => { await alongside(ctx, () => intake(ctx), { what: "cheap", run: () => intake(ctx), wanted: () => true }); return intake(ctx, "FIXTURE:usage-limit"); },
+      { what: "plan ahead", run: async () => null, wanted: () => true },
+    ).catch((e: unknown) => e);
+    expect(later).toBeInstanceOf(AssistantUnavailable);
+    expect(readPause(repo.path)?.failures).toBe(2);
+    // The strong judge got through: once the plan is waited for, the pause ends.
+    const b = await alongsideFirst(ctx, () => alongside(ctx, () => intake(ctx), { what: "cheap", run: () => intake(ctx), wanted: () => true }), { what: "plan ahead", run: () => intake(ctx), wanted: () => true });
+    await b.rest();
+    expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
   test("ownTime leaves out the phase boundary run inside it", async () => {
     const { repo, ctx, trace } = await setup();
     setPhaseBoundary(async () => { await tick(300); });

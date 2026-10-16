@@ -16,10 +16,10 @@ This is part D of the speed changes (A: concurrent work, F: speculative plan, D:
 G: parallel intents). Like every part, it can be switched off in config, and it is off by default.
 
 It builds on part A as merged (`alongside(ctx, main, { what, run, wanted })`, cancellation through
-an `AbortSignal`, `early-…` rows, `loopDayLeft` and `mayOverlap`). Part F (the plan written while the
-spec check runs) is a separate change and is not part of this one. When F lands, its pairing of
-spec-check with the plan written ahead runs the judge beside other work, so it must call
-`runJudge(ctx, phase, { alongside: 1 })`, as the early review does; `runJudge` keeps that option for it.
+an `AbortSignal`, `early-…` rows, `loopDayLeft` and `mayOverlap`), and on part F (the plan written
+while the spec check runs: `alongsideFirst`, the `early-plan` row). F pairs spec-check with the plan
+written ahead, so the judge runs beside other work there and calls
+`runJudge(ctx, phase, { alongside: 1 })`, as the early review does.
 
 ## Which judges
 
@@ -134,7 +134,7 @@ export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: Age
 ```
 
 - **`opts.alongside`:** sessions already running next to this call (the early review beside the
-  verifier passes 1; so must part F's spec-check beside the plan written ahead).
+  verifier passes 1, and so does spec-check beside the plan written ahead).
 - **`opts.prompt`:** the phase's `phasePrompt`, when the caller already rendered it (round 1 and the
   early review key on it). The prompt is rendered once, and both judges are sent exactly that.
 - **The cheaper phase:** `{ ...phase, model: "default", traceName: `${name}-cheap`, retry: false, endsPause: false }`,
@@ -287,7 +287,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   before `alongside` started both; in first each attempt runs it before its session, and it is
   never counted as the judge's time.
 - **Nested `alongside`:** the early review's shadow runs an `alongside` inside the build step's
-  `alongside` (the verifier beside the early review). A group knows the group it runs inside of:
+  `alongside` (the verifier beside the early review), and spec-check's shadow runs one inside the
+  design step's `alongsideFirst` (spec-check beside the plan written ahead; the two share
+  `startAlongside`, so the rules are the same). A group knows the group it runs inside of:
   - no boundary runs while any enclosing group still runs other work (a strong judge's `-retry`
     after the cheaper one ended still waits while the verifier runs);
   - the inner main work inherits the outer extra's cancel signal, and the inner extra is cancelled
@@ -343,8 +345,11 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   - When `decidedBy` is `cheap`, the evidence reads `"<summary> (decided by the cheaper judge, sonnet)"`.
   - The broken-judge path and the rewrite findings are unchanged. Findings always come from the
     deciding envelope, which is the strong judge's whenever the verdict is a reject.
-  - Part F, when it lands, runs this judge beside the plan written ahead and must pass
-    `{ alongside: 1 }` there.
+  - When the plan is written ahead (part F), this judge runs as `alongsideFirst`'s main work beside
+    `early-plan` and passes `{ alongside: 1 }`, so a shadow (or an audit) asks for room for three
+    sessions; without a plan ahead it passes nothing and asks for two. Without room for three, the
+    plan still runs beside the strong judge, and the event says "not compared".
+    `alongsideFirst`'s `wanted` is `passes(…)` too.
 - **`src/stages/review.ts` `runReviewRounds`:**
   - Renders the prompt once and calls `(await takeEarlyReview(ctx, phase, prompt)) ?? await runJudge(ctx, phase, { prompt })`.
   - Pass is `passes("review", envelope)`. The `important` list is still built for the message
@@ -548,6 +553,10 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   - With `max_budget_usd_per_day` and no `max_budget_usd`, only the strong session runs, and a
     "not compared" event is traced.
   - With room for two but not three, the early review runs without `early-review-cheap`.
+  - With room for two but not three, the plan is written ahead beside spec-check, there is no
+    `spec-check-cheap`, and "not compared" is traced; with `plan_ahead: false` and the same day, the
+    shadow runs. With room for three, spec-check, `spec-check-cheap` and `early-plan` all start
+    before spec-check ends, a row is written and the plan is kept.
 - **first, earned (seeded 30 caught):**
   - A cheaper clean pass decides alone: no opus call, `how = 'alone'`, and the gate evidence names
     the cheaper judge.
@@ -581,6 +590,10 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
     cancels both inner pieces; an inner success does not end the pause when the outer main found
     the assistant unavailable.
   - `ownTime` leaves out the boundary.
+  - Nested in `alongsideFirst`'s main (a shadow beside the plan written ahead): no boundary inside
+    while the plan runs; a strong judge that throws cancels the cheaper judge and the plan; a success
+    inside counts for the outer group, so it never ends the pause when the outer main then finds the
+    assistant unavailable.
 - **trace:** an old database gains the judges table on open, and `trace.judge` writes the row
   and a `judge` event to events.jsonl.
 - **judgeReport and renderJudges:**
@@ -647,7 +660,7 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 - The early review is shadowed (room for three) so round 1 gets measured; a kept review decided by the cheaper judge is used only if the judge is still trusted now, while strong-decided reviews keep today's key unchanged.
 - Lessons' previous-failures input and the status table's last phase leave out -cheap rows, which Design 1 missed: otherwise a cheap judge's invalid envelope would be fed to lessons as the change's failure. They share one helper (`besideWork`) with part A's `early-` rows, rather than two lists.
 - Nested alongside (the early review's shadow inside the build step's group) knows its enclosing group: no merge while the outer work runs, the outer cancel reaches both judges, and only the outermost group decides about the pause.
-- Part F is a separate change; runJudge keeps `alongside` so F's spec-check beside the plan written ahead can pass `alongside: 1`.
+- Paired with part F: spec-check beside the plan written ahead passes `alongside: 1`, so its shadow needs room for three sessions, and the shadow's `alongside` nests inside F's `alongsideFirst` group with the same rules as inside the early review's group (one shared `startAlongside`).
 - Observability lives in a new `loopstra judges` command and a dashboard section; `loopstra status` and the attention list stay owner-only because a shadow false pass needs no person.
 - Report costs are measured (phase rows and per-session cost/time) and 'first would cost' is computed from shadow rows, not from price tables, so the engineer sees whether first pays.
 - Rows are read whole via trace.judgeRows() and filtered in pure functions in src/judges.ts, keeping trace.ts thin and the evidence and report logic unit-testable.

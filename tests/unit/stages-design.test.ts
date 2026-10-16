@@ -475,6 +475,42 @@ describe("cheaper judges on the spec check", () => {
     }
   });
 
+  test("shadow alongside the plan written ahead needs room for three sessions", async () => {
+    // After intake and design (about $0.05), a day of 2.5 with $1 sessions has room for two, not three.
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n" });
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toContain("early-plan");
+    expect(phaseNames(trace)).not.toContain("spec-check-cheap");
+    expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
+    expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("with no plan written ahead, the same day has room for the shadow beside spec-check", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\n  plan_ahead: false\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n" });
+    await runDesignStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check", "spec-check-cheap"]);
+    expect(trace.judgeRows().map((r) => `${r.cheap}/${r.strong}`)).toEqual(["pass/pass"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("with room for three, the shadow runs beside spec-check and the plan written ahead, and all three are kept or recorded", async () => {
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" }, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 10\n  max_budget_usd: 1\n" });
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      const byName = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)!;
+      // Judged by start order: on a slow machine the sessions need not overlap in time.
+      expect(byName("spec-check-cheap").started < byName("spec-check").ended!).toBe(true);
+      expect(byName("early-plan").started < byName("spec-check").ended!).toBe(true);
+      expect(trace.judgeRows().map((r) => `${r.cheap}/${r.strong}`)).toEqual(["pass/pass"]);
+      expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(true);
+      trace.close(); repo.cleanup();
+    });
+  });
+
   test("first, earned: a cheaper pass decides alone and the gate's evidence names the cheaper judge", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: first\n" });
     seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);

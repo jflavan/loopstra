@@ -229,11 +229,12 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
   list.push({
     name: s.judge.name,
     run: async () => {
-      const judge = () => runJudge(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) });
       // Work for the next stage runs alongside on the same artifact the judge reads; it is optional,
       // so an outage or the day's budget drops it and the judge meets the same trouble on its own.
       // The check ends with an approving judge while the work still runs; settle keeps the work.
       const work = await aheadNow(ctx, s);
+      // Beside that work, a cheaper judge in shadow needs room for a third session.
+      const judge = () => runJudge(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
       let r: JudgeResult<J>;
       if (work) {
         const b = await alongsideFirst(ctx, judge, { what: work.what, run: () => work.run(ctx, a), wanted: (j) => j.ok && passes(s.judge.name, j.envelope) });

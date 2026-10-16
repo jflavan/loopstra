@@ -190,7 +190,8 @@ export function setPhaseBoundary(fn: PhaseBoundary | null): void {
 
 /**
  * Two pieces of work running at once (see alongside): how many still run, whether a session in them
- * succeeded, and the group it runs inside of, if any (a judge's shadow inside the early review).
+ * succeeded, and the group it runs inside of, if any (a judge's shadow inside the early review, or
+ * inside spec-check beside the plan written ahead).
  */
 interface Group { running: number; succeeded: boolean; parent?: Group }
 
@@ -268,9 +269,10 @@ export function mayOverlap(ctx: StepContext): boolean {
  *   the loop stops rather than pauses), else main's error.
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
- * - It may run inside another alongside (a judge's shadow inside the early review): no boundary runs
- *   while the outer work runs, cancelling the outer extra cancels both, and a success inside counts
- *   for the outer group, which decides about the pause.
+ * - It may run inside another alongside or alongsideFirst (a judge's shadow inside the early review,
+ *   or inside spec-check beside the plan written ahead): no boundary runs while the outer work runs,
+ *   cancelling the outer extra cancels both, and a success inside counts for the outer group, which
+ *   decides about the pause.
  */
 export async function alongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>): Promise<[M, E | null]> {
   return (await startAlongside(ctx, main, extra, false)).both;

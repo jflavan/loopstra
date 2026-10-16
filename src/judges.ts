@@ -338,8 +338,8 @@ function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & {
  * decides. A due audit that has no room: the strong judge alone.
  *
  * `alongside`: sessions already running next to this call, which shadow needs room beside (the early
- * review beside the verifier passes 1; so must any other judge run beside other work). `prompt`: the
- * phase's phasePrompt, when the caller already has it; both judges are sent exactly that.
+ * review beside the verifier passes 1, and so does spec-check beside the plan written ahead).
+ * `prompt`: the phase's phasePrompt, when the caller already has it; both judges are sent exactly that.
  */
 export async function runJudge<J extends JudgeName>(
   ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: { alongside?: number; prompt?: string | null } = {},
