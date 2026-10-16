@@ -6,7 +6,7 @@ import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
-import { agentPhase, alongside, ownTime, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { agentPhase, alongsideFirst, ownTime, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { AssistantUnavailable } from "./stop";
 import { CHEAP, type JudgeRow, type NewJudgeRow } from "./trace";
 
@@ -330,23 +330,52 @@ function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & {
   });
 }
 
+/** What runJudge's options are: see there. */
+type JudgeOpts = { alongside?: number; prompt?: string | null };
+
 /**
- * Asks a judge (spec-check, plan-challenge, review). Off, or with nothing cheaper to compare: the
- * strong judge alone, as always. shadow (and first while not earned, and first's audits): both judges
- * at once on the same prompt, the strong one decides, and the two verdicts are recorded. first, earned:
- * the cheaper judge alone, and only a clean pass stands; otherwise the strong judge runs after it and
- * decides. A due audit that has no room: the strong judge alone.
+ * Asks a judge (spec-check, plan-challenge, review) and waits until its comparison is recorded. Off,
+ * or with nothing cheaper to compare: the strong judge alone, as always. shadow (and first while not
+ * earned, and first's audits): both judges at once on the same prompt, the strong one decides, and the
+ * two verdicts are recorded. first, earned: the cheaper judge alone, and only a clean pass stands;
+ * otherwise the strong judge runs after it and decides. A due audit that has no room: the strong judge alone.
  *
  * `alongside`: sessions already running next to this call, which shadow needs room beside (the early
  * review beside the verifier passes 1, and so does spec-check beside the plan written ahead).
  * `prompt`: the phase's phasePrompt, when the caller already has it; both judges are sent exactly that.
  */
-export async function runJudge<J extends JudgeName>(
-  ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: { alongside?: number; prompt?: string | null } = {},
-): Promise<JudgeResult<J>> {
+export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOpts = {}): Promise<JudgeResult<J>> {
+  const j = await judgeFirst(ctx, phase, opts);
+  await j.rest();
+  return j.result;
+}
+
+/**
+ * A judge's verdict, given as soon as the deciding judge has it (see judgeFirst). `rest` waits for the
+ * cheaper judge of a shadow and records the comparison, and throws a stop request that ended it;
+ * `cancel` calls it off, and then nothing is recorded.
+ */
+export interface JudgeAnswer<J extends JudgeName> {
+  result: JudgeResult<J>;
+  rest: () => Promise<void>;
+  cancel: () => void;
+}
+
+/** An answer with nothing left to compare. */
+function done<J extends JudgeName>(result: JudgeResult<J>): JudgeAnswer<J> {
+  return { result, rest: async () => {}, cancel: () => {} };
+}
+
+/**
+ * runJudge, returning as soon as the deciding judge answered, so the step can record the gate's result
+ * first: a stop while the cheaper judge of a shadow still runs then loses only the comparison. Until
+ * `rest` is called, no phase boundary (a merge) runs, as with alongsideFirst: the caller calls `rest`
+ * before any other phase.
+ */
+export async function judgeFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOpts = {}): Promise<JudgeAnswer<J>> {
   const prompt = opts.prompt === undefined ? await phasePrompt(ctx, phase) : opts.prompt;
   const c = await comparison(ctx, phase, prompt);
-  if (!c || prompt === null) return { ...(await agentPhase(ctx, phase, prompt)), decidedBy: "strong" };
+  if (!c || prompt === null) return done({ ...(await agentPhase(ctx, phase, prompt)), decidedBy: "strong" });
   // Same phase (so the same prompt file, LOOPSTRA_PHASE and tools), on the cheaper model, never
   // retried. It never ends an outage pause: the strong model may be the one that is out.
   const pair: Pair<J> = {
@@ -360,27 +389,34 @@ export async function runJudge<J extends JudgeName>(
     if (!standing.earned) judgeEvent(ctx, phase, `first: running as shadow; ${standingWhy(standing)}`);
     // A due audit runs before it decides alone again; until there is room for one, shadow lets the
     // strong judge decide alone.
-    else if (mayDecideAlone(ctx.cfg, standing) && !standing.auditDue) return cheapFirst(ctx, pair, c);
+    else if (mayDecideAlone(ctx.cfg, standing) && !standing.auditDue) return done(await cheapFirst(ctx, pair, c));
     else if (roomFor(ctx.cfg, ctx.trace, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
   return shadow(ctx, pair, c, sessions);
 }
 
-/** Both judges at once; the strong one decides. Without budget room for both, the strong one alone. */
-async function shadow<J extends JudgeName>(ctx: StepContext, pair: Pair<J>, c: Comparison, sessions: number): Promise<JudgeResult<J>> {
+/**
+ * Both judges at once; the strong one decides, and its verdict is given as soon as it is in. Without
+ * budget room for both, the strong one alone.
+ */
+async function shadow<J extends JudgeName>(ctx: StepContext, pair: Pair<J>, c: Comparison, sessions: number): Promise<JudgeAnswer<J>> {
   if (!roomFor(ctx.cfg, ctx.trace, sessions)) {
     // Shadow always gives way to the judge that decides and to the work already running.
     judgeEvent(ctx, pair.strong, "not compared: today's budget has no room for another session");
-    return { ...(await agentPhase(ctx, pair.strong, pair.prompt)), decidedBy: "strong" };
+    return done({ ...(await agentPhase(ctx, pair.strong, pair.prompt)), decidedBy: "strong" });
   }
   // The cheaper judge is the extra work: an outage or the day's budget drops it, and the strong judge
   // meets the same trouble on its own. It is always wanted, so the comparison is recorded once the
-  // strong judge has answered; a stop, or the strong judge throwing, cancels it.
-  const [strong, cheap] = await alongside(ctx, () => timed(ctx, pair.strong, pair.prompt), {
+  // strong judge has answered and `rest` is called; a stop, or the strong judge throwing, cancels it.
+  const b = await alongsideFirst(ctx, () => timed(ctx, pair.strong, pair.prompt), {
     what: pair.cheap.traceName!, run: () => timed(ctx, pair.cheap, pair.prompt), wanted: () => true,
   });
-  if (cheap) record(ctx, pair.strong, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(pair.strong.name, cheap.r), strong });
-  return { ...strong.r, decidedBy: "strong" };
+  const strong = b.result;
+  const rest = async () => {
+    const cheap = await b.rest();
+    if (cheap) record(ctx, pair.strong, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(pair.strong.name, cheap.r), strong });
+  };
+  return { result: { ...strong.r, decidedBy: "strong" }, rest, cancel: b.cancel };
 }
 
 /**

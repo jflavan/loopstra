@@ -8,6 +8,7 @@ import { readIntent } from "../../src/intents";
 import { setPhaseBoundary } from "../../src/phases";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD, runPlanStep } from "../../src/stages/plan";
+import { requestStop, resetStop } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, openRepo, setupRepo, tempDir, withEnv } from "../helpers";
 
@@ -344,6 +345,32 @@ describe("cheaper judges on the plan challenge", () => {
     } finally {
       dir.cleanup();
     }
+  });
+
+  test("shadow: a stop after the strong judge passed the plan, while the cheaper judge still runs, keeps the pass", async () => {
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "plan-challenge@sonnet=60000" }, async () => {
+      const { repo, ctx, trace } = await specApproved(SHADOW);
+      const passed = () => trace.phases("add-numbers").some((p) => p.name === "plan-challenge" && p.status === "success");
+      const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repo.path }).stdout.toString().includes("→ plan-approved");
+      // Stop a moment after the pass is committed, or a few seconds after the strong judge passed when it is not.
+      let since: number | null = null;
+      let asked = false;
+      const watch = setInterval(() => {
+        if (asked || !passed()) return;
+        since ??= Date.now();
+        if (committed() || Date.now() - since > 5000) { asked = true; setTimeout(requestStop, 300); }
+      }, 50);
+      try {
+        expect(await runPlanStep(ctx)).toEqual({ ok: true });
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+        expect(trace.phases("add-numbers").find((p) => p.name === "plan-challenge-cheap")?.status).toBe("interrupted");
+        expect(trace.judgeRows()).toEqual([]);
+      } finally {
+        clearInterval(watch);
+        resetStop();
+        trace.close(); repo.cleanup();
+      }
+    });
   });
 
   test("shadow: a cheaper judge that cannot reach the assistant is dropped; the step passes on the strong verdict, unpaused", async () => {

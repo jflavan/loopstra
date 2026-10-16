@@ -190,10 +190,10 @@ export function setPhaseBoundary(fn: PhaseBoundary | null): void {
 
 /**
  * Two pieces of work running at once (see alongside): how many still run, whether a session in them
- * succeeded, and the group it runs inside of, if any (a judge's shadow inside the early review, or
- * inside spec-check beside the plan written ahead).
+ * succeeded, whether it has decided about the pause (both ended), and the group it runs inside of, if
+ * any (a judge's shadow inside the early review, or inside spec-check beside the plan written ahead).
  */
-interface Group { running: number; succeeded: boolean; parent?: Group }
+interface Group { running: number; succeeded: boolean; decided?: boolean; parent?: Group }
 
 /**
  * The group the current call runs in, and the signal that cancels its work (none for the main work
@@ -242,9 +242,14 @@ function cancelSignal(): AbortSignal | undefined {
   return inGroup.getStore()?.signal;
 }
 
-/** A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once both ended. */
+/**
+ * A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once
+ * both ended. A group that already decided passes it on (a shadow's comparison can end after the work
+ * of the group it ran in: see judgeFirst).
+ */
 function assistantReached(ctx: StepContext): void {
-  const g = inGroup.getStore()?.group;
+  let g = inGroup.getStore()?.group;
+  while (g?.decided) g = g.parent;
   if (g) g.succeeded = true;
   else clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
 }
@@ -336,6 +341,7 @@ async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, ex
   const both = Promise.allSettled([mainDone, extraDone]).then(([m, x]): [M, E | null] => {
     // Inside another group this marks that group, which decides about the pause once its work ended.
     if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) assistantReached(ctx);
+    group.decided = true;
     if (x.status === "rejected") throw x.reason; // only ever a stop request
     if (m.status === "rejected") throw m.reason;
     return [m.value, x.value];

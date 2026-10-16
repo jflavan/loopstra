@@ -511,6 +511,60 @@ describe("cheaper judges on the spec check", () => {
     });
   });
 
+  test("shadow: a stop after the strong judge passed the spec, while the cheaper judge and the plan still run, keeps the pass", async () => {
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "spec-check@sonnet=60000" }, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\n" });
+      await hangingPlan(repo.path);
+      const passed = () => trace.phases("add-numbers").some((p) => p.name === "spec-check" && p.status === "success");
+      const committed = () => Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s"], cwd: repo.path }).stdout.toString().includes("→ spec-approved");
+      // Stop a moment after the pass is committed. A step that does not commit it while the cheaper
+      // judge runs is stopped a few seconds after the strong judge passed, so it fails here.
+      let since: number | null = null;
+      let asked = false;
+      const watch = setInterval(() => {
+        if (asked || !passed()) return;
+        since ??= Date.now();
+        if (committed() || Date.now() - since > 5000) { asked = true; setTimeout(requestStop, 300); }
+      }, 50);
+      try {
+        expect(await runDesignStep(ctx)).toEqual({ ok: true });
+        expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+        const status = (n: string) => trace.phases("add-numbers").find((p) => p.name === n)?.status;
+        expect([status("spec-check"), status("spec-check-cheap"), status("early-plan")]).toEqual(["success", "interrupted", "interrupted"]);
+        expect(trace.gates("add-numbers").map((g) => `${g.check}:${g.result}`)).toEqual(["headings:pass", "spec-check:pass"]);
+        // Only the comparison and the plan are lost.
+        expect(trace.judgeRows()).toEqual([]);
+        expect(judgeNotes(trace)).toEqual(["not compared: stopped by request"]);
+        expect(planAheadNotes(trace)).toEqual(["not kept: stopped by request"]);
+      } finally {
+        clearInterval(watch);
+        resetStop();
+        trace.close(); repo.cleanup();
+      }
+    });
+  });
+
+  test("shadow: a spec the strong judge rejects calls off the plan beside it at once, while the cheaper judge still runs", async () => {
+    await withEnv({ LOOPSTRA_FAKE_DELAY_MS: "spec-check@sonnet=5000" }, async () => {
+      // Restarted during the automatic rewrite, so one rejection blocks.
+      const { repo, ctx, trace } = await setupRepo("designing", { config: "speed:\n  cheap_judges: shadow\n" });
+      mkdirSync(ctx.runDir, { recursive: true });
+      writeFileSync(join(ctx.runDir, "redesigned"), "- earlier findings\n");
+      await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "{{intent}} {{spec}} FIXTURE:spec-check-reject");
+      await hangingPlan(repo.path);
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+      expect(planAheadNotes(trace)).toEqual([CALLED_OFF]);
+      // Called off once the strong judge rejected, not once the cheaper judge ended (it may not have
+      // started its session yet); the comparison is still recorded.
+      const calledOff = trace.events("add-numbers").find((e) => e.type === "command" && e.payload.includes("plan ahead"))!;
+      const cheap = trace.phases("add-numbers").find((p) => p.name === "spec-check-cheap")!;
+      expect(calledOff.ts < cheap.ended!).toBe(true);
+      expect(trace.judgeRows().map((r) => `${r.cheap}/${r.strong}`)).toEqual(["reject/reject"]);
+      trace.close(); repo.cleanup();
+    });
+  });
+
   test("first, earned: a cheaper pass decides alone and the gate's evidence names the cheaper judge", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: first\n" });
     seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);

@@ -159,13 +159,18 @@ missing prompt gives today's missing-prompt failure, and no cheaper session star
 1. **Room:** `roomFor(cfg, trace, 2 + (opts.alongside ?? 0))`. Without room, only the strong judge
    runs, and a `judge` event says "not compared: today's budget has no room for another session".
    Shadow always gives way to the deciding judge and to the overlaps that already exist.
-2. **Run together:** the strong judge is `alongside`'s main work and the cheaper judge its extra:
+2. **Run together:** the strong judge is `alongsideFirst`'s main work and the cheaper judge its extra:
    ```ts
-   alongside(ctx, () => timed(phase), {
+   alongsideFirst(ctx, () => timed(phase), {
      what: cheapPhase.traceName, run: () => timed(cheapPhase), wanted: () => true,
    })
    ```
-   The between-phases merge boundary runs once, before both.
+   The between-phases merge boundary runs once, before both. `judgeFirst` gives the strong verdict
+   as soon as it is in, with a `rest` that waits for the cheaper judge and records the comparison
+   (no merge runs until `rest` is called); `runJudge` calls `rest` at once. The spec check and the
+   plan challenge use `judgeFirst`, so the step commits the gate's result before it waits for the
+   cheaper judge (found in review): a stop meanwhile loses only the comparison, as part F's
+   approval loses only the plan, and a rejected spec calls off the plan written ahead at once.
 3. **Not cut short once the strong judge answered:** the extra is always wanted, so when the
    strong judge ends first the cheaper one is waited for and the comparison is recorded. It is
    never retried (`retry: false`) and is bounded by `claude.timeout_minutes` like any session; the
@@ -339,7 +344,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 ### Call sites
 
 - **`src/stages/artifact.ts` `checks()`:**
-  - The judge check calls `runJudge(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) })`.
+  - The judge check calls `judgeFirst(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) })`.
+    `settle` commits the gate's result, then waits for the comparison (`rest`) before the work
+    written ahead and before any rewrite; on an error it calls both off.
   - The pass test is `passes(s.judge.name, r.envelope)` in place of `e.approved`. It means the
     same thing, now from one source.
   - When `decidedBy` is `cheap`, the evidence reads `"<summary> (decided by the cheaper judge, sonnet)"`.
@@ -448,6 +455,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 
 - **Stop (Ctrl-C) while both run:** both sessions are stopped, `alongside` waits for both rows to
   end interrupted, rethrows the stop, and no row is written. The step resumes and asks both again.
+- **Stop after the strong spec check or plan challenge answered, while the cheaper judge runs:**
+  the gate's result is already committed (an approval keeps its status); the cheaper session ends
+  interrupted, no row is written, and a `judge` event says "not compared: stopped by request".
 - **Stop while first's escalation runs:** interrupted. No row is written, because rows are written
   just before `runJudge` returns. The step resumes.
 - **Process killed:** rows are left running, their holds go stale as today, and no comparison is
@@ -468,8 +478,9 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   `claude.timeout_minutes`; it is never retried, so a timeout ends it as `failed` and the strong
   verdict stands. (Beside the verifier, a failing verifier cancels it at once, with the strong
   early review.)
-- **Daily budget too small:** without room for two sessions (three for the early review), only the
-  strong judge runs, and a "not compared" event is traced. In first, a due audit without room
+- **Daily budget too small:** without room for two sessions (three for the early review, and for
+  the spec check beside a plan written ahead), only the strong judge runs, and a "not compared"
+  event is traced. In first, a due audit without room
   means the strong judge decides alone too, so the cheaper judge never decides alone unaudited.
   With a daily budget and no session cap, shadow never runs, and first is never used (a judge that
   earned it under an earlier budget setting keeps its record, but the strong judge decides).
@@ -549,6 +560,11 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
   pause is not ended.
 - **Shadow stop:** `requestStop` while both run. Both rows end interrupted, no row is written,
   and the status is unchanged.
+- **Shadow stop after the strong judge passed** (stages-design, stages-plan): the cheaper judge
+  hangs, and a stop comes once the pass is committed. The status is `spec-approved` (or
+  `plan-approved`), the cheaper row and the plan written ahead end interrupted, and no row is written.
+- **Shadow reject beside a plan written ahead:** the plan is called off before the slow cheaper
+  judge ends, and the comparison is still recorded.
 - **Shadow room:**
   - With `max_budget_usd_per_day` and no `max_budget_usd`, only the strong session runs, and a
     "not compared" event is traced.
@@ -655,6 +671,7 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 - A cheap pass that contradicts itself (spec-check approved with an unmet finding, plan-challenge approved with a blocking concern, review with no important findings but approved false) is 'unsure' and escalates; it is a pure function on the existing envelopes, so no confidence field or prompt change is needed.
 - The done-check is left out because a second judge would need a second copy of main and install (or would share the output folder), and it runs once per change after the merge, so the saving is small.
 - Not cut short once the strong judge answered: the cheaper judge is alongside's extra with `wanted: () => true`, so the comparison is recorded; the cheaper model is normally the faster one, it is never retried, and `timeout_minutes` bounds it. A stop, or the strong judge throwing, still cancels it through part A's signal, since nothing could be compared.
+- The spec check and the plan challenge get the strong verdict before the comparison ends (`judgeFirst`, found in review): waiting for the cheaper judge brought back the window part F closed, where a stop after the strong judge approved threw away the passed gate, and a rejected spec kept the plan written ahead running until the cheaper judge ended.
 - In first mode, a cheaper session that throws AssistantUnavailable escalates to the strong judge rather than pausing the loop, since a per-model limit should only cost more, never stop work.
 - First-mode escalation runs cheap then strong one after the other, never at once, so the strong judge sees exactly what it sees today; each is timed with `ownTime`, which leaves out the merge boundary.
 - The early review is shadowed (room for three) so round 1 gets measured; a kept review decided by the cheaper judge is used only if the judge is still trusted now, while strong-decided reviews keep today's key unchanged.

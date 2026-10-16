@@ -632,6 +632,26 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a shadow whose comparison ends after the group it ran in decided still ends the pause when its judge got through", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}}\n");
+    pauseAfterUnavailable(repo.path);
+    // A rejected spec: the strong judge answers, the plan beside it is called off, and the cheaper
+    // judge ends only after that group decided.
+    let cheapMayEnd = () => {};
+    const cheapEnds = new Promise<void>((r) => { cheapMayEnd = r; });
+    let shadow: { rest: () => Promise<unknown> } | null = null;
+    await alongside(ctx, async () => {
+      shadow = await alongsideFirst(ctx, () => intake(ctx), { what: "cheap", run: () => cheapEnds.then(() => null), wanted: () => true });
+      return "rejected";
+    }, { what: "plan ahead", run: async () => null, wanted: (m) => m !== "rejected" });
+    expect(readPause(repo.path)).not.toBeNull();
+    cheapMayEnd();
+    await shadow!.rest();
+    expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
   test("ownTime leaves out the phase boundary run inside it", async () => {
     const { repo, ctx, trace } = await setup();
     setPhaseBoundary(async () => { await tick(300); });
