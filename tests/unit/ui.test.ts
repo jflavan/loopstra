@@ -172,17 +172,33 @@ describe("cheaper judges", () => {
 
       await config(t.path, "speed:\n  cheap_judges: shadow\n");
       const shadow = (await buildState(t.path, 0)).judges!;
-      expect(shadow).toMatchObject({ setting: "shadow", cheapModel: "sonnet", strongModel: "opus", spentUsd: 0, falsePasses: [] });
-      expect(shadow.judges.map((j) => j.judge)).toEqual(["spec-check", "plan-challenge", "review"]);
+      expect(shadow).toEqual({ setting: "Cheaper judges: shadow (sonnet beside opus)", note: "No comparisons yet.", table: [], spent: null, notCompared: [], falsePasses: [] });
 
       await config(t.path);
       const trace = Trace.open(t.path);
       for (let i = 1; i <= 7; i++) falsePass(trace, t.path, `change-${i}`);
       trace.close();
       const off = (await buildState(t.path, 0)).judges!;
-      expect(off.setting).toBe("off");
-      expect(off.judges.find((j) => j.judge === "review")).toMatchObject({ compared: 7, falsePasses: 7 });
-      expect(off.falsePasses.map((p) => p.slug)).toEqual(["change-7", "change-6", "change-5", "change-4", "change-3"]);
+      // Laid out as `loopstra judges` lays it out.
+      expect(off.setting).toBe("Cheaper judges: off (sonnet is not asked)");
+      expect(off.table.map((r) => r[0])).toEqual(["Judge", "spec-check", "plan-challenge", "review"]);
+      expect(off.table.at(-1)!.slice(0, 4)).toEqual(["review", "7", "0", "7"]);
+      expect(off.spent).toBe("Spent on cheaper judges so far: $0.00.");
+      expect(off.falsePasses.map((p) => p.split(", ")[1])).toEqual(["change-7", "change-6", "change-5", "change-4", "change-3"]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a prompt file that cannot be read never takes the rest of the page down", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "speed:\n  cheap_judges: shadow\n");
+      // review.md is a folder: it cannot be read as a template.
+      mkdirSync(join(t.path, "loopstra", "prompts", "review.md"), { recursive: true });
+      const state = await buildState(t.path, 0);
+      expect(state.judges?.setting).toBe("Cheaper judges: shadow (sonnet beside opus)");
+      expect(state.loop).toBeDefined();
     } finally {
       t.cleanup();
     }

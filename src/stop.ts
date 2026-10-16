@@ -21,16 +21,18 @@ export class StopRequested extends Error {
  * installed). Like a stop, it is not the intent's fault: the step ends, the intent keeps its
  * status, and the loop pauses and tries again later. `detail` is for the trace; `phase` and `line`
  * (the phase that could not reach the assistant, and the text that said so) let the loop notice the
- * same failure repeating.
+ * same failure repeating; `model` (the one it ran on) is the one whose session ends the pause.
  */
 export class AssistantUnavailable extends Error {
   readonly phase: string | null;
   readonly line: string;
-  constructor(public readonly detail: string, where: { phase: string; line: string } | null = null) {
+  readonly model: string | null;
+  constructor(public readonly detail: string, where: { phase: string; line: string; model?: string } | null = null) {
     super(`the assistant is unavailable: ${detail}`);
     this.name = "AssistantUnavailable";
     this.phase = where?.phase ?? null;
     this.line = where?.line ?? detail;
+    this.model = where?.model ?? null;
   }
 }
 

@@ -7,7 +7,7 @@ import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } fr
 import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
 import { Trace } from "../trace";
 import { errorText } from "../shell";
-import { judgesView, type JudgesView } from "./judges";
+import { judgesShown, judgesView, type JudgesShown } from "./judges";
 import { CHAT_SLUG } from "../chat/agents";
 import type { DashboardTransport } from "../chat/transports/dashboard";
 
@@ -48,10 +48,11 @@ export interface UiState {
   health: { result: string; ts: string; text: string } | null;
   signals: Array<{ name: string; ts: string; result: string; output: string }>;
   /**
-   * What `loopstra judges` shows, with only the newest five false passes; null while
-   * speed.cheap_judges is off and nothing was ever compared, or when the config cannot be read.
+   * What `loopstra judges` shows, laid out the same, with only the newest five false passes; null
+   * while speed.cheap_judges is off and nothing was ever compared, when the config cannot be read,
+   * or when the report could not be made.
    */
-  judges: JudgesView | null;
+  judges: JudgesShown | null;
   events: Array<{ id: number; slug: string; phase_seq: number | null; type: string; ts: string; payload: unknown }>;
   lastEventId: number;
 }
@@ -92,11 +93,17 @@ export async function buildState(root: string, afterEventId: number, now: Date =
   }
 }
 
-/** The cheaper judges' report, shown only once they are on or have been compared at all. */
-function judgesState(root: string, cfg: Config, trace: Trace): JudgesView | null {
-  const v = judgesView(root, cfg, trace);
-  if (v.setting === "off" && !v.total) return null;
-  return { ...v, falsePasses: v.falsePasses.slice(0, 5) };
+/**
+ * The cheaper judges' report, shown only once they are on or have been compared at all (asked first,
+ * so most polls stop there). It is one section of the page: if it cannot be made, the rest still shows.
+ */
+function judgesState(root: string, cfg: Config, trace: Trace): JudgesShown | null {
+  if (cfg.speed.cheap_judges === "off" && !trace.hasJudgeRows()) return null;
+  try {
+    return judgesShown(judgesView(root, cfg, trace), { falsePasses: 5 });
+  } catch {
+    return null;
+  }
 }
 
 function intentView(root: string, trace: Trace, i: Intent, all: Intent[], now: Date): IntentView {

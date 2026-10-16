@@ -20,6 +20,39 @@ export function judgesView(root: string, cfg: Config, trace: Trace): JudgesView 
   return { ...judgeReport(cfg, rows, templates), spentUsd: trace.cheapJudgeCost(), total: rows.length };
 }
 
+/**
+ * The report in words and cells: the one copy `loopstra judges` and the dashboard both show. With
+ * nothing compared yet there is no table and no spending line.
+ */
+export interface JudgesShown {
+  /** "Cheaper judges: shadow (sonnet beside opus)". */
+  setting: string;
+  /** What counts; with nothing compared yet, that (and how to start measuring). */
+  note: string;
+  /** The header row, then one row per judge; empty with nothing compared. */
+  table: string[][];
+  spent: string | null;
+  /** Why some judges are never compared, each reason once. */
+  notCompared: string[];
+  /** The false passes, newest first, one line each. */
+  falsePasses: string[];
+}
+
+/** The report laid out for reading; `falsePasses`: at most that many of them (the dashboard shows five). */
+export function judgesShown(v: JudgesView, opts: { falsePasses?: number } = {}): JudgesShown {
+  const setting = `Cheaper judges: ${v.setting} (${settingHow(v)})`;
+  const notCompared = [...new Set(v.judges.map((j) => j.why).filter((w): w is string => w !== null))];
+  if (!v.total) {
+    const hint = v.setting === "off" ? " Set speed.cheap_judges to shadow to start measuring." : "";
+    return { setting, note: `No comparisons yet.${hint}`, table: [], spent: null, notCompared, falsePasses: [] };
+  }
+  return {
+    setting, note: "Only comparisons with these two models and the current prompts count.", table: table(v), spent: spentLine(v), notCompared,
+    falsePasses: v.falsePasses.slice(0, opts.falsePasses ?? Infinity)
+      .map((p) => `${shortDay(p.ts)}, ${p.slug}, ${p.trace_name}: ${p.strong_model} rejected, ${p.cheap_model} passed.`),
+  };
+}
+
 /** `loopstra judges`: how often the cheaper judges agreed with the strong ones. Read-only. */
 export async function renderJudges(root: string): Promise<string> {
   const cfg = await loadConfig(root);
@@ -33,17 +66,10 @@ export async function renderJudges(root: string): Promise<string> {
 
 /** The report as plain text: the setting, a table per judge, the spending, and what went wrong. */
 export function judgesText(v: JudgesView): string {
-  const setting = `Cheaper judges: ${v.setting} (${settingHow(v)})`;
-  const notCompared = reasons(v);
-  if (!v.total) {
-    const hint = v.setting === "off" ? " Set speed.cheap_judges to shadow to start measuring." : "";
-    return [`${setting}.`, `No comparisons yet.${hint}`, ...notCompared].join("\n") + "\n";
-  }
-  const lines = [`${setting}. Only comparisons with these two models and the current prompts count.`, ...table(v), spentLine(v), ...notCompared];
-  if (v.falsePasses.length) {
-    lines.push("", "Passed what the strong judge rejected (newest first):",
-      ...v.falsePasses.map((p) => `- ${shortDay(p.ts)}, ${p.slug}, ${p.trace_name}: ${p.strong_model} rejected, ${p.cheap_model} passed.`));
-  }
+  const s = judgesShown(v);
+  const lines = s.table.length ? [`${s.setting}. ${s.note}`, ...aligned(s.table), s.spent!] : [`${s.setting}.`, s.note];
+  if (s.notCompared.length) lines.push("", "Not compared:", ...s.notCompared.map((w) => `- ${w}`));
+  if (s.falsePasses.length) lines.push("", "Passed what the strong judge rejected (newest first):", ...s.falsePasses.map((p) => `- ${p}`));
   return lines.join("\n") + "\n";
 }
 
@@ -63,8 +89,8 @@ function pair(a: number | null, b: number | null, show: (n: number) => string): 
   return `${a === null ? "-" : show(a)} / ${b === null ? "-" : show(b)}`;
 }
 
-/** One line per judge; "Goes first?" only when the setting is shadow or first. */
-function table(v: JudgesView): string[] {
+/** The header, then one row per judge; "Goes first?" only when the setting is shadow or first. */
+function table(v: JudgesView): string[][] {
   const goesFirst = v.setting !== "off";
   const headers = ["Judge", "Compared", "Agreed", `Passed what ${v.strongModel} rejected`, `Rejected what ${v.strongModel} passed`, "Unsure", "Could not answer",
     `Avg cost (${v.cheapModel} / ${v.strongModel})`, `Avg time (${v.cheapModel} / ${v.strongModel})`, "First would cost", ...(goesFirst ? ["Goes first?"] : [])];
@@ -74,8 +100,12 @@ function table(v: JudgesView): string[] {
     j.firstWouldCost === null ? "-" : `${Math.round(j.firstWouldCost * 100)}%`,
     ...(goesFirst ? [j.why ? "not compared (see below)" : j.goesFirst ?? "-"] : []),
   ];
-  const rows = [headers, ...v.judges.map(row)];
-  const widths = headers.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)));
+  return [headers, ...v.judges.map(row)];
+}
+
+/** A table's rows as text, its columns padded to line up. */
+function aligned(rows: string[][]): string[] {
+  const widths = rows[0]!.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)));
   return rows.map((r) => r.map((cell, c) => cell.padEnd(widths[c]!)).join("  ").trimEnd());
 }
 
@@ -83,10 +113,4 @@ function spentLine(v: JudgesView): string {
   const n = v.notCounted;
   const older = n ? ` ${n} older comparison${n === 1 ? "" : "s"} with other models or prompts ${n === 1 ? "is" : "are"} not counted.` : "";
   return `Spent on cheaper judges so far: ${money(v.spentUsd)}.${older}`;
-}
-
-/** Why some judges are never compared, each reason once. */
-function reasons(v: JudgesView): string[] {
-  const whys = [...new Set(v.judges.map((j) => j.why).filter((w): w is string => w !== null))];
-  return whys.length ? ["", "Not compared:", ...whys.map((w) => `- ${w}`)] : [];
 }

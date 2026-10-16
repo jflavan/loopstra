@@ -188,31 +188,24 @@
       + (recent.length ? `<div style="margin-top:6px">${recent.map((g) => `<span class="tag ${esc(g.result)}" title="${esc(g.output.slice(-400))}">${esc(time(g.ts))} ${esc(g.result)}</span>`).join(" ")}</div>` : "");
   }
 
-  // The same report as `loopstra judges`, shown once the cheaper judges are on or have been compared.
+  // The same report as `loopstra judges`, laid out by the server, shown once the cheaper judges are on or have been compared.
   function renderJudges(s) {
     document.getElementById("judges-section").hidden = !s.judges;
     if (!s.judges) return;
-    const j = s.judges, cheap = j.cheapModel, strong = j.strongModel;
-    const how = j.setting === "first" ? `${cheap} before ${strong}` : j.setting === "shadow" ? `${cheap} beside ${strong}` : `${cheap} is not asked`;
-    const pair = (a, b, show) => a == null && b == null ? "–" : (a == null ? "–" : show(a)) + " / " + (b == null ? "–" : show(b));
-    const goes = j.setting !== "off";
-    const head = ["Judge", "Compared", "Agreed", `Passed what ${strong} rejected`, `Rejected what ${strong} passed`, "Unsure", "Could not answer",
-      `Avg cost (${cheap} / ${strong})`, `Avg time (${cheap} / ${strong})`, "First would cost", ...(goes ? ["Goes first?"] : [])];
-    const counts = (r) => [r.compared, r.agreed, r.falsePasses, r.falseRejects, r.unsure, r.couldNotAnswer].map((n) => `<td class="num">${n}</td>`).join("");
-    const row = (r) => `<tr><td>${esc(r.judge)}</td>${counts(r)}<td>${esc(pair(r.avgCheapUsd, r.avgStrongUsd, money))}</td>
-      <td>${esc(pair(r.avgCheapMs, r.avgStrongMs, took))}</td><td class="num">${r.firstWouldCost == null ? "–" : Math.round(r.firstWouldCost * 100) + "%"}</td>
-      ${goes ? `<td>${esc(r.why ? "not compared (see below)" : r.goesFirst || "–")}</td>` : ""}</tr>`;
-    const table = j.total
-      ? `<div class="scroll"><table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${j.judges.map(row).join("")}</tbody></table></div>`
-      : `<div class="muted">No comparisons yet.</div>`;
-    const why = [...new Set(j.judges.map((r) => r.why).filter(Boolean))];
-    const spent = `Spent on cheaper judges so far: ${money(j.spentUsd)}.` + (j.notCounted ? ` ${j.notCounted} older ${j.notCounted === 1 ? "comparison with other models or prompts is" : "comparisons with other models or prompts are"} not counted.` : "");
-    document.getElementById("judges").innerHTML = `<div style="margin-bottom:6px">Setting: <b>${esc(j.setting)}</b> (${esc(how)}). Only comparisons with these two models and the current prompts count.</div>`
+    const j = s.judges;
+    const list = (title, items) => items.length ? `<div style="margin-top:6px">${esc(title)}<ul style="margin:2px 0">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>` : "";
+    // The counts and the share are numbers; the rest is words.
+    const cls = (c) => (c >= 1 && c <= 6) || c === 9 ? ' class="num"' : "";
+    const [head, ...rows] = j.table;
+    const table = head
+      ? `<div class="scroll"><table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>`
+        + rows.map((r) => `<tr>${r.map((cell, c) => `<td${cls(c)}>${esc(cell)}</td>`).join("")}</tr>`).join("") + `</tbody></table></div>`
+      : "";
+    document.getElementById("judges").innerHTML = `<div style="margin-bottom:6px"><b>${esc(j.setting)}</b>. ${esc(j.note)}</div>`
       + table
-      + `<div class="muted" style="margin-top:6px">${esc(spent)}</div>`
-      + (why.length ? `<div style="margin-top:6px">Not compared:<ul style="margin:2px 0">${why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : "")
-      + (j.falsePasses.length ? `<div style="margin-top:6px">Passed what the strong judge rejected (newest first):<ul style="margin:2px 0">${j.falsePasses.map((p) =>
-          `<li>${esc(time(p.ts))}, ${esc(p.slug)}, ${esc(p.trace_name)}: ${esc(p.strong_model)} rejected, ${esc(p.cheap_model)} passed.</li>`).join("")}</ul></div>` : "");
+      + (j.spent ? `<div class="muted" style="margin-top:6px">${esc(j.spent)}</div>` : "")
+      + list("Not compared:", j.notCompared)
+      + list("Passed what the strong judge rejected (newest first):", j.falsePasses);
   }
 
   function renderEvents(events) {

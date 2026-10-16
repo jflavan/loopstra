@@ -134,12 +134,14 @@ export interface Pause {
   slug?: string | null;
   phase?: string | null;
   line?: string | null;
+  /** The model that could not be reached (null when unknown): only a session on it ends the pause. */
+  model?: string | null;
   /** Pauses in a row for the same change, phase, and line (see PROBE_AFTER in the scheduler). */
   repeats?: number;
 }
 
-/** What made the loop pause: the change, its phase, and the line that matched. */
-export interface PauseCause { slug: string; phase: string; line: string }
+/** What made the loop pause: the change, its phase, the line that matched, and the model it ran on. */
+export interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
 
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
@@ -177,7 +179,7 @@ export function pauseAfterUnavailable(root: string, now: Date = new Date(), caus
   const until = new Date(now.getTime() + minutes * 60_000);
   const pause: Pause = {
     until: until.toISOString(), reason: `The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${clockText(until)}.`, failures,
-    slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, repeats,
+    slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, model: cause?.model ?? null, repeats,
   };
   try {
     // Whole (temp file, then rename): the tick and the dashboard read it while it is written.
@@ -191,8 +193,16 @@ export function clockText(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** Ends the pause and its back-off (a phase got through to the assistant). */
-export function clearPause(root: string): void {
+/**
+ * Ends the pause and its back-off (a phase got through to the assistant). With `model`, only when the
+ * pause is for that model or for none known: a session on another model getting through says nothing
+ * about the one that is out (a usage limit is often one model's), so the back-off keeps climbing.
+ */
+export function clearPause(root: string, model?: string): void {
+  if (model !== undefined) {
+    const out = readPause(root)?.model;
+    if (out && out !== model) return;
+  }
   try { rmSync(pausePath(root), { force: true }); } catch { /* nothing to clear */ }
 }
 

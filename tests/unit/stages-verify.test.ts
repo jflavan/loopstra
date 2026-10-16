@@ -97,9 +97,9 @@ describe("verify stage", () => {
 
   test("lessons are told the change's failed phases, but never a cheaper judge's failure", async () => {
     const { repo, ctx, trace } = await merged();
-    const fail = (name: string, error: string) => trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, "agent"), { status: "fail", error });
-    fail("spec-check-cheap", "invalid envelope from the cheaper judge");
-    fail("build", "the build broke");
+    const fail = (name: string, kind: "agent" | "cheap-judge", error: string) => trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, kind), { status: "fail", error });
+    fail("spec-check-cheap", "cheap-judge", "invalid envelope from the cheaper judge");
+    fail("build", "agent", "the build broke");
     await runVerifyStep(ctx);
     const p = trace.phases("add-numbers").find((x) => x.name === "lessons")!;
     const prompt = await Bun.file(join(ctx.runDir, "phases", `${p.seq}-lessons`, "prompt.md")).text();

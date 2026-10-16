@@ -605,3 +605,7 @@ for the report; `templates` maps each judge to the sha256 of its current prompt 
 - Report costs are measured (phase rows and per-session cost/time) and 'first would cost' is computed from shadow rows, not from price tables, so the engineer sees whether first pays.
 - Rows are read whole via trace.judgeRows() and filtered in pure functions in src/judges.ts, keeping trace.ts thin and the evidence and report logic unit-testable.
 - Fake claude gains <phase>@<model>[-n].jsonl with per-model counters because the existing per-phase counter races when two sessions of one phase start together.
+
+## Changed after review
+
+`docs/decisions.md` ("Cheaper judges", and its "Second review") records what was built where it differs from this design. In short: an audit counts only when both judges answered; the budget rule covers a daily budget smaller than two session caps; `runJudge` takes `room` (asked by the caller before work beside the judge starts) in place of `alongside`; a strong judge that throws still writes the row, and the cheaper verdict is used again on the same question; `timed` is gone (`agentPhase` returns `ms`); `endsPause` is replaced by a pause that records the out model; cheaper judges' phase rows have the kind `cheap-judge` instead of being found by their `-cheap` name; and an early review's alone row is written only once round 1 uses it.

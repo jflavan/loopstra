@@ -2,8 +2,9 @@ import { block, clearMarker, readMarker, writeArtifact, writeMarker, type StepCo
 import { modelFor } from "../config";
 import { Envelopes } from "../envelopes";
 import { Git } from "../git";
-import { cheapMayDecide, passes, runJudge, type JudgeResult } from "../judges";
+import { cheapMayDecide, judgeModel, passes, runJudge, type JudgeResult } from "../judges";
 import { phasePrompt, type AgentPhaseSpec } from "../phases";
+import type { NewJudgeRow } from "../trace";
 import { testLoop } from "./build";
 import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
 
@@ -41,8 +42,8 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   const a = await artifacts(ctx);
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
-    const phase = await reviewPhase(ctx, round, a.spec, a.currentPlan);
-    const review = (await takeEarlyReview(ctx, phase)) ?? await runJudge(ctx, phase);
+    const ask = await reviewAsk(ctx, round, a.spec, a.currentPlan);
+    const review = (await takeEarlyReview(ctx, ask)) ?? await runJudge(ctx, ask.phase, { commit: ask.commit });
     if (!review.ok) return block(ctx, review.note);
     // review.md, the gate row and the findings all come from the review that decided.
     await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
@@ -78,13 +79,22 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   }
 }
 
-/** A round's review session. The early review uses the same, so it asks exactly what round 1 would. */
-async function reviewPhase(ctx: StepContext, round: number, spec: string, plan: string): Promise<AgentPhaseSpec & { name: "review" }> {
+/** A round's review: its session, with the prompt rendered once (absent when the prompt file is), and the commit it judges. */
+interface ReviewAsk {
+  phase: AgentPhaseSpec & { name: "review" };
+  commit: string;
+}
+
+/** A round's review. The early review uses the same, so it asks exactly what round 1 would. */
+async function reviewAsk(ctx: StepContext, round: number, spec: string, plan: string): Promise<ReviewAsk> {
   const stage = ctx.cfg.stages.review;
-  return {
-    name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-    vars: { spec, plan, test_result: await testResult(ctx, new Git(ctx.worktreeDir)) }, skills: stage.skills,
+  const wt = new Git(ctx.worktreeDir);
+  const phase: AgentPhaseSpec & { name: "review" } = {
+    name: "review", traceName: `review-${round}`, model: judgeModel(ctx.cfg, "review"), permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
+    vars: { spec, plan, test_result: await testResult(ctx, wt) }, skills: stage.skills,
   };
+  const prompt = await phasePrompt(ctx, phase);
+  return { phase: prompt === null ? phase : { ...phase, prompt }, commit: await wt.headSha() };
 }
 
 /**
@@ -94,23 +104,24 @@ async function reviewPhase(ctx: StepContext, round: number, spec: string, plan: 
 export const EARLY_REVIEW = "review.early";
 
 /** What a review is asked about: the commit, the model, and the whole prompt. */
-async function reviewKey(ctx: StepContext, phase: AgentPhaseSpec): Promise<string | null> {
-  const prompt = await phasePrompt(ctx, phase);
-  return prompt === null ? null : [await new Git(ctx.worktreeDir).headSha(), modelFor(ctx.cfg, phase.model), prompt].join("\n");
+function reviewKey(ctx: StepContext, ask: ReviewAsk): string | null {
+  return ask.phase.prompt === undefined ? null : [ask.commit, modelFor(ctx.cfg, ask.phase.model), ask.phase.prompt].join("\n");
 }
 
 /**
  * Round 1's review, run by the build step at the same time as the verifier (the tests have passed,
  * so both judge the same commit). Returns what to keep if the verifier passes, or null when the
  * review did not finish (round 1 then runs as usual). The build step runs it as optional work.
+ * `room`: whether a cheaper judge in shadow has room beside the verifier (see shadowRoom), asked by
+ * the build step before either starts.
  */
-export async function reviewAhead(ctx: StepContext, spec: string, plan: string): Promise<string | null> {
-  const phase = await reviewPhase(ctx, 1, spec, plan);
-  const key = await reviewKey(ctx, phase);
-  // The verifier is already running beside it, so a cheaper judge in shadow needs room for a third
-  // session. Its comparison is recorded even if the verifier fails: it was the same question.
-  const r = await runJudge(ctx, phase, { alongside: 1 });
-  return key !== null && r.ok ? JSON.stringify({ key, envelope: r.envelope, decidedBy: r.decidedBy }) : null;
+export async function reviewAhead(ctx: StepContext, spec: string, plan: string, room: boolean): Promise<string | null> {
+  const ask = await reviewAsk(ctx, 1, spec, plan);
+  const key = reviewKey(ctx, ask);
+  // A comparison is recorded even if the verifier fails: it was the same question. A pass the cheaper
+  // judge decided alone is not: its row is kept with the review and written only if round 1 uses it.
+  const r = await runJudge(ctx, ask.phase, { room, commit: ask.commit, keepAlone: true });
+  return key !== null && r.ok ? JSON.stringify({ key, envelope: r.envelope, decidedBy: r.decidedBy, alone: r.alone }) : null;
 }
 
 /** Keeps an early review for round 1 (see reviewAhead). */
@@ -122,24 +133,27 @@ export function keepEarlyReview(ctx: StepContext, kept: string): void {
  * The early review, when it was asked exactly what `phase` would ask; it is used up either way. Not
  * once review before commands are set: what they changed may be left uncommitted, so the key misses it.
  */
-async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & { name: "review" }): Promise<JudgeResult<"review"> | null> {
+async function takeEarlyReview(ctx: StepContext, ask: ReviewAsk): Promise<JudgeResult<"review"> | null> {
+  const { phase } = ask;
   const kept = readMarker(ctx, EARLY_REVIEW);
   if (kept === null) return null;
   clearMarker(ctx, EARLY_REVIEW);
-  let saved: { key?: unknown; envelope?: unknown; decidedBy?: unknown };
+  let saved: { key?: unknown; envelope?: unknown; decidedBy?: unknown; alone?: NewJudgeRow };
   try { saved = JSON.parse(kept); } catch { return null; }
   const envelope = Envelopes.review.safeParse(saved.envelope);
-  if (!envelope.success || ctx.cfg.stages.review.before.length || saved.key !== (await reviewKey(ctx, phase))) {
+  if (!envelope.success || ctx.cfg.stages.review.before.length || saved.key !== reviewKey(ctx, ask)) {
     ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: the change, its plan, the review prompt or its commands moved on since it ran" });
     return null;
   }
   // One the cheaper judge decided stands only if it is still trusted now: since the build step, an
   // audit may have found a miss, or the setting may have moved. A marker without decidedBy is older, and strong.
   const decidedBy = saved.decidedBy === "cheap" ? "cheap" : "strong";
-  if (decidedBy === "cheap" && !(await cheapMayDecide(ctx, phase))) {
+  if (decidedBy === "cheap" && !(await cheapMayDecide(ctx, phase, ask.commit))) {
     ctx.trace.event(ctx.slug, "command", { command: "early review", note: "not used: it was decided by the cheaper judge, which is no longer trusted to decide alone" });
     return null;
   }
+  // Only now does the cheaper judge's pass stand, so only now is it one it decided alone.
+  if (decidedBy === "cheap" && saved.alone) ctx.trace.judge(ctx.slug, saved.alone);
   ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName} uses the review that ran alongside the verifier` });
   return { ok: true, envelope: envelope.data, sessionId: null, costUsd: 0, decidedBy };
 }

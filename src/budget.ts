@@ -76,9 +76,13 @@ export function roomFor(cfg: Config, trace: Trace, sessions: number, now = new D
   return day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) }) >= sessions * cap;
 }
 
-/** A daily budget and no session cap: two of the loop's sessions never have room at once (see roomFor). */
-export function noSessionCap(cfg: Config): boolean {
-  return cfg.claude.max_budget_usd_per_day !== undefined && cfg.claude.max_budget_usd === undefined;
+/**
+ * Two of the loop's sessions never have room at once (see roomFor), whatever was spent: a daily budget
+ * with no session cap, or one smaller than two session caps.
+ */
+export function neverRoomForTwo(cfg: Config): boolean {
+  const { max_budget_usd_per_day: day, max_budget_usd: cap } = cfg.claude;
+  return day !== undefined && (cap === undefined || day < 2 * cap);
 }
 
 /**

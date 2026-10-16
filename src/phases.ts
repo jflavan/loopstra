@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
-import type { Trace } from "./trace";
+import type { AgentKind, Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
@@ -37,13 +37,19 @@ export interface AgentPhaseSpec {
   skills?: string[];
   /** false: a timeout or crash is not tried again (the cheaper judge: the strong judge stands behind it). Default true. */
   retry?: boolean;
-  /** false: getting through does not end an outage pause, since another model may still be out (the cheaper judge). Default true. */
-  endsPause?: boolean;
+  /**
+   * The phase row's kind in the trace. cheap-judge: a cheaper judge's session (see src/judges.ts), which
+   * spending, the status table and lessons tell apart by it. Default agent.
+   */
+  kind?: AgentKind;
+  /** The prompt, already rendered by phasePrompt for this spec (a judge renders it once for both its sessions). */
+  prompt?: string;
 }
 
+/** `ms`: how long its sessions ran, a retry's included; the phase boundary before each is not (none for a result that ran no session). */
 export type AgentPhaseResult<N extends PhaseName> =
-  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number }
-  | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
+  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number; ms?: number }
+  | { ok: false; reason: FailureReason; note: string; sessionId: string | null; ms?: number };
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
 /** Git commands that only read, so a judge can see the change it is judging. */
@@ -161,7 +167,7 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promi
 }
 
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }): Promise<AgentPhaseResult<N>> {
-  const prompt = await phasePrompt(ctx, spec);
+  const prompt = spec.prompt ?? await phasePrompt(ctx, spec);
   if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
@@ -171,7 +177,8 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   const first = await attempt(ctx, spec, prompt, traceName);
   if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
   ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-  return attempt(ctx, spec, prompt, `${traceName}-retry`);
+  const second = await attempt(ctx, spec, prompt, `${traceName}-retry`);
+  return { ...second, ms: (first.ms ?? 0) + (second.ms ?? 0) };
 }
 
 /** Run before every phase (agent or code); the scheduler sets it for the duration of a tick. */
@@ -235,10 +242,10 @@ export async function optional<T>(ctx: StepContext, what: string, fn: () => Prom
  * too little is left. `capUsd` is the session's cap (Infinity: none); `fromDay`: the cap is what was
  * left of the day, less than claude.max_budget_usd (or that is not set), so hitting it is the day's.
  */
-function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd: number; fromDay: boolean } {
+function startPhase(ctx: StepContext, traceName: string, kind: AgentKind): { seq: number; capUsd: number; fromDay: boolean } {
   const c = ctx.cfg.claude;
-  if (c.max_budget_usd_per_day === undefined) return { seq: ctx.trace.phaseStart(ctx.slug, traceName, "agent"), capUsd: limitOf(c.max_budget_usd), fromDay: false };
-  const held = ctx.trace.phaseStartWithin(ctx.slug, traceName, "agent", {
+  if (c.max_budget_usd_per_day === undefined) return { seq: ctx.trace.phaseStart(ctx.slug, traceName, kind), capUsd: limitOf(c.max_budget_usd), fromDay: false };
+  const held = ctx.trace.phaseStartWithin(ctx.slug, traceName, kind, {
     since: startOfToday(), limitUsd: c.max_budget_usd_per_day, capUsd: limitOf(c.max_budget_usd), floorUsd: MIN_SESSION_USD,
     pool: { except: CHAT_SLUG }, runningSince: staleBefore(ctx.cfg),
   });
@@ -250,15 +257,16 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
   await boundary(ctx);
   throwIfStopping();
-  const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+  const { seq, capUsd, fromDay } = startPhase(ctx, traceName, spec.kind ?? "agent");
   const started = Date.now();
+  const model = modelFor(ctx.cfg, spec.model);
   // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
   let denied: string[] = [];
   const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
     const refused = denied.length ? `; not allowed: ${denied.join(", ")}` : "";
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}${refused}`, denied });
     const tests = protectedTests(protectedLog);
-    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId };
+    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId, ms: Date.now() - started };
   };
   let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
@@ -276,7 +284,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       cwd: spec.cwd ?? ctx.root,
       prompt,
       schema: jsonSchemaFor(spec.name),
-      model: modelFor(ctx.cfg, spec.model),
+      model,
       permissionMode: spec.permissionMode,
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
@@ -296,7 +304,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       if (unavailable(r.reason)) {
         // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
         ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
-        throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
+        throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model });
       }
       if (r.reason === "budget" && fromDay) {
         // The loop's day ran out, not this step's own limit: the loop pauses and the step resumes later.
@@ -314,8 +322,9 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const envelope = parsed.data as Envelope<N>;
     if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
-    if (spec.endsPause !== false) clearPause(ctx.root); // the assistant is back: the next outage starts the back-off afresh
-    return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
+    // This model is back: the next outage starts the back-off afresh. A pause for another model stays.
+    clearPause(ctx.root, model);
+    return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd, ms: Date.now() - started };
   } catch (e) {
     if (e instanceof StopRequested) {
       // A session the stop killed never reported its cost.

@@ -17,8 +17,12 @@ export interface IntentSummary {
   costUsd: number; lastPhase: string | null; lastPhaseStatus: string | null; lastActivity: string | null;
 }
 
+/** An agent session's kind: cheap-judge is a cheaper judge's (see src/judges.ts), which only runs beside or before the judge that decides. */
+export type AgentKind = "agent" | "cheap-judge";
+export type PhaseKind = AgentKind | "code" | "human";
+
 export interface PhaseRow {
-  slug: string; seq: number; name: string; kind: string; status: string;
+  slug: string; seq: number; name: string; kind: PhaseKind; status: string;
   started: string; ended: string | null; cost_usd: number; session_id: string | null; error: string | null;
 }
 
@@ -76,7 +80,8 @@ export function judgeNote(row: NewJudgeRow): string {
   const cheap = `the cheaper judge (${row.cheap_model})`;
   const strong = `the strong judge (${row.strong_model})`;
   if (row.how === "alone" || row.strong === null) return `decided by ${cheap}: passed`;
-  if (row.how === "escalated") return `${cheap} ${row.cheap === "pass" ? "passed" : cheapDid(row.cheap)}, so ${strong} decided: ${decided(row.strong)}`;
+  // Escalated: the cheaper judge did not pass (a pass decides alone).
+  if (row.how === "escalated") return `${cheap} ${cheapDid(row.cheap as "unsure" | "reject" | "failed")}, so ${strong} decided: ${decided(row.strong)}`;
   if (row.strong === "failed") return `${strong} could not answer, so nothing was compared`;
   if (row.cheap === "failed") return `${cheap} could not answer; ${strong} decided: ${decided(row.strong)}`;
   if (row.cheap === "pass" && row.strong === "pass") return `${cheap} agreed with ${strong}: passed`;
@@ -197,7 +202,7 @@ export class Trace {
    * processes starting phases of the same slug at once (chat in the dashboard and in `loopstra chat`)
    * never pick the same number.
    */
-  phaseStart(slug: string, name: string, kind: "agent" | "code" | "human", costUsd = 0): number {
+  phaseStart(slug: string, name: string, kind: PhaseKind, costUsd = 0): number {
     const seq = this.db.query<{ seq: number }, [string, string, string, string, number, string]>(
       "INSERT INTO phases (slug, seq, name, kind, status, started, cost_usd) SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, 'running', ?4, ?5 FROM phases WHERE slug = ?6 RETURNING seq",
     ).get(slug, name, kind, now(), costUsd, slug)!.seq;
@@ -214,7 +219,7 @@ export class Trace {
    * killed processes (see costIn). With no limit and no cap (both Infinity) nothing is held: the row
    * starts at 0.
    */
-  phaseStartWithin(slug: string, name: string, kind: "agent" | "code" | "human", budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number; pool?: BudgetPool; runningSince?: string }): { seq: number; heldUsd: number } | null {
+  phaseStartWithin(slug: string, name: string, kind: PhaseKind, budget: { since: string; limitUsd: number; capUsd: number; floorUsd: number; pool?: BudgetPool; runningSince?: string }): { seq: number; heldUsd: number } | null {
     const reserve = this.db.transaction(() => {
       const spent = this.costIn(budget.pool ?? { slug }, budget.since, { runningSince: budget.runningSince });
       const left = budget.limitUsd - spent;
@@ -256,9 +261,14 @@ export class Trace {
     this.event(slug, "judge", { note: judgeNote(row), ...row });
   }
 
-  /** What every cheaper judge's session (a `-cheap` phase) has cost, across all changes; a running one holds, so it is left out. */
+  /** What every cheaper judge's session (a cheap-judge phase) has cost, across all changes; a running one holds, so it is left out. */
   cheapJudgeCost(): number {
-    return this.db.query<{ c: number | null }, []>("SELECT SUM(cost_usd) AS c FROM phases WHERE name LIKE '%-cheap' AND status != 'running'").get()?.c ?? 0;
+    return this.db.query<{ c: number | null }, []>("SELECT SUM(cost_usd) AS c FROM phases WHERE kind = 'cheap-judge' AND status != 'running'").get()?.c ?? 0;
+  }
+
+  /** Whether any cheaper judge was ever compared or asked (a judges row exists). */
+  hasJudgeRows(): boolean {
+    return this.db.query<{ n: number }, []>("SELECT EXISTS (SELECT 1 FROM judges) AS n").get()?.n === 1;
   }
 
   /** Every judges row, oldest first. They are few; src/judges.ts filters them. */
@@ -342,7 +352,7 @@ export class Trace {
     if (!i) return null;
     const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
     // A cheaper judge's row is never where a change is: it only runs beside (or before) the judge that decides.
-    const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? AND name NOT LIKE '%-cheap' ORDER BY seq DESC LIMIT 1").get(slug);
+    const last = this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? AND kind != 'cheap-judge' ORDER BY seq DESC LIMIT 1").get(slug);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);
     return {
       slug: i.slug, status: i.status, priority: i.priority, updated: i.updated,

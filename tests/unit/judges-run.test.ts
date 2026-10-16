@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CHAT_SLUG, startOfToday } from "../../src/budget";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
+import { AUDIT_EVERY, FIRST_NEEDS, runJudge, shadowRoom, templateSha } from "../../src/judges";
 import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -142,11 +143,15 @@ describe("runJudge shadow", () => {
     });
   });
 
-  test("a strong judge that cannot reach the assistant throws once the cheaper one has ended; no row", async () => {
-    await withRepo(SHADOW, { "spec-check@opus": fixture("outage") }, async ({ ctx, trace }) => {
+  test("a strong judge that cannot reach the assistant throws once the cheaper one has ended; the cheaper verdict is kept and used again", async () => {
+    await withRepo(SHADOW, { "spec-check@opus-1": fixture("outage"), "spec-check@sonnet": fixture("spec-check-reject") }, async ({ ctx, trace, fake }) => {
       expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
-      expect(phase(trace, "spec-check-cheap")?.status).toBe("success");
-      expect(trace.judgeRows()).toEqual([]);
+      expect(phase(trace, "spec-check-cheap")).toMatchObject({ status: "success", kind: "cheap-judge" });
+      expect(trace.judgeRows()).toEqual([expect.objectContaining({ how: "shadow", cheap: "reject", strong: "failed", strong_usd: null })]);
+      // After the pause the same question asks only the strong judge; the row compares the two.
+      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
+      expect(fake.models()).toEqual(["opus", "sonnet", "opus"]);
+      expect(trace.judgeRows().at(-1)).toMatchObject({ how: "shadow", cheap: "reject", strong: "pass", cheap_usd: null, cheap_ms: null });
     });
   });
 
@@ -155,13 +160,14 @@ describe("runJudge shadow", () => {
       const files = { "spec-check@opus": fixture("outage"), "spec-check@sonnet": fixture("spec-check-reject") };
       await withRepo(mode === "shadow" ? SHADOW : FIRST, files, async ({ repo, ctx, trace }) => {
         if (mode === "first") seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
-        pauseAfterUnavailable(ctx.root);
-        pauseAfterUnavailable(ctx.root);
-        expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
+        const out = { slug: "add-numbers", phase: "spec-check", line: "usage limit", model: "opus" };
+        pauseAfterUnavailable(ctx.root, new Date(), out);
+        pauseAfterUnavailable(ctx.root, new Date(), out);
+        expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toMatchObject({ model: "opus" });
         expect(phase(trace, "spec-check-cheap")?.status).toBe("success");
         // The back-off keeps climbing: the next pause is the third in a row.
         expect(readPause(ctx.root)?.failures).toBe(2);
-        expect(pauseAfterUnavailable(ctx.root).failures).toBe(3);
+        expect(pauseAfterUnavailable(ctx.root, new Date(), out).failures).toBe(3);
       });
     });
   }
@@ -208,13 +214,26 @@ describe("runJudge shadow", () => {
     });
   });
 
-  test("work already running alongside counts: room for two is not room for three", async () => {
+  test("work starting alongside counts: room for two is not room for three", async () => {
     await withRepo(`${SHADOW}claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n`, {}, async ({ ctx, trace, fake }) => {
-      await runJudge(ctx, SPEC_CHECK, { alongside: 1 });
+      await runJudge(ctx, SPEC_CHECK, { room: shadowRoom(ctx, 1) });
       expect(fake.models()).toEqual(["opus"]);
       expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
       await runJudge(ctx, SPEC_CHECK);
       expect(fake.models()).toHaveLength(3);
+      expect(trace.judgeRows()).toHaveLength(1);
+    });
+  });
+
+  test("room asked before the work beside it starts stands: that work's hold, taken since, is not counted twice", async () => {
+    await withRepo(`${SHADOW}claude:\n  max_budget_usd_per_day: 3.5\n  max_budget_usd: 1\n`, {}, async ({ ctx, trace, fake }) => {
+      const room = shadowRoom(ctx, 1);
+      expect(room).toBe(true);
+      // The work beside the judge starts first and holds its session's share of the day.
+      trace.phaseStartWithin(ctx.slug, "verify", "agent", { since: startOfToday(), limitUsd: 3.5, capUsd: 1, floorUsd: 0.01, pool: { except: CHAT_SLUG } });
+      expect(shadowRoom(ctx, 1)).toBe(false);
+      await runJudge(ctx, SPEC_CHECK, { room });
+      expect(fake.models().sort()).toEqual(["opus", "sonnet"]);
       expect(trace.judgeRows()).toHaveLength(1);
     });
   });
@@ -300,11 +319,64 @@ describe("runJudge first", () => {
     });
   });
 
+  test("earned, with a daily budget smaller than two sessions: no audit can ever run, so the cheaper judge never decides alone", async () => {
+    await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 5\n  max_budget_usd: 3\n`, {}, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      for (let i = 1; i <= AUDIT_EVERY + 1; i++) {
+        expect(await runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } })).toMatchObject({ decidedBy: "strong" });
+      }
+      expect(fake.models()).toEqual(Array(AUDIT_EVERY + 1).fill("opus"));
+    });
+  });
+
+  test("earned: an audit the cheaper judge failed is no audit, so the next call is an audit again", async () => {
+    await withRepo(FIRST, { [`spec-check@sonnet-${AUDIT_EVERY}`]: fixture("crash") }, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      const ask = (i: number) => runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } });
+      for (let i = 1; i < AUDIT_EVERY; i++) expect(await ask(i)).toMatchObject({ decidedBy: "cheap" });
+      expect(await ask(AUDIT_EVERY)).toMatchObject({ decidedBy: "strong" });
+      expect(trace.judgeRows().at(-1)).toMatchObject({ how: "shadow", cheap: "failed" });
+      // Still due: both run again, and this one compares.
+      expect(await ask(AUDIT_EVERY + 1)).toMatchObject({ decidedBy: "strong" });
+      expect(trace.judgeRows().at(-1)).toMatchObject({ how: "shadow", cheap: "pass", strong: "pass" });
+      expect(fake.models().filter((m) => m === "opus")).toHaveLength(2);
+      expect(await ask(AUDIT_EVERY + 2)).toMatchObject({ decidedBy: "cheap" });
+    });
+  });
+
+  test("earned and escalated, and the strong judge cannot be reached: the cheaper verdict is kept, and after the pause only the strong judge runs", async () => {
+    await withRepo(FIRST, { "spec-check@sonnet": fixture("spec-check-reject"), "spec-check@opus-1": fixture("outage") }, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      expect(await runJudge(ctx, SPEC_CHECK).catch((e) => e)).toBeInstanceOf(AssistantUnavailable);
+      expect(trace.judgeRows().at(-1)).toMatchObject({ how: "escalated", cheap: "reject", strong: "failed" });
+      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
+      expect(fake.models()).toEqual(["sonnet", "opus", "opus"]);
+      expect(trace.judgeRows().at(-1)).toMatchObject({ how: "escalated", cheap: "reject", strong: "pass", cheap_usd: null });
+    });
+  });
+
+  test("earned and escalated: a strong judge that times out is retried after the merge work runs again, as any phase is", async () => {
+    await withRepo(FIRST, { "spec-check@sonnet": fixture("spec-check-reject"), "spec-check@opus-1": fixture("crash") }, async ({ repo, ctx, trace, fake }) => {
+      seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+      let boundaries = 0;
+      setPhaseBoundary(async () => { boundaries++; });
+      try {
+        expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
+      } finally {
+        setPhaseBoundary(null);
+      }
+      expect(fake.models()).toEqual(["sonnet", "opus", "opus"]);
+      expect(trace.phases("add-numbers").map((p) => p.name)).toEqual(["spec-check-cheap", "spec-check", "spec-check-retry"]);
+      // Before the cheaper session, the strong one, and its retry.
+      expect(boundaries).toBe(3);
+    });
+  });
+
   test("earned, an audit is due and today's budget has no room for it: the strong judge decides alone until one runs", async () => {
     // Room for two sessions (an audit alone) but not three (an audit beside other work).
     await withRepo(`${FIRST}claude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n`, {}, async ({ repo, ctx, trace, fake }) => {
       seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
-      const ask = (i: number, alongside: number) => runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } }, { alongside });
+      const ask = (i: number, alongside: number) => runJudge(ctx, { ...SPEC_CHECK, vars: { ...SPEC_CHECK.vars, spec: `# Spec ${i}` } }, { room: shadowRoom(ctx, alongside) });
       for (let i = 1; i < AUDIT_EVERY; i++) expect(await ask(i, 1)).toMatchObject({ decidedBy: "cheap" });
       // The audit is due, and beside other work there is no room for it: the cheaper judge does not decide alone.
       expect(await ask(AUDIT_EVERY, 1)).toMatchObject({ decidedBy: "strong" });

@@ -4,7 +4,7 @@ import type { Envelope } from "../envelopes";
 import { modelFor } from "../config";
 import { evaluateGate, type Check } from "../gates";
 import type { Status } from "../intents";
-import { passes, runJudge } from "../judges";
+import { judgeModel, passes, runJudge, shadowRoom } from "../judges";
 import { agentPhase, optional, together, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { artifacts, bullets, humanNote, runHookCommands, type Artifacts } from "./shared";
@@ -162,8 +162,9 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // Work for the next stage runs alongside on the same artifact the judge reads; it is optional,
       // so an outage or the day's budget drops it and the judge meets the same trouble on its own.
       const ahead = s.ahead?.when(ctx) ? s.ahead : undefined;
-      // A cheaper judge in shadow then needs room beside both.
-      const judge = () => runJudge(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, { alongside: ahead ? 1 : 0 });
+      // A cheaper judge in shadow then needs room beside both, asked before either starts (see shadowRoom).
+      const room = shadowRoom(ctx, ahead ? 1 : 0);
+      const judge = () => runJudge(ctx, { name: s.judge.name, model: judgeModel(ctx.cfg, s.judge.name), permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, { room });
       const [r, early] = ahead
         ? await together(ctx, [judge, () => optional(ctx, ahead.what, () => ahead.run(ctx, a))] as const)
         : [await judge(), null];

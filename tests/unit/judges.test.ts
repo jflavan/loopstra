@@ -96,6 +96,16 @@ describe("firstStanding", () => {
     expect(firstStanding(rows(...caught(30), ...caught(4, { ...first, cheap_model: "haiku" })), KEY).auditDue).toBe(false);
   });
 
+  test("an audit where either judge failed compared nothing: the next call is still an audit", () => {
+    const first = { how: "alone" as const, mode: "first" as const, strong: null, cheap: "pass" as const };
+    const four = [first, first, first, first];
+    expect(firstStanding(rows(...caught(30), ...four, { mode: "first", cheap: "failed" }), KEY).auditDue).toBe(true);
+    expect(firstStanding(rows(...caught(30), ...four, { mode: "first", strong: "failed" }), KEY).auditDue).toBe(true);
+    // Failing again and again keeps it due; one that compares ends it.
+    expect(firstStanding(rows(...caught(30), ...four, { mode: "first", cheap: "failed" }, { mode: "first", cheap: "failed" }), KEY).auditDue).toBe(true);
+    expect(firstStanding(rows(...caught(30), ...four, { mode: "first", cheap: "failed" }, { mode: "first" }), KEY).auditDue).toBe(false);
+  });
+
   test("audited counts only audits, not the shadow calls that earn first back after a miss", () => {
     const first = { how: "alone" as const, mode: "first" as const, strong: null, cheap: "pass" as const };
     const audit = { mode: "first" as const, cheap: "pass" as const };
@@ -155,6 +165,8 @@ describe("judgeReport", () => {
     expect(why("stages:\n  review:\n    model: default\n")).toBe("review already runs on sonnet; there is nothing cheaper to compare");
     expect(why("claude:\n  models:\n    default: opus\n", "spec-check")).toBe("the cheaper and the strong model are both opus; there is nothing cheaper to compare");
     expect(why("claude:\n  max_budget_usd_per_day: 10\n")).toBe("with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run at once; set a session limit");
+    expect(why("claude:\n  max_budget_usd_per_day: 5\n  max_budget_usd: 3\n")).toBe("claude.max_budget_usd_per_day ($5.00) is less than two sessions of claude.max_budget_usd ($3.00 each), so both judges never run at once; lower the session limit or raise the day's");
+    expect(why("claude:\n  max_budget_usd_per_day: 6\n  max_budget_usd: 3\n")).toBeNull();
     expect(why("gates:\n  plan:\n    agent: false\n", "plan-challenge")).toBe("the plan gate has no judge (gates.plan.agent is false)");
     expect(why("")).toBeNull();
   });

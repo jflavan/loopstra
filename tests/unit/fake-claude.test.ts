@@ -42,12 +42,23 @@ describe("the fake claude's fixtures for one model", () => {
     } finally { dir.cleanup(); }
   });
 
-  test("the plain <phase>-<n> sequence still counts every call of the phase", async () => {
+  test("a session its model's fixture serves is not counted in the plain <phase>-<n> sequence", async () => {
     const dir = tempDir();
     try {
       for (const name of ["plan-1", "plan-2", "plan@sonnet-1"]) fixture(dir.path, name);
       expect(await replayed(dir.path, "plan", "sonnet")).toBe("plan@sonnet-1");
+      expect(await replayed(dir.path, "plan", "opus")).toBe("plan-1");
       expect(await replayed(dir.path, "plan", "opus")).toBe("plan-2");
+    } finally { dir.cleanup(); }
+  });
+
+  test("two sessions of one phase at the same time: the one without a model fixture keeps its plain number", async () => {
+    const dir = tempDir();
+    try {
+      for (const name of ["review-1", "review-2", "review@sonnet-1"]) fixture(dir.path, name);
+      const [cheap, strong] = await Promise.all([replayed(dir.path, "review", "sonnet"), replayed(dir.path, "review", "opus")]);
+      expect([cheap, strong]).toEqual(["review@sonnet-1", "review-1"]);
+      expect(await replayed(dir.path, "review", "opus")).toBe("review-2");
     } finally { dir.cleanup(); }
   });
 });

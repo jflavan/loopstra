@@ -7,6 +7,7 @@ import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/review";
+import { shadowRoom } from "../../src/judges";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -332,12 +333,12 @@ describe("the first review alongside the verifier", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("the early review counts the verifier beside it even before the verifier's session holds its share", async () => {
-    // Called directly, with nothing running: room for two sessions, not three, so the cheaper judge stays out.
+  test("the early review's room counts the verifier beside it, asked before either session holds its share", async () => {
+    // Asked with nothing running: room for two sessions, not three, so the cheaper judge stays out.
     const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: shadow\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n");
     await ctx.git.run(["branch", ctx.branch]);
     await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
-    expect(await reviewAhead(ctx, "# Spec", PLAN)).not.toBeNull();
+    expect(await reviewAhead(ctx, "# Spec", PLAN, shadowRoom(ctx, 1))).not.toBeNull();
     expect(phaseNames(trace)).toEqual(["review-1"]);
     expect(judgeNotes(trace)).toEqual(["not compared: today's budget has no room for another session"]);
     trace.close(); repo.cleanup();
@@ -364,6 +365,29 @@ describe("the first review alongside the verifier", () => {
     expect(reviews(trace)).toEqual([]);
     expect(earlyNotes(trace)).toEqual(["review-1 uses the review that ran alongside the verifier"]);
     expect(trace.lastGate("add-numbers", "review", "findings")?.evidence).toEndWith("; decided by the cheaper judge (sonnet)");
+    trace.close(); repo.cleanup();
+  });
+
+  test("first: an early review the cheaper judge decided counts as decided alone only once round 1 uses it", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: first\n");
+    seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+    const alone = () => trace.judgeRows().filter((r) => r.how === "alone");
+    await runBuildStep(ctx);
+    expect(alone()).toEqual([]);
+    await ctx.reload();
+    await runMergeStep(ctx);
+    expect(alone()).toMatchObject([{ slug: "add-numbers", trace_name: "review-1", cheap: "pass", strong: null }]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("first: when verify fails, the early review the cheaper judge decided never counts as decided alone", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, "speed:\n  cheap_judges: first\n");
+    seedCaught(repo.path, trace, "review", FIRST_NEEDS);
+    await Bun.write(join(repo.path, "loopstra", "prompts", "verify.md"), "{{spec}} {{plan}} FIXTURE:verify-reject");
+    await runBuildStep(ctx);
+    expect(phaseNames(trace)).toContain("review-1-cheap");
+    expect(existsSync(join(ctx.runDir, "review.early"))).toBe(false);
+    expect(trace.judgeRows().filter((r) => r.how === "alone")).toEqual([]);
     trace.close(); repo.cleanup();
   });
 

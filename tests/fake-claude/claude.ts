@@ -18,8 +18,9 @@
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
 // each prompt as one JSON line ({phase, args, prompt}).
 // One model (the --model argument): before everything above, $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>@<model>-<n>.jsonl
-// (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. Two sessions of one phase
-// that start together race on the plain sequence's counter, so a test that runs both judges uses these.
+// (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. A session one of these
+// serves is not counted in the plain sequence. Two sessions of one phase that start together would race on
+// the plain sequence's counter, so a test that runs both judges gives at least one model its own fixtures.
 // Like the real CLI, the process exits 1 after a result event with is_error.
 // $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap).
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
@@ -56,10 +57,14 @@ let modelSequenced: string | undefined;
 let modelFixture: string | undefined;
 const fixtureDir = process.env.LOOPSTRA_FAKE_FIXTURE_DIR;
 if (fixtureDir && phase) {
-  sequenced = join(fixtureDir, `${phase}-${await nextCall(fixtureDir, phase)}.jsonl`);
   if (model) {
     modelSequenced = join(fixtureDir, `${phase}@${model}-${await nextCall(fixtureDir, `${phase}@${model}`)}.jsonl`);
     modelFixture = join(fixtureDir, `${phase}@${model}.jsonl`);
+  }
+  // A session its model's fixture serves is not counted in the plain sequence, so the other judge's
+  // sessions of the phase keep their numbers whatever the two do at the same time.
+  if (!existsSync(modelSequenced ?? "") && !existsSync(modelFixture ?? "")) {
+    sequenced = join(fixtureDir, `${phase}-${await nextCall(fixtureDir, phase)}.jsonl`);
   }
 }
 

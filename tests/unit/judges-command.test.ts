@@ -58,7 +58,7 @@ describe("loopstra judges", () => {
       ]);
       const trace = Trace.open(t.path);
       for (const [name, cost] of [["spec-check-cheap", 0.25], ["review-1-cheap", 0.5], ["review-1", 1]] as const) {
-        trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, "agent"), { status: "success", costUsd: cost });
+        trace.phaseEnd("add-numbers", trace.phaseStart("add-numbers", name, name.endsWith("-cheap") ? "cheap-judge" : "agent"), { status: "success", costUsd: cost });
       }
       trace.close();
 

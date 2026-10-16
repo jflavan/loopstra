@@ -238,7 +238,7 @@ export const PROBE_AFTER = 3;
  * probe does not → the loop keeps backing off.
  */
 async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, e: AssistantUnavailable): Promise<TickResult> {
-  const cause = out.picked && e.phase ? { slug: out.picked, phase: e.phase, line: e.line } : null;
+  const cause = out.picked && e.phase ? { slug: out.picked, phase: e.phase, line: e.line, model: e.model } : null;
   const p = pauseAfterUnavailable(root, new Date(), cause);
   trace.event(out.picked ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
   out.paused = p.reason;

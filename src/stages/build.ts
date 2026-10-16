@@ -2,6 +2,7 @@ import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { roomFor } from "../budget";
+import { shadowRoom } from "../judges";
 import { agentPhase, codePhase, optional, projectCommand, together } from "../phases";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./review";
 import type { CommandResult } from "../shell";
@@ -77,8 +78,10 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   // The verifier. A verify failure gets exactly one fix (then the tests again), then blocks.
   // Round 1's review may judge the same tested commit meanwhile; it is kept only if verify passes.
-  const [verified, early] = (await reviewsAhead(ctx, wt))
-    ? await together(ctx, [() => verifyChange(ctx, a.spec, plan, "verify"), () => optional(ctx, "early review", () => reviewAhead(ctx, a.spec, plan))] as const)
+  // Room for a cheaper judge in shadow beside the verifier is asked before either starts (see shadowRoom).
+  const ahead = (await reviewsAhead(ctx, wt)) ? { room: shadowRoom(ctx, 1) } : null;
+  const [verified, early] = ahead
+    ? await together(ctx, [() => verifyChange(ctx, a.spec, plan, "verify"), () => optional(ctx, "early review", () => reviewAhead(ctx, a.spec, plan, ahead.room))] as const)
     : [await verifyChange(ctx, a.spec, plan, "verify"), null];
   if (!verified.ok) return block(ctx, verified.note, verified);
   if (verified.passed && early) keepEarlyReview(ctx, early);

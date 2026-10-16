@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { noSessionCap, roomFor } from "./budget";
+import { neverRoomForTwo, roomFor } from "./budget";
 import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
@@ -58,7 +58,8 @@ function matches(row: JudgeRow, key: JudgeKey): boolean {
 /**
  * Where a judge stands for first. `caught`: strong rejections the cheaper judge also rejected (or was
  * unsure of), newest first, before any miss; `miss`: the newest row where it passed what the strong
- * judge rejected, if one stopped the count; `auditDue`: the next first-mode call should run as shadow.
+ * judge rejected, if one stopped the count; `auditDue`: the next first-mode call should run as shadow
+ * (it stays due until an audit compares: one where either judge failed did not).
  */
 export interface FirstStanding {
   earned: boolean;
@@ -93,10 +94,12 @@ export function firstStanding(rows: readonly JudgeRow[], key: JudgeKey): FirstSt
     if (miss) break;
     caught++;
   }
-  const lastShadow = mine.findLastIndex((r) => r.how === "shadow");
-  const sinceShadow = mine.slice(lastShadow + 1).filter((r) => r.how !== "shadow").length;
+  // Calls since the last shadow row that compared. One where either judge failed compared nothing, so
+  // it is no audit: a cheaper judge that keeps failing its audits never decides alone again.
+  const lastCompared = mine.findLastIndex((r) => r.how === "shadow" && r.cheap !== "failed" && r.strong !== "failed");
+  const sinceCompared = mine.slice(lastCompared + 1).filter((r) => r.how !== "shadow").length;
   return {
-    earned: caught >= FIRST_NEEDS, caught, miss, auditDue: sinceShadow >= AUDIT_EVERY - 1,
+    earned: caught >= FIRST_NEEDS, caught, miss, auditDue: sinceCompared >= AUDIT_EVERY - 1,
     alone: mine.filter((r) => r.how === "alone").length,
     audited: mine.filter((r, i) => r.how === "shadow" && r.mode === "first" && i > 0 && mine[i - 1]!.how !== "shadow").length,
   };
@@ -116,7 +119,10 @@ export function standingWhy(s: FirstStanding): string {
   return `the cheaper judge decides alone only after it has also rejected the last ${FIRST_NEEDS} things the strong judge rejected (${s.caught} so far)`;
 }
 
-/** The model alias each judge runs on: spec-check and plan-challenge always strong; review as configured. */
+/**
+ * The model alias each judge runs on: spec-check and plan-challenge always strong; review as configured.
+ * The stages ask this too, so what runs and what the report says can be compared never differ.
+ */
 export function judgeModel(cfg: Config, judge: JudgeName): ModelRef {
   return judge === "review" ? cfg.stages.review.model : "strong";
 }
@@ -128,8 +134,15 @@ export function notComparable(cfg: Config, judge: JudgeName): string | null {
   if (modelFor(cfg, "default") === modelFor(cfg, "strong")) return `the cheaper and the strong model are both ${modelFor(cfg, "strong")}; there is nothing cheaper to compare`;
   const gate = judge === "spec-check" ? "spec" : judge === "plan-challenge" ? "plan" : null;
   if (gate && !cfg.gates[gate].agent) return `the ${gate} gate has no judge (gates.${gate}.agent is false)`;
-  if (noSessionCap(cfg)) return "with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run at once; set a session limit";
-  return null;
+  return budgetWhy(cfg);
+}
+
+/** Why today's budget never lets both judges run at once, in words, or null when it can (see neverRoomForTwo). */
+function budgetWhy(cfg: Config): string | null {
+  if (!neverRoomForTwo(cfg)) return null;
+  const { max_budget_usd_per_day: day, max_budget_usd: cap } = cfg.claude;
+  if (cap === undefined) return "with claude.max_budget_usd_per_day set and no claude.max_budget_usd, both judges never run at once; set a session limit";
+  return `claude.max_budget_usd_per_day ($${day!.toFixed(2)}) is less than two sessions of claude.max_budget_usd ($${cap.toFixed(2)} each), so both judges never run at once; lower the session limit or raise the day's`;
 }
 
 /** One judge's line of `loopstra judges` and the dashboard. Averages and costs are null with nothing to average. */
@@ -237,40 +250,46 @@ export function judgeReport(cfg: Config, rows: readonly JudgeRow[], templates: P
   };
 }
 
-/** The verdict a judge gave, and who decided it: the strong judge, or a trusted cheaper judge that passed alone. */
-export type JudgeResult<J extends JudgeName> = AgentPhaseResult<J> & { decidedBy: "strong" | "cheap" };
-
-/** One session and how long it took. */
-type Timed<J extends JudgeName> = { r: AgentPhaseResult<J>; ms: number };
-
 /**
- * Runs one judge session and times it. It runs as a group of one, so the phase boundary (merging other
- * changes whose pull requests became ready) runs before the clock starts and is never counted as the
- * judge's time; inside shadow's group the boundary has already run.
+ * The verdict a judge gave, and who decided it: the strong judge, or a trusted cheaper judge that passed
+ * alone. `alone`: with keepAlone, the row of a pass the cheaper judge decided alone, not yet written;
+ * the caller writes it (ctx.trace.judge) once the verdict is used.
  */
-async function timed<J extends JudgeName>(ctx: StepContext, spec: AgentPhaseSpec & { name: J }): Promise<Timed<J>> {
-  const [t] = await together(ctx, [async () => {
-    const started = Date.now();
-    const r = await agentPhase(ctx, spec);
-    return { r, ms: Date.now() - started };
-  }] as const);
-  return t;
-}
+export type JudgeResult<J extends JudgeName> = AgentPhaseResult<J> & { decidedBy: "strong" | "cheap"; alone?: NewJudgeRow };
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-/** The sha256 of a judge's prompt template (loopstra/prompts/<judge>.md), or null when it is missing. Editing it starts the record over. */
+/** Template shas by path, kept while the file's size and times are unchanged: the dashboard asks on every poll. */
+const templateShas = new Map<string, { stamp: string; sha: string }>();
+
+/**
+ * The sha256 of a judge's prompt template (loopstra/prompts/<judge>.md), or null when it is missing or
+ * cannot be read (not a file, no permission). Editing it starts the record over.
+ */
 export function templateSha(root: string, judge: JudgeName): string | null {
   const path = join(root, "loopstra", "prompts", `${judge}.md`);
-  return existsSync(path) ? sha256(readFileSync(path, "utf8")) : null;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return null;
+    const stamp = `${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    const hit = templateShas.get(path);
+    if (hit?.stamp === stamp) return hit.sha;
+    const sha = sha256(readFileSync(path, "utf8"));
+    templateShas.set(path, { stamp, sha });
+    return sha;
+  } catch {
+    return null;
+  }
 }
 
 /** What a comparison is keyed on: the judge's key and the sha256 of the question (the whole prompt, and the review's commit). */
 interface Comparison {
   key: JudgeKey;
   promptSha: string;
+  /** The rendered prompt, given to both sessions so neither renders it again. */
+  prompt: string;
 }
 
 /**
@@ -278,17 +297,17 @@ interface Comparison {
  * judge does not run on the strong model, both model names are the same, or the prompt is missing
  * (agentPhase then gives today's missing-prompt failure, and no cheaper session starts). The review's
  * prompt does not name the commit it judges, so every round of a change would read the same; its
- * commit is added, so each round is its own question.
+ * commit (`commit`, else HEAD where it runs) is added, so each round is its own question.
  */
-async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }): Promise<Comparison | null> {
+async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, commit?: string): Promise<Comparison | null> {
   const cheap = modelFor(ctx.cfg, "default");
   const strong = modelFor(ctx.cfg, "strong");
   if (ctx.cfg.speed.cheap_judges === "off" || phase.model !== "strong" || cheap === strong) return null;
   const template = templateSha(ctx.root, phase.name);
-  const prompt = await phasePrompt(ctx, phase);
+  const prompt = phase.prompt ?? await phasePrompt(ctx, phase);
   if (template === null || prompt === null) return null;
-  const question = phase.name === "review" ? `${await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
-  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(question) };
+  const question = phase.name === "review" ? `${commit ?? await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
+  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(question), prompt };
 }
 
 /** The strong judge's verdict: failed when its session did not end ok. */
@@ -309,24 +328,65 @@ function judgeEvent(ctx: StepContext, phase: AgentPhaseSpec, note: string): void
   ctx.trace.event(ctx.slug, "judge", { note, judge: phase.name, trace_name: phase.traceName ?? phase.name });
 }
 
-/** One call's sessions and verdicts, as its judges row records them. */
+/**
+ * One call's verdicts, as its judges row records them, and the sessions that gave them here (null: it
+ * did not run in this call, or threw).
+ */
 interface Asked<J extends JudgeName> {
   how: NewJudgeRow["how"];
-  cheap: Timed<J> | null;
+  cheap: AgentPhaseResult<J> | null;
   cheapVerdict: NewJudgeRow["cheap"];
-  strong: Timed<J> | null;
+  strong: AgentPhaseResult<J> | null;
+  strongVerdict: NewJudgeRow["strong"];
 }
 
-/** Writes the judges row (and its event) for one call. Costs and times only for sessions that ended ok. */
-function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, c: Comparison, a: Asked<J>): void {
-  const usd = (t: Timed<J> | null) => (t?.r.ok ? t.r.costUsd : null);
-  const ms = (t: Timed<J> | null) => (t?.r.ok ? t.ms : null);
-  ctx.trace.judge(ctx.slug, {
+/** The cheaper side of a call, known before the strong judge runs. */
+type CheapSide<J extends JudgeName> = Pick<Asked<J>, "how" | "cheap" | "cheapVerdict">;
+
+/** One call's judges row. Costs and times only for sessions that ran in this call and ended ok. */
+function judgeRow<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, c: Comparison, a: Asked<J>): NewJudgeRow {
+  const usd = (r: AgentPhaseResult<J> | null) => (r?.ok ? r.costUsd : null);
+  const ms = (r: AgentPhaseResult<J> | null) => (r?.ok ? r.ms ?? null : null);
+  return {
     judge: phase.name, trace_name: phase.traceName ?? phase.name, mode: ctx.cfg.speed.cheap_judges === "first" ? "first" : "shadow", how: a.how,
     cheap_model: c.key.cheap_model, strong_model: c.key.strong_model, template_sha: c.key.template_sha, prompt_sha: c.promptSha,
-    cheap: a.cheapVerdict, strong: a.strong ? strongVerdict(phase.name, a.strong.r) : null,
+    cheap: a.cheapVerdict, strong: a.strongVerdict,
     cheap_usd: usd(a.cheap), strong_usd: usd(a.strong), cheap_ms: ms(a.cheap), strong_ms: ms(a.strong),
-  });
+  };
+}
+
+/** Writes the judges row (and its event) for one call. */
+function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, c: Comparison, a: Asked<J>): void {
+  ctx.trace.judge(ctx.slug, judgeRow(ctx, phase, c, a));
+}
+
+/**
+ * What the cheaper judge already said to this very question, when the call that asked it never got
+ * the strong judge's answer (it failed, or the loop paused or stopped while it ran): that newest row's
+ * verdict, used again instead of paying for the cheaper session twice. Null otherwise.
+ */
+function earlierCheap(rows: readonly JudgeRow[], c: Comparison): NewJudgeRow["cheap"] | null {
+  const last = rows.findLast((r) => matches(r, c.key) && r.prompt_sha === c.promptSha);
+  return last && last.strong === "failed" && last.cheap !== "failed" ? last.cheap : null;
+}
+
+/**
+ * Whether today's budget has room for shadow's two sessions beside `alongside` other sessions that
+ * start with the judge. A caller that starts other work beside a judge asks this before starting any
+ * of it: a session that has started already holds its share of the day, so asking after would count
+ * it twice or not, depending on which session started first.
+ */
+export function shadowRoom(ctx: StepContext, alongside = 0): boolean {
+  return roomFor(ctx.cfg, ctx.trace, 2 + alongside);
+}
+
+export interface JudgeOptions {
+  /** Room for shadow (see shadowRoom), from a caller that starts other work beside the judge. Default: shadowRoom now, with nothing beside. */
+  room?: boolean;
+  /** The review's commit, when the caller already has it (see comparison). */
+  commit?: string;
+  /** A pass the cheaper judge decides alone is handed back (JudgeResult.alone), not written, for a caller that may not use it. */
+  keepAlone?: boolean;
 }
 
 /**
@@ -334,81 +394,114 @@ function record<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & {
  * strong judge alone, as always. shadow (and first while not earned, and first's audits): both judges
  * at once on the same prompt, the strong one decides, and the two verdicts are recorded. first, earned:
  * the cheaper judge alone, and only a clean pass stands; otherwise the strong judge runs after it and
- * decides. A due audit that has no room: the strong judge alone. `alongside`: sessions already running
- * next to this call, which shadow needs room beside.
+ * decides. A due audit that has no room: the strong judge alone.
  */
-export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: { alongside?: number } = {}): Promise<JudgeResult<J>> {
-  const c = await comparison(ctx, phase);
+export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOptions = {}): Promise<JudgeResult<J>> {
+  const c = await comparison(ctx, phase, opts.commit);
   if (!c) return { ...(await agentPhase(ctx, phase)), decidedBy: "strong" };
-  // Same phase (so the same prompt file, LOOPSTRA_PHASE and tools), on the cheaper model, never
-  // retried. It never ends an outage pause: the strong model may be the one that is out.
-  const cheapPhase: AgentPhaseSpec & { name: J } = { ...phase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false, endsPause: false };
-  const sessions = 2 + (opts.alongside ?? 0);
+  const room = opts.room ?? shadowRoom(ctx);
+  const strongPhase: AgentPhaseSpec & { name: J } = { ...phase, prompt: c.prompt };
+  // Same phase (so the same prompt, LOOPSTRA_PHASE and tools), on the cheaper model, never retried,
+  // and its own kind in the trace.
+  const cheapPhase: AgentPhaseSpec & { name: J } = { ...strongPhase, model: "default", traceName: `${phase.traceName ?? phase.name}-cheap`, retry: false, kind: "cheap-judge" };
+  const rows = ctx.trace.judgeRows();
+  const before = earlierCheap(rows, c);
   if (ctx.cfg.speed.cheap_judges === "first") {
-    const standing = firstStanding(ctx.trace.judgeRows(), c.key);
+    const standing = firstStanding(rows, c.key);
     if (!standing.earned) judgeEvent(ctx, phase, `first: running as shadow; ${standingWhy(standing)}`);
+    else if (mayDecideAlone(ctx.cfg, standing)) return cheapFirst(ctx, strongPhase, cheapPhase, c, before, opts.keepAlone ?? false);
     // A due audit runs before it decides alone again; until there is room for one, shadow lets the
     // strong judge decide alone.
-    else if (mayDecideAlone(ctx.cfg, standing) && !standing.auditDue) return cheapFirst(ctx, phase, cheapPhase, c);
-    else if (roomFor(ctx.cfg, ctx.trace, sessions)) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
+    else if (room) judgeEvent(ctx, phase, "first: this call is an audit; both judges run and the strong judge decides");
   }
-  return shadow(ctx, phase, cheapPhase, c, sessions);
+  return shadow(ctx, strongPhase, cheapPhase, c, before, room);
 }
 
-/** Both judges at once; the strong one decides. Without budget room for both, the strong one alone. */
-async function shadow<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, cheapPhase: AgentPhaseSpec & { name: J }, c: Comparison, sessions: number): Promise<JudgeResult<J>> {
-  if (!roomFor(ctx.cfg, ctx.trace, sessions)) {
+/**
+ * Runs the strong judge. If it throws (an outage, the day's budget, a stop), the call's row is written
+ * first, with the strong verdict failed, so what the cheaper judge said is kept; then it passes on.
+ */
+async function strongJudge<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, c: Comparison, side: CheapSide<J>): Promise<AgentPhaseResult<J>> {
+  try {
+    return await agentPhase(ctx, phase);
+  } catch (e) {
+    record(ctx, phase, c, { ...side, strong: null, strongVerdict: "failed" });
+    throw e;
+  }
+}
+
+/**
+ * Both judges at once; the strong one decides. Without budget room for both, the strong one alone. A
+ * cheaper verdict this question already got (`before`) is used again, and only the strong judge runs.
+ */
+async function shadow<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, cheapPhase: AgentPhaseSpec & { name: J }, c: Comparison, before: NewJudgeRow["cheap"] | null, room: boolean): Promise<JudgeResult<J>> {
+  if (before) {
+    const side: CheapSide<J> = { how: "shadow", cheap: null, cheapVerdict: before };
+    const strong = await strongJudge(ctx, phase, c, side);
+    record(ctx, phase, c, { ...side, strong, strongVerdict: strongVerdict(phase.name, strong) });
+    return { ...strong, decidedBy: "strong" };
+  }
+  if (!room) {
     // Shadow always gives way to the judge that decides and to the work already running.
     judgeEvent(ctx, phase, "not compared: today's budget has no room for another session");
     return { ...(await agentPhase(ctx, phase)), decidedBy: "strong" };
   }
   // The cheaper judge is optional: an outage or the day's budget drops it, and the strong judge meets
-  // the same trouble on its own. If the strong judge throws, together waits for both and rethrows.
+  // the same trouble on its own. If the strong judge throws, the cheaper verdict is still recorded once
+  // both have ended; then the error passes on (a stop request first, as together does).
+  let threw: { e: unknown } | null = null;
   const [strong, cheap] = await together(ctx, [
-    () => timed(ctx, phase),
-    () => optional(ctx, cheapPhase.traceName!, () => timed(ctx, cheapPhase)),
+    () => agentPhase(ctx, phase).catch((e: unknown) => { threw = { e }; return null; }),
+    () => optional(ctx, cheapPhase.traceName!, () => agentPhase(ctx, cheapPhase)),
   ] as const);
-  if (cheap) record(ctx, phase, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(phase.name, cheap.r), strong });
-  return { ...strong.r, decidedBy: "strong" };
+  if (cheap) record(ctx, phase, c, { how: "shadow", cheap, cheapVerdict: cheapVerdict(phase.name, cheap), strong, strongVerdict: strong ? strongVerdict(phase.name, strong) : "failed" });
+  if (threw) throw (threw as { e: unknown }).e;
+  return { ...strong!, decidedBy: "strong" };
 }
 
 /**
  * The cheaper judge alone; a clean pass decides. Anything else (a reject, unsure, a failed session, or
  * the cheaper model being unavailable) goes to the strong judge, which runs after it and decides, so a
- * limit on the cheaper model alone never pauses the loop. A stop or the day's budget passes on.
+ * limit on the cheaper model alone never pauses the loop. A stop or the day's budget passes on. A
+ * reject or unsure this question already got (`before`) goes straight to the strong judge.
  */
-async function cheapFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, cheapPhase: AgentPhaseSpec & { name: J }, c: Comparison): Promise<JudgeResult<J>> {
-  let cheap: Timed<J> | null = null;
-  try {
-    cheap = await timed(ctx, cheapPhase);
-  } catch (e) {
-    if (!(e instanceof AssistantUnavailable)) throw e; // its phase row already ended interrupted
+async function cheapFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, cheapPhase: AgentPhaseSpec & { name: J }, c: Comparison, before: NewJudgeRow["cheap"] | null, keepAlone: boolean): Promise<JudgeResult<J>> {
+  let cheap: AgentPhaseResult<J> | null = null;
+  let verdict: NewJudgeRow["cheap"];
+  if (before && before !== "pass") {
+    verdict = before;
+  } else {
+    try {
+      cheap = await agentPhase(ctx, cheapPhase);
+    } catch (e) {
+      if (!(e instanceof AssistantUnavailable)) throw e; // its phase row already ended interrupted
+    }
+    verdict = cheap ? cheapVerdict(phase.name, cheap) : "failed";
+    if (cheap?.ok && verdict === "pass") {
+      const row = judgeRow(ctx, phase, c, { how: "alone", cheap, cheapVerdict: verdict, strong: null, strongVerdict: null });
+      if (keepAlone) return { ...cheap, decidedBy: "cheap", alone: row };
+      ctx.trace.judge(ctx.slug, row);
+      return { ...cheap, decidedBy: "cheap" };
+    }
   }
-  const verdict = cheap ? cheapVerdict(phase.name, cheap.r) : "failed";
-  if (cheap && verdict === "pass") {
-    record(ctx, phase, c, { how: "alone", cheap, cheapVerdict: verdict, strong: null });
-    return { ...cheap.r, decidedBy: "cheap" };
-  }
-  const strong = await timed(ctx, phase);
-  record(ctx, phase, c, { how: "escalated", cheap, cheapVerdict: verdict, strong });
-  return { ...strong.r, decidedBy: "strong" };
+  const side: CheapSide<J> = { how: "escalated", cheap, cheapVerdict: verdict };
+  const strong = await strongJudge(ctx, phase, c, side);
+  record(ctx, phase, c, { ...side, strong, strongVerdict: strongVerdict(phase.name, strong) });
+  return { ...strong, decidedBy: "strong" };
 }
 
 /**
- * The one rule for whether an earned cheaper judge may decide alone (runJudge also waits for a due
- * audit). It decides alone only while its audits can run: with a daily budget and no session cap they
- * never can, so there it never decides alone, whatever its record says.
+ * The one rule for whether a cheaper judge may decide alone now: it has earned first, no audit is due
+ * (a due audit runs first), and its audits can run at all. When today's budget never has room for both
+ * judges (see neverRoomForTwo) they never can, so there it never decides alone, whatever its record says.
  */
 function mayDecideAlone(cfg: Config, standing: FirstStanding): boolean {
-  return standing.earned && !noSessionCap(cfg);
+  return standing.earned && !standing.auditDue && !neverRoomForTwo(cfg);
 }
 
-/**
- * First is on and this judge may decide alone now (a kept early review the cheaper judge decided is
- * rechecked with this). A due audit does not drop it: the kept review's own row can be what made it due.
- */
-export async function cheapMayDecide(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }): Promise<boolean> {
+/** First is on and this judge may decide alone now (a kept early review the cheaper judge decided is rechecked with this). */
+export async function cheapMayDecide(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, commit?: string): Promise<boolean> {
   if (ctx.cfg.speed.cheap_judges !== "first") return false;
-  const c = await comparison(ctx, phase);
+  const c = await comparison(ctx, phase, commit);
   return c !== null && mayDecideAlone(ctx.cfg, firstStanding(ctx.trace.judgeRows(), c.key));
 }

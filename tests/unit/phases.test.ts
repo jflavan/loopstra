@@ -319,6 +319,26 @@ describe("agentPhase failures", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a pause for one model is ended only by a session on that model; another model getting through leaves the back-off climbing", async () => {
+    const { repo, ctx, trace } = await setup();
+    pauseAfterUnavailable(repo.path, new Date(), { slug: "x", phase: "review", line: "usage limit", model: "opus" });
+    expect(readPause(repo.path)?.model).toBe("opus");
+    expect(await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} })).toMatchObject({ ok: true });
+    expect(readPause(repo.path)?.failures).toBe(1);
+    expect(await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {} })).toMatchObject({ ok: true });
+    expect(readPause(repo.path)).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
+  test("a session that cannot reach the assistant names the model it ran on, for the pause", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:outage");
+    const thrown = await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {} }).catch((e) => e);
+    expect(thrown).toBeInstanceOf(AssistantUnavailable);
+    expect((thrown as AssistantUnavailable).model).toBe("opus");
+    trace.close(); repo.cleanup();
+  });
+
   test("a runtime error inside the phase never leaves the phase running", async () => {
     const { repo, ctx, trace } = await setup();
     mkdirSync(join(repo.path, ".loopstra", "runs", "x"), { recursive: true });

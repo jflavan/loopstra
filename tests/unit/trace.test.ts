@@ -158,12 +158,26 @@ describe("the judges table", () => {
     try {
       trace.upsertIntent("x", "designing", "normal");
       const strong = trace.phaseStart("x", "spec-check", "agent");
-      const cheap = trace.phaseStart("x", "spec-check-cheap", "agent");
+      const cheap = trace.phaseStart("x", "spec-check-cheap", "cheap-judge");
       trace.phaseEnd("x", strong, { status: "success", costUsd: 0.3 });
       trace.phaseEnd("x", cheap, { status: "fail", costUsd: 0.1, error: "invalid-envelope: x" });
       const summary = trace.intentSummary("x")!;
       expect([summary.lastPhase, summary.lastPhaseStatus]).toEqual(["spec-check", "success"]);
       expect(summary.costUsd).toBeCloseTo(0.4);
+      expect(trace.cheapJudgeCost()).toBeCloseTo(0.1);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("a cheaper judge's session is told apart by its kind, never by its name", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.upsertIntent("x", "designing", "normal");
+      // A phase whose name happens to end in -cheap is an ordinary phase.
+      trace.phaseEnd("x", trace.phaseStart("x", "plan-cheap", "agent"), { status: "success", costUsd: 0.2 });
+      expect(trace.intentSummary("x")!.lastPhase).toBe("plan-cheap");
+      expect(trace.cheapJudgeCost()).toBe(0);
+      expect(trace.hasJudgeRows()).toBe(false);
     } finally { trace.close(); t.cleanup(); }
   });
 });

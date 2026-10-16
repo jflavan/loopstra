@@ -74,12 +74,12 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * The change's failed phases, for lessons. A cheaper judge's failure (a `-cheap` phase) is left out:
+ * The change's failed phases, for lessons. A cheaper judge's failure (a cheap-judge phase) is left out:
  * the strong judge decided that step, so it was never the change's failure.
  */
 function failures(ctx: StepContext): string {
   return ctx.trace.phases(ctx.slug)
-    .filter((p) => p.status === "fail" && !p.name.endsWith("-cheap"))
+    .filter((p) => p.status === "fail" && p.kind !== "cheap-judge")
     .map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
 }
 
