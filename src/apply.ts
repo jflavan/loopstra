@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { APPROVE_TO, doneWords, isOpen, personReviews, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
+import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { Git } from "./git";
-import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, STATUSES, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
@@ -231,8 +231,7 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   return kept;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["accept", "new", "approve", "send-back", "retry", "close", "priority", "hold", "release", "undo"]);
-const isStatus = (v: unknown): boolean => typeof v === "string" && (STATUSES as readonly string[]).includes(v);
+const KINDS: ReadonlySet<string> = new Set(REQUEST_KINDS);
 
 /**
  * Why a request file cannot be read as the request it says it is, or null when it can. Checked

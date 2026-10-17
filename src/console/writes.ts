@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { offers, retryOptions, undoMatches } from "../actions";
+import { isStatus, offers, REQUEST_KINDS, retryOptions, undoMatches, type RequestKind } from "../actions";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig, type Config } from "../config";
 import { holdLoop, readLoopHold, releaseLoop } from "../heartbeat";
-import { humanGates, PRIORITIES, readIntent, SLUG, STATUSES, type Frontmatter, type Priority, type Status } from "../intents";
+import { humanGates, PRIORITIES, readIntent, SLUG, type Frontmatter, type Priority } from "../intents";
 import { cancelRequest, CONSOLE, requestState, submitRequest, type RequestBody } from "../requests";
 import { Trace } from "../trace";
 import { touchWake } from "../wake";
@@ -14,8 +14,9 @@ import { loopNow } from "./model";
 /** The longest note a send back takes, and the longest hold reason. */
 const MAX_NOTE = 4_000;
 const MAX_REASON = 300;
-const KINDS = ["approve", "send-back", "retry", "accept", "close", "priority", "hold", "release", "undo"] as const;
-type Kind = (typeof KINDS)[number];
+/** Every request kind but chat's written intents. */
+type Kind = Exclude<RequestKind, "new">;
+const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new");
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const refuse = (error: string, status = 409) => json({ error }, status);
@@ -74,13 +75,12 @@ function loop(root: string, body: Record<string, unknown>): Response {
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
-const isStatus = (v: unknown): v is Status => typeof v === "string" && (STATUSES as readonly string[]).includes(v);
 
 /** The body as a request, or why it is not one (a 400). */
 function parse(body: Record<string, unknown>): RequestBody | string {
   const kind = str(body.kind);
   const slug = str(body.slug);
-  if (!kind || !(KINDS as readonly string[]).includes(kind)) return "Unknown action.";
+  if (!kind || !KINDS.includes(kind)) return "Unknown action.";
   if (!slug || !SLUG.test(slug)) return "Unknown change.";
   const k = kind as Kind;
   if (k === "accept") return { kind: k, slug };

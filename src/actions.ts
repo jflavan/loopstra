@@ -7,6 +7,18 @@ import type { Trace } from "./trace";
  * server offers them, the loop checks them again when it applies a request, and chat proposes them.
  */
 
+/** The actions on a change chat may propose (start is its own, `accept`). */
+export const CHANGE_ACTIONS = ["approve", "send-back", "retry", "close", "priority", "hold", "release"] as const;
+
+/** Every kind of request the loop applies: start, chat's written intents (`new`), the actions on a change, and undo. */
+export const REQUEST_KINDS = ["accept", "new", ...CHANGE_ACTIONS, "undo"] as const;
+export type RequestKind = (typeof REQUEST_KINDS)[number];
+
+/** True when a value read from a request is a status. */
+export function isStatus(v: unknown): v is Status {
+  return typeof v === "string" && (STATUSES as readonly string[]).includes(v);
+}
+
 /** Where Approve takes a change waiting at each review status. */
 export const APPROVE_TO: Readonly<Partial<Record<Status, Status>>> = { "spec-review": "spec-approved", "plan-review": "plan-approved", "merge-review": "merge-approved", verifying: "done" };
 

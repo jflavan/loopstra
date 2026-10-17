@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHANGE_ACTIONS } from "../actions";
 import { PRIORITIES } from "../intents";
 
 /** What the orchestrator may hand to the writer: everything agreed, and the drafts it changes. */
@@ -13,7 +14,7 @@ export const Handoff = z.object({
 export type Handoff = z.infer<typeof Handoff>;
 
 /** The actions chat may propose on a change (start is `accept`, below). */
-export const ACTION_KINDS = ["approve", "send-back", "retry", "close", "priority", "hold", "release"] as const;
+export const ACTION_KINDS = CHANGE_ACTIONS;
 
 /** An action the orchestrator proposes; the runtime asks the person before submitting it. `note`: send back's note, hold's reason, or the status a retry starts from. */
 export const ProposedAction = z.object({
