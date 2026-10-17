@@ -50,6 +50,11 @@ describe("events in plain words", () => {
     expect(describeEvent(row("error", { where: "tick", error: "boom\n  at x", stack: "..." }))).toBe("Problem (tick): boom.");
     expect(describeEvent(row("error", { where: "sync", result: "fail" }))).toBe("Problem (sync).");
     expect(describeEvent(row("error", {}))).toBe("Problem.");
+    // A problem with both what failed and why says both: the first line of the error after what failed.
+    expect(describeEvent(row("error", { where: "cleanup", what: "worktree", error: "fatal: 'wt' is locked\nuse 'git worktree unlock'" })))
+      .toBe("Problem (cleanup): worktree: fatal: 'wt' is locked.");
+    expect(describeEvent(row("error", { where: "cleanup", what: "branch", error: "" }))).toBe("Problem (cleanup): branch.");
+    expect(describeEvent(row("error", { where: "cleanup", what: "worktree", error: "a".repeat(200) }))).toBe(`Problem (cleanup): worktree: ${"a".repeat(149)}…`);
     // Pauses: a reason, or a note when the loop is still backing off.
     expect(describeEvent(row("pause", { note: "the probe could not reach the assistant either; still backing off" })))
       .toBe("Paused: the probe could not reach the assistant either; still backing off.");

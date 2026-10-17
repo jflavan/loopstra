@@ -48,10 +48,14 @@ function commandText(p: Payload): string {
   return sentence(capital(what));
 }
 
-/** An `error` event: whichever field its call site used for what went wrong, and where. */
+/**
+ * An `error` event: whichever field its call site used for what went wrong, and where. One that names
+ * both what failed and the error (a cleanup that could not remove a worktree, say) says both.
+ */
 function errorLine(p: Payload): string {
   const where = p.where ? ` (${str(p.where)})` : "";
-  const what = firstLine(first(p.what, p.problem, p.error, p.note, p.reason, p.detail, p.value));
+  const why = first(p.what) && first(p.error) ? firstLine(p.error) : "";
+  const what = firstLine(why ? `${firstLine(p.what)}: ${why}` : first(p.what, p.problem, p.error, p.note, p.reason, p.detail, p.value));
   if (what) return sentence(`Problem${where}: ${what}`);
   if (p.expected !== undefined && p.actual !== undefined) return `Problem${where}: expected ${str(p.expected)}, found ${str(p.actual)}.`;
   return `Problem${where}.`;
