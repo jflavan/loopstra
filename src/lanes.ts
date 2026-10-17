@@ -1,35 +1,34 @@
 /**
  * Everything that lets more than one change run a step at the same time (speed.max_parallel_changes):
- * the locks, the claimed changes, and the count of running lanes. It is the only place that holds
- * this state, and it imports nothing from the rest of Loopstra. The locks live in memory, which is
- * right because one loop process runs per repository; they go away with the process.
+ * the locks and the claimed changes. It is the only place that holds this state, and it imports
+ * nothing from the rest of Loopstra. The locks live in memory, which is right because one loop
+ * process runs per repository; they go away with the process.
  *
- * Two locks, always taken in this order:
+ * A lock covers what is written, not where git runs. Four locks, always taken in this order:
  * - the merge lock (oneMerge): one merge at a time;
- * - the main lock (onMain), one per main checkout: git in the main checkout runs one command at a
- *   time, and a few sequences that are only correct if main does not move in between run as one unit.
- * No work runs side by side inside either lock: child promises would all think they hold it. So an
- * `alongside` group asserts it holds no lock, and an agent session asserts it holds no main lock.
+ * - the sync lock (oneSync): one sync of main with the remote at a time (it has a worktree of its own);
+ * - the checkout lock (onCheckout), one per main checkout: what is written there, its index, its
+ *   files and its main branch (records, moving main, a local merge);
+ * - the remote lock (onRemote), one per main checkout: what fetch and push write, the remote-tracking refs.
+ * Worktree administration, branches, and reads of refs and objects take none. No work runs side by
+ * side inside a lock: child promises would all think they hold it. So an `alongside` group asserts
+ * it holds no lock, and an agent session asserts it holds no checkout lock.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 /** The locks the current async context holds (by name). Re-entering one it holds goes straight in. */
-const held = new AsyncLocalStorage<ReadonlySet<string>>();
+const held = new AsyncLocalStorage<ReadonlyMap<string, number>>();
 
-/** The names this context holds. */
-function heldNames(): ReadonlySet<string> {
-  return held.getStore() ?? new Set();
+/** The names this context holds, each with its place in the lock order. */
+function heldLocks(): ReadonlyMap<string, number> {
+  return held.getStore() ?? new Map();
 }
 
-/** Main locks are named with this prefix, then the checkout's key. */
-const MAIN = "main:";
-
-/** True when this context holds a main lock (of any checkout). */
-function holdsMainLock(): boolean {
-  return [...heldNames()].some((n) => n.startsWith(MAIN));
-}
+/** The place of each kind of lock in the order they are taken. */
+const ORDER = { merge: 0, sync: 1, checkout: 2, remote: 3 } as const;
+type Kind = keyof typeof ORDER;
 
 /** A first-come, first-served lock, re-entrant within one async context. */
 export interface Lock {
@@ -46,15 +45,20 @@ export interface Lock {
   holder(): string | null;
 }
 
-/** A first-come, first-served lock. Re-entrant within one async context. Released when `fn` ends, however it ends. */
-function lock(name: string): Lock {
+/**
+ * A first-come, first-served lock. Re-entrant within one async context. Released when `fn` ends,
+ * however it ends. Taking it while holding a lock that comes later in the order is a programming error.
+ */
+function lock(name: string, kind: Kind): Lock {
   let tail: Promise<unknown> = Promise.resolve();
   let holder: string | null = null;
   let pending = 0;
-  const heldHere = () => heldNames().has(name);
+  const heldHere = () => heldLocks().has(name);
   const run = <T>(fn: () => Promise<T>, who = ""): Promise<T> => {
     if (heldHere()) return fn();
-    const mine = new Set([...heldNames(), name]);
+    const later = [...heldLocks()].filter(([, place]) => place > ORDER[kind]).map(([n]) => n);
+    if (later.length) throw new Error(`The ${name} lock was asked for while holding ${later.join(", ")}: locks are taken in the order merge, sync, checkout, remote (a programming error).`);
+    const mine = new Map([...heldLocks(), [name, ORDER[kind]]]);
     pending++;
     const go = tail.then(() => { holder = who; return held.run(mine, fn); });
     const done = () => { holder = null; pending--; };
@@ -80,75 +84,72 @@ export function realPathKey(path: string): string {
 }
 
 /**
- * The key of a folder's main lock: its real path (see realPathKey), or null for a folder inside a
- * `.loopstra` folder (a change's worktree, the done-check and health copies of main). A worktree's
- * index and branch belong to one change, and a change runs one step at a time, so they need no lock.
+ * The key of a checkout's locks: its real path (see realPathKey), or null for a linked worktree (its
+ * `.git` is a file: a change's worktree, a snapshot, the done-check, health and sync copies of main),
+ * whose index, files and HEAD are its own. A change runs one step at a time, so they need no lock.
  */
-export function mainLockKey(cwd: string): string | null {
-  const key = realPathKey(cwd);
-  return key.split("/").includes(".loopstra") ? null : key;
+export function checkoutKey(cwd: string): string | null {
+  try {
+    if (statSync(join(cwd, ".git")).isFile()) return null;
+  } catch { /* no .git here: not a linked worktree */ }
+  return realPathKey(cwd);
 }
 
-const mainLocks = new Map<string, Lock>();
+const keyed = new Map<string, Lock>();
 
-/** The main lock of the checkout with this key. */
-function mainLock(key: string): Lock {
-  let l = mainLocks.get(key);
-  if (!l) { l = lock(`${MAIN}${key}`); mainLocks.set(key, l); }
+/** The lock of this kind for the checkout with this key. */
+function keyedLock(kind: "checkout" | "remote", key: string): Lock {
+  const name = `${kind}:${key}`;
+  let l = keyed.get(name);
+  if (!l) { l = lock(name, kind); keyed.set(name, l); }
   return l;
 }
 
 /**
- * Runs `fn` under the main lock of the checkout at `root`: its index and files, refs, `.git/config`,
- * the worktree list and the remote refs. No agent session or merge check runs inside it. A folder
- * with no key (inside `.loopstra`) runs `fn` without a lock.
+ * Runs `fn` under the checkout lock of the main checkout at `root`: nothing else writes its index,
+ * its files or its main branch until it ends. No agent session or merge check runs inside it. A
+ * linked worktree (see checkoutKey) runs `fn` without a lock.
  */
-export function onMain<T>(root: string, fn: () => Promise<T>): Promise<T> {
-  const key = mainLockKey(root);
-  return key === null ? fn() : onMainKey(key, fn);
+export function onCheckout<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  const key = checkoutKey(root);
+  return key === null ? fn() : onCheckoutKey(key, fn);
 }
 
-/** onMain for a key already worked out (Git works its key out once). */
-export function onMainKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  return mainLock(key).run(fn);
+/** onCheckout for a key already worked out (Git works its key out once). */
+export function onCheckoutKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  return keyedLock("checkout", key).run(fn);
 }
 
-const merge = lock("merge");
-
-/** Throws when taking the merge lock here would break the lock order (merge lock, then main lock). */
-function assertMergeLockOrder(): void {
-  if (!merge.heldHere() && holdsMainLock()) throw new Error("The merge lock was asked for while holding a main lock: take the merge lock first (a programming error).");
+/** Runs `fn` under the remote lock of the checkout with this key: no other fetch or push of it runs meanwhile. */
+export function onRemoteKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  return keyedLock("remote", key).run(fn);
 }
 
 /**
  * The merge lock: one merge at a time. Without a remote it covers the merge checks through the
  * merge; with one, the up-to-date check through the merge on GitHub. `who` is the change's slug.
  */
-export const oneMerge: Lock = {
-  name: merge.name,
-  run: (fn, who) => { assertMergeLockOrder(); return merge.run(fn, who); },
-  tryRun: (fn, who) => { assertMergeLockOrder(); return merge.tryRun(fn, who); },
-  heldHere: merge.heldHere,
-  busy: merge.busy,
-  holder: merge.holder,
-};
+export const oneMerge: Lock = lock("merge", "merge");
 
-/** True when the current context holds any lock (the merge lock or a main lock). */
+/** The sync lock: one sync of main with the remote at a time, since each replays main in the same worktree. */
+export const oneSync: Lock = lock("sync", "sync");
+
+/** True when the current context holds any lock. */
 export function holdsLock(): boolean {
-  return heldNames().size > 0;
+  return heldLocks().size > 0;
 }
 
 /** Throws a programming error when the current context holds any lock: `where` must not run inside one. */
 export function assertNoLock(where: string): void {
-  if (holdsLock()) throw new Error(`${where} ran while holding a lock (${[...heldNames()].join(", ")}), a programming error.`);
+  if (holdsLock()) throw new Error(`${where} ran while holding a lock (${[...heldLocks().keys()].join(", ")}), a programming error.`);
 }
 
-/** Throws a programming error when the current context holds a main lock: `where` must not run inside one. */
-export function assertNoMainLock(where: string): void {
-  if (holdsMainLock()) throw new Error(`${where} ran while holding a main lock, a programming error.`);
+/** Throws a programming error when the current context holds a checkout lock: `where` must not run inside one. */
+export function assertNoCheckoutLock(where: string): void {
+  if ([...heldLocks().keys()].some((n) => n.startsWith("checkout:"))) throw new Error(`${where} ran while holding a checkout lock, a programming error.`);
 }
 
-/** The changes running a step now (a lane's, or the between-phases merge's). */
+/** The changes running a step now (a lane's, or the pull request watcher's). */
 const claimed = new Set<string>();
 
 /** Claims a change for one step: false when it is claimed already. */
@@ -167,12 +168,3 @@ export function release(slug: string): void {
 export function othersRunning(slug: string): number {
   return claimed.size - (claimed.has(slug) ? 1 : 0);
 }
-
-let lanes = 0;
-
-/** A lane started running steps. */
-export function laneStarted(): void { lanes++; }
-/** A lane ended. */
-export function laneEnded(): void { lanes = Math.max(0, lanes - 1); }
-/** How many lanes are running now. */
-export function lanesRunning(): number { return lanes; }

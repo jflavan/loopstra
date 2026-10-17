@@ -18,13 +18,10 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, PR_PUSHING); // nor an earlier build's push that was cut short
 
   const branch = await codePhase(ctx, "branch", async () => {
-    // One main-lock section: the branch and its worktree are made while no other change touches refs or worktrees.
-    await ctx.git.section(async () => {
-      if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
-      // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
-      await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
-    });
-    // In the change's own worktree, so no lock.
+    // Branches and worktrees take no lock (see Git.run): another change's commits and checkouts go on meanwhile.
+    if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
+    // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
+    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
     if (ctx.cfg.commands.install) {
       const r = await projectCommand(ctx, ctx.cfg.commands.install, ctx.worktreeDir);
       if (r.code !== 0) throw new Error(`install failed: ${r.lastLine}`);

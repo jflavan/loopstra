@@ -6,7 +6,7 @@ import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
-import { agentPhase, alongsideFirst, ownTime, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { agentPhase, alongsideFirst, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { AssistantUnavailable } from "./stop";
 import { CHEAP, type JudgeRow, type NewJudgeRow } from "./trace";
 
@@ -250,13 +250,11 @@ interface Pair<J extends JudgeName> {
   prompt: string;
 }
 
-/**
- * Runs one judge session and times it. The phase boundary (merging other changes whose pull requests
- * became ready) is left out of the time (see ownTime), so the time is the judge's own.
- */
+/** Runs one judge session and times it. */
 async function timed<J extends JudgeName>(ctx: StepContext, spec: AgentPhaseSpec & { name: J }, prompt: string): Promise<Timed<J>> {
-  const { value, ms } = await ownTime(() => agentPhase(ctx, spec, prompt));
-  return { r: value, ms };
+  const started = Date.now();
+  const r = await agentPhase(ctx, spec, prompt);
+  return { r, ms: Date.now() - started };
 }
 
 function sha256(text: string): string {
@@ -369,9 +367,8 @@ function done<J extends JudgeName>(result: JudgeResult<J>): JudgeAnswer<J> {
 
 /**
  * runJudge, returning as soon as the deciding judge answered, so the step can record the gate's result
- * first: a stop while the cheaper judge of a shadow still runs then loses only the comparison. Until
- * `rest` is called, no phase boundary (a merge) runs, as with alongsideFirst: the caller calls `rest`
- * before any other phase.
+ * first: a stop while the cheaper judge of a shadow still runs then loses only the comparison. `rest`
+ * waits for the comparison and records it.
  */
 export async function judgeFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOpts = {}): Promise<JudgeAnswer<J>> {
   const prompt = opts.prompt === undefined ? await phasePrompt(ctx, phase) : opts.prompt;

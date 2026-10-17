@@ -5,7 +5,7 @@ import { loadConfig } from "../../src/config";
 import { setStatus, StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { pushBranch, shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
+import { MOVE_CUT_SHORT_NOTE, moveMain, pushBranch, settleCutShortMove, shareMain, syncMain, SYNC_SIGNAL, SYNC_TEXT } from "../../src/remote";
 import { Trace } from "../../src/trace";
 import { run, tempDir, tempGitRepo, withEnv } from "../helpers";
 
@@ -147,7 +147,8 @@ describe("syncMain", () => {
     expect(await git.currentBranch()).toBe("main");
     expect(await git.isDirty()).toBe(false);
     expect(existsSync(join(s.repo, ".git", "rebase-merge"))).toBe(false);
-    expect(syncErrors(s.trace)).toEqual(["rebase onto the remote failed and was aborted; main is not synced"]);
+    expect(existsSync(join(s.repo, ".loopstra", "sync"))).toBe(false);
+    expect(syncErrors(s.trace)).toEqual(["replaying main onto the remote's main hit a conflict; main is not synced"]);
     s.cleanup();
   });
 
@@ -182,40 +183,74 @@ describe("syncMain", () => {
     expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "waiting", output: SYNC_TEXT.unsaved });
     expect(existsSync(join(s.repo, "theirs.md"))).toBe(false);
     expect(await Bun.file(join(s.repo, "README.md")).text()).toBe("# work in progress\n");
-    expect(syncErrors(s.trace)).toEqual(["skipped: the root checkout has changes to tracked files"]);
+    expect(syncErrors(s.trace)).toEqual(["skipped: the main checkout has changes to tracked files"]);
     s.cleanup();
   });
 
-  test("asked not to rebase (other changes are being worked on), it fetches, leaves main as it is, waits, and records no signal", async () => {
+  test("main is replayed in a worktree of its own and moved once: the main checkout is never mid-rebase, and the worktree is gone after", async () => {
     const s = await setup();
-    await syncMain(s.repo, s.cfg, s.trace);
-    const signals = () => s.trace.signals().filter((x) => x.name === SYNC_SIGNAL).length;
-    const before = signals();
     await pushFromOther(s.other, "theirs.md", "theirs\n");
-    const head = (await run(["git", "rev-parse", "main"], s.repo)).out.trim();
-    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("waiting");
-    expect((await run(["git", "rev-parse", "main"], s.repo)).out.trim()).toBe(head);
-    expect(existsSync(join(s.repo, "theirs.md"))).toBe(false);
-    // Fetched: the remote's main is known here, ready for the next sync.
-    expect((await run(["git", "cat-file", "-e", "origin/main:theirs.md"], s.repo)).code).toBe(0);
-    expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "pass", output: SYNC_TEXT.inStep });
-    expect(signals()).toBe(before);
-    expect(syncErrors(s.trace)).toEqual([]);
-    expect(s.trace.events("_loop").some((e) => e.payload.includes("\"sync main\""))).toBe(false);
+    await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
+    await new Git(s.repo).commitPaths(["intent/x"], "loopstra(x): record");
+    // The replay's own checkout runs git's post-checkout hook: it shows where the replay happens.
+    const seen = join(s.repo, "..", `replay-${Date.now()}.txt`);
+    const hook = join(s.repo, ".git", "hooks", "post-checkout");
+    await Bun.write(hook, `#!/bin/sh\npwd >> "${seen.replaceAll("\\", "/")}"\n`);
+    chmodSync(hook, 0o755);
+    try {
+      expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
+      const where = (await Bun.file(seen).text()).trim().split(/\r?\n/);
+      expect(where.every((w) => w.replaceAll("\\", "/").endsWith(".loopstra/sync"))).toBe(true);
+      expect(existsSync(join(s.repo, ".loopstra", "sync"))).toBe(false);
+      expect(existsSync(join(s.repo, ".loopstra", "moving-main"))).toBe(false);
+      expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
+      expect((await run(["git", "log", "-2", "--format=%s", "main"], s.repo)).out.trim().split(/\r?\n/)).toEqual(["loopstra(x): record", "elsewhere: theirs.md"]);
+      expect((await run(["git", "worktree", "list", "--porcelain"], s.repo)).out.match(/^worktree /gm)).toHaveLength(1);
+      expect(s.trace.events("_loop").some((e) => e.payload.includes("\"sync main\"") && e.payload.includes("\"pulled\":1"))).toBe(true);
+    } finally { rmSync(seen, { force: true }); s.cleanup(); }
+  });
 
-    // Not behind: the same as an ordinary sync.
+  test("a record committed on main while the replay runs is kept: it is replayed on top before main moves", async () => {
+    const s = await setup();
+    await pushFromOther(s.other, "theirs.md", "theirs\n");
+    await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
+    await new Git(s.repo).commitPaths(["intent/x"], "loopstra(x): record");
+    // Another change records its status in the middle of the replay (the hook runs once, when the replay's worktree is checked out).
+    const root = s.repo.replaceAll("\\", "/");
+    const hook = join(s.repo, ".git", "hooks", "post-checkout");
+    await Bun.write(hook, [
+      "#!/bin/sh",
+      `[ -f "${root}/.git/once" ] || exit 0`,
+      `rm -f "${root}/.git/once"`,
+      `mkdir -p "${root}/intent/y" && printf -- '---\\nstatus: draft\\n---\\n# Intent: y\\n' > "${root}/intent/y/intent.md"`,
+      `git -C "${root}" add intent/y && git -C "${root}" -c user.name=Loopstra -c user.email=loopstra@localhost commit -q -m "loopstra(y): record"`,
+      "",
+    ].join("\n"));
+    chmodSync(hook, 0o755);
+    await Bun.write(join(s.repo, ".git", "once"), "");
     expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
-    expect(await syncMain(s.repo, s.cfg, s.trace, { rebase: false })).toBe("pass");
+    expect((await run(["git", "log", "-3", "--format=%s", "main"], s.repo)).out.trim().split(/\r?\n/)).toEqual(["loopstra(y): record", "loopstra(x): record", "elsewhere: theirs.md"]);
+    expect(existsSync(join(s.repo, "intent", "y", "intent.md"))).toBe(true);
+    expect(await new Git(s.repo).isDirty()).toBe(false);
+    // Both records reached GitHub.
+    expect((await run(["git", "cat-file", "-e", "main:intent/y/intent.md"], s.remote)).code).toBe(0);
     s.cleanup();
   });
 
-  test("its fetch and rebase never start git's automatic gc or maintenance (other changes may be committing meanwhile)", async () => {
+  test("its fetch, replay and move never start git's automatic gc or maintenance (other changes may be committing meanwhile)", async () => {
     const s = await setup();
     const log = join(s.other, "..", `git-trace-${Date.now()}.log`);
     try {
       await pushFromOther(s.other, "theirs.md", "theirs\n");
       await withEnv({ GIT_TRACE: log }, () => syncMain(s.repo, s.cfg, s.trace));
+      // A commit of main's own, so this sync replays (it is a person's, so nothing is pushed: the remote's own
+      // maintenance after a push is not this repository's).
+      await pushFromOther(s.other, "more.md", "more\n");
+      await personCommits(s.repo, "ours.md", "ours\n");
+      await withEnv({ GIT_TRACE: log }, () => syncMain(s.repo, s.cfg, s.trace));
+      expect(await Bun.file(log).text()).toContain("rebase");
       expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
+      expect(existsSync(join(s.repo, "more.md"))).toBe(true);
       expect(await Bun.file(log).text()).not.toMatch(/maintenance run --auto|gc --auto/);
     } finally { rmSync(log, { force: true }); s.cleanup(); }
   });
@@ -226,6 +261,106 @@ describe("syncMain", () => {
     await syncMain(s.repo, s.cfg, s.trace);
     expect(syncErrors(s.trace)).toEqual(["fetch failed"]);
     s.cleanup();
+  });
+});
+
+/** A file's text with Windows line endings (what a checkout writes there) made plain. */
+async function text(path: string): Promise<string> {
+  return (await Bun.file(path).text()).replace(/\r\n/g, "\n");
+}
+
+describe("moving main", () => {
+  /** A repo whose main has two commits apart: `from`, and `to`, which changes a.md, removes b.md and adds c.md. */
+  async function twoCommits() {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    await Bun.write(join(repo.path, "a.md"), "a1\n");
+    await Bun.write(join(repo.path, "b.md"), "b1\n");
+    await git.commitAll("from");
+    const from = await git.headSha();
+    await Bun.write(join(repo.path, "a.md"), "a2\n");
+    rmSync(join(repo.path, "b.md"));
+    await Bun.write(join(repo.path, "c.md"), "c2\n");
+    await git.commitAll("to");
+    const to = await git.headSha();
+    await run(["git", "reset", "-q", "--hard", from], repo.path);
+    return { repo, git, from, to };
+  }
+
+  test("a move lands whole: the branch, the index and the files", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    try {
+      expect(await moveMain(git, from, to)).toEqual({ ok: true });
+      expect(await git.headSha()).toBe(to);
+      expect(await git.isDirty()).toBe(false);
+      expect(existsSync(join(repo.path, "b.md"))).toBe(false);
+      expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a move that cannot land leaves main, its files and a person's file as they were", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    try {
+      await Bun.write(join(repo.path, "c.md"), "a person's own c\n");
+      const r = await moveMain(git, from, to);
+      expect(r.ok).toBe(false);
+      expect(await git.headSha()).toBe(from);
+      expect(await text(join(repo.path, "a.md"))).toBe("a1\n");
+      expect(await text(join(repo.path, "c.md"))).toBe("a person's own c\n");
+      expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a move a kill cut short is put back at the next tick's start; a person's file is left alone", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    const trace = Trace.open(repo.path);
+    try {
+      // As a killed `reset --keep` leaves it: some files written, the index half-written, the branch not moved.
+      await Bun.write(join(repo.path, "a.md"), "a2\n");
+      rmSync(join(repo.path, "b.md"));
+      await Bun.write(join(repo.path, "c.md"), "c2\n");
+      await run(["git", "update-index", "--add", "c.md"], repo.path);
+      await Bun.write(join(repo.path, "notes.md"), "a person's notes\n");
+      await Bun.write(join(repo.path, ".loopstra", "moving-main"), `${from}\n${to}\n`);
+      expect(await settleCutShortMove(repo.path, trace)).toBeNull();
+      expect(await git.headSha()).toBe(from);
+      expect(await text(join(repo.path, "a.md"))).toBe("a1\n");
+      expect(await text(join(repo.path, "b.md"))).toBe("b1\n");
+      expect(existsSync(join(repo.path, "c.md"))).toBe(false);
+      expect(await text(join(repo.path, "notes.md"))).toBe("a person's notes\n");
+      expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+      expect(trace.events("_loop").some((e) => e.payload.includes("a move of main cut short was put back"))).toBe(true);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a move a kill cut short after it landed, or a main a person moved since, is left as it is", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    const trace = Trace.open(repo.path);
+    try {
+      await run(["git", "reset", "-q", "--hard", to], repo.path);
+      await Bun.write(join(repo.path, ".loopstra", "moving-main"), `${from}\n${to}\n`);
+      expect(await settleCutShortMove(repo.path, trace)).toBeNull();
+      expect(await git.headSha()).toBe(to);
+      expect(await git.isDirty()).toBe(false);
+      expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a move that cannot be put back yet (git's lock is still there) pauses with a plain note, and settles once the lock is gone", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    const trace = Trace.open(repo.path);
+    try {
+      await Bun.write(join(repo.path, "a.md"), "a2\n");
+      await Bun.write(join(repo.path, ".loopstra", "moving-main"), `${from}\n${to}\n`);
+      await Bun.write(join(repo.path, ".git", "index.lock"), "");
+      expect(await settleCutShortMove(repo.path, trace)).toBe(MOVE_CUT_SHORT_NOTE);
+      rmSync(join(repo.path, ".git", "index.lock"));
+      expect(await settleCutShortMove(repo.path, trace)).toBeNull();
+      expect(await text(join(repo.path, "a.md"))).toBe("a1\n");
+      expect(await git.headSha()).toBe(from);
+    } finally { trace.close(); repo.cleanup(); }
   });
 });
 

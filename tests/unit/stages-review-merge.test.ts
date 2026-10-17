@@ -496,14 +496,18 @@ describe("merge", () => {
   test("a cleanup failure is traced and the change is still merged; cleanup can be retried", async () => {
     const { repo, ctx, trace } = await built();
     const git = new Git(repo.path);
-    // A locked worktree cannot be removed with a single --force.
-    await git.run(["worktree", "lock", ctx.worktreeDir]);
-    await runMergeStep(ctx);
+    // The worktree cannot be removed this time (on Windows, a file in it is open in another program, say).
+    const remove = Git.prototype.worktreeRemove;
+    Git.prototype.worktreeRemove = async () => { throw new Error("the folder is in use"); };
+    try {
+      await runMergeStep(ctx);
+    } finally {
+      Git.prototype.worktreeRemove = remove;
+    }
     expect(await status(repo.path)).toBe("merged");
     expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("cleanup"))).toBe(true);
     expect(existsSync(ctx.worktreeDir)).toBe(true);
-    await git.run(["worktree", "unlock", ctx.worktreeDir]);
     expect(await cleanupChange(ctx)).toBe(true);
     expect(existsSync(ctx.worktreeDir)).toBe(false);
     expect(await git.branchExists(ctx.branch)).toBe(false);

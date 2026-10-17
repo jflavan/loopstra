@@ -95,10 +95,18 @@ describe("the loop", () => {
         const total = phases.reduce((sum, p) => sum + p.cost_usd, 0);
         expect(trace.costIn({ except: CHAT_SLUG }, startOfToday())).toBeCloseTo(total, 6);
         // Golden, with the default of one change at a time: the phases and status changes come out in today's order.
-        expect(phases.map((p) => `${p.name}:${p.status}`)).toEqual([
+        // Work run alongside starts together with the phase beside it, so either row may come first: each
+        // such pair is compared in a fixed order.
+        const beside: Record<string, string> = { "early-plan": "spec-check", "early-review": "verify", "early-lessons": "done-check" };
+        const rows = phases.map((p) => `${p.name}:${p.status}`);
+        for (let k = 0; k + 1 < rows.length; k++) {
+          const [a, b] = [rows[k]!.split(":")[0]!, rows[k + 1]!.split(":")[0]!];
+          if (beside[a] === b) [rows[k], rows[k + 1]] = [rows[k + 1]!, rows[k]!];
+        }
+        expect(rows).toEqual([
           "intake:success", "design:success", "spec-check:success", "early-plan:success", "plan-challenge:success",
           "branch:success", "build:success", "drift:success", "test-1:success", "verify:success", "early-review:success",
-          "merge:success", "early-lessons:success", "done-check:success",
+          "merge:success", "done-check:success", "early-lessons:success",
         ]);
         const moves = trace.events("add-numbers").filter((e) => e.type === "status_change").map((e) => JSON.parse(e.payload) as { from: string; to: string });
         expect(moves.map((m) => `${m.from}>${m.to}`)).toEqual([

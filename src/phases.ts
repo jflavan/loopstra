@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, sessionCost, staleBefore, startOfToday } from "./budget";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config } from "./config";
 import type { Trace } from "./trace";
@@ -9,10 +9,11 @@ import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { renderPrompt, type PromptVars } from "./prompts";
+import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { assertNoLock, assertNoMainLock, holdsLock } from "./lanes";
-import { AssistantUnavailable, Cancelled, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { assertNoCheckoutLock, assertNoLock } from "./lanes";
+import { AssistantUnavailable, Cancelled, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -29,7 +30,7 @@ export interface AgentPhaseSpec {
   permissionMode: PermissionMode;
   tools: ToolSet;
   vars: PromptVars;
-  /** Run in this directory (the worktree for build phases). Defaults to the repo root. */
+  /** Run in this directory (the worktree for build phases). Defaults to the step's snapshot of main (see StepContext.snapshot). */
   cwd?: string;
   /** Resume this session id. */
   resume?: string;
@@ -177,24 +178,12 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   return attempt(ctx, spec, prompt, `${traceName}-retry`);
 }
 
-/** Run before every phase (agent or code); the scheduler sets it for the duration of a tick. */
-type PhaseBoundary = (ctx: StepContext) => Promise<void>;
-let phaseBoundary: PhaseBoundary | null = null;
-
 /**
- * Sets (or with null clears) what runs before each phase of a step: the scheduler uses it to merge
- * other changes whose pull requests became ready while this step runs (see the scheduler).
+ * Two pieces of work running at once (see alongside): whether a session in them succeeded, whether
+ * it has decided about the pause (both ended), and the group it runs inside of, if any (a judge's
+ * shadow inside the early review, or inside spec-check beside the plan written ahead).
  */
-export function setPhaseBoundary(fn: PhaseBoundary | null): void {
-  phaseBoundary = fn;
-}
-
-/**
- * Two pieces of work running at once (see alongside): how many still run, whether a session in them
- * succeeded, whether it has decided about the pause (both ended), and the group it runs inside of, if
- * any (a judge's shadow inside the early review, or inside spec-check beside the plan written ahead).
- */
-interface Group { running: number; succeeded: boolean; decided?: boolean; parent?: Group }
+interface Group { succeeded: boolean; decided?: boolean; parent?: Group }
 
 /**
  * The group the current call runs in, and the signal that cancels its work (none for the main work
@@ -202,43 +191,6 @@ interface Group { running: number; succeeded: boolean; decided?: boolean; parent
  * group (another change's phases) never sees it.
  */
 const inGroup = new AsyncLocalStorage<{ group: Group; signal?: AbortSignal }>();
-
-/** Other work still runs beside this call, in its own group or in one it runs inside of. */
-function othersRunning(g: Group | undefined): boolean {
-  for (; g; g = g.parent) if (g.running > 1) return true;
-  return false;
-}
-
-/** The time the phase boundary took inside a call that `ownTime` measures. */
-const boundaryClock = new AsyncLocalStorage<{ ms: number }>();
-
-/**
- * Runs the phase boundary, except while other work runs beside this call, or while the step holds the
- * merge lock or a main lock: a merge started there could wait on the lock this step holds while this
- * step waits for it. Every phase runs it first; a step runs it itself before deciding something on
- * main's code (see takePlanAhead).
- */
-export async function boundary(ctx: StepContext): Promise<void> {
-  if (!phaseBoundary || othersRunning(inGroup.getStore()?.group) || holdsLock()) return;
-  const started = Date.now();
-  try {
-    await phaseBoundary(ctx);
-  } finally {
-    const clock = boundaryClock.getStore();
-    if (clock) clock.ms += Date.now() - started;
-  }
-}
-
-/**
- * Runs `fn` and says how long it took, less the phase boundary run inside it (merging other changes
- * whose pull requests became ready), so a session's time is its own (the cheaper judges' report).
- */
-export async function ownTime<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }> {
-  const clock = { ms: 0 };
-  const started = Date.now();
-  const value = await boundaryClock.run(clock, fn);
-  return { value, ms: Date.now() - started - clock.ms };
-}
 
 /** What cancels the current call's sessions and commands: set for the extra work of alongside, and for work inside it. */
 function cancelSignal(): AbortSignal | undefined {
@@ -270,8 +222,6 @@ export function mayOverlap(ctx: StepContext): boolean {
  * does not need (lessons beside the done-check, round 1's review beside the verifier). Returns both
  * results; extra's is null when it was dropped or cancelled.
  *
- * - The phase boundary (the between-phases merge) runs once, before them, and inside only for a phase
- *   that starts after the other work ended, so no merge touches main while two phases run.
  * - Extra work is optional: anything it throws but a stop request is dropped, traced, and never ends
  *   the step; main meets the same trouble on its own.
  * - Once main ends, extra is cancelled (its session or command killed) unless `extra.wanted` says
@@ -281,12 +231,11 @@ export function mayOverlap(ctx: StepContext): boolean {
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
  * - It may run inside another alongside or alongsideFirst (a judge's shadow inside the early review,
- *   or inside spec-check beside the plan written ahead): no boundary runs while the outer work runs,
- *   cancelling the outer extra cancels both, and a success inside counts for the outer group, which
- *   decides about the pause.
+ *   or inside spec-check beside the plan written ahead): cancelling the outer extra cancels both, and
+ *   a success inside counts for the outer group, which decides about the pause.
  */
 export async function alongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>): Promise<[M, E | null]> {
-  return (await startAlongside(ctx, main, extra, false)).both;
+  return startAlongside(ctx, main, extra).both;
 }
 
 /** The work run beside main (see alongside): its name in the trace, the work, and whether main's result uses it. */
@@ -296,48 +245,37 @@ type Extra<M, E> = { what: string; run: () => Promise<E>; wanted: (m: M) => bool
  * alongside, returning as soon as main ends with a result that uses the extra work, so the step can
  * record that result first (spec-check's pass is committed while the plan written beside it still
  * runs, so a stop meanwhile loses only the plan). `rest` then waits for the extra (null when dropped)
- * and throws a stop request that ended it; `cancel` calls it off. Until `rest` is called, the group
- * still counts main as running, so no phase boundary (a merge) runs in the extra while the step works
- * on main: the caller calls `rest` before any other phase. A result that does not use the extra, or an
- * error, waits for both as alongside does.
+ * and throws a stop request that ended it; `cancel` calls it off. A result that does not use the
+ * extra, or an error, waits for both as alongside does.
  */
 export async function alongsideFirst<M, E>(
   ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>,
 ): Promise<{ result: M; rest: () => Promise<E | null>; cancel: () => void }> {
-  const s = await startAlongside(ctx, main, extra, true);
+  const s = startAlongside(ctx, main, extra);
   let result: M;
   try {
     result = await s.main;
   } catch (e) {
-    s.release();
     await s.both; // throws: a stop request from either, else main's error
     throw e;
   }
   if (!extra.wanted(result)) {
-    s.release();
     const [, x] = await s.both;
     return { result, rest: async () => x, cancel: () => {} };
   }
-  return { result, rest: () => { s.release(); return s.both.then(([, x]) => x); }, cancel: s.cancel };
+  return { result, rest: () => s.both.then(([, x]) => x), cancel: s.cancel };
 }
 
-/**
- * Starts main and the extra work in one group (see alongside). `main` is main's result; `both` ends
- * once both have, with alongside's rules. With `hold`, main counts as running until `release`.
- */
-async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>, hold: boolean) {
+/** Starts main and the extra work in one group (see alongside). `main` is main's result; `both` ends once both have, with alongside's rules. */
+function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: Extra<M, E>) {
   // Both pieces would think they hold the lock, so neither would wait for the other.
   assertNoLock(`The ${extra.what} work run alongside`);
-  await boundary(ctx);
   const outer = inGroup.getStore();
-  const group: Group = { running: 2, succeeded: false, parent: outer?.group };
+  const group: Group = { succeeded: false, parent: outer?.group };
   const cancel = new AbortController();
   const extraSignal = outer?.signal ? AbortSignal.any([outer.signal, cancel.signal]) : cancel.signal;
-  let held = hold;
-  const release = () => { if (held) { held = false; group.running--; } };
-  const member = <T>(fn: () => Promise<T>, signal?: AbortSignal, holds = false): Promise<T> =>
-    inGroup.run({ group, signal }, async () => { try { return await fn(); } finally { if (!holds) group.running--; } });
-  const mainDone = member(main, outer?.signal, hold).then(
+  const member = <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> => inGroup.run({ group, signal }, fn);
+  const mainDone = member(main, outer?.signal).then(
     (m) => { if (!extra.wanted(m)) cancel.abort(); return m; },
     (e: unknown) => { cancel.abort(); throw e; },
   );
@@ -355,7 +293,7 @@ async function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, ex
     return [m.value, x.value];
   });
   both.catch(() => {}); // awaited by the caller; never an unhandled rejection meanwhile
-  return { main: mainDone, both, release, cancel: () => cancel.abort() };
+  return { main: mainDone, both, cancel: () => cancel.abort() };
 }
 
 /**
@@ -379,40 +317,25 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 export const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
 /**
- * One traced run of a phase. The phase row always ends (never left running) and the raw log is always
- * closed. Never under a main lock: a session takes minutes, and every other change's git in the main
- * checkout would wait for it (under the merge lock is fine: the merge checks run fix sessions).
+ * One traced run of a phase (see tracedSession). In the spec's `cwd`, or else the step's snapshot of
+ * main, made the first time a session of the step asks. Never under a checkout lock: a session takes
+ * minutes, and every record, sync and merge would wait for it (under the merge lock is fine: the
+ * merge checks run fix sessions).
  */
 async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
-  assertNoMainLock(`The ${traceName} session`);
-  await boundary(ctx);
+  assertNoCheckoutLock(`The ${traceName} session`);
   throwIfStopping();
   const signal = cancelSignal();
   throwIfCancelled(signal);
+  const cwd = spec.cwd ?? (await ctx.snapshot());
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
-  const started = Date.now();
-  // Commands the session was not allowed to run: on the phase in the trace, so an engineer can add allow rules.
-  let denied: string[] = [];
-  const failed = (reason: BlockingReason, detail: string, sessionId: string | null, costUsd = 0): AgentPhaseResult<N> => {
-    const refused = denied.length ? `; not allowed: ${denied.join(", ")}` : "";
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", costUsd, sessionId: sessionId ?? undefined, error: `${reason}: ${detail}${refused}`, denied });
-    const tests = protectedTests(protectedLog);
-    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId };
-  };
-  let raw: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");
-  // What the session cost, once it ended (null until then): kept if the phase fails after it.
-  let costUsd: number | null = null;
-  try {
-    mkdirSync(dir, { recursive: true });
-    await Bun.write(join(dir, "prompt.md"), prompt);
-    const writer = Bun.file(join(dir, "raw.jsonl")).writer();
-    raw = writer;
-
-    const r = await runPhase({
-      cwd: spec.cwd ?? ctx.root,
+  const out = await tracedSession({
+    trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE,
+    run: {
+      cwd,
       prompt,
       schema: jsonSchemaFor(spec.name),
       model: modelFor(ctx.cfg, spec.model),
@@ -424,51 +347,27 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
       signal,
-      onEvent: (e) => {
-        writer.write(JSON.stringify(e) + "\n");
-        if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
-      },
-    });
-
-    denied = r.denied;
-    costUsd = sessionCost(r, r.durationMs, capUsd);
-    if (!r.ok) {
-      if (unavailable(r.reason)) {
-        // Not this phase's failure: it is interrupted, and the scheduler pauses the loop.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied });
-        throw new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail });
-      }
-      if (r.reason === "budget" && fromDay) {
-        // The loop's day ran out, not this step's own limit: the loop pauses and the step resumes later.
-        ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd, sessionId: r.sessionId ?? undefined, error: "budget: the loop's daily budget ran out during this session", denied });
-        throw new LoopBudgetReached();
-      }
-      return failed(r.reason, r.detail, r.sessionId, costUsd);
-    }
-    const parsed = Envelopes[spec.name].safeParse(r.structuredOutput);
-    await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
-    if (!parsed.success) {
-      const err = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-      return failed("invalid-envelope", err, r.sessionId, r.costUsd);
-    }
-    const envelope = parsed.data as Envelope<N>;
-    if (envelope.status === "fail") return failed("agent-fail", envelope.summary, r.sessionId, r.costUsd);
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied });
-    if (spec.endsPause !== false) assistantReached(ctx);
-    return { ok: true, envelope, sessionId: r.sessionId, costUsd: r.costUsd };
-  } catch (e) {
-    if (e instanceof StopRequested || e instanceof Cancelled) {
-      // A session the stop (or a cancel) killed never reported its cost.
-      const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, capUsd);
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", costUsd: spent, error: e instanceof Cancelled ? e.message : STOPPED_NOTE });
-      throw e;
-    }
-    // Its phase row is already ended.
-    if (notTheStepsFault(e)) throw e;
-    return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd ?? 0);
-  } finally {
-    if (raw) { try { await raw.end(); } catch { /* already closed */ } }
+    },
+    onEvent: (e) => { if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq); },
+    read: (output) => {
+      const parsed = Envelopes[spec.name].safeParse(output);
+      if (!parsed.success) return { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
+      const envelope = parsed.data as Envelope<N>;
+      return envelope.status === "fail" ? { ok: false, reason: "agent-fail", detail: envelope.summary } : { ok: true, value: envelope };
+    },
+    // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
+    // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
+    interrupt: (r) => unavailable(r.reason)
+      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail }), note: `${r.reason}: ${r.detail}` }
+      : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
+  });
+  if (!out.ok) {
+    const reason = out.reason as BlockingReason;
+    const tests = protectedTests(protectedLog);
+    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
+  if (spec.endsPause !== false) assistantReached(ctx);
+  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd };
 }
 
 /** The test files the protect-tests hook refused during a phase, once each, in the order refused. */
@@ -551,7 +450,6 @@ export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: strin
 
 /** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request (or a cancel) is marked interrupted and passed on. */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
-  await boundary(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
     const r = await fn(seq);

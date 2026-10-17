@@ -3,12 +3,12 @@ import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor, type Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
 import { scanRepo, type Status } from "../intents";
-import { agentPhase, boundary, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
 import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
-import { codeState, takeKept, type Artifacts, type Kept } from "./shared";
+import { codeDiffers, takeKept, type Artifacts, type Kept } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
@@ -22,7 +22,8 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
     name: "files",
     run: async () => {
       const files = parsePlanFiles(a.plan) ?? []; // no Files section: the headings check reports it
-      const tracked = (await ctx.git.run(["ls-files", "-z"])).out.split("\0");
+      // The files of the code the plan was written on (the step's snapshot of main).
+      const tracked = (await ctx.git.run(["ls-tree", "-r", "-z", "--name-only", await ctx.readCommit()])).out.split("\0");
       const r = filesExistOrNew(tracked, files);
       return r.ok ? { result: "pass", evidence: `${files.length} files listed` } : { result: "fail", evidence: r.problems.join("; ") };
     },
@@ -47,8 +48,7 @@ export function runPlanStep(ctx: StepContext): Promise<StepResult> {
 
 /**
  * Run-folder file: the first plan, written while spec-check judged the spec (see planAhead), as JSON:
- * what it was asked (`key`), the commit main was on when it started (`base`), and the code it read
- * (`state`, see codeState).
+ * what it was asked (`key`), and the commit whose code it read (`base`, the design step's snapshot).
  */
 export const PLAN_AHEAD = "plan.ahead";
 
@@ -93,23 +93,16 @@ async function plansAhead(ctx: StepContext): Promise<boolean> {
 
 /**
  * The first plan, written on the spec the judge was given, by the same session the plan step would
- * start (LOOPSTRA_PHASE stays plan). Returns what to keep if the spec passes, or null when the session
- * did not finish or the code changed while it ran (the plan step then plans as usual).
+ * start (LOOPSTRA_PHASE stays plan), in the design step's snapshot of main. Returns what to keep if
+ * the spec passes, or null when the session did not finish (the plan step then plans as usual).
  */
 async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | null> {
   // An early- row, as for all work run alongside: its failures are not the change's (see EARLY).
   const phase = { ...writerPhase(ctx, PLAN, a, ""), traceName: `${EARLY}plan` }; // the trace name is not part of the prompt
   const prompt = await phasePrompt(ctx, phase);
-  // Taken before the session starts and again after it ends, so a change while it ran counts.
-  const base = await ctx.git.headSha();
-  const state = await codeState(ctx.git, base);
   const r = await agentPhase(ctx, phase, prompt);
   if (prompt === null || !r.ok) return null;
-  if (state === null || state !== await codeState(ctx.git, base)) {
-    ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "not kept: the code on main changed while it was written" });
-    return null;
-  }
-  return JSON.stringify({ key: planKey(ctx, phase, prompt), base, state, envelope: r.envelope });
+  return JSON.stringify({ key: planKey(ctx, phase, prompt), base: await ctx.readCommit(), envelope: r.envelope });
 }
 
 /** Keeps the plan written ahead for the plan step (see planAheadRun). */
@@ -151,16 +144,14 @@ async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "
 
 /** In plain words, the first rule the kept plan breaks; null when it keeps them all. */
 async function whyNotUsed(ctx: StepContext, phase: AgentPhaseSpec, prompt: string | null, kept: Kept<"plan"> | null): Promise<string | null> {
-  const { base, state } = kept?.saved ?? {};
-  if (!kept || typeof base !== "string" || !COMMIT.test(base) || typeof state !== "string") return "it could not be read";
+  const { base } = kept?.saved ?? {};
+  if (!kept || typeof base !== "string" || !COMMIT.test(base)) return "it could not be read";
   const ruled = ruledOut(ctx.cfg);
   if (ruled !== null) return ruled;
   if (prompt === null) return "the plan prompt is missing";
   if (kept.key !== planKey(ctx, phase, prompt)) return "the intent, the spec, the plan prompt or its model changed";
-  // Pull requests that are ready merge first, as they would before a plan session.
-  await boundary(ctx);
-  // The code the plan read, measured from the same commit; the loop's own commits (statuses,
+  // The code the plan read against the code this step reads; the loop's own commits (statuses,
   // artifacts, the queue) are all under intent/. A missing base commit counts as a change.
-  if (await codeState(ctx.git, base) !== state) return "the code on main changed";
+  if (await codeDiffers(ctx.git, base, await ctx.readCommit())) return "the code on main changed";
   return null;
 }

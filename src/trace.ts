@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS phases (slug TEXT NOT NULL, seq INTEGER NOT NULL, nam
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER,
   type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_slug ON events (slug, id);
+CREATE INDEX IF NOT EXISTS events_slug_type ON events (slug, type, id);
 CREATE TABLE IF NOT EXISTS gates (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, gate TEXT NOT NULL,
   "check" TEXT NOT NULL, result TEXT NOT NULL, evidence TEXT NOT NULL, ts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, ts TEXT NOT NULL,
@@ -78,6 +79,9 @@ CREATE TABLE IF NOT EXISTS judges (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TE
   cheap_model TEXT NOT NULL, strong_model TEXT NOT NULL, template_sha TEXT NOT NULL, prompt_sha TEXT NOT NULL,
   cheap TEXT NOT NULL, strong TEXT,
   cheap_usd REAL, strong_usd REAL, cheap_ms INTEGER, strong_ms INTEGER);
+CREATE INDEX IF NOT EXISTS signals_name ON signals (name, id);
+CREATE INDEX IF NOT EXISTS gates_check ON gates (slug, gate, "check", id);
+CREATE INDEX IF NOT EXISTS phases_started ON phases (started);
 `;
 
 const JUDGE_COLUMNS = ["slug", "judge", "trace_name", "ts", "mode", "how", "cheap_model", "strong_model", "template_sha", "prompt_sha",
@@ -301,6 +305,21 @@ export class Trace {
   lastEvent(slug: string, type: EventType, contains = ""): EventRow | null {
     return this.db.query<EventRow, [string, string, string]>(
       "SELECT * FROM events WHERE slug = ? AND type = ? AND instr(payload, ?) > 0 ORDER BY id DESC LIMIT 1").get(slug, type, contains) ?? null;
+  }
+
+  /**
+   * Records an event unless the newest one like it (see lastEvent: the same slug and type, its payload
+   * containing `like`) says the same `field`, and is no older than `since` when given. A condition that
+   * lasts is then one line in the trace, not one per tick.
+   */
+  eventOnChange(slug: string, type: EventType, like: string, payload: Record<string, unknown>, field: string, since?: string): void {
+    const last = this.lastEvent(slug, type, like);
+    if (last && (since === undefined || last.ts >= since)) {
+      let said: unknown;
+      try { said = (JSON.parse(last.payload) as Record<string, unknown>)[field]; } catch { said = undefined; }
+      if (JSON.stringify(said) === JSON.stringify(payload[field])) return;
+    }
+    this.event(slug, type, payload);
   }
 
   /** The newest `limit` events of one slug, oldest first. */

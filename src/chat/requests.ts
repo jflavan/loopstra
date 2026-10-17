@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config";
-import { bookkeeping, Git } from "../git";
+import { commitRecord } from "../context";
 import { parseIntentFile, readIntent, SLUG, writeIntent } from "../intents";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
@@ -90,7 +90,7 @@ export async function applyChatRequests(root: string, cfg: Config, trace: Trace)
   let applied = 0;
   for (const req of pendingRequests(root)) {
     try {
-      const text = req.kind === "accept" ? await applyAccept(root, trace, req) : await applyNew(root, trace, req);
+      const text = req.kind === "accept" ? await applyAccept(root, cfg.main_branch, trace, req) : await applyNew(root, cfg.main_branch, trace, req);
       finish(root, req, text);
       applied++;
     } catch (e) {
@@ -101,28 +101,34 @@ export async function applyChatRequests(root: string, cfg: Config, trace: Trace)
   return applied;
 }
 
-async function applyAccept(root: string, trace: Trace, req: Extract<ChatRequest, { kind: "accept" }>): Promise<string> {
+async function applyAccept(root: string, main: string, trace: Trace, req: Extract<ChatRequest, { kind: "accept" }>): Promise<string> {
   const path = join(root, "intent", req.slug, "intent.md");
   if (!SLUG.test(req.slug) || !existsSync(path)) {
     trace.event(CHAT_SLUG, "chat-request", { id: req.id, kind: "accept", slug: req.slug, by: req.byName, result: "missing" });
     return `I could not start ${req.slug}: it is not in the main code. If it came from a pull request, that needs to be merged first.`;
   }
-  const intent = await readIntent(root, req.slug);
-  const was = intent.file.frontmatter.status;
-  // Written by an earlier try of this request whose commit failed: commit it now.
-  const ours = was === "accepted" && (req.written ?? []).includes(req.slug);
-  if (!ours && !(await writeIntent(intent, { status: "accepted", note: "" }, { expectStatus: "draft" }))) {
-    trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, result: "not-draft", status: was });
-    return `I did not start ${req.slug}: it is ${was} now, not a draft, so someone already changed it.`;
+  let refused = null as string | null;
+  await commitRecord(root, main, req.slug, `accepted by ${oneLine(req.byName, 80)} from chat`, async () => {
+    const intent = await readIntent(root, req.slug);
+    const was = intent.file.frontmatter.status;
+    // Written by an earlier try of this request whose commit failed: commit it now.
+    const ours = was === "accepted" && (req.written ?? []).includes(req.slug);
+    if (!ours && !(await writeIntent(intent, { status: "accepted", note: "" }, { expectStatus: "draft" }))) {
+      refused = was;
+      return false;
+    }
+    markWritten(root, req, req.slug);
+  });
+  if (refused !== null) {
+    trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, result: "not-draft", status: refused });
+    return `I did not start ${req.slug}: it is ${refused} now, not a draft, so someone already changed it.`;
   }
-  markWritten(root, req, req.slug);
-  await new Git(root).commitPaths([`intent/${req.slug}`], bookkeeping(`loopstra(${req.slug}): accepted by ${oneLine(req.byName, 80)} from chat`));
   trace.statusChange(req.slug, "draft", "accepted", `accepted by ${req.byName} from chat`);
   trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, byId: req.by, transport: req.transport, result: "accepted" });
   return `Started ${req.slug}. I will say here when it needs anyone, and when it is done.`;
 }
 
-async function applyNew(root: string, trace: Trace, req: Extract<ChatRequest, { kind: "new" }>): Promise<string> {
+async function applyNew(root: string, main: string, trace: Trace, req: Extract<ChatRequest, { kind: "new" }>): Promise<string> {
   const added: string[] = [];
   const skipped: string[] = [];
   for (const i of req.intents) {
@@ -136,10 +142,11 @@ async function applyNew(root: string, trace: Trace, req: Extract<ChatRequest, { 
       try { status = parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { /* keep unreadable */ }
       if (!i.update || status !== "draft") { skipped.push(`${i.slug} (it already exists and is ${status})`); continue; }
     }
-    mkdirSync(dir, { recursive: true });
-    await Bun.write(path, i.text);
-    markWritten(root, req, i.slug);
-    await new Git(root).commitPaths([`intent/${i.slug}`], bookkeeping(`loopstra(${i.slug}): ${i.update ? "update" : "open"} intent from chat`));
+    await commitRecord(root, main, i.slug, `${i.update ? "update" : "open"} intent from chat`, async () => {
+      mkdirSync(dir, { recursive: true });
+      await Bun.write(path, i.text);
+      markWritten(root, req, i.slug);
+    });
     trace.event(i.slug, "chat-request", { id: req.id, kind: "new", by: req.byName, update: i.update });
     added.push(i.slug);
   }

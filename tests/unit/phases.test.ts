@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, ownTime, projectCommand, setPhaseBoundary, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { onMain, oneMerge } from "../../src/lanes";
+import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
 import { AssistantUnavailable, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
@@ -371,49 +371,18 @@ describe("alongside", () => {
   /** A command that runs far longer than any test waits, so a test that ends in time saw it cancelled. */
   const LONG = `bun -e "setTimeout(() => {}, 30000)"`;
 
-  test("starts both before either finishes; the boundary runs once before them and never while both run", async () => {
+  test("starts both before either finishes", async () => {
     const { repo, ctx, trace } = await setup();
     const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    try {
-      const r = await alongside(
-        ctx,
-        () => codePhase(ctx, "a", async () => { log.push("a start"); await tick(30); log.push("a end"); return { ok: true as const, v: 1 }; }),
-        { what: "b", run: () => codePhase(ctx, "b", async () => { log.push("b start"); await tick(5); log.push("b end"); return { ok: true as const, v: 2 }; }), wanted: () => true },
-      );
-      expect(r.map((x) => x && x.ok && x.v)).toEqual([1, 2]);
-      expect(log).toEqual(["boundary", "a start", "b start", "b end", "a end"]);
-      // Outside a group the boundary runs before each phase again.
-      await codePhase(ctx, "c", async () => ({ ok: true as const }));
-      expect(log.at(-1)).toBe("boundary");
-    } finally {
-      setPhaseBoundary(null);
-    }
-    trace.close(); repo.cleanup();
-  });
-
-  test("a phase that starts once the other work has ended gets the boundary; work outside the group always does", async () => {
-    const { repo, ctx, trace } = await setup();
-    const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    try {
-      const group = alongside(
-        ctx,
-        async () => {
-          await codePhase(ctx, "a", async () => { log.push("a"); return { ok: true as const }; });
-          await tick(60); // b has ended by now: a retry-like second phase may merge again
-          return codePhase(ctx, "a2", async () => { log.push("a2"); return { ok: true as const }; });
-        },
-        { what: "b", run: () => codePhase(ctx, "b", async () => { log.push("b"); await tick(20); return { ok: true as const }; }), wanted: () => true },
-      );
-      // Another change's phase, on its own call chain while the group runs: not part of the group.
-      await tick(5);
-      await codePhase(ctx, "other", async () => { log.push("other"); return { ok: true as const }; });
-      await group;
-      expect(log).toEqual(["boundary", "a", "b", "boundary", "other", "boundary", "a2"]);
-    } finally {
-      setPhaseBoundary(null);
-    }
+    let bStarted = () => {};
+    const started = new Promise<void>((r) => { bStarted = r; });
+    const r = await alongside(
+      ctx,
+      () => codePhase(ctx, "a", async () => { log.push("a start"); await started; log.push("a end"); return { ok: true as const, v: 1 }; }),
+      { what: "b", run: () => codePhase(ctx, "b", async () => { log.push("b start"); bStarted(); log.push("b end"); return { ok: true as const, v: 2 }; }), wanted: () => true },
+    );
+    expect(r.map((x) => x && x.ok && x.v)).toEqual([1, 2]);
+    expect(log.indexOf("b start")).toBeLessThan(log.indexOf("a end"));
     trace.close(); repo.cleanup();
   });
 
@@ -432,34 +401,25 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("alongsideFirst returns once main wants the extra; no boundary runs in the extra until rest is called", async () => {
+  test("alongsideFirst returns once main wants the extra, while the extra still runs; rest waits for it", async () => {
     const { repo, ctx, trace } = await setup();
     const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    try {
-      let mayRetry: () => void = () => {};
-      const retry = new Promise<void>((r) => { mayRetry = r; });
-      const b = await alongsideFirst(ctx, async () => "pass", {
-        what: "b", wanted: (m) => m === "pass",
-        run: async () => {
-          await codePhase(ctx, "b", async () => { log.push("b"); return { ok: true as const }; });
-          await retry; // a retry-like second phase, started after main ended
-          await codePhase(ctx, "b2", async () => { log.push("b2"); return { ok: true as const }; });
-          return 2;
-        },
-      });
-      expect(b.result).toBe("pass");
-      log.push("main recorded");
-      mayRetry();
-      await tick(30);
-      // b2 ran without a boundary: main still counts as running until rest is called.
-      expect(log).toEqual(["boundary", "b", "main recorded", "b2"]);
-      expect(await b.rest()).toBe(2);
-      await codePhase(ctx, "c", async () => ({ ok: true as const }));
-      expect(log).toEqual(["boundary", "b", "main recorded", "b2", "boundary"]);
-    } finally {
-      setPhaseBoundary(null);
-    }
+    let mayFinish: () => void = () => {};
+    const finish = new Promise<void>((r) => { mayFinish = r; });
+    const b = await alongsideFirst(ctx, async () => "pass", {
+      what: "b", wanted: (m) => m === "pass",
+      run: async () => {
+        await codePhase(ctx, "b", async () => { log.push("b"); return { ok: true as const }; });
+        await finish; // still running when main's result is recorded
+        await codePhase(ctx, "b2", async () => { log.push("b2"); return { ok: true as const }; });
+        return 2;
+      },
+    });
+    expect(b.result).toBe("pass");
+    log.push("main recorded");
+    mayFinish();
+    expect(await b.rest()).toBe(2);
+    expect(log).toEqual(["b", "main recorded", "b2"]);
     trace.close(); repo.cleanup();
   });
 
@@ -514,40 +474,6 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("inside other alongside work (a judge's shadow in the early review), no boundary runs while the outer work runs", async () => {
-    const { repo, ctx, trace } = await setup();
-    const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    // Signals rather than sleeps, so a slow machine keeps the order: verify runs until strong-retry has
-    // started, and strong-retry starts only after the cheaper one has ended.
-    let retryStarted = () => {};
-    const retrying = new Promise<void>((r) => { retryStarted = r; });
-    let cheapEnded = () => {};
-    const cheapDone = new Promise<void>((r) => { cheapEnded = r; });
-    try {
-      await alongside(
-        ctx,
-        () => codePhase(ctx, "verify", async () => { log.push("verify"); await retrying; return { ok: true as const }; }),
-        {
-          what: "early review", wanted: () => true,
-          run: () => alongside(
-            ctx,
-            async () => {
-              await codePhase(ctx, "strong", async () => { log.push("strong"); return { ok: true as const }; });
-              await cheapDone; // the cheaper one has ended, but verify still runs: no merge yet
-              return codePhase(ctx, "strong-retry", async () => { log.push("strong-retry"); retryStarted(); return { ok: true as const }; });
-            },
-            { what: "cheap", run: () => codePhase(ctx, "cheap", async () => { log.push("cheap"); return { ok: true as const }; }).finally(cheapEnded), wanted: () => true },
-          ),
-        },
-      );
-      expect(log).toEqual(["boundary", "verify", "strong", "cheap", "strong-retry"]);
-    } finally {
-      setPhaseBoundary(null);
-    }
-    trace.close(); repo.cleanup();
-  });
-
   test("cancelling outer extra work cancels both pieces of the alongside work inside it", async () => {
     const { repo, ctx, trace } = await setup();
     const started = Date.now();
@@ -577,35 +503,6 @@ describe("alongside", () => {
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AssistantUnavailable);
     expect(readPause(repo.path)?.failures).toBe(2);
-    trace.close(); repo.cleanup();
-  });
-
-  test("a shadow inside alongsideFirst's main (spec-check beside the plan written ahead) gets no boundary while the plan runs", async () => {
-    const { repo, ctx, trace } = await setup();
-    const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    try {
-      const b = await alongsideFirst(
-        ctx,
-        () => alongside(
-          ctx,
-          async () => {
-            await codePhase(ctx, "strong", async () => { log.push("strong"); return { ok: true as const }; });
-            await tick(40); // the cheaper one has ended, but the plan still runs: no merge yet
-            return codePhase(ctx, "strong-retry", async () => { log.push("strong-retry"); return { ok: true as const }; });
-          },
-          { what: "cheap", run: () => codePhase(ctx, "cheap", async () => { log.push("cheap"); return { ok: true as const }; }), wanted: () => true },
-        ),
-        { what: "plan ahead", wanted: () => true, run: () => codePhase(ctx, "plan", async () => { log.push("plan"); await tick(150); return { ok: true as const }; }) },
-      );
-      expect(b.result[0].ok).toBe(true);
-      await b.rest();
-      expect(log.filter((l) => l === "boundary")).toEqual(["boundary"]);
-      expect(log[0]).toBe("boundary");
-      expect(log).toContain("strong-retry");
-    } finally {
-      setPhaseBoundary(null);
-    }
     trace.close(); repo.cleanup();
   });
 
@@ -675,67 +572,63 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("a group belongs to its own step: a group in change A does not stop change B's boundary", async () => {
-    const { repo, ctx, trace } = await setup();
-    const b = new StepContext(repo.path, ctx.cfg, trace, await readIntent(repo.path, "x"));
-    const log: string[] = [];
-    setPhaseBoundary(async (c) => { log.push(c === ctx ? "boundary A" : "boundary B"); });
-    let open = () => {};
-    const held = new Promise<void>((r) => { open = r; });
-    try {
-      const group = alongside(ctx, () => held.then(() => 1), { what: "a2", run: () => held.then(() => 2), wanted: () => true });
-      await tick(5);
-      await codePhase(b, "b", async () => ({ ok: true as const }));
-      expect(log).toEqual(["boundary A", "boundary B"]);
-      open();
-      await group;
-    } finally {
-      open();
-      setPhaseBoundary(null);
-    }
-    trace.close(); repo.cleanup();
-  });
-
-  test("the boundary does nothing while the step holds the merge lock or a main lock", async () => {
-    const { repo, ctx, trace } = await setup();
-    const log: string[] = [];
-    setPhaseBoundary(async () => { log.push("boundary"); });
-    try {
-      await oneMerge.run(() => codePhase(ctx, "under-merge", async () => ({ ok: true as const })), ctx.slug);
-      await onMain(repo.path, () => codePhase(ctx, "under-main", async () => ({ ok: true as const })));
-      expect(log).toEqual([]);
-      await codePhase(ctx, "free", async () => ({ ok: true as const }));
-      expect(log).toEqual(["boundary"]);
-    } finally {
-      setPhaseBoundary(null);
-    }
-    trace.close(); repo.cleanup();
-  });
-
-  test("alongside under a lock, or a session under a main lock, is a programming error", async () => {
+  test("alongside under a lock, or a session under a checkout lock, is a programming error", async () => {
     const { repo, ctx, trace } = await setup();
     const pair = () => alongside(ctx, async () => 1, { what: "two", run: async () => 2, wanted: () => true });
     expect(String(await oneMerge.run(pair, ctx.slug).catch((e: unknown) => e))).toContain("programming error");
-    expect(String(await onMain(repo.path, pair).catch((e: unknown) => e))).toContain("programming error");
+    expect(String(await onCheckout(repo.path, pair).catch((e: unknown) => e))).toContain("programming error");
     const first = () => alongsideFirst(ctx, async () => 1, { what: "two", run: async () => 2, wanted: () => true });
-    expect(String(await onMain(repo.path, first).catch((e: unknown) => e))).toContain("programming error");
-    expect(String(await onMain(repo.path, () => intake(ctx)).catch((e: unknown) => e))).toContain("programming error");
+    expect(String(await onCheckout(repo.path, first).catch((e: unknown) => e))).toContain("programming error");
+    expect(String(await onCheckout(repo.path, () => intake(ctx)).catch((e: unknown) => e))).toContain("programming error");
     expect(trace.phases("x")).toEqual([]);
     // Sessions may run under the merge lock (the merge checks run fix sessions).
     expect((await oneMerge.run(() => intake(ctx), ctx.slug)).ok).toBe(true);
     trace.close(); repo.cleanup();
   });
+});
 
-  test("ownTime leaves out the phase boundary run inside it", async () => {
+describe("the step's snapshot of main", () => {
+  test("a read-only session runs in a snapshot of main's last commit, never the main checkout or its uncommitted files", async () => {
     const { repo, ctx, trace } = await setup();
-    setPhaseBoundary(async () => { await tick(300); });
+    const args = join(repo.path, "..", `args-${Date.now()}.json`);
+    const restore = setEnv({ LOOPSTRA_FAKE_ARGS: args });
     try {
-      const { value, ms } = await ownTime(() => codePhase(ctx, "a", async () => { await tick(50); return { ok: true as const }; }));
-      expect(value.ok).toBe(true);
-      expect(ms).toBeLessThan(250);
+      await Bun.write(join(repo.path, "uncommitted.md"), "a person's work in progress\n");
+      const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent: "" } });
+      expect(r.ok).toBe(true);
+      const snapshot = join(repo.path, ".loopstra", "snapshots", "x");
+      expect(realPathKey((await Bun.file(args).json() as { cwd: string }).cwd)).toBe(realPathKey(snapshot));
+      expect(existsSync(join(snapshot, "intent", "x", "intent.md"))).toBe(true);
+      expect(existsSync(join(snapshot, "uncommitted.md"))).toBe(false);
+      expect((await new Git(snapshot).run(["rev-parse", "HEAD"])).out.trim()).toBe(await ctx.readCommit());
+      // Every session of the step reads the same commit, however main moves meanwhile.
+      const commit = await ctx.readCommit();
+      await Bun.write(join(repo.path, "later.md"), "later\n");
+      await new Git(repo.path).commitAll("main moves on");
+      await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent: "" } });
+      expect(await ctx.readCommit()).toBe(commit);
+      expect(existsSync(join(snapshot, "later.md"))).toBe(false);
+      await ctx.dropSnapshot();
+      expect(existsSync(snapshot)).toBe(false);
+      expect((await new Git(repo.path).run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)).toHaveLength(1);
     } finally {
-      setPhaseBoundary(null);
+      restore();
+      rmSync(args, { force: true });
+      trace.close(); repo.cleanup();
     }
-    trace.close(); repo.cleanup();
+  });
+
+  test("two sessions asking for the snapshot at once share one; a session with a cwd of its own makes none", async () => {
+    const { repo, ctx, trace } = await setup();
+    const intake = (c: StepContext) => agentPhase(c, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent: "" } });
+    try {
+      const own = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: { intent: "" }, cwd: repo.path });
+      expect(own.ok).toBe(true);
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
+      const [a, b] = await alongside(ctx, () => intake(ctx), { what: "two", run: () => intake(ctx), wanted: () => true });
+      expect(a.ok && b?.ok).toBe(true);
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x", "intent", "x", "intent.md"))).toBe(true);
+      await ctx.dropSnapshot();
+    } finally { trace.close(); repo.cleanup(); }
   });
 });

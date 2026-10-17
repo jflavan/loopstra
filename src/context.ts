@@ -1,16 +1,23 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
-import { bookkeeping, Git } from "./git";
-import { onMain } from "./lanes";
+import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
+import { onCheckout } from "./lanes";
 import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
+import { throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
-import { errorText } from "./shell";
+
+/** The folder that holds each change's snapshot of main (see StepContext.snapshot). */
+export function snapshotsDir(root: string): string {
+  return join(root, ".loopstra", "snapshots");
+}
 
 export class StepContext {
   readonly git: Git;
-  /** The step was started by the between-phases merge, inside another change's step (see mergeReadyChanges). */
-  betweenPhases = false;
+  /** The commit this step's read-only sessions read, once asked for (see readCommit). */
+  private reading: Promise<string> | null = null;
+  /** The step's snapshot, once asked for (see snapshot). */
+  private made: Promise<string> | null = null;
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
@@ -24,11 +31,50 @@ export class StepContext {
   get worktreeDir(): string { return join(this.root, ".loopstra", "worktrees", this.slug); }
   get branch(): string { return `intent/${this.slug}`; }
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
+
+  /**
+   * The commit this step's read-only sessions read: main's when the step first asks. It stays the
+   * same for every session of the step, so another change merging meanwhile never changes what one
+   * step reads.
+   */
+  readCommit(): Promise<string> {
+    if (!this.reading) {
+      const p = this.git.run(["rev-parse", "--verify", `${this.cfg.main_branch}^{commit}`]).then((r) => r.out.trim());
+      p.catch(() => { if (this.reading === p) this.reading = null; }); // a failure is not kept: the next ask tries again
+      this.reading = p;
+    }
+    return this.reading;
+  }
+
+  /**
+   * Where the step's read-only sessions run: a detached worktree of readCommit
+   * (`.loopstra/snapshots/<slug>`), made the first time a session asks, so none sees the main
+   * checkout's uncommitted files or main moving. Removed when the step ends (see dropSnapshot).
+   */
+  snapshot(): Promise<string> {
+    if (!this.made) {
+      const dir = join(snapshotsDir(this.root), this.slug);
+      const p = this.readCommit().then(async (sha) => { await addDetachedWorktree(this.git, dir, sha); return dir; });
+      p.catch(() => { if (this.made === p) this.made = null; });
+      this.made = p;
+    }
+    return this.made;
+  }
+
+  /** Removes the step's snapshot, if it made one. */
+  async dropSnapshot(): Promise<void> {
+    const made = this.made;
+    this.made = null;
+    this.reading = null;
+    if (!made) return;
+    const dir = await made.catch(() => null);
+    if (dir) await removeWorktree(this.git, dir);
+  }
 }
 
 /**
- * `waiting`: the step only looked (for example at a pull request) and nothing changed; another
- * change may run in the same tick. `personChanged`: a person set the status while the step ran, so
+ * `waiting`: the step only looked at a pull request (the watcher's steps) and nothing changed; it
+ * looks again later. `personChanged`: a person set the status while the step ran, so
  * the step ended without writing anything over it; the next tick picks up their status.
  */
 export type StepResult = { ok: true; waiting?: boolean; personChanged?: boolean } | { ok: false; note: string };
@@ -62,32 +108,41 @@ export class MainCheckoutMoved extends Error {
   }
 }
 
-/** Throws MainCheckoutMoved unless the repository root is on `main_branch`. */
-export async function assertRootOnMain(ctx: StepContext): Promise<void> {
+/** Throws MainCheckoutMoved unless the checkout at `git` is on `main` (a stop request or a git error passes through). */
+async function assertOnMain(git: Git, main: string): Promise<void> {
   try {
-    await ctx.git.assertBranch(ctx.cfg.main_branch);
+    await git.assertBranch(main);
   } catch (e) {
-    throw new MainCheckoutMoved(errorText(e));
+    if (e instanceof WrongBranchError) throw new MainCheckoutMoved(e.message);
+    throw e;
   }
 }
 
 /**
- * Commits the change's folder on the main branch, with the generated queue.md along (the queue is
- * never committed on its own). The tick shares main with the remote once, at its end. Refuses when
- * the root is on any other branch.
+ * Writes a change's record on main and commits it: every record (statuses, artifacts, a person's
+ * edits, chat's drafts, the main-health draft) is written this one way. One checkout-lock section:
+ * the checkout must be on main (MainCheckoutMoved otherwise, since a record written into another
+ * branch's checkout would land on that branch); `write` writes files under intent/<slug> (it may
+ * give false: nothing to commit after all); then they are committed with the generated queue.md,
+ * which is never committed on its own. Once writing has begun the commit is not stopped by a stop
+ * request (only bounded by git's time limit), so a stop never leaves a record written but not
+ * committed. The tick shares main with the remote once, at its end. False when nothing was committed.
  */
-export async function commitArtifacts(ctx: StepContext, what: string): Promise<void> {
-  await assertRootOnMain(ctx);
-  await ctx.git.commitPaths([`intent/${ctx.slug}`, "intent/queue.md"], bookkeeping(`loopstra(${ctx.slug}): ${what}`));
+export function commitRecord(root: string, main: string, slug: string, what: string, write: () => Promise<boolean | void> = async () => {}): Promise<boolean> {
+  return onCheckout(root, async () => {
+    const git = new Git(root);
+    await assertOnMain(git, main);
+    throwIfStopping();
+    if ((await write()) === false) return false;
+    return git.commitPaths([`intent/${slug}`, "intent/queue.md"], bookkeeping(`loopstra(${slug}): ${what}`), { finish: true });
+  });
 }
 
 /**
- * Writes frontmatter keys for the runtime: only on main, re-read from disk right before writing,
- * and never over a status a person set while the step ran (throws PersonChangedStatus instead).
+ * Writes frontmatter keys for the runtime (inside commitRecord), re-read from disk right before
+ * writing, never over a status a person set while the step ran (throws PersonChangedStatus instead).
  */
 async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
-  // Check before writing: a status written into another branch's checkout would land on that branch.
-  await assertRootOnMain(ctx);
   const expected = ctx.intent.file.frontmatter.status;
   if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }))) {
     const found = (await readIntent(ctx.root, ctx.slug)).file.frontmatter.status;
@@ -95,23 +150,18 @@ async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["fro
   }
 }
 
-/**
- * Writes the status and commits it. One main-lock section, from the branch check to the commit, so
- * no other change's sync, commit or merge lands in between: a sync would find the status written
- * but not committed and wait, and the branch check would find main half rebased.
- */
+/** Writes the status and commits it (see commitRecord). */
 export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
-  await onMain(ctx.root, async () => {
-    const from = ctx.intent.file.frontmatter.status;
-    const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
-    // resume_from always follows the approved state being left, even if it was already set:
-    // a person may have set an approved status by hand, and the marker must follow.
-    if (APPROVED.has(status)) patch.resume_from = status;
-    else if (APPROVED.has(from)) patch.resume_from = from;
+  const from = ctx.intent.file.frontmatter.status;
+  const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
+  // resume_from always follows the approved state being left, even if it was already set:
+  // a person may have set an approved status by hand, and the marker must follow.
+  if (APPROVED.has(status)) patch.resume_from = status;
+  else if (APPROVED.has(from)) patch.resume_from = from;
+  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${from} → ${status}`, async () => {
     await writeForStep(ctx, patch);
     ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
     ctx.trace.statusChange(ctx.slug, from, status, note);
-    await commitArtifacts(ctx, `${from} → ${status}`);
   });
 }
 
@@ -198,14 +248,17 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
   return existsSync(p) ? await Bun.file(p).text() : null;
 }
 
-/** Writes an artifact on main and commits it, as one main-lock section (see setStatus). */
+/** Writes an artifact on main and commits it (see commitRecord). */
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
-  await onMain(ctx.root, async () => {
-    await assertRootOnMain(ctx);
+  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `write ${name}`, async () => {
     await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
     ctx.intent.artifacts.add(name);
-    await commitArtifacts(ctx, `write ${name}`);
   });
+}
+
+/** Commits the change's own folder on main as it is now (a person's uncommitted edits to it); nothing else is touched. */
+export async function recordPersonEdits(ctx: StepContext): Promise<void> {
+  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, "record edits made by a person");
 }
 
 /** Run-folder file: the agent sessions to resume, by key. */
@@ -233,18 +286,16 @@ export function clearSession(ctx: StepContext, key: string): void {
 
 /**
  * Records a priority only when the owner stated none; an owner's own priority is never overwritten.
- * It is committed at once, as one main-lock section: left unsaved through the design session, it
- * would hold up another change's sync or merge (main would have unsaved changes).
+ * It is committed at once (see commitRecord): left unsaved through the design session, it would
+ * hold up a sync or a merge (main would have unsaved changes).
  */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
-  await onMain(ctx.root, async () => {
-    await assertRootOnMain(ctx);
+  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, "record priority", async () => {
     // The owner may have stated one while the step ran: read what the file says now.
     const now = await readIntent(ctx.root, ctx.slug);
     if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
-    if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return; }
+    if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return false; }
     await writeForStep(ctx, { priority });
     ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
-    await commitArtifacts(ctx, "record priority");
   });
 }
