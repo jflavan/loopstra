@@ -5,7 +5,7 @@ import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
 import type { Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
-import { agentPhase, alongsideFirst, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, alongsideFirst, phasePrompt, withNote, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
@@ -104,10 +104,12 @@ export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext,
 /** One writing session (or an answer written earlier, see take): the artifact is written, then the after commands run. */
 async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, findings: string): Promise<StepResult> {
   // A person's note from sending the change back comes first; the check's findings (a rewrite) after it.
-  const all = [sentBackNote(ctx), findings].filter(Boolean).join("\n\n");
+  const sentBack = sentBackNote(ctx);
+  const all = [sentBack, findings].filter(Boolean).join("\n\n");
   const phase = writerPhase(ctx, s, await artifacts(ctx), all);
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent.
-  const prompt = await phasePrompt(ctx, phase);
+  // The note reaches the session even through an older prompt file without {{findings}}.
+  const prompt = withNote(await phasePrompt(ctx, phase), sentBack, sentBack);
   const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
   if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, s.artifact, s.text(r.envelope));

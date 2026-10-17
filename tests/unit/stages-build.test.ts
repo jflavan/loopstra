@@ -80,6 +80,22 @@ describe("build stage", () => {
     }
   });
 
+  test("a repository's older build.md without {{feedback}} still gives the session the note", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      const path = join(repo.path, "loopstra", "prompts", "build.md");
+      const old = (await Bun.file(path).text()).replace(/A person's notes on an earlier build[^\n]*\r?\n\r?\n\{\{feedback\}\}\r?\n\r?\n/, "");
+      expect(old).not.toContain("{{feedback}}");
+      await Bun.write(path, old);
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\nCover negative numbers too.\n");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with speed.parallel_checks, test, lint and build start together inside one test phase", async () => {
     const m = meeting({ test: 0, lint: 0 });
     const { repo, ctx, trace } = await planned({ test: m.test, lint: m.lint, build: "echo built" }, "speed:\n  parallel_checks: true\n");

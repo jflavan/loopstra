@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { attention } from "../../src/attention";
 import { renderStatus } from "../../src/commands/status";
 import { configPath, loadConfig } from "../../src/config";
-import { holdLoop } from "../../src/heartbeat";
+import { holdLoop, pauseAfterUnavailable } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -131,6 +131,8 @@ describe("attention", () => {
       await intent(t.path, "a", "status: building\nhold: waiting for legal (John, the dashboard)");
       await intent(t.path, "d", "status: done\nhold: left over");
       holdLoop(t.path, "John");
+      // An outage's pause as well: two items, never one key.
+      pauseAfterUnavailable(t.path);
       const trace = Trace.open(t.path, () => {});
       try {
         const items = await attention(t.path, await loadConfig(t.path), trace, new Date());
@@ -139,9 +141,11 @@ describe("attention", () => {
           what: "Held: waiting for legal (John, the dashboard). The loop starts no step for it until it is released, in the console or by removing the hold line from intent.md.",
         }]);
         expect(items[0]).toEqual({
-          kind: "paused", label: "Paused", slug: null, title: "Loopstra is paused",
-          what: "Paused by John: running steps finish, nothing new starts. Resume it in the console, or delete .loopstra/hold.json.",
+          kind: "paused", label: "Paused", slug: null, title: "Paused by John",
+          what: "Nothing new starts until it is resumed. Resume it in the console, or delete .loopstra/hold.json.",
         });
+        const paused = items.filter((i) => i.kind === "paused");
+        expect(paused.map((i) => i.title)).toEqual(["Paused by John", "Loopstra is paused"]);
       } finally {
         trace.close();
       }

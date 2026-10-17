@@ -59,6 +59,22 @@ describe("design stage", () => {
     }
   });
 
+  test("a repository's older design.md without {{findings}} still gives the session the note", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const path = join(repo.path, "loopstra", "prompts", "design.md");
+      await Bun.write(path, (await Bun.file(path).text()).replaceAll("{{findings}}", ""));
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runDesignStep(ctx);
+      const design = trace.phases("add-numbers").find((p) => p.name === "design")!;
+      const prompt = await Bun.file(join(ctx.runDir, "phases", `${design.seq}-design`, "prompt.md")).text();
+      expect(prompt).toContain("A person sent the earlier version back with this note:\nCover negative numbers too.");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with no human gate, accepted → spec-approved in one step: spec written, checks run in the same step", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     const r = await runDesignStep(ctx);

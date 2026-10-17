@@ -164,6 +164,15 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promi
   return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
 }
 
+/**
+ * A rendered prompt with `text` added at its end when it does not hold `note` already: a repository's
+ * own prompt file may be older than the variable that carries the note (init never upgrades one).
+ */
+export function withNote(prompt: string | null, note: string, text: string): string | null {
+  if (prompt === null || !note || prompt.includes(note)) return prompt;
+  return `${prompt}\n\n${text}\n`;
+}
+
 /** Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it. */
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
   const prompt = rendered === undefined ? await phasePrompt(ctx, spec) : rendered;

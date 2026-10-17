@@ -1,6 +1,6 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
-import { activePause, agoText, loopHoldText, readLoopHold } from "./heartbeat";
+import { activePause, agoText, readLoopHold } from "./heartbeat";
 import { dependencyWait, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
@@ -60,9 +60,10 @@ export async function attention(root: string, config: Config | { problem: string
   const items: AttentionItem[] = [];
   const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what });
 
-  // A person paused the loop: nothing new starts until they resume it.
+  // A person paused the loop: nothing new starts until they resume it. Titled apart from an outage's
+  // pause, so the two are two items; worded for a loop that is stopped as much as one running.
   const loopHold = readLoopHold(root);
-  if (loopHold) add("paused", null, "Loopstra is paused", `${loopHoldText(loopHold)} Resume it in the console, or delete .loopstra/hold.json.`);
+  if (loopHold) add("paused", null, `Paused by ${loopHold.by}`, "Nothing new starts until it is resumed. Resume it in the console, or delete .loopstra/hold.json.");
 
   const pause = activePause(root, now);
   if (pause) add("paused", null, "Loopstra is paused", pause.reason);
