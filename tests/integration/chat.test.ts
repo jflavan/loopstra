@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
-import { pendingRequests, takeResults } from "../../src/chat/requests";
+import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { ChatService, type Transport } from "../../src/chat/service";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
@@ -99,15 +99,14 @@ describe("chat with the loop", () => {
   test("a request whose commit failed is finished on the next tick, not mistaken for someone else's edit", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
-      const { submitRequest } = await import("../../src/chat/requests");
-      const { writeJson, chatDir } = await import("../../src/chat/threads");
-      const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", transport: "terminal", thread: "local" });
-      const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", transport: "terminal", thread: "local" });
+      const { writeJson } = await import("../../src/chat/threads");
+      const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       // As if an earlier tick wrote both files and then failed to commit.
       await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
       await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
-      writeJson(join(chatDir(r.root), "requests", `${accept.id}.json`), { ...accept, written: ["a"] });
-      writeJson(join(chatDir(r.root), "requests", `${added.id}.json`), { ...added, written: ["c"] });
+      writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"] });
+      writeJson(join(requestsDir(r.root), `${added.id}.json`), { ...added, written: ["c"] });
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
         "Started a. I will say here when it needs anyone, and when it is done.",
@@ -122,8 +121,7 @@ describe("chat with the loop", () => {
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
     try {
-      const { submitRequest } = await import("../../src/chat/requests");
-      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", transport: "slack", thread: "C1:1.0" });
+      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "Slack", transport: "slack", thread: "C1:1.0" });
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal", "dashboard"]))).toEqual([]);
       expect(takeResults(r.root, new Set(["slack"])).map((x) => x.thread)).toEqual(["C1:1.0"]);

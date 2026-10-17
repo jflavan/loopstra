@@ -13,7 +13,7 @@ import { Trace } from "../trace";
 import { AnnouncementLog } from "./announcer";
 import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
-import { submitRequest } from "./requests";
+import { submitRequest } from "../requests";
 import { OrchestratorTurn, type Handoff } from "./schemas";
 import { ThreadStore, threadKey, type ThreadState } from "./threads";
 
@@ -275,7 +275,7 @@ export class Orchestrator {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can start work, so I have not started ${slug}.`); return; }
     const st = await this.statusOf(slug);
     if (st !== "draft") { await say(`${slug} is ${st ?? "not in the main code"} now, not a draft, so I have not started it.`); return; }
-    submitRequest(this.root, { kind: "accept", slug, by: m.authorId, byName: m.authorName, transport: m.transport, thread: m.thread });
+    submitRequest(this.root, { kind: "accept", slug, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
     await say(`Asked the loop to start ${slug}. ${this.loopWhen(cfg, "starts it")}`);
   }
 

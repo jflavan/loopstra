@@ -6,7 +6,7 @@ import { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
 import { Orchestrator, type IncomingMessage } from "./orchestrator";
-import { takeResults } from "./requests";
+import { takeResults } from "../requests";
 import { chatDir, readJson, writeJson } from "./threads";
 
 /** What a transport hands the service for each message a person sends. */

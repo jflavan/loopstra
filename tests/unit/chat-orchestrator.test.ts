@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator, isYes } from "../../src/chat/orchestrator";
-import { pendingRequests } from "../../src/chat/requests";
+import { pendingRequests } from "../../src/requests";
 import { holdLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
