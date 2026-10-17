@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHANGE_ACTIONS } from "../actions";
 import { PRIORITIES } from "../intents";
 
 /** What the orchestrator may hand to the writer: everything agreed, and the drafts it changes. */
@@ -12,11 +13,24 @@ export const Handoff = z.object({
 });
 export type Handoff = z.infer<typeof Handoff>;
 
-/** One orchestrator turn. `handoff` and `accept` are proposals; the runtime asks a person before acting on either. */
+/** The actions chat may propose on a change (start is `accept`, below). */
+export const ACTION_KINDS = CHANGE_ACTIONS;
+
+/** An action the orchestrator proposes; the runtime asks the person before submitting it. `note`: send back's note, hold's reason, or the status a retry starts from. */
+export const ProposedAction = z.object({
+  kind: z.enum(ACTION_KINDS),
+  slug: z.string(),
+  note: z.string(),
+  priority: z.enum(PRIORITIES).nullable(),
+});
+export type ProposedAction = z.infer<typeof ProposedAction>;
+
+/** One orchestrator turn. `handoff`, `accept` and `action` are proposals; the runtime asks a person before acting on any. */
 export const OrchestratorTurn = z.object({
   reply: z.string(),
   handoff: Handoff.nullable(),
   accept: z.object({ slug: z.string() }).nullable(),
+  action: ProposedAction.nullable(),
 });
 export type OrchestratorTurn = z.infer<typeof OrchestratorTurn>;
 

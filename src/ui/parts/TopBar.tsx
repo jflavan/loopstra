@@ -1,5 +1,6 @@
 import { pillText, usd } from "../format";
 import { keyLabel, onMac } from "../keys";
+import { setLoopHeld } from "../requests";
 import { inbox, loop, openDrawer, paletteOpen, totals } from "../store";
 import { cycleTheme, theme } from "../theme";
 import { Icon } from "./Icon";
@@ -18,6 +19,13 @@ export function TopBar() {
       </span>
       <span class="grow" />
       {t && <span class="muted hide-narrow" title="Spent today, chat included">{usd(t.todayUsd)} today</span>}
+      {l && (
+        <button class="ghost" onClick={() => void setLoopHeld(!l.held)}
+          title={l.held ? `Paused by ${l.held.by}. Resume: the loop goes on.` : "Pause the loop: running steps finish, nothing new starts."}
+          aria-label={l.held ? "Resume the loop" : "Pause the loop"}>
+          <Icon name={l.held ? "play" : "pause"} /><span class="hide-narrow">{l.held ? "Resume" : "Pause"}</span>
+        </button>
+      )}
       <button class="ghost" onClick={() => { paletteOpen.value = true; }} title={`Search and commands (${keyLabel("mod+k", onMac)})`}>
         <Icon name="search" /><span class="hide-narrow">Search</span><kbd class="hide-narrow">{keyLabel("mod+k", onMac)}</kbd>
       </button>

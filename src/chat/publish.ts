@@ -7,7 +7,7 @@ import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import type { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
-import { submitRequest } from "./requests";
+import { submitRequest } from "../requests";
 import type { Handoff } from "./schemas";
 import { chatDir, oneLine } from "./threads";
 import { writeIntents, type WrittenIntent } from "./writer";
@@ -75,7 +75,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       if (!w.ok) return { kind: "failed", problem: w.problem, budget: w.budget };
       submitRequest(o.root, {
         kind: "new", title: o.handoff.title, intents: w.intents.map((i) => ({ slug: i.slug, text: i.text, update: i.update })),
-        by: o.authorId, byName: o.author, transport: o.transport, thread: o.thread,
+        by: o.authorId, byName: o.author, via: o.via, transport: o.transport, thread: o.thread,
       });
       done = { kind: "local", intents: w.intents };
       note({ kind: "new", slugs: w.intents.map((i) => i.slug), by: o.author });

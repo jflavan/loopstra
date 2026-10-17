@@ -9,7 +9,7 @@ import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/early-review";
 import { PR_LEASE, PR_PUSHING, REMOTE_AHEAD } from "../../src/stages/shared";
-import { readMarker, writeMarker } from "../../src/context";
+import { readMarker, writeMarker, writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -59,6 +59,60 @@ function meeting(codes: { test: number; lint: number }): { test: string; lint: s
 const LONG = `bun -e "setTimeout(() => {}, 30000)"`;
 
 describe("build stage", () => {
+  test("a change sent back with a note gives the note to the next build session, once; with none, the prompt says so", async () => {
+    const first = await planned({ test: "echo ok" });
+    try {
+      await runBuildStep(first.ctx);
+      expect(await promptOf(first.ctx.runDir, first.trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\n(none)");
+    } finally {
+      first.trace.close();
+      first.repo.cleanup();
+    }
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("Cover negative numbers too.");
+      expect(existsSync(join(ctx.runDir, "sent-back.md"))).toBe(false);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
+  test("a repository's older build.md without {{feedback}} still gives the session the note", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      const path = join(repo.path, "loopstra", "prompts", "build.md");
+      const old = (await Bun.file(path).text()).replace(/A person's notes on an earlier build[^\n]*\r?\n\r?\n\{\{feedback\}\}\r?\n\r?\n/, "");
+      expect(old).not.toContain("{{feedback}}");
+      await Bun.write(path, old);
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\nCover negative numbers too.\n");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
+  test("an older build.md gives the session the note even when the plan holds the same words", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), PLAN.replace("1. x", "1. Use zod."));
+      await new Git(repo.path).commitAll("plan says it");
+      await ctx.reload();
+      const path = join(repo.path, "loopstra", "prompts", "build.md");
+      await Bun.write(path, (await Bun.file(path).text()).replace(/A person's notes on an earlier build[^\n]*\r?\n\r?\n\{\{feedback\}\}\r?\n\r?\n/, ""));
+      writeSentBack(repo.path, "add-numbers", "Use zod.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\nUse zod.\n");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with speed.parallel_checks, test, lint and build start together inside one test phase", async () => {
     const m = meeting({ test: 0, lint: 0 });
     const { repo, ctx, trace } = await planned({ test: m.test, lint: m.lint, build: "echo built" }, "speed:\n  parallel_checks: true\n");
@@ -294,7 +348,8 @@ describe("the first review alongside the verifier", () => {
     } finally {
       restore();
     }
-  });
+    // A whole build step and a merge step, with two-second sessions: a slow Windows runner needs more than 30 s.
+  }, 90_000);
 
   test("it reads a throwaway copy of the tested commit, not the worktree the verifier runs commands in", async () => {
     const t = tempDir("loopstra-prompts-");

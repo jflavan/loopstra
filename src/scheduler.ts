@@ -7,15 +7,15 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { andList } from "./text";
+import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
-import { applyChatRequests } from "./chat/requests";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
@@ -24,6 +24,7 @@ import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
+import { wakeStamp } from "./wake";
 
 export interface TickResult {
   /**
@@ -36,8 +37,8 @@ export interface TickResult {
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
   /**
-   * Set when no step ran because the repository needs a person first, or because the assistant is
-   * unavailable and the loop is backing off (plain words).
+   * Set when no step ran because the repository needs a person first, because the assistant is
+   * unavailable and the loop is backing off, or because a person paused the loop (plain words).
    */
   paused?: string;
   /** A stop was requested during the tick; the step was interrupted, not blocked. */
@@ -102,12 +103,18 @@ export async function tick(root: string): Promise<TickResult> {
     // Shared at the end only after a sync that went through: a sync that waits or fails says why itself.
     share = hasRemote && (await syncMain(root, cfg, trace)) === "pass";
 
-    // What people asked for in chat (start a draft, add written intents): only the loop writes main.
-    await applyChatRequests(root, cfg, trace);
+    // What people asked for (chat, the console): only the loop writes main.
+    await applyRequests(root, cfg, trace);
+    // From here the applier beside the tick may apply requests too (see startApplier).
+    armApplier(root);
+
+    // A person paused the loop (.loopstra/hold.json): requests still apply, the queue is still written
+    // and leftovers cleaned up, but nothing new starts until they resume it, main's tests included.
+    const loopHold = readLoopHold(root);
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
-    const health = mainHealthDue(root, cfg, trace);
-    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
+    const health = loopHold ? null : mainHealthDue(root, cfg, trace);
+    if (health?.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
@@ -124,7 +131,8 @@ export async function tick(root: string): Promise<TickResult> {
     const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     await cleanupLeftovers(root, cfg, trace, ordered);
-    await packWhileNoLaneRuns(root, trace);
+    // Between the applier's passes too: no request commits while git packs.
+    await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
 
     // The assistant was unavailable a moment ago: no step runs until the pause runs out.
     const pause = activePause(root);
@@ -141,6 +149,14 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
     heartbeatDayPause(root, null);
+
+    // Paused by a person (read above): no step starts.
+    if (loopHold) {
+      out.paused = loopHoldText(loopHold);
+      // Traced once per pause: a new pause by the same person reads the same, but starts later.
+      trace.eventOnChange("_loop", "pause", "", { reason: out.paused, held: true }, "reason", loopHold.at);
+      return out;
+    }
 
     // Run steps for up to speed.max_parallel_changes changes at once, each in its own lane; the
     // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
@@ -202,7 +218,8 @@ const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approve
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
   for (;;) {
-    if (shared.halt || stopRequested()) return [];
+    // A pause a person set during the tick lets running steps finish and starts nothing more.
+    if (shared.halt || stopRequested() || readLoopHold(root)) return [];
     const next = candidates.find((i) => takeChange(shared, i.slug));
     if (!next) return [];
     const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
@@ -210,9 +227,14 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
   }
 }
 
-/** True when a change is a lane's to run now: runnable, and (with a remote) not watching its pull request. */
+/** True when a change is a lane's to run now: runnable, not held, and (with a remote) not watching its pull request. */
 function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
-  return isRunnable(i, human, hasRemote) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+  return isRunnable(i, human, hasRemote) && !held(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+}
+
+/** A person (or chat) has put the change on hold (`hold:` in intent.md): no step starts for it. */
+function held(i: Intent): boolean {
+  return i.file.frontmatter.hold.trim() !== "";
 }
 
 /**
@@ -265,11 +287,11 @@ async function watchPullRequests(root: string, cfg: Config, trace: Trace, shared
  * which is looked at again on the next tick. False once a stop or a problem ended it.
  */
 async function watchOnce(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, steps: LaneStep[]): Promise<boolean> {
-  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true);
+  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !held(i);
   const didWork = (slug: string) => steps.some((s) => s.slug === slug && !(s.result?.ok && s.result.waiting));
   const ordered = orderQueue((await scanRepo(root)).intents);
   for (const i of ordered) {
-    if (shared.halt || stopRequested()) return false;
+    if (shared.halt || stopRequested() || readLoopHold(root)) return false;
     if (!watching(i) || didWork(i.slug) || waitingOn(i, ordered).length || !claim(i.slug)) continue;
     const step = await runClaimed(root, cfg, trace, shared, i.slug, watching);
     if (!step) continue;
@@ -395,7 +417,8 @@ const GC_TIMEOUT_MS = 60 * 60_000;
 const GC_RETRY_MS = 24 * 60 * 60_000;
 
 /**
- * Lets git pack the repository when it thinks it is time, while no lane runs. Runtime commits never
+ * Lets git pack the repository when it thinks it is time, while no lane runs and no request is being
+ * applied (the tick runs it between the applier's passes, see betweenPasses). Runtime commits never
  * do it themselves (gc.auto=0): a pack of the refs during one change's commit could make another
  * change's commit fail. Traced only when it fails, and then not tried again for a day; never stops
  * the tick.
@@ -753,6 +776,27 @@ async function sleepUnlessStopped(ms: number, until?: Promise<unknown>): Promise
   }
 }
 
+/**
+ * The loop's wait between ticks: up to `ms`, ending early on a stop or when `.loopstra/wake` no
+ * longer says `seen` (someone asked for something: a request, a resume). `seen` is read when the
+ * tick began, so a wake during the tick ends this wait at once. Checks the file every `checkMs`.
+ */
+export async function sleepBetweenTicks(root: string, ms: number, seen: string, checkMs = 1000): Promise<"woken" | "timeout" | "stop"> {
+  if (wakeStamp(root) !== seen) return "woken";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let check: ReturnType<typeof setInterval> | undefined;
+  try {
+    return await Promise.race([
+      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), ms); }),
+      stopPromise().then(() => "stop" as const),
+      new Promise<"woken">((resolve) => { check = setInterval(() => { if (wakeStamp(root) !== seen) resolve("woken"); }, checkMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    clearInterval(check);
+  }
+}
+
 /** What a step gave, for the console line. */
 function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
@@ -772,10 +816,14 @@ export async function start(root: string, opts: { once: boolean; installSignals?
   resetStop();
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
   const beat = startHeartbeat(root);
+  // Applies requests while steps run, once the first tick has settled the checkout (see armApplier).
+  const applier = startApplier(root);
   try {
     // The last pause logged: a pause that lasts (the loop's day, until midnight) is logged once, not every poll.
     let lastPaused = "";
     for (;;) {
+      // Read as the tick begins: a wake during the tick ends the sleep after it at once.
+      const seen = wakeStamp(root);
       try {
         beat.tickStarted();
         const r = await tick(root);
@@ -799,10 +847,11 @@ export async function start(root: string, opts: { once: boolean; installSignals?
       beat.tickEnded();
       if (opts.once || stopRequested()) break;
       const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
-      await sleepUnlessStopped(poll * 1000);
+      await sleepBetweenTicks(root, poll * 1000, seen);
       if (stopRequested()) break;
     }
   } finally {
+    await applier.stop();
     beat.stopped();
     uninstall();
   }

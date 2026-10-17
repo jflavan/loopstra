@@ -7,10 +7,10 @@ import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
   StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
-  readArtifact, setStatus, writeArtifact, writeIntentPriority, loadSessions, saveSession,
+  readArtifact, setStatus, statusPatch, writeArtifact, writeIntentPriority, loadSessions, saveSession,
 } from "../../src/context";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
-import { lastCommit, run, tempGitRepo } from "../helpers";
+import { lastCommit, run, setupRepo, tempGitRepo } from "../helpers";
 
 async function setup() {
   const repo = await tempGitRepo();
@@ -207,5 +207,35 @@ describe("StepContext", () => {
     await Bun.write(join(ctx.runDir, "sessions.json"), "not json");
     expect(loadSessions(ctx)).toEqual({});
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("the retry status of a block", () => {
+  test("the block's status_change carries the status its note tells a person to set", async () => {
+    const { repo, ctx, trace } = await setupRepo("plan-approved");
+    try {
+      await block(ctx, "The build broke.");
+      const e = trace.lastEvent("add-numbers", "status_change")!;
+      expect(JSON.parse(e.payload)).toMatchObject({ from: "plan-approved", to: "blocked", retry: "plan-approved" });
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a note that already says what to set gives no retry of its own", async () => {
+    const { repo, ctx, trace } = await setupRepo("plan-approved");
+    try {
+      await block(ctx, "Set status to accepted to write it again.");
+      const p = JSON.parse(trace.lastEvent("add-numbers", "status_change")!.payload) as { retry?: string };
+      expect(p.retry).toBeUndefined();
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("statusPatch keeps resume_from on the approved state", () => {
+    expect(statusPatch("plan-review", "plan-approved", "")).toEqual({ status: "plan-approved", note: "", resume_from: "plan-approved" });
+    expect(statusPatch("plan-approved", "building", "x")).toEqual({ status: "building", note: "x", resume_from: "plan-approved" });
+    expect(statusPatch("building", "blocked", "y")).toEqual({ status: "blocked", note: "y" });
   });
 });

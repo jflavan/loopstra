@@ -10,6 +10,8 @@ const PATHS: Record<string, string> = {
   bell: "M6 16v-5a6 6 0 0 1 12 0v5l2 2H4zM10 20h4",
   theme: "M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z",
   close: "M6 6l12 12M18 6L6 18",
+  pause: "M9 5v14M15 5v14",
+  play: "M7 5l12 7-12 7z",
 };
 
 /** A line icon in the text's colour. */

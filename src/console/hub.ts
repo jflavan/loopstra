@@ -2,6 +2,7 @@ import { readdirSync, statSync, watch, type Dirent, type FSWatcher } from "node:
 import { join } from "node:path";
 import { heartbeatPath } from "../heartbeat";
 import { intentRoot, scanRepo, type Scan } from "../intents";
+import { requestsDir } from "../requests";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
 import { activityItem, phaseNamer } from "./describe";
@@ -70,6 +71,11 @@ export class Hub {
   /** The newest model, or null while no page is connected. */
   latest(): Model | null {
     return this.model;
+  }
+
+  /** Something was just written (a request, the loop's pause): look again soon instead of on the next poll. */
+  poke(): void {
+    if (this.clients.size) this.lookSoon();
   }
 
   /** Resolves once the hub has let go of everything after its last page left. */
@@ -227,11 +233,12 @@ export class Hub {
 
   /**
    * A cheap fingerprint of what the model reads: the newest event, the heartbeat, the pause, the
-   * config and the intent files (`key`). The ten-second bucket keeps "last check 20s ago" and the ages fresh.
+   * loop's hold, the config, the waiting requests and the intent files (`key`). The ten-second bucket keeps "last check 20s ago" and the ages fresh.
    */
   private signatureOf(trace: Trace, key: string): string {
     const parts = [String(trace.lastEventId()), String(Math.floor(Date.now() / 10_000))];
-    for (const p of [heartbeatPath(this.root), join(this.root, ".loopstra", "paused.json"), join(this.root, "loopstra", "config.yaml")]) parts.push(stamp(p));
+    for (const p of [heartbeatPath(this.root), join(this.root, ".loopstra", "paused.json"), join(this.root, ".loopstra", "hold.json"), join(this.root, "loopstra", "config.yaml")]) parts.push(stamp(p));
+    parts.push(requestsKey(this.root));
     parts.push(key);
     return parts.join("|");
   }
@@ -302,4 +309,10 @@ export class Hub {
     this.noted.add(what);
     try { this.trace?.event("_loop", "error", { where: "console", what }); } catch { /* the console never stops over its own trace */ }
   }
+}
+
+/** The waiting and claimed requests by name: a request made or finished changes the console. */
+function requestsKey(root: string): string {
+  const names = (dir: string) => { try { return readdirSync(dir).filter((n) => n.endsWith(".json")).sort().join(","); } catch { return ""; } };
+  return `${names(requestsDir(root))};${names(join(requestsDir(root), "applying"))}`;
 }

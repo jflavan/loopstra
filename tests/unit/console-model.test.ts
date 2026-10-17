@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildModel, nowLine, stripOf } from "../../src/console/model";
 import { scanRepo } from "../../src/intents";
-import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
+import { holdLoop, pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
+import { CONSOLE, requestsDir, submitRequest } from "../../src/requests";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
@@ -24,9 +25,10 @@ describe("changes", () => {
       });
       const m = await model(t.path);
       expect(m.sections.changes.map((c) => c.slug)).toEqual(["one", "two"]);
-      expect(m.sections.changes[0]).toMatchObject({ title: "One", status: "building", plain: "building and testing", priority: "high", stage: "build", waiting: null, running: false });
+      expect(m.sections.changes[0]).toMatchObject({ title: "One", status: "building", plain: "building and testing", priority: "high", statedPriority: "high", stage: "build", waiting: null, running: false });
       expect(m.sections.changes[0]?.costUsd).toBeCloseTo(0.3);
-      expect(m.sections.changes[1]).toMatchObject({ stage: "design", priority: "normal", costUsd: 0 });
+      // No priority line: it reads as normal, and the page knows none was written (an undo then takes the line out again).
+      expect(m.sections.changes[1]).toMatchObject({ stage: "design", priority: "normal", statedPriority: null, costUsd: 0 });
       expect(m.sections.changes[1]?.waiting).toContain("one");
       expect(m.meta).toEqual({ chat: false, usdPerMinute: 0.2, pollSeconds: 60 });
       expect((await model(t.path, new Date(), { chat: true })).meta.chat).toBe(true);
@@ -372,6 +374,62 @@ describe("totals", () => {
       expect(later.sections.changes.find((x) => x.slug === "one")?.inStatus).toBe("2 h");
       // No traced change into its status: the time since intent.md was last written.
       expect(later.sections.changes.find((x) => x.slug === "two")?.inStatus).toBe("2 h");
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("controls", () => {
+  test("each change carries what it offers and whether it is held; pending requests and the loop's pause are there", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "gates:\n  plan: { human: status }\n");
+      await intent(t.path, "a", "status: plan-review");
+      await intent(t.path, "b", "status: building\nhold: waiting for legal");
+      const m = await model(t.path);
+      const a = m.sections.changes.find((c) => c.slug === "a")!;
+      expect(a.offers.map((o) => o.kind)).toEqual(["approve", "send-back", "hold", "priority", "close"]);
+      expect(a.held).toBeNull();
+      const b = m.sections.changes.find((c) => c.slug === "b")!;
+      expect(b.held).toBe("waiting for legal");
+      expect(b.offers.map((o) => o.kind)).toEqual(["release", "priority", "close"]);
+      expect(m.sections.requests).toEqual([]);
+      expect(m.sections.loop.held).toBeNull();
+      submitRequest(t.path, { by: "u", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "approve", slug: "a", expect: "plan-review" });
+      holdLoop(t.path, "John");
+      const m2 = await model(t.path);
+      expect(m2.sections.requests).toEqual([expect.objectContaining({ kind: "approve", slug: "a", label: "Approve the plan", byName: "John", via: "the dashboard" })]);
+      expect(m2.sections.loop.held).toMatchObject({ by: "John" });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a request file the page cannot show is skipped; the others are still listed", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "gates:\n  plan: { human: status }\n");
+      await intent(t.path, "a", "status: plan-review");
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      const bad = (id: string, body: Record<string, unknown>) => writeFileSync(join(requestsDir(t.path), `${id}.json`), JSON.stringify({ id, ...body }));
+      bad("000000000000001-1-0000", { kind: "new", byName: "Bo", via: "chat", at: "x" });
+      bad("000000000000002-1-0000", { kind: "explode", slug: "a" });
+      submitRequest(t.path, { by: "u", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "approve", slug: "a", expect: "plan-review" });
+      const m = await model(t.path);
+      expect(m.sections.requests.map((r) => r.label)).toEqual(["Approve the plan"]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a blocked change offers retry from what its block recorded", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "c", `status: blocked\nnote: ${JSON.stringify("The build broke. When that is sorted out, set status to plan-approved to try again.")}`);
+      const m = await model(t.path);
+      expect(m.sections.changes.find((c) => c.slug === "c")!.offers.filter((o) => o.kind === "retry")).toEqual([{ kind: "retry", label: "Retry from plan-approved", to: "plan-approved" }]);
     } finally {
       t.cleanup();
     }

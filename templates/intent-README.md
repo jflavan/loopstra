@@ -12,7 +12,7 @@ The system takes it from there. Check `queue.md` in this folder to see where eve
 
 ## Or talk it through
 
-If your team has set up Loopstra's chat (in the terminal, the console, Slack or Discord), you can describe what you want there instead. It asks questions until the change is clear, shows you a summary, and when you say yes, writes the change up for you as a draft (usually as a pull request for someone to review and merge). A draft still waits for someone to accept it: set `status: accepted`, or, if you are allowed to, ask in the chat to start it. You can also ask the chat how any change is going.
+If your team has set up Loopstra's chat (in the terminal, the console, Slack or Discord), you can describe what you want there instead. It asks questions until the change is clear, shows you a summary, and when you say yes, writes the change up for you as a draft (usually as a pull request for someone to review and merge). A draft still waits for someone to accept it: set `status: accepted`, or, if you are allowed to, ask in the chat to start it. You can also ask the chat how any change is going, and, if you are allowed to start drafts, to approve, send back, retry, hold, release or close a change.
 
 ## How big a change should be
 
@@ -49,6 +49,10 @@ The `status` line at the top of `intent.md` says where the change is, and the `n
 
 To stop a change at any point, set `status: closed`.
 
+The console's buttons (approve, send back, retry, start, hold, release, priority and close) and the chat do the same as these edits, for you; editing the file still works.
+
+To hold a change for a while, write a `hold:` line with a reason at the top of `intent.md`, for example `hold: waiting for legal`. The loop starts no step for it until the line is removed. The console's Hold and Release buttons write and remove it.
+
 Your changes to `intent.md` are picked up whether or not you commit them; saving the file is enough. The system never writes over what you wrote: if you change the status while it is working on that change, it stops that step and goes with your status.
 
 A finished change also gets `lessons.md`, notes for the engineers; you can leave it to them.
@@ -64,6 +68,7 @@ When a change is finished, `outcome.md` may have a section called "For a person 
 status: draft
 # priority: low, normal, high or urgent. Leave it out and Loopstra fills it in.
 # depends_on: [another-change] (optional: changes that must be merged first)
+# hold: a reason (optional: the loop starts no step for it until you remove the line)
 author: Your name
 opened: 2026-01-01
 note: ""

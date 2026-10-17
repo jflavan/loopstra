@@ -49,8 +49,12 @@ export function shortModel(model: string): string {
 
 const STATE: Record<LoopSection["state"], string> = { running: "Running", paused: "Paused", stopped: "Stopped", "not-responding": "Not responding" };
 
-/** The loop pill's words: its state and how many agents work. The full sentence goes in its tooltip. */
-export function pillText(loop: Pick<LoopSection, "state" | "text"> & { working: unknown[] }): string {
+/**
+ * The loop pill's words: its state and how many agents work, or who paused it (its last steps may
+ * still be finishing). The full sentence goes in its tooltip.
+ */
+export function pillText(loop: Pick<LoopSection, "state" | "text"> & { working: unknown[]; held?: { by: string } | null }): string {
+  if (loop.held) return `Paused by ${loop.held.by}`;
   if (loop.text.startsWith("Stopping")) return "Stopping";
   const n = loop.working.length;
   return n ? `${STATE[loop.state]} · ${n} ${n === 1 ? "agent" : "agents"}` : STATE[loop.state];

@@ -24,6 +24,7 @@ describe("events in plain words", () => {
     expect(describeEvent(row("error", { where: "scan", problem: "The status line is wrong" }))).toBe("Problem (scan): The status line is wrong.");
     expect(describeEvent(row("pause", { reason: "The assistant is unavailable." }))).toBe("Paused: The assistant is unavailable.");
     expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", result: "accepted" }))).toBe("ana accepted it from chat.");
+    expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", via: "the dashboard", result: "accepted" }))).toBe("ana accepted it from the dashboard.");
     expect(describeEvent(row("tick", {}))).toBeNull();
     expect(describeEvent(row("claude_event", { type: "assistant" }))).toBeNull();
   });
@@ -76,6 +77,13 @@ describe("events in plain words", () => {
     // A line cut short ends with its ellipsis, not a full stop after it; padding is trimmed.
     expect(describeEvent(row("error", { where: "x", error: `  ${"a".repeat(200)}` }))).toBe(`Problem (x): ${"a".repeat(159)}…`);
     expect(describeEvent(row("status_change", { from: "draft" }))).toBeNull();
+  });
+
+  test("requests: who did what, and from where; ones not applied say why", () => {
+    expect(describeEvent(row("request", { kind: "approve", by: "John", via: "the dashboard", result: "applied", what: "plan approved" }))).toBe("Plan approved by John from the dashboard.");
+    expect(describeEvent(row("request", { kind: "hold", by: "Ana", via: "Slack", result: "applied", what: "held" }))).toBe("Held by Ana from Slack.");
+    expect(describeEvent(row("request", { kind: "approve", by: "John", via: "the dashboard", result: "moved-on", status: "building" }))).toBe("John's approve from the dashboard was not applied: the change had moved on to building.");
+    expect(describeEvent(row("request", { kind: "retry", by: "John", via: "the dashboard", result: "refused" }))).toBe("John's retry from the dashboard was not applied.");
   });
 
   test("the technical line is the type and the payload's fields on one line", () => {

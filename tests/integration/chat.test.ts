@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
-import { pendingRequests, takeResults } from "../../src/chat/requests";
+import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { ChatService, type Transport } from "../../src/chat/service";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
@@ -58,6 +58,11 @@ describe("chat with the loop", () => {
       await service.poll();
       expect(t.sent.length).toBe(1);
       expect(o.store.get("terminal", "local").messages.at(-1)!.text).toContain("Added to the queue as drafts");
+      // The agent hears of the yes and of the loop's answer on its next turn.
+      expect(o.store.get("terminal", "local").since).toEqual([
+        'Ana said yes: "CSV export" was written up as csv-export, csv-dates, and the loop was asked to add it to the queue.',
+        "The loop answered: Added to the queue as drafts: csv-export, csv-dates. Read them in intent/, then set status to accepted, or ask me to start one.",
+      ]);
     } finally { r.cleanup(); }
   });
 
@@ -81,7 +86,7 @@ describe("chat with the loop", () => {
       const csv = await readIntent(r.root, "csv-export");
       expect(["accepted", "designing", "spec-approved", "blocked"]).toContain(csv.file.frontmatter.status);
       const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
-      expect(log).toContain("loopstra(csv-export): accepted by Ana from chat [skip ci]");
+      expect(log).toContain("loopstra(csv-export): accepted by Ana from the terminal [skip ci]");
       expect((await readIntent(r.root, "other")).file.frontmatter.status).toBe("closed");
       const results = takeResults(r.root, new Set(["terminal"]));
       expect(results.map((x) => x.text)).toEqual([
@@ -91,7 +96,7 @@ describe("chat with the loop", () => {
       const trace = Trace.open(r.root);
       try {
         const change = trace.events("csv-export").find((e) => e.type === "status_change");
-        expect(JSON.parse(change!.payload)).toEqual({ from: "draft", to: "accepted", note: "accepted by Ana from chat" });
+        expect(JSON.parse(change!.payload)).toEqual({ from: "draft", to: "accepted", note: "accepted by Ana from the terminal" });
       } finally { trace.close(); }
     } finally { r.cleanup(); }
   });
@@ -99,22 +104,21 @@ describe("chat with the loop", () => {
   test("a request whose commit failed is finished on the next tick, not mistaken for someone else's edit", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
-      const { submitRequest } = await import("../../src/chat/requests");
-      const { writeJson, chatDir } = await import("../../src/chat/threads");
-      const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", transport: "terminal", thread: "local" });
-      const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", transport: "terminal", thread: "local" });
+      const { writeJson } = await import("../../src/chat/threads");
+      const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       // As if an earlier tick wrote both files and then failed to commit.
       await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
       await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
-      writeJson(join(chatDir(r.root), "requests", `${accept.id}.json`), { ...accept, written: ["a"] });
-      writeJson(join(chatDir(r.root), "requests", `${added.id}.json`), { ...added, written: ["c"] });
+      writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"] });
+      writeJson(join(requestsDir(r.root), `${added.id}.json`), { ...added, written: ["c"] });
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
         "Started a. I will say here when it needs anyone, and when it is done.",
         "Added to the queue as drafts: c. Read them in intent/, then set status to accepted, or ask me to start one.",
       ]);
       const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
-      expect(log).toContain("loopstra(a): accepted by U from chat");
+      expect(log).toContain("loopstra(a): accepted by U from the terminal");
       expect(log).toContain("loopstra(c): open intent from chat");
     } finally { r.cleanup(); }
   });
@@ -122,8 +126,7 @@ describe("chat with the loop", () => {
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
     try {
-      const { submitRequest } = await import("../../src/chat/requests");
-      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", transport: "slack", thread: "C1:1.0" });
+      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "Slack", transport: "slack", thread: "C1:1.0" });
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal", "dashboard"]))).toEqual([]);
       expect(takeResults(r.root, new Set(["slack"])).map((x) => x.thread)).toEqual(["C1:1.0"]);

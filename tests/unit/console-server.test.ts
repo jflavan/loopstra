@@ -1,10 +1,16 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { applyRequests } from "../../src/apply";
+import { loadConfig } from "../../src/config";
 import { Hub, type HubOptions } from "../../src/console/hub";
 import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
+import { readLoopHold } from "../../src/heartbeat";
+import { pendingRequests } from "../../src/requests";
 import { Trace } from "../../src/trace";
+import { wakeStamp } from "../../src/wake";
+import { chatRepo, INTENT } from "../chat-helpers";
 import { config, intent, sseFrames, until } from "../console-helpers";
 import { tempDir } from "../helpers";
 
@@ -209,4 +215,121 @@ describe("the console's server", () => {
       }
     });
   });
+});
+
+/** A person on the plan gate, so Approve and Send back are theirs to give. */
+const PEOPLE = "gates:\n  plan: { human: status }\n";
+
+/**
+ * A console on a git repository on main (applyRequests commits there) with change "a" at
+ * plan-review. Stopped, and its hub let go, before the repository is removed.
+ */
+async function withRepoConsole(fn: (base: string, root: string) => Promise<void>) {
+  const r = await chatRepo({ intents: { a: INTENT("plan-review", "a") }, config: PEOPLE });
+  const hub = new Hub(r.root);
+  const server = serveConsole(r.root, 0, { hub });
+  try {
+    await fn(`http://127.0.0.1:${server.port}`, r.root);
+  } finally {
+    server.stop(true);
+    await until(() => hub.latest() === null);
+    await hub.whenStopped();
+    r.cleanup();
+  }
+}
+
+async function applyAll(root: string): Promise<void> {
+  const trace = Trace.open(root, () => {});
+  try { await applyRequests(root, await loadConfig(root), trace); } finally { trace.close(); }
+}
+
+describe("writes", () => {
+  const post = (base: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: base, ...headers }, body: JSON.stringify(body) });
+
+  test("an action is submitted, followed and read once", async () => {
+    await withRepoConsole(async (base, root) => {
+      const r = await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" });
+      expect(r.status).toBe(202);
+      const { id, loop } = await r.json() as { id: string; loop: string };
+      expect(loop).toBe("stopped");
+      expect(pendingRequests(root).map((q) => [q.id, q.kind, q.via, q.transport])).toEqual([[id, "approve", "the dashboard", "console"]]);
+      expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toEqual({ state: "pending" });
+      // The loop applies it.
+      await applyAll(root);
+      // Only GET reads a result: a HEAD would take it with no body to carry it.
+      expect((await fetch(`${base}/api/requests/${id}`, { method: "HEAD" })).status).toBe(405);
+      expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toMatchObject({ state: "done", ok: true, status: "plan-approved" });
+      expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
+    });
+  }, 30_000);
+
+  test("an action the change does not offer now, or a status it is no longer at, is refused with plain words", async () => {
+    await withRepoConsole(async (base) => {
+      const stale = await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "spec-review" });
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as { error: string }).error).toBe("a is plan-review now, not spec-review. The page shows it as it is now.");
+      const wrong = await post(base, "/api/requests", { kind: "retry", slug: "a", expect: "plan-review", to: "accepted" });
+      expect(wrong.status).toBe(409);
+      expect((await post(base, "/api/requests", { kind: "approve", slug: "../x", expect: "plan-review" })).status).toBe(400);
+      expect((await post(base, "/api/requests", { kind: "send-back", slug: "a", expect: "plan-review", note: "  " })).status).toBe(400);
+      expect((await post(base, "/api/requests", { kind: "approve", slug: "nope", expect: "plan-review" })).status).toBe(404);
+    });
+  }, 30_000);
+
+  test("an undo is taken only for the step that really happened last", async () => {
+    await withRepoConsole(async (base, root) => {
+      // Never approved: there is nothing to take back.
+      expect((await post(base, "/api/requests", { kind: "undo", slug: "a", expect: "plan-review", to: "spec-review", note: "" })).status).toBe(409);
+      await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" });
+      await applyAll(root);
+      expect((await post(base, "/api/requests", { kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "" })).status).toBe(202);
+    });
+  }, 30_000);
+
+  test("a priority is one of the priorities, or null for none stated (as an undo puts back); nothing else", async () => {
+    await withRepoConsole(async (base, root) => {
+      expect((await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: "high" })).status).toBe(202);
+      expect((await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: null })).status).toBe(202);
+      expect(pendingRequests(root).map((q) => (q.kind === "priority" ? q.priority : "?"))).toEqual(["high", null]);
+      for (const bad of ["bogus", "", undefined, 3]) {
+        const r = await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: bad });
+        expect({ bad, status: r.status }).toEqual({ bad, status: 400 });
+      }
+    });
+  }, 30_000);
+
+  test("a waiting request can be cancelled once", async () => {
+    await withRepoConsole(async (base) => {
+      const { id } = await (await post(base, "/api/requests", { kind: "hold", slug: "a", expect: "plan-review", reason: "" })).json() as { id: string };
+      const del = () => fetch(`${base}/api/requests/${id}`, { method: "DELETE", headers: { origin: base } });
+      expect(await (await del()).json()).toEqual({ cancelled: true });
+      expect((await del()).status).toBe(409);
+    });
+  }, 30_000);
+
+  test("pause and resume the loop", async () => {
+    await withRepoConsole(async (base, root) => {
+      expect(await (await post(base, "/api/loop", { action: "pause" })).json()).toMatchObject({ held: { by: expect.any(String) } });
+      expect(readLoopHold(root)).not.toBeNull();
+      const stamp = wakeStamp(root);
+      expect(await (await post(base, "/api/loop", { action: "resume" })).json()).toEqual({ held: null });
+      expect(readLoopHold(root)).toBeNull();
+      expect(wakeStamp(root)).not.toBe(stamp);
+      expect((await post(base, "/api/loop", { action: "explode" })).status).toBe(400);
+    });
+  }, 30_000);
+
+  test("a write from another origin, without JSON, or to another host name is refused", async () => {
+    await withRepoConsole(async (base, root) => {
+      expect((await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" }, { origin: "http://evil.example" })).status).toBe(403);
+      expect((await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" }, { origin: "" })).status).toBe(403);
+      expect((await fetch(`${base}/api/requests`, { method: "POST", headers: { origin: base, "content-type": "text/plain" }, body: "{}" })).status).toBe(415);
+      expect((await fetch(`${base}/api/requests`, { method: "POST", headers: { origin: base, "content-type": "text/plain; charset=application/json" }, body: "{}" })).status).toBe(415);
+      expect((await fetch(`${base}/api/loop`, { method: "POST", headers: { origin: base, "content-type": "application/json", host: "evil.example" }, body: '{"action":"pause"}' })).status).toBe(403);
+      expect((await fetch(`${base}/api/requests/000000000000001-1-0000`, { method: "DELETE", headers: { origin: "http://evil.example" } })).status).toBe(403);
+      expect(readLoopHold(root)).toBeNull();
+      expect(pendingRequests(root)).toEqual([]);
+    });
+  }, 30_000);
 });

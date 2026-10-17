@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, dependencyNote, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
+  checkConsistency, dependencyNote, isRunnable, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
   type Intent,
 } from "../../src/intents";
 import { sameFileHolds } from "../../src/scheduler";
@@ -327,6 +327,16 @@ describe("same files: a change waits instead of building into a conflict (more t
     t.cleanup();
   });
 
+  test("a held plan-approved change never runs, so it holds no later one; a held building change still holds", async () => {
+    const t = tempDir();
+    await mk(t.path, "held-first", "status: plan-approved\npriority: high\nopened: 2026-09-01\nhold: waiting for legal", planned(["src/a.ts"]));
+    await mk(t.path, "second", "status: plan-approved\npriority: normal\nopened: 2026-09-02", planned(["src/a.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([]);
+    await mk(t.path, "held-builder", "status: building\nhold: waiting for legal", planned(["src/a.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([["held-first", "held-builder"], ["second", "held-builder"]]);
+    t.cleanup();
+  });
+
   test("a plan with no file list never waits and holds nobody", async () => {
     const t = tempDir();
     await mk(t.path, "unlisted-builder", "status: building", planned(null));
@@ -343,4 +353,14 @@ describe("same files: a change waits instead of building into a conflict (more t
     expect([...(await holdsIn(t.path, 1))]).toEqual([]);
     t.cleanup();
   });
+});
+
+function held(slug: string, status: string, hold: string): Intent {
+  return { slug, dir: "", artifacts: new Set(["intent.md", "spec.md", "plan.md"]), file: parseIntentFile(`---\nstatus: ${status}\nhold: ${JSON.stringify(hold)}\n---\n# Intent: ${slug}\n`) };
+}
+
+test("a held change is under Needs a person, and its note says it is held and why", () => {
+  const q = renderQueue([held("a", "building", "waiting for legal (John, the dashboard)")]);
+  const needs = q.slice(q.indexOf("## Needs a person"), q.indexOf("## Finished"));
+  expect(needs).toContain("| a | normal | building and testing | Held: waiting for legal (John, the dashboard). |");
 });

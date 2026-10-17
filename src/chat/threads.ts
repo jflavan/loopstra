@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
+import type { RequestShape } from "../actions";
+import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
@@ -12,7 +14,9 @@ export function chatDir(root: string): string {
 /** A proposal waiting for a person's yes. */
 export type Pending =
   | { kind: "handoff"; handoff: Handoff; by: string; at: string }
-  | { kind: "accept"; slug: string; by: string; at: string };
+  | { kind: "accept"; slug: string; by: string; at: string }
+  /** An action on a change, as it will be submitted; `ask` is the question the person was asked. */
+  | { kind: "action"; request: RequestBody & RequestShape; ask: string; by: string; at: string };
 
 /** One hand-off made from a thread, and what became of it. */
 export interface HandoffRecord {
@@ -46,10 +50,18 @@ export interface ThreadState {
   lastAnnouncementSeen: number;
   /** The newest messages, for the dashboard panel. */
   messages: ChatMessage[];
+  /**
+   * What happened since the agent's last turn that it was not part of (a yes it never saw, what the
+   * loop did with a request), one short line each, for the next turn's context. A thread saved
+   * before this existed has none.
+   */
+  since: string[];
 }
 
 /** How many messages a thread keeps for display. The conversation itself lives in the session. */
 const KEPT_MESSAGES = 200;
+/** How many lines of what happened since the agent's last turn a thread keeps (the newest). */
+const KEPT_SINCE = 10;
 
 export function threadKey(transport: string, thread: string): string {
   return `${transport}:${thread}`;
@@ -87,12 +99,17 @@ export class ThreadStore {
   get(transport: string, thread: string): ThreadState {
     const key = threadKey(transport, thread);
     const found = readJson<ThreadState>(join(this.dir(), fileName(key)));
-    return found ?? { key, transport, thread, sessionId: null, pending: null, handoffs: [], lastAnnouncementSeen: 0, messages: [] };
+    return found ? filled(found) : { key, transport, thread, sessionId: null, pending: null, handoffs: [], lastAnnouncementSeen: 0, messages: [], since: [] };
   }
 
   save(t: ThreadState): void {
     t.messages = t.messages.slice(-KEPT_MESSAGES);
     writeJson(join(this.dir(), fileName(t.key)), t);
+  }
+
+  /** Notes a line of what happened for the agent's next turn (see ThreadState.since); only the newest are kept. */
+  noteSince(t: ThreadState, line: string): void {
+    t.since = [...t.since, line].slice(-KEPT_SINCE);
   }
 
   /** Appends a message to the thread's display log and returns it. */
@@ -105,6 +122,11 @@ export class ThreadStore {
   all(): ThreadState[] {
     const d = this.dir();
     if (!existsSync(d)) return [];
-    return readdirSync(d).filter((n) => n.endsWith(".json")).map((n) => readJson<ThreadState>(join(d, n))).filter((t): t is ThreadState => !!t);
+    return readdirSync(d).filter((n) => n.endsWith(".json")).map((n) => readJson<ThreadState>(join(d, n))).filter((t): t is ThreadState => !!t).map(filled);
   }
+}
+
+/** A thread as it was saved, with what a thread saved by an older version has not got. */
+function filled(t: ThreadState): ThreadState {
+  return { ...t, since: Array.isArray(t.since) ? t.since : [] };
 }

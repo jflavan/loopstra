@@ -94,8 +94,15 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "stale-lock-removed": return "Removed a lock a stopped process left behind.";
     case "chat-message": return `${str(p.from) || "Someone"} wrote in chat.`;
     case "chat-request":
-      if (p.result === "accepted") return `${str(p.by)} accepted it from chat.`;
+      if (p.result === "accepted") return `${str(p.by)} accepted it from ${str(p.via) || "chat"}.`;
       return p.kind === "new" ? `Chat wrote this change up for ${str(p.by)}.` : `A chat request was not applied (${str(p.result)}).`;
+    case "request": {
+      const who = str(p.by) || "Someone";
+      const where = p.via ? ` from ${str(p.via)}` : "";
+      if (p.result === "applied") return `${capital(str(p.what) || str(p.kind))} by ${who}${where}.`;
+      if (p.result === "moved-on") return `${who}'s ${str(p.kind)}${where} was not applied: the change had moved on${p.status ? ` to ${str(p.status)}` : ""}.`;
+      return `${who}'s ${str(p.kind)}${where} was not applied.`;
+    }
     case "chat-pr": return "Chat's pull request of new intents changed.";
     case "judge": return firstLine(p.note) || null;
     default: return null;

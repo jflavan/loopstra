@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
-import { effectivePriority, readIntent, writeIntent, type Intent, type Priority, type Status } from "./intents";
+import { effectivePriority, readIntent, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
@@ -150,24 +150,44 @@ async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["fro
   }
 }
 
-/** Writes the status and commits it (see commitRecord). */
-export async function setStatus(ctx: StepContext, status: Status, note = ""): Promise<void> {
-  const from = ctx.intent.file.frontmatter.status;
-  const patch: Partial<Intent["file"]["frontmatter"]> = { status, note };
+/**
+ * The frontmatter a status change writes: the status, the note, and resume_from following the
+ * approved state (entered, or being left). The runtime's steps and the requests people make both use it.
+ */
+export function statusPatch(from: Status, to: Status, note: string): Partial<Frontmatter> {
+  const patch: Partial<Frontmatter> = { status: to, note };
   // resume_from always follows the approved state being left, even if it was already set:
   // a person may have set an approved status by hand, and the marker must follow.
-  if (APPROVED.has(status)) patch.resume_from = status;
+  if (APPROVED.has(to)) patch.resume_from = to;
   else if (APPROVED.has(from)) patch.resume_from = from;
+  return patch;
+}
+
+/** Writes the status and commits it (see commitRecord). `extra` goes into the traced status change. */
+export async function setStatus(ctx: StepContext, status: Status, note = "", extra: Record<string, unknown> = {}): Promise<void> {
+  const from = ctx.intent.file.frontmatter.status;
+  const patch = statusPatch(from, status, note);
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${from} → ${status}`, async () => {
     await writeForStep(ctx, patch);
     ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
-    ctx.trace.statusChange(ctx.slug, from, status, note);
+    ctx.trace.statusChange(ctx.slug, from, status, note, extra);
   });
 }
 
 /** True when a note already tells the person which status to set. */
 function saysWhatToSet(note: string): boolean {
   return /\b(set|change)\b[^.]*\b(status|to closed|to done)\b/i.test(note);
+}
+
+/**
+ * The status a person sets to try a block again, as blockNote words it: `retryFrom` when given, else
+ * the approved status the change is resumed from. Null when the note already says what to set, or
+ * there is no approved status to go back to.
+ */
+export function retryTarget(ctx: StepContext, note: string, retryFrom?: Status): Status | null {
+  if (saysWhatToSet(note)) return null;
+  const from = ctx.intent.file.frontmatter.status;
+  return retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from) ?? null;
 }
 
 /** The owner's notes for a passing hiccup (the assistant crashed, or took too long): nothing to sort out first. */
@@ -182,9 +202,7 @@ export const TIMEOUT_NOTE = "The assistant took too long on this step.";
  * this function words it.
  */
 export function blockNote(ctx: StepContext, note: string, retryFrom?: Status): string {
-  if (saysWhatToSet(note)) return note;
-  const from = ctx.intent.file.frontmatter.status;
-  const resume = retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from);
+  const resume = retryTarget(ctx, note, retryFrom);
   if (!resume) return note;
   if (note.includes(CRASH_NOTE) || note.includes(TIMEOUT_NOTE)) return `${note} To try again, set status to ${resume}.`;
   return `${note} When that is sorted out, set status to ${resume} to try again.`;
@@ -205,8 +223,10 @@ export type Failure = { ok: false; note: string; detail: string; retryFrom?: Sta
 export async function block(ctx: StepContext, reason: string, opts: { detail?: unknown; retryFrom?: Status } = {}): Promise<{ ok: false; note: string }> {
   if (opts.detail !== undefined) ctx.trace.event(ctx.slug, "error", { note: reason, detail: opts.detail });
   const note = blockNote(ctx, reason, opts.retryFrom);
+  // Recorded in the trace, so the console can offer the status the note names as a retry.
+  const retry = retryTarget(ctx, reason, opts.retryFrom);
   try {
-    await setStatus(ctx, "blocked", note);
+    await setStatus(ctx, "blocked", note, retry ? { retry } : {});
   } catch (e) {
     if (!(e instanceof MainCheckoutMoved)) throw e;
     // Nothing can be recorded on main while the checkout is elsewhere; the loop pauses until it is back.
@@ -281,6 +301,27 @@ export function clearSession(ctx: StepContext, key: string): void {
   const all = loadSessions(ctx);
   delete all[key];
   writeMarker(ctx, SESSIONS, JSON.stringify(all, null, 2));
+}
+
+/** Run-folder file: the note a person sent the change back with, for the next writing or build session (see sentBackNote). */
+export const SENT_BACK = "sent-back.md";
+
+/** Keeps the note a person sent a change back with, until the next session of the stage it went back to has used it. */
+export function writeSentBack(root: string, slug: string, note: string): void {
+  const dir = join(root, ".loopstra", "runs", slug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, SENT_BACK), note);
+}
+
+/** The note the change was sent back with, worded for a session ("" when there is none). */
+export function sentBackNote(ctx: StepContext): string {
+  const note = readMarker(ctx, SENT_BACK)?.trim() ?? "";
+  return note ? `A person sent the earlier version back with this note:\n${note}` : "";
+}
+
+/** Drops a kept sent-back note (its send back was undone). */
+export function dropSentBack(root: string, slug: string): void {
+  rmSync(join(root, ".loopstra", "runs", slug, SENT_BACK), { force: true });
 }
 
 

@@ -1,14 +1,14 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
-import { activePause, agoText } from "./heartbeat";
-import { dependencyWait, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { activePause, agoText, readLoopHold } from "./heartbeat";
+import { dependencyWait, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
 import type { Trace } from "./trace";
 
 /** One thing a person should do or know. The same list in `loopstra status` and the dashboard. */
 export interface AttentionItem {
-  kind: "paused" | "health" | "sync" | "config" | "blocked" | "unreadable" | "waiting";
+  kind: "paused" | "health" | "sync" | "config" | "blocked" | "held" | "unreadable" | "waiting";
   /** The kind in plain words, e.g. "Blocked" or "Waiting for you". */
   label: string;
   /** The change it is about; null for the repository as a whole. */
@@ -20,7 +20,7 @@ export interface AttentionItem {
 
 export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
   paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings",
-  blocked: "Blocked", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
+  blocked: "Blocked", held: "Held", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
 
 /** What the tests on main say, in plain words: the newest check, and whether main is red. */
@@ -48,7 +48,7 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
 
 /**
  * Everything that needs a person, most pressing first: a pause, a red main, main out of step with
- * GitHub, a config problem, blocked changes, unreadable intents, then changes waiting for a person
+ * GitHub, a config problem, blocked changes, held changes, unreadable intents, then changes waiting for a person
  * (drafts, and reviews with a person on the gate). `config` is the loaded config, or the problem
  * that stopped it loading (which the loop also traces). `scan` is the intent folder already read, for
  * a caller that has one (the console reads it once per rebuild); otherwise it is read here.
@@ -59,6 +59,11 @@ export async function attention(root: string, config: Config | { problem: string
   const intents = orderQueue(scan.intents);
   const items: AttentionItem[] = [];
   const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what });
+
+  // A person paused the loop: nothing new starts until they resume it. Titled apart from an outage's
+  // pause, so the two are two items; worded for a loop that is stopped as much as one running.
+  const loopHold = readLoopHold(root);
+  if (loopHold) add("paused", null, `Paused by ${loopHold.by}`, "Nothing new starts until it is resumed. Resume it in the console, or delete .loopstra/hold.json.");
 
   const pause = activePause(root, now);
   if (pause) add("paused", null, "Loopstra is paused", pause.reason);
@@ -75,6 +80,11 @@ export async function attention(root: string, config: Config | { problem: string
     if (i.file.frontmatter.status === "blocked") {
       add("blocked", i.slug, i.file.title || i.slug, i.file.frontmatter.note || "Stopped and needs a person. Read intent.md, then set the status line to continue.");
     }
+  }
+  for (const i of intents) {
+    const s = i.file.frontmatter.status;
+    if (!heldNote(i) || s === "done" || s === "closed") continue;
+    add("held", i.slug, i.file.title || i.slug, `${heldNote(i)} The loop starts no step for it until it is released, in the console or by removing the hold line from intent.md.`);
   }
   for (const u of scan.unreadable) add("unreadable", u.slug, u.slug, u.problem);
   const human = humanGates(cfg);

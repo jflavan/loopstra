@@ -211,6 +211,14 @@ are replaced by the tests below. The README's Watch section is rewritten.
 
 # Part 2: Controls
 
+> **Built** (2026-10-17), from `docs/superpowers/plans/2026-10-17-console-part-2.md`; `docs/decisions.md`
+> ("The console, part 2") records the decisions. Four places differ from the text below: priority, hold
+> and release apply whatever the change's status is now (any open change), not only when it is still
+> the status the person saw; Hold is not offered on a draft or a blocked change (neither runs, so
+> there is nothing to hold); the step after an approval starts on the next tick (the request lands
+> within seconds; with the loop sleeping, the wake starts a tick at once; while lanes run, it waits
+> for them); and Stop session waits for part 3.
+
 Builds on simpler-core (`commitRecord`, the records lock, the watcher). It starts once
 `feat/simpler-core` is merged.
 

@@ -34,6 +34,8 @@ export const inbox = computed(() => state.value.sections.inbox ?? null);
 export const changes = computed(() => state.value.sections.changes ?? null);
 export const running = computed(() => state.value.sections.running ?? null);
 export const totals = computed(() => state.value.sections.totals ?? null);
+/** Requests the loop has not finished yet, shown beside their change. */
+export const requests = computed(() => state.value.sections.requests ?? null);
 export const activity = computed(() => state.value.activity);
 export const gaps = computed(() => state.value.gaps);
 
@@ -51,14 +53,21 @@ export function openDrawer(about: About | null = null): void {
   drawer.value = { open: true, about };
 }
 
-export interface Toast { id: number; text: string; kind: "info" | "bad" }
+/** A short message at the bottom of the page, with an optional button (Undo). */
+export interface Toast { id: number; text: string; kind: "info" | "bad"; action?: { label: string; run: () => void } }
 export const toasts = signal<Toast[]>([]);
 let toastId = 0;
 
-export function toast(text: string, kind: Toast["kind"] = "info"): void {
+/** Shows a toast for `ms` (6 s unless said), with an optional button; gives its id, for dismiss. */
+export function toast(text: string, kind: Toast["kind"] = "info", opts: { action?: Toast["action"]; ms?: number } = {}): number {
   const id = ++toastId;
-  toasts.value = [...toasts.value, { id, text, kind }];
-  setTimeout(() => { toasts.value = toasts.value.filter((t) => t.id !== id); }, 6000);
+  toasts.value = [...toasts.value, { id, text, kind, action: opts.action }];
+  setTimeout(() => dismiss(id), opts.ms ?? 6000);
+  return id;
+}
+
+export function dismiss(id: number): void {
+  toasts.value = toasts.value.filter((t) => t.id !== id);
 }
 
 /** A reply that was not a success; the page tells "not found" from "the server failed" by the status. */

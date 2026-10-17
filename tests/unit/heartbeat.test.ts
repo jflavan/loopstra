@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readPause, startHeartbeat, writeHeartbeat, type Heartbeat,
+  activePause, clearPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopHoldText, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, startHeartbeat, writeHeartbeat, type Heartbeat,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
+import { touchWake, wakeStamp } from "../../src/wake";
 import { setupRepo, tempDir } from "../helpers";
 
 afterEach(() => resetStop());
@@ -320,4 +321,72 @@ describe("the scheduler writes the heartbeat", () => {
       trace.close(); repo.cleanup();
     }
   }, 30_000);
+});
+
+describe("the loop's pause by a person", () => {
+  test("hold, read, release; releasing twice is fine", () => {
+    const t = tempDir();
+    try {
+      expect(readLoopHold(t.path)).toBeNull();
+      const h = holdLoop(t.path, "John");
+      expect(readLoopHold(t.path)).toEqual(h);
+      expect(h.by).toBe("John");
+      expect(loopHoldText(h)).toBe("Paused by John: running steps finish, nothing new starts.");
+      expect(releaseLoop(t.path)).toBe(true);
+      expect(releaseLoop(t.path)).toBe(false);
+      expect(readLoopHold(t.path)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a hold file that cannot be read, or lacks who or when, still pauses the loop", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, ".loopstra", "hold.json");
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      const mtime = new Date("2026-10-17T08:00:00.000Z");
+      for (const text of ["", "not json", "{}", "null", "[1]"]) {
+        writeFileSync(path, text);
+        utimesSync(path, mtime, mtime);
+        expect(readLoopHold(t.path)).toEqual({ by: "someone", at: mtime.toISOString() });
+      }
+      writeFileSync(path, JSON.stringify({ by: "John" }));
+      utimesSync(path, mtime, mtime);
+      expect(readLoopHold(t.path)).toEqual({ by: "John", at: mtime.toISOString() });
+      writeFileSync(path, JSON.stringify({ by: 3, at: "2026-10-17T09:00:00.000Z" }));
+      expect(readLoopHold(t.path)).toEqual({ by: "someone", at: "2026-10-17T09:00:00.000Z" });
+      expect(releaseLoop(t.path)).toBe(true);
+      expect(readLoopHold(t.path)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a running loop that is held reads paused and still lists what it works on; a stopped one says what its next start does", () => {
+    const now = new Date("2026-10-17T10:00:00Z");
+    const beat = { pid: process.pid, startedAt: "2026-10-17T09:00:00Z", lastTickAt: "2026-10-17T09:59:50Z", lastBeatAt: "2026-10-17T09:59:58Z", current: { slug: "a" }, working: ["a"], stopping: false, stopped: false };
+    const hold = { by: "John", at: "2026-10-17T09:59:00Z" };
+    const held = heartbeatState(beat, 60, now, { pause: null, hold });
+    expect(held).toEqual({ state: "paused", text: "Paused by John: running steps finish, nothing new starts.", working: [{ slug: "a" }] });
+    const stopped = heartbeatState({ ...beat, stopped: true }, 60, now, { pause: null, hold });
+    expect(stopped.state).toBe("stopped");
+    expect(stopped.text).toEndWith("Paused by John: the next start starts nothing until it is resumed.");
+  });
+});
+
+describe("the wake file", () => {
+  test("each touch changes the stamp; no file is an empty stamp", () => {
+    const t = tempDir();
+    try {
+      expect(wakeStamp(t.path)).toBe("");
+      touchWake(t.path);
+      const a = wakeStamp(t.path);
+      touchWake(t.path);
+      expect(a).not.toBe("");
+      expect(wakeStamp(t.path)).not.toBe(a);
+    } finally {
+      t.cleanup();
+    }
+  });
 });

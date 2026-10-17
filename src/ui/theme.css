@@ -151,6 +151,17 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .inbox-item.selected { border-color: var(--accent); }
 .inbox-item .kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-3); }
 .inbox-item .actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+
+/* A change's controls (see parts/Actions.tsx): they wrap, never scroll, down to a phone's width. */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin-bottom: 18px; }
+.inbox-item .controls { margin-bottom: 0; }
+.controls .badge { max-width: 100%; }
+.control-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.control-form textarea { width: 100%; min-height: 72px; resize: vertical; }
+.control-form input[type="text"] { flex: 1 1 200px; min-width: 0; }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.danger:hover { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
+.prio-pick { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); }
 .calm { padding: 20px; border-radius: var(--radius); background: var(--ok-bg); color: var(--ok); }
 
 /* Changes */
@@ -302,5 +313,7 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .help dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 12px 0 0; }
 .help dd { margin: 0; }
 .toasts { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); display: grid; gap: 8px; z-index: 40; }
-.toast { padding: 10px 16px; border-radius: var(--radius); background: var(--fg); color: var(--bg); box-shadow: var(--shadow); }
+.toast { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: var(--radius); background: var(--fg); color: var(--bg); box-shadow: var(--shadow); }
+.toast .btn { background: transparent; color: inherit; border-color: currentColor; padding: 2px 10px; }
+.toast .btn:hover { color: inherit; border-color: currentColor; }
 .toast.bad { background: var(--bad); color: var(--on-bad); }

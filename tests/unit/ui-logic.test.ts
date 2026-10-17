@@ -6,12 +6,13 @@ import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
-import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, type State } from "../../src/ui/store";
+import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
 import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
+import { act, beforeOf, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -39,6 +40,11 @@ describe("formatting", () => {
     expect(pillText({ state: "running", text: "Running — last check 3s ago", working: [] })).toBe("Running");
     expect(pillText({ state: "running", text: "Stopping — last check 3s ago", working: [{ slug: "a" }] })).toBe("Stopping");
     expect(pillText({ state: "not-responding", text: "Not responding (last check 14 min ago)", working: [] })).toBe("Not responding");
+  });
+
+  test("a loop a person paused says so in the top bar, even while its last steps finish", () => {
+    const heldLoop = { state: "paused" as const, text: "Paused by John: running steps finish, nothing new starts.", held: { by: "John", at: "2026-10-17T10:00:00Z" }, working: [{ slug: "a", phase: "build" }] };
+    expect(pillText(heldLoop)).toBe("Paused by John");
   });
 });
 
@@ -188,8 +194,8 @@ describe("a transcript on the page", () => {
 
 describe("the page's state", () => {
   const sections: Sections = {
-    loop: { state: "stopped", text: "Stopped", working: [], nextCheck: null },
-    inbox: [], changes: [], running: { now: [], recent: [] }, totals: { todayUsd: 0, weekUsd: 0, allUsd: 0 },
+    loop: { state: "stopped", text: "Stopped", working: [], nextCheck: null, held: null },
+    inbox: [], changes: [], running: { now: [], recent: [] }, totals: { todayUsd: 0, weekUsd: 0, allUsd: 0 }, requests: [],
   };
 
   test("a snapshot sets everything; a section replaces only itself; events are kept once, up to a limit", () => {
@@ -326,7 +332,7 @@ describe("what is worth a notification", () => {
 });
 
 describe("when a change page reads its detail again", () => {
-  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true };
+  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [] };
   test("the age in words, which the server rebuilds every few seconds, does not count", () => {
     expect(detailKey({ ...summary, inStatus: "3 min" }, "2")).toBe(detailKey(summary, "2"));
     expect(detailKey(null, "")).toBe(detailKey(null, ""));
@@ -337,6 +343,11 @@ describe("when a change page reads its detail again", () => {
       expect(detailKey({ ...summary, ...changed }, "2")).not.toBe(base);
     }
     expect(detailKey(summary, "2,3")).not.toBe(base);
+  });
+  test("a hold or a release does, so the page shows the change held or not at once", () => {
+    const held = detailKey({ ...summary, held: "waiting for legal (John, the dashboard)" }, "2");
+    expect(held).not.toBe(detailKey(summary, "2"));
+    expect(detailKey({ ...summary, held: null }, "2")).not.toBe(held);
   });
   test("the diff reloads only when the status or a running step changes", () => {
     expect(codeKey({ ...summary, costUsd: 9, note: "x" }, "2")).toBe(codeKey(summary, "2"));
@@ -385,5 +396,78 @@ describe("reading JSON", () => {
     } finally {
       globalThis.fetch = real;
     }
+  });
+});
+
+describe("requests from the page", () => {
+  const change = { slug: "a", status: "plan-review", note: "Read plan.md.", priority: "normal" } as unknown as ChangeSummary;
+
+  test("the body names the change, the status the person saw, and what the action needs", () => {
+    expect(bodyFor(change, { kind: "approve", label: "Approve the plan", to: "plan-approved" })).toEqual({ kind: "approve", slug: "a", expect: "plan-review" });
+    expect(bodyFor(change, { kind: "send-back", label: "Send back", to: "spec-approved" }, { note: "Split it." })).toEqual({ kind: "send-back", slug: "a", expect: "plan-review", note: "Split it." });
+    expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
+    expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
+    expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
+  });
+
+  test("what an undo puts back is the stated priority: none when the change only reads as normal", () => {
+    expect(beforeOf({ ...change, statedPriority: null })).toEqual({ note: "Read plan.md.", priority: null });
+    expect(beforeOf({ ...change, priority: "high", statedPriority: "high" })).toEqual({ note: "Read plan.md.", priority: "high" });
+  });
+
+  test("undo puts back what the action changed, from where it left the change", () => {
+    const before = { note: "Read plan.md.", priority: "normal" };
+    expect(undoFor({ kind: "approve", slug: "a", expect: "plan-review" }, before, "plan-approved")).toEqual({ kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "Read plan.md." });
+    expect(undoFor({ kind: "send-back", slug: "a", expect: "plan-review", note: "x" }, before, "spec-approved")).toEqual({ kind: "undo", slug: "a", expect: "spec-approved", to: "plan-review", note: "Read plan.md." });
+    expect(undoFor({ kind: "priority", slug: "a", expect: "building", priority: "high" }, before, "building")).toEqual({ kind: "priority", slug: "a", expect: "building", priority: "normal" });
+    expect(undoFor({ kind: "hold", slug: "a", expect: "building", reason: "" }, before, "building")).toEqual({ kind: "release", slug: "a", expect: "building" });
+    expect(undoFor({ kind: "close", slug: "a", expect: "building" }, before, "closed")).toBeNull();
+    expect(undoFor({ kind: "approve", slug: "a", expect: "plan-review" }, before, null)).toBeNull();
+    // A change with no priority line gets none again, not "normal" written into its file.
+    expect(undoFor({ kind: "priority", slug: "a", expect: "building", priority: "high" }, { ...before, priority: null }, "building")).toEqual({ kind: "priority", slug: "a", expect: "building", priority: null });
+  });
+
+  test("an action that failed loses its Undo, and an Undo pressed after the failure says nothing more", async () => {
+    const real = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      asked.push(`${method} ${url}`);
+      if (method === "POST") return Response.json({ id: "r1", loop: "running" }, { status: 202 });
+      // Claimed by the loop already: it cannot be cancelled.
+      if (method === "DELETE") return Response.json({ error: "claimed" }, { status: 409 });
+      return Response.json({ state: "done", ok: false, text: "a moved on to building; nothing changed.", status: "building" });
+    }) as unknown as typeof fetch;
+    // Real timers: the first ask for the result is a second after the send.
+    const settle = async (check: () => boolean) => { for (let i = 0; i < 300 && !check(); i++) await Bun.sleep(10); };
+    toasts.value = [];
+    try {
+      expect(await act({ kind: "approve", slug: "a", expect: "plan-review" }, { note: "", priority: null }, "Approve the plan, a")).toBe(true);
+      const sent = toasts.value.find((t) => t.action)!;
+      expect(sent.text).toBe("Approve the plan, a: sent to the loop.");
+      await settle(() => toasts.value.some((t) => t.kind === "bad"));
+      expect(toasts.value.map((t) => [t.text, t.kind, !!t.action])).toEqual([["a moved on to building; nothing changed.", "bad", false]]);
+      // A press that got in before the toast went: the failure is not shown again, and nothing is sent.
+      sent.action!.run();
+      await settle(() => asked.some((a) => a.startsWith("DELETE")));
+      await Bun.sleep(20);
+      expect(toasts.value).toHaveLength(1);
+      expect(asked.filter((a) => a.startsWith("POST"))).toHaveLength(1);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
+  });
+
+  test("results are asked for every second for half a minute, then every 5 s, for about ten minutes", () => {
+    expect(nextPoll(0)).toBe(1000);
+    expect(nextPoll(29)).toBe(1000);
+    expect(nextPoll(30)).toBe(5000);
+    expect(nextPoll(143)).toBe(5000);
+    expect(nextPoll(144)).toBeNull();
+  });
+
+  test("an action that could not be sent says so plainly, without the error itself", () => {
+    expect(unsentText("Approve the plan, a")).toBe("Approve the plan, a: it could not be sent. Try again.");
   });
 });

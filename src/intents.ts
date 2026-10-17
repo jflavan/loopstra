@@ -40,6 +40,11 @@ export const Frontmatter = z.object({
   }),
   /** The last approved status, so a person can retry from it. Runtime-managed. */
   resume_from: z.enum(STATUSES).optional(),
+  /**
+   * Optional: why the change is held. While it is set, the scheduler starts no step for the change.
+   * Written by the runtime (a hold from the console or chat) or by a person; blank reads as absent.
+   */
+  hold: blankableString,
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
 
@@ -96,7 +101,9 @@ function parseSections(body: string): Record<string, string> {
 
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
-  const fm = stringify(file.frontmatter, { lineWidth: 0 }).trimEnd();
+  // A blank hold is no hold: it gets no line, so a released change's file does not say `hold: ""`.
+  const { hold, ...rest } = file.frontmatter;
+  const fm = stringify(hold ? file.frontmatter : rest, { lineWidth: 0 }).trimEnd();
   const body = file.body.replace(/^\r?\n/, "");
   const text = `---\n${fm}\n---\n${body}`;
   return crlf ? text.replace(/\r?\n/g, "\r\n") : text;
@@ -219,24 +226,35 @@ function commentStart(rest: string): number {
  * trailing comment is kept), or added just before the closing `---`. Everything else (other keys
  * and their order, comments, blank lines, the body, CRLF or LF, a leading BOM) stays as it was, so
  * a person's own edits to the file survive a status change. A frontmatter shape the line patcher
- * cannot handle (for example a one-line `{...}` map) is rewritten whole, which still parses.
+ * cannot handle (for example a one-line `{...}` map) is rewritten whole, which still parses. Each
+ * key in `remove` loses its line (with its comment and any lines its value went on over).
  */
-export function patchFrontmatter(raw: string, patch: Record<string, string>): string {
+export function patchFrontmatter(raw: string, patch: Record<string, string>, remove: readonly string[] = []): string {
   const bom = raw.startsWith("﻿") ? "﻿" : "";
   const text = raw.slice(bom.length);
   const parts = text.split(/(?<=\n)/);
   const content = (p: string) => p.replace(/\r?\n$/, "");
   const eol = /\r\n/.exec(text) ? "\r\n" : "\n";
   const entries = Object.entries(patch);
-  if (!entries.length) return raw;
+  if (!entries.length && !remove.length) return raw;
 
   const close = content(parts[0] ?? "").trimEnd() === "---" ? parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---") : -1;
   let out: string;
   if (close < 0) {
+    if (!entries.length) return raw;
     out = bom + ["---", ...entries.map(([k, v]) => `${k}: ${scalar(v)}`), "---"].join(eol) + eol + text;
   } else {
     const head = parts.slice(0, close);
     const tail = parts.slice(close);
+    for (const key of remove) {
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      if (at < 0) continue;
+      // The key's line and any lines its value went on over (a block or folded scalar).
+      let end = at + 1;
+      while (end < head.length && /^(\s+\S|\s*$)/.test(content(head[end]!))) end++;
+      while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+      head.splice(at, end - at);
+    }
     for (const [key, value] of entries) {
       const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
       const line = `${key}: ${scalar(value)}`;
@@ -254,18 +272,20 @@ export function patchFrontmatter(raw: string, patch: Record<string, string>): st
     }
     out = bom + head.join("") + tail.join("");
   }
-  if (patched(out, patch)) return out;
+  if (patched(out, patch, remove)) return out;
   // Fallback: rewrite the whole frontmatter from what the file says, with the patch on top.
   const file = parseIntentFile(raw);
-  const next = Frontmatter.parse({ ...file.frontmatter, ...patch });
+  const merged: Record<string, unknown> = { ...file.frontmatter, ...patch };
+  for (const key of remove) delete merged[key];
+  const next = Frontmatter.parse(merged);
   return serializeIntentFile({ ...file, frontmatter: next });
 }
 
-/** True when `text` parses and has every patched value. */
-function patched(text: string, patch: Record<string, string>): boolean {
+/** True when `text` parses, has every patched value, and has no value left for a removed key. */
+function patched(text: string, patch: Record<string, string>, remove: readonly string[] = []): boolean {
   try {
     const fm = parseIntentFile(text).frontmatter as Record<string, unknown>;
-    return Object.entries(patch).every(([k, v]) => (fm[k] ?? "") === v);
+    return Object.entries(patch).every(([k, v]) => (fm[k] ?? "") === v) && remove.every((k) => (fm[k] ?? "") === "");
   } catch {
     return false;
   }
@@ -275,15 +295,16 @@ function patched(text: string, patch: Record<string, string>): boolean {
  * Writes frontmatter keys into intent.md. The file is read from disk right before writing and only
  * the given keys change (see patchFrontmatter), so a person's edits made meanwhile are kept. With
  * `expectStatus`, nothing is written when the status on disk is a different one (a person changed
- * it); the return value says whether it wrote. `intent.file` is refreshed from what was written.
+ * it); the return value says whether it wrote. With `remove`, those keys' lines are taken out.
+ * `intent.file` is refreshed from what was written.
  */
-export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status } = {}): Promise<boolean> {
+export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> } = {}): Promise<boolean> {
   const path = join(intent.dir, "intent.md");
   const onDisk = existsSync(path) ? await Bun.file(path).text() : serializeIntentFile(intent.file);
   if (opts.expectStatus !== undefined && parseIntentFile(onDisk).frontmatter.status !== opts.expectStatus) return false;
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries(patch)) if (v !== undefined) values[k] = String(v);
-  const text = patchFrontmatter(onDisk, values);
+  const text = patchFrontmatter(onDisk, values, opts.remove ?? []);
   await Bun.write(path, text);
   intent.file = parseIntentFile(text);
   return true;
@@ -443,9 +464,15 @@ export function waitNote(intent: Intent, intents: Intent[], heldBy?: string): st
   return [dependencyNote(intent, intents), sameFiles].filter(Boolean).join(" ");
 }
 
-/** The note shown for a change: why it waits for others, if it does, then its own note. */
+/** "Held: <why>." for a held change, or "". */
+export function heldNote(intent: Intent): string {
+  const hold = intent.file.frontmatter.hold.trim();
+  return hold ? `Held: ${hold.replace(/[.\s]+$/, "")}.` : "";
+}
+
+/** The note shown for a change: that it is held, why it waits for others, then its own note. */
 export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): string {
-  return [waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
+  return [heldNote(intent), waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
 }
 
 /** Statuses whose change holds the files its plan lists until it merges. */
@@ -459,9 +486,10 @@ export function planFilesNeeded(status: Status): boolean {
 /**
  * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
  * lists a file that another change's plan lists, and that change is building, in review or waiting to
- * merge, or is at plan-approved earlier in the queue and not waiting on its own depends_on. Building
- * both would end in a rebase conflict, which needs an engineer. No deadlock: a holder is past
- * plan-approved, or earlier in the queue and free to go. `files` gives each change's planned files
+ * merge (held or not: its branch exists), or is at plan-approved earlier in the queue, not held and not
+ * waiting on its own depends_on. Building both would end in a rebase conflict, which needs an engineer.
+ * No deadlock: a holder is past plan-approved, or earlier in the queue and free to go (a held change
+ * never runs, so it holds no plan-approved change back). `files` gives each change's planned files
  * (null or missing: the plan has no file list, so it never waits and holds nobody). Gives the change
  * each waiting change waits for (the first in queue order).
  */
@@ -474,7 +502,7 @@ export function fileHolds(ordered: Intent[], files: ReadonlyMap<string, string[]
     const holder = ordered.find((h, hat) => {
       if (h === i) return false;
       const s = h.file.frontmatter.status;
-      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !waitingOn(h, ordered).length);
+      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !h.file.frontmatter.hold.trim() && !waitingOn(h, ordered).length);
       return holding && (listed(h) ?? []).some((f) => mine.includes(f));
     });
     if (holder) holds.set(i.slug, holder.slug);
@@ -521,12 +549,12 @@ const NOBODY: HumanGates = humanGates(null);
 
 /**
  * The generated queue.md. "Needs a person" holds every change waiting for one (blocked, drafts, and
- * reviews with a person on the gate; see waitsForPerson) and intents whose intent.md cannot be read,
+ * reviews with a person on the gate; see waitsForPerson), held changes that are not finished, and intents whose intent.md cannot be read,
  * with their plain problem. `holds`: the same-file waits (see fileHolds), each shown in its note.
  */
 export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map()): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const waiting = ordered.filter((i) => waitsForPerson(i, human));
+  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || !!i.file.frontmatter.hold.trim()));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
   const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug)))} |`;

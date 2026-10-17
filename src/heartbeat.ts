@@ -1,4 +1,4 @@
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
@@ -100,16 +100,17 @@ export function pidAlive(pid: number): boolean {
  * three beats) whose process is gone is a loop that did not shut down cleanly (killed, crashed);
  * with the process still there it is not responding (hung, or the machine slept). A stopped loop
  * with a pause still running says when the next start will try. `pause` defaults to the one the
- * heartbeat carries; `alive` is for tests.
+ * heartbeat carries; `hold` is a person's pause (see LoopHold); `alive` is for tests.
  */
 export function heartbeatState(
   hb: Heartbeat | null, pollSeconds: number, now: Date = new Date(),
-  opts: { pause?: Pause | null; alive?: (pid: number) => boolean } = {},
+  opts: { pause?: Pause | null; hold?: LoopHold | null; alive?: (pid: number) => boolean } = {},
 ): LoopStatus {
   const t = now.getTime();
   const until = opts.pause !== undefined ? opts.pause?.until : hb?.pausedUntil;
   const waits = until && Date.parse(until) > t ? ` The assistant was unavailable; the next start waits until ${clockText(new Date(until))}.` : "";
-  const stopped = (text: string): LoopStatus => ({ state: "stopped", text: waits ? `${text}.${waits}` : text, working: [] });
+  const holds = opts.hold ? ` Paused by ${opts.hold.by}: the next start starts nothing until it is resumed.` : "";
+  const stopped = (text: string): LoopStatus => ({ state: "stopped", text: waits || holds ? `${text}.${waits}${holds}` : text, working: [] });
   if (!hb) return stopped("Stopped");
   const lastCheck = `last check ${agoText(t - Date.parse(hb.lastTickAt ?? hb.startedAt))} ago`;
   if (hb.stopped) return stopped(hb.lastTickAt ? `Stopped — ${lastCheck}` : "Stopped");
@@ -121,6 +122,8 @@ export function heartbeatState(
   }
   if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, working: workingOf(hb) };
   if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), working: [] };
+  // A person's pause: the steps already running go on, so they are still listed.
+  if (opts.hold) return { state: "paused", text: loopHoldText(opts.hold), working: workingOf(hb) };
   const working = workingOf(hb);
   const on = working.length ? `working on ${andList(working.map((w) => w.slug))}, ` : "";
   return { state: "running", text: `Running — ${on}${lastCheck}`, working };
@@ -129,7 +132,7 @@ export function heartbeatState(
 /** "Loop: Running — last check 20s ago" plus a newline, for `status`. */
 export async function loopStatusLine(root: string): Promise<string> {
   const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
-  return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root) }).text}\n`;
+  return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root), hold: readLoopHold(root) }).text}\n`;
 }
 
 /**
@@ -195,6 +198,57 @@ export function pauseAfterUnavailable(root: string, now: Date = new Date(), caus
     writeFileAtomic(pausePath(root), JSON.stringify(pause, null, 2));
   } catch { /* without the file the next tick simply tries again */ }
   return pause;
+}
+
+/**
+ * The loop paused by a person, `.loopstra/hold.json` (`{ by, at }`). While it exists the tick
+ * starts no new step; running steps and the pull request watcher finish what they are doing. It
+ * is not the outage pause (paused.json) and never clears by itself.
+ */
+export interface LoopHold { by: string; at: string }
+
+function loopHoldPath(root: string): string {
+  return join(root, ".loopstra", "hold.json");
+}
+
+/**
+ * The person's pause, or null when there is no hold file. A file that is there but cannot be read,
+ * or lacks who or when, still pauses the loop: "someone", since the file's last change.
+ */
+export function readLoopHold(root: string): LoopHold | null {
+  const path = loopHoldPath(root);
+  let since: string;
+  try {
+    since = statSync(path).mtime.toISOString();
+  } catch (e) {
+    if ((e as { code?: string })?.code === "ENOENT") return null;
+    since = new Date().toISOString();
+  }
+  let h: Partial<Record<keyof LoopHold, unknown>> = {};
+  try {
+    const read = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (read && typeof read === "object") h = read as typeof h;
+  } catch { /* unreadable: it still pauses */ }
+  return { by: typeof h.by === "string" ? h.by : "someone", at: typeof h.at === "string" ? h.at : since };
+}
+
+/** Pauses the loop for `by` (whole file, temp then rename). */
+export function holdLoop(root: string, by: string, now: Date = new Date()): LoopHold {
+  const hold: LoopHold = { by, at: now.toISOString() };
+  writeFileAtomic(loopHoldPath(root), JSON.stringify(hold, null, 2));
+  return hold;
+}
+
+/** Ends the person's pause; false when there was none. */
+export function releaseLoop(root: string): boolean {
+  const had = readLoopHold(root) !== null;
+  rmSync(loopHoldPath(root), { force: true });
+  return had;
+}
+
+/** The loop line while a person has paused it. */
+export function loopHoldText(h: LoopHold): string {
+  return `Paused by ${h.by}: running steps finish, nothing new starts.`;
 }
 
 /** "14:32", local time. */

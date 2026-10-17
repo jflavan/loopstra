@@ -22,6 +22,12 @@ export interface ChangeSummary {
   note: string;
   /** A step of it is running now. */
   running: boolean;
+  /** Why it is held (the hold line), or null. */
+  held: string | null;
+  /** The priority line as written, or null when there is none (`priority` then reads normal). */
+  statedPriority: string | null;
+  /** What a person can do to it now (see src/actions.ts). */
+  offers: Offer[];
 }
 
 export interface RunningPhase {
@@ -42,7 +48,12 @@ export interface FinishedPhase {
 export interface LoopSection extends LoopStatus {
   /** When the next tick is due while the loop sleeps between ticks; null otherwise. */
   nextCheck: string | null;
+  /** A person's pause of the loop (see readLoopHold), or null. */
+  held: { by: string; at: string } | null;
 }
+
+/** A request the loop has not finished: shown beside its change ("Waiting for the loop: Approve the plan"). */
+export interface PendingRequest { id: string; kind: string; slug: string | null; label: string; byName: string; via: string; at: string }
 
 export interface Totals { todayUsd: number; weekUsd: number; allUsd: number }
 
@@ -52,6 +63,7 @@ export interface Sections {
   changes: ChangeSummary[];
   running: { now: RunningPhase[]; recent: FinishedPhase[] };
   totals: Totals;
+  requests: PendingRequest[];
 }
 
 /**
@@ -61,7 +73,7 @@ export interface Sections {
 export const ANY_SLUG = /^_?[a-z0-9][a-z0-9-]*$/;
 
 export type SectionName = keyof Sections;
-export const SECTION_NAMES: readonly SectionName[] = ["loop", "inbox", "changes", "running", "totals"];
+export const SECTION_NAMES: readonly SectionName[] = ["loop", "inbox", "changes", "running", "totals", "requests"];
 
 export interface Meta {
   /** Whether this console has the orchestrator's chat. */
@@ -137,3 +149,12 @@ export interface SpendView {
   byHour: Array<{ hour: string; costUsd: number }>;
   judges: JudgesView | null;
 }
+
+/** What a person can do to a change from the console or chat. */
+export type ActionKind = "approve" | "send-back" | "retry" | "accept" | "close" | "priority" | "hold" | "release";
+
+/** One action a change offers now: its kind, its button's words, and the status it leads to (when it sets one). */
+export interface Offer { kind: ActionKind; label: string; to?: string; confirm?: boolean }
+
+/** The priorities, in order (the same list as src/intents.ts; the page cannot import that file). */
+export const PRIORITY_NAMES = ["urgent", "high", "normal", "low"] as const;

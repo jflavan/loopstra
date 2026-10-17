@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { loadConfig, type Config } from "../config";
-import { ARTIFACTS, orderQueue, scanRepo } from "../intents";
+import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES, runsDir } from "./files";
@@ -15,13 +15,10 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   const ordered = orderQueue((await scanRepo(root)).intents);
   const i = ordered.find((x) => x.slug === slug);
   if (!i) return null;
-  let lanes = 1;
-  let pollSeconds = 60;
-  try {
-    const cfg = await loadConfig(root);
-    lanes = cfg.speed.max_parallel_changes;
-    pollSeconds = cfg.poll_seconds;
-  } catch { /* the inbox says what is wrong with the config */ }
+  let cfg: Config | null = null;
+  try { cfg = await loadConfig(root); } catch { /* the inbox says what is wrong with the config */ }
+  const lanes = cfg?.speed.max_parallel_changes ?? 1;
+  const pollSeconds = cfg?.poll_seconds ?? 60;
   const holds = await sameFileHolds(lanes, ordered);
   const rows = trace.phases(slug);
   // The board's rule, so the two never disagree.
@@ -40,7 +37,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     };
   });
   return {
-    ...changeSummary(trace, i, ordered, holds.get(slug), busy, now),
+    ...changeSummary(trace, i, ordered, holds.get(slug), busy, now, humanGates(cfg)),
     dependsOn: i.file.frontmatter.depends_on ?? [],
     documents: ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${slug}/${a}` })),
     phases,
