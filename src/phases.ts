@@ -13,7 +13,7 @@ import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
-import { AssistantUnavailable, Cancelled, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { toolTarget } from "./tools";
 
 /**
@@ -473,7 +473,11 @@ export async function projectCommand(
 /** `detail`: what went wrong, for the trace (the caller words the owner's note). */
 export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
-/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request (or a cancel) is marked interrupted and passed on. */
+/**
+ * Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop
+ * request (or a cancel, or a session inside that a person stopped or that asked a question) is marked
+ * interrupted and passed on.
+ */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
   try {
@@ -481,8 +485,8 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
     return r;
   } catch (e) {
-    if (e instanceof StopRequested || e instanceof Cancelled) {
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof Cancelled ? e.message : STOPPED_NOTE });
+    if (e instanceof StopRequested || e instanceof Cancelled || endsStepQuietly(e)) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof StopRequested ? STOPPED_NOTE : e.message });
       throw e;
     }
     const msg = errorText(e);

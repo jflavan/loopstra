@@ -8,7 +8,7 @@ import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
-import { AssistantUnavailable, StopRequested } from "../../src/stop";
+import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
 
@@ -362,6 +362,20 @@ describe("codePhase", () => {
     expect(odd.ok).toBe(false);
     if (!odd.ok) expect(odd.detail).toContain("null");
     trace.close(); repo.cleanup();
+  });
+
+  test("a stopped session or a question inside passes on: the row ends interrupted, and the step ends quietly", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await expect(codePhase(ctx, "merge", async () => { throw new SessionStopped("John"); })).rejects.toBeInstanceOf(SessionStopped);
+      await expect(codePhase(ctx, "checks", async () => { throw new QuestionAsked("fix", "Keep the old API?"); })).rejects.toBeInstanceOf(QuestionAsked);
+      const phases = trace.phases("x");
+      expect(phases.map((p) => p.status)).toEqual(["interrupted", "interrupted"]);
+      expect(phases[0]?.error).toBe("stopped by John");
+      expect(phases[1]?.error).toBe("the fix session asked: Keep the old API?");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
   });
 });
 
