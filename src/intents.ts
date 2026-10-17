@@ -431,12 +431,17 @@ function dependsOn(from: Intent, target: string, intents: Intent[], seen = new S
 }
 
 /**
- * The note shown for a change: why it waits for others, if it does, then its own note. `heldBy`: the
- * change it waits for because both change the same files (see fileHolds).
+ * Why a change waits for others, in words ("" when it does not). `heldBy`: the change it waits for
+ * because both change the same files (see fileHolds).
  */
-export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): string {
+export function waitNote(intent: Intent, intents: Intent[], heldBy?: string): string {
   const sameFiles = heldBy ? `Waits for ${heldBy} to be merged first, because both change the same files.` : null;
-  return [dependencyNote(intent, intents), sameFiles, intent.file.frontmatter.note].filter(Boolean).join(" ");
+  return [dependencyNote(intent, intents), sameFiles].filter(Boolean).join(" ");
+}
+
+/** The note shown for a change: why it waits for others, if it does, then its own note. */
+export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): string {
+  return [waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
 }
 
 /** Statuses whose change holds the files its plan lists until it merges. */
