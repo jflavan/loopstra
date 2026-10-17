@@ -26,8 +26,8 @@ function Screen() {
     case "live": return <Live />;
     case "inbox": return <Inbox />;
     case "changes": return <Changes />;
-    case "change": return <Change slug={r.slug} tab={r.tab} />;
-    case "session": return <Session slug={r.slug} seq={r.seq} />;
+    case "change": return <Change key={r.slug} slug={r.slug} tab={r.tab} />;
+    case "session": return <Session key={`${r.slug}/${r.seq}`} slug={r.slug} seq={r.seq} />;
     case "activity": return <Activity />;
     case "spend": return <Spend />;
     case "missing":

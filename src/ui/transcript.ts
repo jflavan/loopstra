@@ -14,10 +14,17 @@ export function addItems(s: Shown, more: TranscriptItem[]): Shown {
   const items = [...s.items];
   const results = { ...s.results };
   let todos = s.todos;
+  // A stream that reconnects sends again what it sent before; a call or edit is shown once.
+  const seen = new Set<string>();
+  for (const it of items) if ("id" in it) seen.add(it.id);
   for (const it of more) {
     if (it.kind === "tool-result") results[it.id] = { ok: it.ok, output: it.output };
     else if (it.kind === "todos") todos = it.items;
-    else items.push(it);
+    else if ("id" in it) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      items.push(it);
+    } else items.push(it);
   }
   return { items, results, todos };
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { ChangeDetail, PhaseView, SessionMessage, TranscriptItem } from "../../console/types";
-import { clock, costSoFar, duration, shortModel, usd } from "../format";
+import { clock, costSoFar, duration, shortModel, stepWord, usd } from "../format";
 import { Link } from "../parts/Link";
 import { Transcript } from "../parts/Transcript";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
@@ -8,38 +8,58 @@ import { addItems, EMPTY, type Shown } from "../transcript";
 
 type Phase = Extract<SessionMessage, { type: "phase" }>;
 
+/** The cost of a chat turn, which has no change page: what its last result item says. */
+function costOfLastResult(shown: Shown): number | null {
+  for (let k = shown.items.length - 1; k >= 0; k--) {
+    const it = shown.items[k]!;
+    if (it.kind === "result") return it.costUsd;
+  }
+  return null;
+}
+
+// The screen is keyed by session (see app.tsx), so every piece of state here starts over when the person opens another one.
 export function Session({ slug, seq }: { slug: string; seq: number }) {
   const [shown, setShown] = useState<Shown>(EMPTY);
   const [phase, setPhase] = useState<Phase | null>(null);
   const [ended, setEnded] = useState(false);
+  const [stopped, setStopped] = useState(false);
   const [missing, setMissing] = useState(false);
   const [detail, setDetail] = useState<PhaseView | null>(null);
+  const chat = slug.startsWith("_");
 
   useEffect(() => {
-    setShown(EMPTY);
-    setPhase(null);
-    setEnded(false);
-    setMissing(false);
     let buffer: TranscriptItem[] = [];
-    // Rows arrive in bursts; drawing them ten times a second keeps a long session smooth.
-    const flush = setInterval(() => {
+    let gotPhase = false;
+    const flushNow = () => {
       if (!buffer.length) return;
       const batch = buffer;
       buffer = [];
       setShown((s) => addItems(s, batch));
-    }, 100);
+    };
+    // Rows arrive in bursts; drawing them ten times a second keeps a long session smooth.
+    const flush = setInterval(flushNow, 100);
     const source = new EventSource(`/api/sessions/${encodeURIComponent(slug)}/${seq}/stream`);
     source.onmessage = (ev) => {
-      const m = JSON.parse(ev.data as string) as SessionMessage;
-      if (m.type === "item") buffer.push(m.item);
-      else if (m.type === "phase") setPhase(m);
-      else {
+      let m: SessionMessage;
+      try { m = JSON.parse(ev.data as string) as SessionMessage; } catch { return; }
+      if (m.type === "item") {
+        buffer.push(m.item);
+        return;
+      }
+      // A phase or the end settles what is shown at once, so "no transcript" is never said while rows wait in the buffer.
+      flushNow();
+      if (m.type === "phase") {
+        gotPhase = true;
+        setPhase(m);
+      } else if (m.type === "end") {
         setEnded(true);
         source.close();
       }
     };
     source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) setMissing(true);
+      if (source.readyState !== EventSource.CLOSED) return;
+      if (gotPhase) setStopped(true);
+      else setMissing(true);
     };
     return () => {
       clearInterval(flush);
@@ -47,10 +67,10 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
     };
   }, [slug, seq]);
 
-  // The step's cost, files and refused commands, read again when its status changes. Chat has no change page.
+  // The step's cost, files and refused commands, read once the stream has said what the step is and again when its status changes. Chat has no change page.
   const status = phase?.status;
   useEffect(() => {
-    if (slug.startsWith("_")) return;
+    if (chat || status === undefined) return;
     let live = true;
     getJson<ChangeDetail>(`/api/changes/${slug}`).then((d) => { if (live) setDetail(d.phases.find((p) => p.seq === seq) ?? null); }, () => {});
     return () => { live = false; };
@@ -60,28 +80,28 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
     return (
       <section class="view">
         <h1>No such step</h1>
-        <p class="muted">There is no step {seq} for {slug}. <Link href={`/c/${slug}`}>Open the change</Link>.</p>
+        <p class="muted">
+          There is no step {seq} for {chat ? "that" : slug}. {chat ? <Link href="/activity">Open Activity</Link> : <Link href={`/c/${slug}`}>Open the change</Link>}.
+        </p>
       </section>
     );
   }
-  const t = now.value;
   const card = running.value?.now.find((p) => p.slug === slug && p.seq === seq);
-  const title = changes.value?.find((c) => c.slug === slug)?.title ?? slug;
-  const live = phase?.status === "running" && !ended;
-  const elapsed = phase ? (phase.ended ? Date.parse(phase.ended) : t) - Date.parse(phase.started) : 0;
+  const title = slug === "_chat" ? "Chat" : changes.value?.find((c) => c.slug === slug)?.title ?? slug;
+  const live = phase?.status === "running" && !ended && !stopped;
   return (
     <section class="view">
       <div class="view-head">
         <h1>
-          {slug.startsWith("_") ? title : <Link href={`/c/${slug}`}>{title}</Link>}
+          {chat ? title : <Link href={`/c/${slug}`}>{title}</Link>}
           <span class="muted"> › {phase?.name ?? `step ${seq}`}</span>
         </h1>
-        {phase && <span class={`status ${phase.status}`}>{phase.status}</span>}
-        {live && <span class="pulse" aria-label="live" />}
+        {phase && <span class={`status ${phase.status}`}>{stepWord(phase.status)}</span>}
+        {live && <span class="pulse" role="img" aria-label="live" />}
       </div>
+      {stopped && <p class="muted">The stream stopped. Reload to see the rest.</p>}
       <div class="session">
-        {/* Keyed by session so following and "show all" start over when the person moves to another one. */}
-        <Transcript key={`${slug}/${seq}`} shown={shown} live={live} />
+        <Transcript shown={shown} live={live} done={ended} />
         <aside class="side">
           {shown.todos && shown.todos.length > 0 && (
             <div class="panel">
@@ -90,20 +110,35 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
             </div>
           )}
           <div class="panel">
-            <dl>
-              {card?.model && <><dt>Model</dt><dd>{shortModel(card.model)}</dd></>}
-              {phase && <><dt>Started</dt><dd>{clock(phase.started, t)}</dd></>}
-              {phase && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(elapsed)}</dd></>}
-              <dt>Cost</dt>
-              <dd>{live && phase ? usd(costSoFar(phase.started, t, meta.value?.usdPerMinute ?? 0.2), true) : usd(detail?.costUsd ?? 0)}</dd>
-              {detail?.error && <><dt>Problem</dt><dd>{detail.error}</dd></>}
-            </dl>
+            <Facts phase={phase} live={live} model={card?.model ?? null} detail={detail} chatCost={chat ? costOfLastResult(shown) : null} />
             {detail && detail.denied.length > 0 && <p class="muted">Not allowed: {detail.denied.join(", ")}</p>}
             {detail && detail.files.length > 0 && <p>{detail.files.map((f) => <a key={f.name} href={f.url} target="_blank" rel="noopener noreferrer" class="chip">{f.name}</a>)}</p>}
           </div>
-          {!slug.startsWith("_") && <button class="btn" onClick={() => openDrawer(title)}>Ask the orchestrator about this</button>}
+          {!chat && <button class="btn" onClick={() => openDrawer(title)}>Ask the orchestrator about this</button>}
         </aside>
       </div>
     </section>
+  );
+}
+
+/** The facts that move with the clock. They read the time here, so a tick redraws these lines and not the transcript. */
+function Facts({ phase, live, model, detail, chatCost }: { phase: Phase | null; live: boolean; model: string | null; detail: PhaseView | null; chatCost: number | null }) {
+  const t = now.value;
+  const rate = meta.value?.usdPerMinute;
+  const elapsed = phase ? (phase.ended ? Date.parse(phase.ended) : t) - Date.parse(phase.started) : 0;
+  let cost = "–";
+  if (live && phase) {
+    if (rate !== undefined) cost = usd(costSoFar(phase.started, t, rate), true);
+  } else if (chatCost !== null) cost = usd(chatCost);
+  else if (detail) cost = usd(detail.costUsd);
+  return (
+    <dl>
+      {model && <><dt>Model</dt><dd>{shortModel(model)}</dd></>}
+      {phase && <><dt>Started</dt><dd>{clock(phase.started, t)}</dd></>}
+      {phase && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(elapsed)}</dd></>}
+      <dt>Cost</dt>
+      <dd>{cost}</dd>
+      {detail?.error && <><dt>Problem</dt><dd>{detail.error}</dd></>}
+    </dl>
   );
 }

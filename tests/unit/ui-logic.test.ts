@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
-import { ago, costSoFar, duration, pillText, shortModel, usd } from "../../src/ui/format";
+import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
@@ -30,6 +30,9 @@ describe("formatting", () => {
     expect(shortModel("claude-sonnet-5-5")).toBe("sonnet 5.5");
     expect(shortModel("claude-haiku-4-5-20251001")).toBe("haiku 4.5");
     expect(shortModel("opus")).toBe("opus");
+    expect(stepWord("success")).toBe("passed");
+    expect(stepWord("fail")).toBe("failed");
+    expect(stepWord("running")).toBe("running");
     expect(pillText({ state: "running", text: "Running — working on a and b, last check 3s ago", working: [{ slug: "a" }, { slug: "b" }] })).toBe("Running · 2 agents");
     expect(pillText({ state: "running", text: "Running — last check 3s ago", working: [] })).toBe("Running");
     expect(pillText({ state: "running", text: "Stopping — last check 3s ago", working: [{ slug: "a" }] })).toBe("Stopping");
@@ -169,6 +172,15 @@ describe("a transcript on the page", () => {
     expect(s2.results.t1).toEqual({ ok: true, output: "done" });
     expect(s2.todos).toEqual([]);
     expect(s.results).toEqual({});
+  });
+
+  test("a call or edit that is already shown is not added again, as after a reconnect", () => {
+    const tool = { kind: "tool", id: "t1", tool: "Bash", target: "x", input: {} } as const;
+    const edit = { kind: "edit", id: "e1", tool: "Edit", path: "a.ts", diff: "" } as const;
+    const s = addItems(EMPTY, [tool, edit, { kind: "text", text: "a" }]);
+    const again = addItems(s, [tool, edit, { kind: "text", text: "a" }, { kind: "tool", id: "t2", tool: "Read", target: "y", input: {} }]);
+    // Text has no id, so it cannot be told from a new line; only calls and edits are checked.
+    expect(again.items.map((i) => ("id" in i ? i.id : i.kind))).toEqual(["t1", "e1", "text", "text", "t2"]);
   });
 });
 

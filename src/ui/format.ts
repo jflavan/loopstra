@@ -55,3 +55,8 @@ export function pillText(loop: Pick<LoopSection, "state" | "text"> & { working: 
   const n = loop.working.length;
   return n ? `${STATE[loop.state]} · ${n} ${n === 1 ? "agent" : "agents"}` : STATE[loop.state];
 }
+
+/** A step's status in the words the owner reads: the trace says "success" and "fail". */
+export function stepWord(status: string): string {
+  return status === "success" ? "passed" : status === "fail" ? "failed" : status;
+}

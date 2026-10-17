@@ -1,9 +1,11 @@
+
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { TranscriptItem } from "../../console/types";
 import { usd } from "../format";
 import type { Shown } from "../transcript";
 import { Diff } from "./Diff";
 import { Markdown } from "./Markdown";
+import { memo } from "./memo";
 
 /** How many of the newest rows are drawn before "Show earlier". */
 const SHOWN = 1500;
@@ -13,7 +15,8 @@ const OUTPUT_LINES = 200;
 type Result = Shown["results"][string] | undefined;
 
 /** A session's transcript. It follows the newest row until the person scrolls up, then offers to jump back. */
-export function Transcript({ shown, live }: { shown: Shown; live: boolean }) {
+// Memoised: the session screen redraws for other reasons (its facts, its status) and the rows need not be rebuilt for them.
+export const Transcript = memo(function Transcript({ shown, live, done }: { shown: Shown; live: boolean; done: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const [all, setAll] = useState(false);
@@ -42,13 +45,13 @@ export function Transcript({ shown, live }: { shown: Shown; live: boolean }) {
       <div class="transcript" ref={box} onScroll={onScroll} onClick={onClick}>
         {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
         {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results[item.id] : undefined} />)}
-        {!shown.items.length && !live && <p class="muted">This step left no transcript.</p>}
+        {!shown.items.length && done && <p class="muted">This step left no transcript.</p>}
         {live && <div class="t-live"><span class="pulse" aria-hidden="true" /> Working…</div>}
       </div>
       {!follow && <button class="btn jump" onClick={() => setFollow(true)}>Jump to live ↓</button>}
     </div>
   );
-}
+});
 
 function Row({ item, result }: { item: Shown["items"][number]; result: Result }) {
   switch (item.kind) {
