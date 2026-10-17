@@ -1,7 +1,7 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { activePause, agoText } from "./heartbeat";
-import { dependencyWait, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Status } from "./intents";
+import { dependencyWait, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
 import type { Trace } from "./trace";
@@ -50,11 +50,12 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
  * Everything that needs a person, most pressing first: a pause, a red main, main out of step with
  * GitHub, a config problem, blocked changes, unreadable intents, then changes waiting for a person
  * (drafts, and reviews with a person on the gate). `config` is the loaded config, or the problem
- * that stopped it loading (which the loop also traces).
+ * that stopped it loading (which the loop also traces). `scan` is the intent folder already read, for
+ * a caller that has one (the console reads it once per rebuild); otherwise it is read here.
  */
-export async function attention(root: string, config: Config | { problem: string }, trace: Trace, now: Date = new Date()): Promise<AttentionItem[]> {
+export async function attention(root: string, config: Config | { problem: string }, trace: Trace, now: Date = new Date(), scan?: Scan): Promise<AttentionItem[]> {
   const cfg = "problem" in config ? null : config;
-  const scan = await scanRepo(root);
+  scan ??= await scanRepo(root);
   const intents = orderQueue(scan.intents);
   const items: AttentionItem[] = [];
   const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what });

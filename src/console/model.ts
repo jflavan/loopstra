@@ -4,7 +4,7 @@ import { attention, type AttentionItem } from "../attention";
 import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause } from "../heartbeat";
-import { effectivePriority, orderQueue, plainStatus, scanRepo, waitNote, type Intent, type Status } from "../intents";
+import { effectivePriority, orderQueue, plainStatus, scanRepo, waitNote, type Intent, type Scan, type Status } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
 import { nowText } from "../tools";
@@ -43,7 +43,9 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
     try { return await fn(); } catch (e) { problems.push(`${what}: ${errorText(e)}`); return fallback; }
   };
 
-  const ordered = orderQueue((await scanRepo(root)).intents);
+  // Read once and shared with the inbox: it is the costliest part of a rebuild.
+  const scan = await scanRepo(root);
+  const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
   const beat = readHeartbeat(root);
   const hb = heartbeatState(beat, pollSeconds, now, { pause: readPause(root) });
@@ -57,7 +59,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
   const holds = cfg ? await safely("same-file waits", () => sameFileHolds(cfg.speed.max_parallel_changes, ordered), new Map<string, string>()) : new Map<string, string>();
   const changes = await safely("changes", () => ordered.map((i) => changeSummary(trace, i, ordered, holds.get(i.slug), busy, now)), [] as ChangeSummary[]);
-  const inbox = await safely("needs attention", () => attention(root, config, trace, now), [] as AttentionItem[]);
+  const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);
   const totals = await safely("costs", () => totalsOf(trace.allPhases(), now), { todayUsd: 0, weekUsd: 0, allUsd: 0 });
   for (const what of problems) inbox.push({ kind: "config", label: "Console", slug: null, title: "Part of the console could not be read", what });
