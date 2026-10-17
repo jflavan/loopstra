@@ -115,6 +115,11 @@ describe("applying requests", () => {
       submitRequest(r.root, { ...by, kind: "release", slug: "a", expect: "designing" });
       await apply(r.root);
       expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8")).not.toContain("hold:");
+      // No stated priority, as an undo puts back on a change that had none: the line is taken out.
+      const none = submitRequest(r.root, { ...by, kind: "priority", slug: "a", expect: "designing", priority: null });
+      await apply(r.root);
+      expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8")).not.toContain("priority:");
+      expect(requestState(r.root, none.id)).toMatchObject({ ok: true, text: "a now has priority normal." });
     } finally {
       r.cleanup();
     }

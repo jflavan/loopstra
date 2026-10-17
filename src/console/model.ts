@@ -92,7 +92,7 @@ export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: st
     slug: i.slug, title: i.file.title || i.slug, status: fm.status, plain: plainStatus(fm.status), priority: effectivePriority(fm),
     stage: STAGE[fm.status], since, inStatus: since ? agoText(now.getTime() - Date.parse(since)) : null,
     costUsd: endedCost(trace.phases(i.slug)), waiting: waitNote(i, all, heldBy) || null, note: fm.note, running: busy.has(i.slug),
-    held: fm.hold.trim() || null,
+    held: fm.hold.trim() || null, statedPriority: fm.priority ?? null,
     offers: offers(fm, human, fm.status === "blocked" ? retryOptions(trace, i.slug, fm.note) : []),
   };
 }

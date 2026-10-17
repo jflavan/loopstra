@@ -46,13 +46,15 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
   }
   if (!detail) return <section class="view"><p class="muted">Loading…</p></section>;
   const d = detail;
+  // From the summary, which comes with every update: a hold or a release shows at once.
+  const held = (summary ?? d).held;
   return (
     <section class="view">
       <div class="view-head">
         <h1>{d.title}</h1>
         <span class={`status ${d.status}`}>{d.plain}</span>
         <span class={`prio ${d.priority}`}>{d.priority}</span>
-        {d.held && <span class="badge warn" title={d.held}>Held</span>}
+        {held && <span class="badge warn" title={held}>Held</span>}
         {d.running && <span class="pulse" role="img" aria-label="running" />}
         <span class="grow" />
         <button class="btn" onClick={() => openDrawer({ slug: d.slug, title: d.title })}>Ask the orchestrator</button>

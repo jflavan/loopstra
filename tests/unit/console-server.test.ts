@@ -287,6 +287,18 @@ describe("writes", () => {
     });
   }, 30_000);
 
+  test("a priority is one of the priorities, or null for none stated (as an undo puts back); nothing else", async () => {
+    await withRepoConsole(async (base, root) => {
+      expect((await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: "high" })).status).toBe(202);
+      expect((await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: null })).status).toBe(202);
+      expect(pendingRequests(root).map((q) => (q.kind === "priority" ? q.priority : "?"))).toEqual(["high", null]);
+      for (const bad of ["bogus", "", undefined, 3]) {
+        const r = await post(base, "/api/requests", { kind: "priority", slug: "a", expect: "plan-review", priority: bad });
+        expect({ bad, status: r.status }).toEqual({ bad, status: 400 });
+      }
+    });
+  }, 30_000);
+
   test("a waiting request can be cancelled once", async () => {
     await withRepoConsole(async (base) => {
       const { id } = await (await post(base, "/api/requests", { kind: "hold", slug: "a", expect: "plan-review", reason: "" })).json() as { id: string };

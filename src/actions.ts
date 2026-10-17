@@ -82,7 +82,7 @@ export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Off
 }
 
 /** The parts of a request these rules read. */
-export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority }
+export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null }
 
 /** The status a status-changing request leads to, from the request alone; null for one that sets no status, or that is not allowed from `expect`. */
 export function targetOf(r: RequestShape): Status | null {
@@ -126,7 +126,7 @@ export function doneWords(r: RequestShape): string {
     case "retry": return `retried from ${r.to}`;
     case "accept": return "accepted";
     case "close": return "closed";
-    case "priority": return `priority set to ${r.priority}`;
+    case "priority": return `priority set to ${r.priority ?? "normal"}`;
     case "hold": return "held";
     case "release": return "released";
     case "undo": return `undone, back to ${r.to}`;
@@ -141,7 +141,7 @@ export function requestLabel(r: RequestShape): string {
     case "retry": return `Retry from ${r.to}`;
     case "accept": return "Start";
     case "close": return "Close";
-    case "priority": return `Set priority to ${r.priority}`;
+    case "priority": return `Set priority to ${r.priority ?? "normal"}`;
     case "hold": return "Hold";
     case "release": return "Release";
     case "undo": return `Undo, back to ${r.to}`;
@@ -156,7 +156,7 @@ export function askText(r: RequestShape, slug: string): string {
     case "retry": return `Retry ${slug} from ${r.to}?`;
     case "accept": return `Start work on ${slug} now?`;
     case "close": return `Close ${slug}? It stops for good.`;
-    case "priority": return `Set ${slug}'s priority to ${r.priority}?`;
+    case "priority": return `Set ${slug}'s priority to ${r.priority ?? "normal"}?`;
     case "hold": return `Hold ${slug}, so the loop starts no step for it?`;
     case "release": return `Release ${slug}, so the loop goes on with it?`;
     case "undo": return `Take ${slug} back to ${r.to}?`;
@@ -168,7 +168,7 @@ const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** The plain result of a request that was applied; `now` is the change's status after it. */
 export function resultText(r: RequestShape, slug: string, now: Status): string {
   switch (r.kind) {
-    case "priority": return `${slug} now has priority ${r.priority}.`;
+    case "priority": return `${slug} now has priority ${r.priority ?? "normal"}.`;
     case "hold": return `${slug} is held: the loop starts no step for it until it is released.`;
     case "release": return `${slug} is released: the loop goes on with it.`;
     default: return `${capital(doneWords(r))}: ${slug} is now ${plainStatus(now)}.`;

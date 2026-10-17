@@ -6,13 +6,13 @@ import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
-import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, type State } from "../../src/ui/store";
+import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
 import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { bodyFor, nextPoll, undoFor } from "../../src/ui/requests";
+import { act, bodyFor, nextPoll, undoFor } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -332,7 +332,7 @@ describe("what is worth a notification", () => {
 });
 
 describe("when a change page reads its detail again", () => {
-  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, offers: [] };
+  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [] };
   test("the age in words, which the server rebuilds every few seconds, does not count", () => {
     expect(detailKey({ ...summary, inStatus: "3 min" }, "2")).toBe(detailKey(summary, "2"));
     expect(detailKey(null, "")).toBe(detailKey(null, ""));
@@ -343,6 +343,11 @@ describe("when a change page reads its detail again", () => {
       expect(detailKey({ ...summary, ...changed }, "2")).not.toBe(base);
     }
     expect(detailKey(summary, "2,3")).not.toBe(base);
+  });
+  test("a hold or a release does, so the page shows the change held or not at once", () => {
+    const held = detailKey({ ...summary, held: "waiting for legal (John, the dashboard)" }, "2");
+    expect(held).not.toBe(detailKey(summary, "2"));
+    expect(detailKey({ ...summary, held: null }, "2")).not.toBe(held);
   });
   test("the diff reloads only when the status or a running step changes", () => {
     expect(codeKey({ ...summary, costUsd: 9, note: "x" }, "2")).toBe(codeKey(summary, "2"));
@@ -413,6 +418,40 @@ describe("requests from the page", () => {
     expect(undoFor({ kind: "hold", slug: "a", expect: "building", reason: "" }, before, "building")).toEqual({ kind: "release", slug: "a", expect: "building" });
     expect(undoFor({ kind: "close", slug: "a", expect: "building" }, before, "closed")).toBeNull();
     expect(undoFor({ kind: "approve", slug: "a", expect: "plan-review" }, before, null)).toBeNull();
+    // A change with no priority line gets none again, not "normal" written into its file.
+    expect(undoFor({ kind: "priority", slug: "a", expect: "building", priority: "high" }, { ...before, priority: null }, "building")).toEqual({ kind: "priority", slug: "a", expect: "building", priority: null });
+  });
+
+  test("an action that failed loses its Undo, and an Undo pressed after the failure says nothing more", async () => {
+    const real = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      asked.push(`${method} ${url}`);
+      if (method === "POST") return Response.json({ id: "r1", loop: "running" }, { status: 202 });
+      // Claimed by the loop already: it cannot be cancelled.
+      if (method === "DELETE") return Response.json({ error: "claimed" }, { status: 409 });
+      return Response.json({ state: "done", ok: false, text: "a moved on to building; nothing changed.", status: "building" });
+    }) as unknown as typeof fetch;
+    // Real timers: the first ask for the result is a second after the send.
+    const settle = async (check: () => boolean) => { for (let i = 0; i < 300 && !check(); i++) await Bun.sleep(10); };
+    toasts.value = [];
+    try {
+      expect(await act({ kind: "approve", slug: "a", expect: "plan-review" }, { note: "", priority: null }, "Approve the plan, a")).toBe(true);
+      const sent = toasts.value.find((t) => t.action)!;
+      expect(sent.text).toBe("Approve the plan, a: sent to the loop.");
+      await settle(() => toasts.value.some((t) => t.kind === "bad"));
+      expect(toasts.value.map((t) => [t.text, t.kind, !!t.action])).toEqual([["a moved on to building; nothing changed.", "bad", false]]);
+      // A press that got in before the toast went: the failure is not shown again, and nothing is sent.
+      sent.action!.run();
+      await settle(() => asked.some((a) => a.startsWith("DELETE")));
+      await Bun.sleep(20);
+      expect(toasts.value).toHaveLength(1);
+      expect(asked.filter((a) => a.startsWith("POST"))).toHaveLength(1);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
   });
 
   test("results are asked for every second for half a minute, then every 5 s, for about ten minutes", () => {

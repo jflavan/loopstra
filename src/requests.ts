@@ -33,7 +33,8 @@ export type RequestBody =
   | { kind: "send-back"; slug: string; expect: Status; note: string }
   | { kind: "retry"; slug: string; expect: "blocked"; to: Status }
   | { kind: "close"; slug: string; expect: Status }
-  | { kind: "priority"; slug: string; expect: Status; priority: Priority }
+  /** `priority` null: no stated priority (the line is taken out, so the change reads as normal), as an undo puts back. */
+  | { kind: "priority"; slug: string; expect: Status; priority: Priority | null }
   | { kind: "hold"; slug: string; expect: Status; reason: string }
   | { kind: "release"; slug: string; expect: Status }
   /** Takes back an approve or a send back (see undoAllowed): from `expect` to `to`, restoring the note it replaced. */

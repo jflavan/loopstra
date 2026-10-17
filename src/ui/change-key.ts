@@ -7,7 +7,7 @@ import type { ChangeSummary, PhaseView } from "../console/types";
  */
 export function detailKey(s: ChangeSummary | null | undefined, runningSeqs: string): string {
   if (!s) return `|${runningSeqs}`;
-  return JSON.stringify([s.status, s.since, s.costUsd, s.running, s.waiting, s.note, s.priority, runningSeqs]);
+  return JSON.stringify([s.status, s.since, s.costUsd, s.running, s.waiting, s.note, s.priority, s.held, runningSeqs]);
 }
 
 /** The diff changes when the branch does, which is when the status moves or a step starts or ends. */

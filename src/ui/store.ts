@@ -58,11 +58,12 @@ export interface Toast { id: number; text: string; kind: "info" | "bad"; action?
 export const toasts = signal<Toast[]>([]);
 let toastId = 0;
 
-/** Shows a toast for `ms` (6 s unless said), with an optional button. */
-export function toast(text: string, kind: Toast["kind"] = "info", opts: { action?: Toast["action"]; ms?: number } = {}): void {
+/** Shows a toast for `ms` (6 s unless said), with an optional button; gives its id, for dismiss. */
+export function toast(text: string, kind: Toast["kind"] = "info", opts: { action?: Toast["action"]; ms?: number } = {}): number {
   const id = ++toastId;
   toasts.value = [...toasts.value, { id, text, kind, action: opts.action }];
   setTimeout(() => dismiss(id), opts.ms ?? 6000);
+  return id;
 }
 
 export function dismiss(id: number): void {

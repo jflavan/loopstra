@@ -98,7 +98,8 @@ function parse(body: Record<string, unknown>): RequestBody | string {
     // Well formed from any status; one not blocked is refused below as not offered (a 409, not a 400).
     case "retry": return isStatus(body.to) ? { kind: k, slug, expect: expect as "blocked", to: body.to } : "Say which status to retry from.";
     case "undo": return isStatus(body.to) && typeof body.note === "string" && body.note.length <= MAX_NOTE ? { kind: k, slug, expect, to: body.to, note: body.note } : "Say which status to go back to.";
-    case "priority": return typeof body.priority === "string" && (PRIORITIES as readonly string[]).includes(body.priority) ? { kind: k, slug, expect, priority: body.priority as Priority } : "Unknown priority.";
+    // null: no stated priority, as an undo puts back on a change that had none.
+    case "priority": return body.priority === null || (typeof body.priority === "string" && (PRIORITIES as readonly string[]).includes(body.priority)) ? { kind: k, slug, expect, priority: body.priority as Priority | null } : "Unknown priority.";
     case "hold": {
       const reason = str(body.reason)?.trim() ?? "";
       return reason.length <= MAX_REASON ? { kind: k, slug, expect, reason } : `A reason is at most ${MAX_REASON} characters.`;

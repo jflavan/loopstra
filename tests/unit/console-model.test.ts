@@ -25,9 +25,10 @@ describe("changes", () => {
       });
       const m = await model(t.path);
       expect(m.sections.changes.map((c) => c.slug)).toEqual(["one", "two"]);
-      expect(m.sections.changes[0]).toMatchObject({ title: "One", status: "building", plain: "building and testing", priority: "high", stage: "build", waiting: null, running: false });
+      expect(m.sections.changes[0]).toMatchObject({ title: "One", status: "building", plain: "building and testing", priority: "high", statedPriority: "high", stage: "build", waiting: null, running: false });
       expect(m.sections.changes[0]?.costUsd).toBeCloseTo(0.3);
-      expect(m.sections.changes[1]).toMatchObject({ stage: "design", priority: "normal", costUsd: 0 });
+      // No priority line: it reads as normal, and the page knows none was written (an undo then takes the line out again).
+      expect(m.sections.changes[1]).toMatchObject({ stage: "design", priority: "normal", statedPriority: null, costUsd: 0 });
       expect(m.sections.changes[1]?.waiting).toContain("one");
       expect(m.meta).toEqual({ chat: false, usdPerMinute: 0.2, pollSeconds: 60 });
       expect((await model(t.path, new Date(), { chat: true })).meta.chat).toBe(true);

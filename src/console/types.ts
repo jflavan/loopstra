@@ -24,6 +24,8 @@ export interface ChangeSummary {
   running: boolean;
   /** Why it is held (the hold line), or null. */
   held: string | null;
+  /** The priority line as written, or null when there is none (`priority` then reads normal). */
+  statedPriority: string | null;
   /** What a person can do to it now (see src/actions.ts). */
   offers: Offer[];
 }

@@ -1,16 +1,16 @@
 import type { ChangeSummary, Offer } from "../console/types";
-import { toast } from "./store";
+import { dismiss, toast } from "./store";
 
 /*
  * The page's side of a request: send an action to /api/requests, follow the loop's answer, and undo
  * it (cancel it while the loop has not claimed it, or send the reverse once it has applied it).
  */
 
-/** What the page posts to /api/requests. */
-export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string; reason?: string }
+/** What the page posts to /api/requests. A `priority` of null takes the priority line out (an undo to no stated priority). */
+export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string }
 
-/** What the change was before an action, so an undo can put it back. */
-export interface Before { note: string; priority: string }
+/** What the change was before an action, so an undo can put it back. `priority`: the priority line as written, or null when there was none. */
+export interface Before { note: string; priority: string | null }
 
 /** The request for an offer on a change: the change, the status the person saw, and what the action needs. */
 export function bodyFor(c: ChangeSummary, offer: Offer, input: { note?: string; priority?: string; reason?: string } = {}): ActionBody {
@@ -30,6 +30,7 @@ export function undoFor(b: ActionBody, before: Before, status: string | null): A
   if (!status) return null;
   switch (b.kind) {
     case "approve": case "send-back": return { kind: "undo", slug: b.slug, expect: status, to: b.expect, note: before.note };
+    // A change that had no priority line gets none again (null), not a "normal" written into its file.
     case "priority": return { kind: "priority", slug: b.slug, expect: status, priority: before.priority };
     case "hold": return { kind: "release", slug: b.slug, expect: status };
     default: return null;
@@ -119,19 +120,22 @@ export async function act(b: ActionBody, before: Before, label: string, opts: { 
       toast("Cancelled; nothing changed.");
       return;
     }
-    const reverse = (d: Done) => {
+    // `shown`: the answer was toasted already. A failure then needs no more words: nothing changed to take back.
+    const reverse = (d: Done, shown: boolean) => {
       const back = d.ok ? undoFor(b, before, d.status) : null;
       if (back) void act(back, before, "Undo", { undo: false });
-      else toast(d.text, d.ok ? "info" : "bad");
+      else if (!shown) toast(d.text, d.ok ? "info" : "bad");
     };
-    if (done) reverse(done);
-    else afterUndo = reverse;
+    if (done) reverse(done, true);
+    else afterUndo = (d) => reverse(d, false);
   };
   const withUndo = opts.undo !== false && UNDOABLE.has(b.kind);
   const said = loop === "stopped" || loop === "not-responding" ? `${label}: saved. It applies when the loop runs.` : `${label}: sent to the loop.`;
-  toast(said, "info", withUndo ? { action: { label: "Undo", run: () => void undo() }, ms: 10_000 } : {});
+  const sentToast = toast(said, "info", withUndo ? { action: { label: "Undo", run: () => void undo() }, ms: 10_000 } : {});
   follow(id, (d) => {
     done = d;
+    // An action that failed changed nothing, so its Undo goes (dismissing a toast already gone does nothing).
+    if (!d.ok) dismiss(sentToast);
     if (afterUndo) { afterUndo(d); return; }
     toast(d.text, d.ok ? "info" : "bad");
   });

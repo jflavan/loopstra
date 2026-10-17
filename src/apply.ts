@@ -225,7 +225,7 @@ function badShape(req: Request): string | null {
   if (r.kind === "accept") return null;
   if (!isStatus(r.expect)) return "the status it saw is not a status";
   if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
-  if (r.kind === "priority" && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
+  if (r.kind === "priority" && r.priority !== null && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
   for (const k of ["note", "reason"]) if (r[k] !== undefined && typeof r[k] !== "string") return `its ${k} is not text`;
   return null;
 }
@@ -472,15 +472,16 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   const ours = (req.written ?? []).includes(req.slug);
   if (!ours && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!ours && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
-  const patch: Partial<Frontmatter> = req.kind === "priority" ? { priority: req.priority } : req.kind === "hold" ? { hold: holdLine(req) } : {};
-  const remove: Array<keyof Frontmatter> = req.kind === "release" ? ["hold"] : [];
+  // A priority of null takes the line out: the change had no stated priority.
+  const patch: Partial<Frontmatter> = req.kind === "priority" ? (req.priority ? { priority: req.priority } : {}) : req.kind === "hold" ? { hold: holdLine(req) } : {};
+  const remove: Array<keyof Frontmatter> = req.kind === "release" ? ["hold"] : req.kind === "priority" && !req.priority ? ["priority"] : [];
   await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async () => {
     // A person's edit, before this request or since an earlier try, is kept in the file; a give-up then leaves it as it is.
     const own = await ownBefore(root, req, req.slug);
     await writeIntent(await readIntent(root, req.slug), patch, { remove });
     markWritten(root, req, req.slug, own);
   });
-  if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, req.priority);
+  if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, effectivePriority({ priority: req.priority ?? undefined }));
   traced(trace, req, "applied", { status: fm.status, what: doneWords(req) });
   return { ok: true, status: fm.status, text: resultText(req, req.slug, fm.status) };
 }
