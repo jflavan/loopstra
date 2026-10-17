@@ -321,6 +321,29 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("a start given up on after a person edited the accepted draft leaves their edit and status", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft", "x") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "accept", slug: "a" });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
+      // The person edits the body, keeping the accepted status the try wrote; the next try finds it accepted.
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("x", "x, and also y"));
+      expect(await apply(r.root)).toBe(0);
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toBeUndefined();
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false });
+      expect(readFileSync(path, "utf8")).toContain("x, and also y");
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("accepted");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a request given up on never undoes a person's edit made before its write", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {

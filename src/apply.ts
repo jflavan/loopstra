@@ -313,7 +313,8 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
     const was = intent.file.frontmatter.status;
     // Written by an earlier try of this request whose commit failed: commit it now.
     const ours = was === "accepted" && (req.written ?? []).includes(req.slug);
-    const own = ours || (await ownBefore(root, req, req.slug));
+    // Looked at even when an earlier try wrote it: a person may have edited it since (see ownBefore).
+    const own = await ownBefore(root, req, req.slug);
     if (!ours && !(await writeIntent(intent, { status: "accepted", note: "" }, { expectStatus: "draft" }))) {
       refused = was;
       return false;
