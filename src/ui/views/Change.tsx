@@ -7,7 +7,7 @@ import { Diff } from "../parts/Diff";
 import { Link } from "../parts/Link";
 import { Markdown } from "../parts/Markdown";
 import { TABS, type Tab } from "../router";
-import { changes, getJson, now, openDrawer, running } from "../store";
+import { changes, getJson, HttpError, now, openDrawer, running } from "../store";
 import { COLUMNS } from "./Changes";
 
 const TAB_LABEL: Record<Tab, string> = { overview: "Overview", documents: "Documents", timeline: "Timeline", code: "Code", gates: "Gates" };
@@ -16,18 +16,26 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
   const summary = changes.value?.find((c) => c.slug === slug);
   const runningSeqs = running.value?.now.filter((p) => p.slug === slug).map((p) => p.seq).join(",") ?? "";
   const [detail, setDetail] = useState<ChangeDetail | null>(null);
-  const [missing, setMissing] = useState(false);
+  // "missing": the server said 404. "failed": anything else; the next change of the key reads it again.
+  const [problem, setProblem] = useState<"missing" | "failed" | null>(null);
   // Read again when something that matters changed: the summary's "12s" age is rebuilt with every update and must not count.
   const key = detailKey(summary, runningSeqs);
   useEffect(() => {
     let live = true;
     getJson<ChangeDetail>(`/api/changes/${slug}`).then(
-      (d) => { if (live) { setDetail(d); setMissing(false); } },
-      () => { if (live) setMissing(true); },
+      (d) => { if (live) { setDetail(d); setProblem(null); } },
+      (e) => { if (live) setProblem(e instanceof HttpError && e.status === 404 ? "missing" : "failed"); },
     );
     return () => { live = false; };
   }, [slug, key]);
-  if (missing && !detail) {
+  if (problem === "failed" && !detail) {
+    return (
+      <section class="view">
+        <p class="muted">This change could not be read. The console will try again.</p>
+      </section>
+    );
+  }
+  if (problem === "missing" && !detail) {
     return (
       <section class="view">
         <h1>No such change</h1>
@@ -170,7 +178,7 @@ function Code({ slug, reload }: { slug: string; reload: string }) {
     let live = true;
     getJson<DiffView>(`/api/changes/${slug}/diff`).then(
       (v) => { if (live) setDiff(v); },
-      () => { if (live) setDiff({ exists: false, stat: "", patch: "", cut: false }); },
+      () => { if (live) setDiff({ exists: true, stat: "", patch: "", cut: false, problem: "The diff could not be read." }); },
     );
     return () => { live = false; };
   }, [slug, reload]);

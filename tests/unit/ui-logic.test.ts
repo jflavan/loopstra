@@ -6,7 +6,7 @@ import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
-import { ACTIVITY_MAX, applyMessage, connect, connection, STALE_MS, type State } from "../../src/ui/store";
+import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, type State } from "../../src/ui/store";
 import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
@@ -367,5 +367,23 @@ describe("where a timeline bar ends", () => {
     expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: "2026-01-01T00:00:10Z", status: "success", durationMs: 99 }, t0 + 60_000)).toBe(t0 + 10_000);
     expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "running", durationMs: 0 }, t0 + 60_000)).toBe(t0 + 60_000);
     expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "fail", durationMs: 5_000 }, t0 + 60_000)).toBe(t0 + 5_000);
+  });
+});
+
+describe("reading JSON", () => {
+  test("a reply that is not a success throws an error that carries its status, so a missing change is told from a failing server", async () => {
+    const real = globalThis.fetch;
+    try {
+      for (const status of [404, 500]) {
+        globalThis.fetch = (async () => new Response("no", { status })) as unknown as typeof fetch;
+        const e = await getJson("/api/changes/one").catch((x: unknown) => x);
+        expect(e).toBeInstanceOf(HttpError);
+        expect((e as HttpError).status).toBe(status);
+      }
+      globalThis.fetch = (async () => Response.json({ ok: 1 })) as unknown as typeof fetch;
+      expect(await getJson<{ ok: number }>("/x")).toEqual({ ok: 1 });
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 });

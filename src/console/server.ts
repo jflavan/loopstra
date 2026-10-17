@@ -19,6 +19,13 @@ const NOT_FOUND = () => new Response("Not found", { status: 404, headers: { "con
 type Timeouts = { timeout(req: Request, seconds: number): void };
 
 /**
+ * How long a JSON route may stay silent before Bun drops it (its default is 10 s). The diff route lets
+ * git take 30 s (DIFF_TIMEOUT_MS), so the limit must be above that or a slow diff is cut off by the
+ * server and the page wrongly says the change has no branch.
+ */
+export const JSON_IDLE_SECONDS = 60;
+
+/**
  * The console on 127.0.0.1. Bun bundles the page once at start and serves it and its chunks itself,
  * on the screens' paths (the page's router knows the same ones). They are the same static code for
  * everyone and never reach `fetch`, so only the data routes check the host. Read-only, apart from
@@ -49,8 +56,9 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
 /**
  * The data routes: `/api/stream`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
  * `/api/events`, `/api/spend`, run files under `/files/`, a change's documents under `/docs/`. Null: not found.
+ * Exported so a test can pass a fake `Timeouts`.
  */
-async function read(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
+export async function read(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
   const path = url.pathname;
   if (path === "/api/stream") {
     // The browser sends Last-Event-ID only when it reconnects by itself; a page opening a new stream
@@ -65,6 +73,7 @@ async function read(root: string, hub: Hub, req: Request, url: URL, server: Time
   if (change) {
     const slug = decode(change[1]!);
     if (!slug || !SLUG.test(slug)) return null;
+    server.timeout(req, JSON_IDLE_SECONDS);
     if (change[2]) return Response.json(await changeDiff(root, (await config(root))?.main_branch ?? "main", slug));
     const d = await withTrace(root, (t) => changeDetail(root, t, slug));
     return d ? Response.json(d) : null;
@@ -79,12 +88,14 @@ async function read(root: string, hub: Hub, req: Request, url: URL, server: Time
     return sse(server, req, (send, close) => streamSession(root, slug, seq, Number.isFinite(from) && from > 0 ? from : 0, send, close) ?? (close(), () => {}));
   }
   if (path === "/api/events") {
+    server.timeout(req, JSON_IDLE_SECONDS);
     const slug = url.searchParams.get("slug") || undefined;
     if (slug && !ANY_SLUG.test(slug)) return Response.json({ error: "slug" }, { status: 400 });
     const before = Number(url.searchParams.get("before") ?? 0);
     return Response.json(await withTrace(root, (t) => eventsPage(t, Number.isFinite(before) && before > 0 ? before : 0, slug, url.searchParams.get("technical") === "1")));
   }
   if (path === "/api/spend") {
+    server.timeout(req, JSON_IDLE_SECONDS);
     const cfg = await config(root);
     return Response.json(await withTrace(root, (t) => spendView(root, t, cfg)));
   }

@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Hub, type HubOptions } from "../../src/console/hub";
-import { serveConsole } from "../../src/console/server";
+import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
 import { Trace } from "../../src/trace";
 import { config, intent, sseFrames, until } from "../console-helpers";
@@ -160,6 +160,25 @@ describe("the console's server", () => {
       const spend = await (await fetch(`${base}/api/spend`)).json() as { totals: { allUsd: number } };
       expect(spend.totals.allUsd).toBeCloseTo(0.1);
     });
+  });
+
+  // Bun drops a request after 10 s of silence by default, and git may take 30 s on a big diff. A real
+  // 10 s wait would make the suite slow, so this checks the request that matters: that each JSON route
+  // asks the server for a longer limit, longer than git's, before it starts work.
+  test("the JSON routes ask for an idle limit above git's, and the files do not need one", async () => {
+    const t = await seeded();
+    const hub = new Hub(t.path);
+    try {
+      for (const path of ["/api/changes/one", "/api/changes/one/diff", "/api/events", "/api/spend"]) {
+        const calls: Array<[Request, number]> = [];
+        const req = new Request(`http://127.0.0.1${path}`);
+        const res = await read(t.path, hub, req, new URL(req.url), { timeout: (r, s) => void calls.push([r, s]) });
+        expect({ path, ok: res?.status, calls: calls.map(([r, s]) => [r === req, s]) }).toEqual({ path, ok: 200, calls: [[true, JSON_IDLE_SECONDS]] });
+      }
+      expect(JSON_IDLE_SECONDS).toBeGreaterThan(30);
+    } finally {
+      t.cleanup();
+    }
   });
 
   test("a session's stream sends its transcript and ends; a phase that does not exist is not found", async () => {

@@ -61,9 +61,16 @@ export function toast(text: string, kind: Toast["kind"] = "info"): void {
   setTimeout(() => { toasts.value = toasts.value.filter((t) => t.id !== id); }, 6000);
 }
 
+/** A reply that was not a success; the page tells "not found" from "the server failed" by the status. */
+export class HttpError extends Error {
+  constructor(readonly status: number, url: string) {
+    super(`${status} ${url}`);
+  }
+}
+
 export async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  if (!r.ok) throw new HttpError(r.status, url);
   return await r.json() as T;
 }
 
