@@ -27,6 +27,18 @@ export class Cancelled extends Error {
   }
 }
 
+/**
+ * A person stopped this one session (Stop in the console). Not the step's failure: the phase ends
+ * interrupted with who stopped it, the change keeps its status, and the hold sent with the stop keeps
+ * it from starting again. Only this step ends; the loop goes on.
+ */
+export class SessionStopped extends Error {
+  constructor(public readonly by: string) {
+    super(`stopped by ${by}`);
+    this.name = "SessionStopped";
+  }
+}
+
 /** Throws Cancelled when `signal` was aborted. Call before starting a process. */
 export function throwIfCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Cancelled();

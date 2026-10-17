@@ -1,6 +1,6 @@
-import { MIN_SESSION_USD } from "./budget";
-import { lastLine, spawnBounded, withBunOnPath } from "./shell";
-import { Cancelled, StopRequested } from "./stop";
+import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
+import { lastLine, spawnBounded, withBunOnPath, type StdinWriter } from "./shell";
+import { Cancelled, SessionStopped, StopRequested } from "./stop";
 
 export interface StreamEvent {
   type: string;
@@ -144,6 +144,90 @@ export interface RunPhaseInput {
   exitGraceMs?: number;
   /** Aborting it kills the session; runPhase then throws Cancelled. */
   signal?: AbortSignal;
+  /**
+   * A live session: stream-json input, kept open, with every message echoed back (see the spike in
+   * docs/decisions.md). `attach` gets the control once the session runs, and gives back what ends its watching.
+   */
+  live?: { attach: (ctl: SessionControl) => () => void };
+}
+
+/** What the runner of a live session may do to it while it runs (see RunPhaseInput.live). */
+export interface SessionControl {
+  /** Writes a message to the running session; false while no process can take one (a redirect is resuming it, or it has ended). */
+  message(text: string): boolean;
+  /** Ends the session now; runPhase then throws SessionStopped. */
+  stop(by: string): void;
+  /** Ends the running process and resumes the session at once with `text` as its prompt; false until the session has an id, and while it cannot take one. */
+  redirect(text: string): boolean;
+}
+
+/** How a message wrapped by the runner starts, so its echo reads as a person's message (not the prompt's). */
+export const MESSAGE_LEAD = "A message from";
+/** How a redirect wrapped by the runner starts. */
+export const REDIRECT_LEAD = "A change of direction from";
+
+/** A user message as one stream-json input line. */
+export function userLine(text: string): string {
+  return `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
+}
+
+/**
+ * The state a live session's control acts on: the process running now (its stdin, what was written
+ * to it and what it echoed), and what a person asked of it.
+ */
+class LiveSession {
+  writer: StdinWriter | null = null;
+  /** Messages written to the running process. */
+  written = 0;
+  /** User messages the running process echoed; the first is its prompt. */
+  replays = 0;
+  kill = new AbortController();
+  sessionId: string | null;
+  stoppedBy: string | null = null;
+  redirectTo: string | null = null;
+
+  constructor(resume: string | undefined) {
+    this.sessionId = resume ?? null;
+  }
+
+  /** A new process starts: nothing written to it yet, and a kill of its own. */
+  next(): AbortSignal {
+    this.writer = null;
+    this.written = 0;
+    this.replays = 0;
+    this.kill = new AbortController();
+    return this.kill.signal;
+  }
+
+  /** The process gave its final result: stdin closes, and nothing more can be sent to it. */
+  done(): void {
+    this.writer?.end();
+    this.writer = null;
+  }
+
+  /** A message written but not echoed yet: the session takes it after this result, with a turn and a result of its own. */
+  waiting(): boolean {
+    return this.written > this.replays - 1;
+  }
+
+  readonly control: SessionControl = {
+    message: (text) => {
+      if (!this.writer || this.redirectTo !== null || !this.writer.write(userLine(text))) return false;
+      this.written++;
+      return true;
+    },
+    stop: (by) => {
+      this.stoppedBy ??= by;
+      this.kill.abort();
+    },
+    redirect: (text) => {
+      if (!this.writer || this.sessionId === null || this.redirectTo !== null || this.stoppedBy !== null) return false;
+      this.redirectTo = text;
+      this.writer = null;
+      this.kill.abort();
+      return true;
+    },
+  };
 }
 
 export type RunPhaseResult = Collected & {
@@ -176,9 +260,22 @@ export function resolveClaude(override?: string): string | null {
  * plus a short grace: it stops reading stdout at the prompt's result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
  * After a stop request it does not start, or it kills the running session, and throws StopRequested;
- * likewise Cancelled for `signal`.
+ * likewise Cancelled for `signal`. A live session (`input.live`) keeps stdin open while it runs, so a
+ * person can send it messages, stop it (SessionStopped) or redirect it (resumed with the new direction).
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
+  if (!input.live) return runSession(input, null);
+  const live = new LiveSession(input.resume);
+  const detach = input.live.attach(live.control);
+  try {
+    return await runSession(input, live);
+  } finally {
+    try { detach(); } catch { /* watching must never fail the phase */ }
+  }
+}
+
+/** runPhase's work; `live` is the live session's state, or null. */
+async function runSession(input: RunPhaseInput, live: LiveSession | null): Promise<RunPhaseResult> {
   const started = Date.now();
   let collector = new StreamCollector();
   // What earlier sends of the prompt cost, and what they were refused (see the resends below).
@@ -210,6 +307,8 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
+  // Every user message the session takes is echoed, so the runner knows which result answers it.
+  if (live) args.push("--input-format", "stream-json", "--replay-user-messages");
 
   // A .ts fake must be run through bun; the real CLI is a native executable.
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
@@ -231,18 +330,51 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     return left < MIN_SESSION_USD ? null : ["--max-budget-usd", String(left)];
   };
   let r: Awaited<ReturnType<typeof spawnBounded>>;
+  // A redirect that came when too little was left of the cap to resume the session with it.
+  let redirectUnaffordable = false;
   for (let resends = 0; ; resends++) {
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
     const resumeArgs = resume ? ["--resume", resume] : [];
+    // A live process is killed by its own signal too (a stop or a redirect), as well as by the caller's.
+    const kill = live?.next();
+    const signal = kill ? (input.signal ? AbortSignal.any([input.signal, kill]) : kill) : input.signal;
+    const processStarted = Date.now();
     r = await spawnBounded({
-      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env, stdin,
-      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal: input.signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
+      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env,
+      stdin: live ? { open: userLine(stdin) } : stdin,
+      onStdin: live ? (w) => { live.writer = w; } : undefined,
+      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
       // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
       onLine: (line) => {
         const e = collector.push(line);
         if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
-        return e?.type === "result" && !answersNotification(e);
+        if (!e) return false;
+        if (live && e.session_id) live.sessionId = e.session_id;
+        if (live && e.type === "user" && e.isReplay === true) live.replays++;
+        if (e.type !== "result" || answersNotification(e)) return false;
+        if (!live) return true;
+        // A message written but not yet taken: its own turn and result follow, and that result is the phase's.
+        if (live.waiting()) return false;
+        live.done();
+        return true;
       },
     });
+    live?.done();
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
+    if (live && live.redirectTo !== null && !r.stopped && !input.signal?.aborted && r.started) {
+      // What the killed process spent counts toward the cap, as a resend's does: its newest result's
+      // running total, or about its minutes when it gave none.
+      const reported = collector.events.filter((e) => e.type === "result").at(-1)?.total_cost_usd;
+      earlierCostUsd += typeof reported === "number" ? reported : ((Date.now() - processStarted) / 60_000) * USD_PER_MINUTE;
+      earlierDenied = [...new Set([...earlierDenied, ...collector.finish().denied])];
+      resume = live.sessionId ?? resume;
+      stdin = live.redirectTo;
+      live.redirectTo = null;
+      collector = new StreamCollector();
+      if (budgetArgs(earlierCostUsd) === null) { redirectUnaffordable = true; break; }
+      resends--; // a redirect is not a notification resend
+      continue;
+    }
     if (r.stopped || r.cancelled || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
@@ -264,6 +396,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
     resume = c.sessionId;
     collector = new StreamCollector();
   }
+  if (redirectUnaffordable) return fail("budget", "too little was left of the session's cap to resume it with the change of direction", r.code, r.err);
   if (r.stopped) throw new StopRequested();
   if (r.cancelled) throw new Cancelled();
   if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
