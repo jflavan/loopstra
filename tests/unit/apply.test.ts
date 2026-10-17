@@ -282,8 +282,31 @@ describe("applying requests", () => {
       failedLongAgo(r.root, 5);
       expect(await apply(r.root)).toBe(1);
       rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
-      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request, and intent.md was changed since, so it was left as it is. An engineer can find the details in the trace." });
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request, and intent.md holds changes it did not make, so it was left as it is. An engineer can find the details in the trace." });
       // The person's text is kept (with the hold it was written over, which they can see).
+      expect(readFileSync(path, "utf8")).toContain("x, and also y");
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ result: "failed", kept: ["a"] });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a request given up on never undoes a person's edit made before its write", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      // A person's edit, not committed, before the request writes.
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("x", "x, and also y"));
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toBeUndefined();
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request, and intent.md holds changes it did not make, so it was left as it is. An engineer can find the details in the trace." });
       expect(readFileSync(path, "utf8")).toContain("x, and also y");
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ result: "failed", kept: ["a"] });
@@ -307,7 +330,7 @@ describe("applying requests", () => {
       failedLongAgo(r.root, 5);
       expect(await apply(r.root)).toBe(1);
       rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
-      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("was changed since") });
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("holds changes it did not make") });
       expect(readFileSync(path, "utf8")).toBe(before);
     } finally {
       r.cleanup();

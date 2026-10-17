@@ -19,7 +19,7 @@ export const CONSOLE = "console";
  * `written`: the slugs whose intent.md the loop already wrote for this request. A request whose
  * commit failed is tried again, and must not then read its own write as someone else's.
  * `writtenHash`: for each of those slugs, the sha256 (hex) of the exact text the loop wrote, so a
- * request given up on puts back only a file nobody changed since (older requests have none).
+ * request given up on puts back only a file nobody else changed, before or since (older requests have none).
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
  * applyRequests, which gives up after a few, and not before some minutes).
  */
