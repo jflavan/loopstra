@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, dependencyNote, isRunnable, orderQueue, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
+  checkConsistency, dependencyNote, isRunnable, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
   type Intent,
 } from "../../src/intents";
 import { sameFileHolds } from "../../src/scheduler";
@@ -343,4 +343,14 @@ describe("same files: a change waits instead of building into a conflict (more t
     expect([...(await holdsIn(t.path, 1))]).toEqual([]);
     t.cleanup();
   });
+});
+
+function held(slug: string, status: string, hold: string): Intent {
+  return { slug, dir: "", artifacts: new Set(["intent.md", "spec.md", "plan.md"]), file: parseIntentFile(`---\nstatus: ${status}\nhold: ${JSON.stringify(hold)}\n---\n# Intent: ${slug}\n`) };
+}
+
+test("a held change is under Needs a person, and its note says it is held and why", () => {
+  const q = renderQueue([held("a", "building", "waiting for legal (John, the dashboard)")]);
+  const needs = q.slice(q.indexOf("## Needs a person"), q.indexOf("## Finished"));
+  expect(needs).toContain("| a | normal | building and testing | Held: waiting for legal (John, the dashboard). |");
 });

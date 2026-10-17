@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { parseIntentFile, patchFrontmatter } from "../../src/intents";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
+import { tempDir } from "../helpers";
 
 const OWNER = `---
 status: draft
@@ -57,5 +60,33 @@ describe("patchFrontmatter", () => {
     const f = parseIntentFile(out);
     expect(f.frontmatter.status).toBe("accepted");
     expect(f.frontmatter.author).toBe("A");
+  });
+});
+
+describe("removing a line", () => {
+  test("a removed key's line goes, with its comment and any lines it went on over; the rest stays as it was", () => {
+    const raw = "---\nstatus: building # now\nhold: >-\n  waiting for\n  legal\npriority: high\n---\n# Intent: x\n";
+    expect(patchFrontmatter(raw, {}, ["hold"])).toBe("---\nstatus: building # now\npriority: high\n---\n# Intent: x\n");
+  });
+
+  test("removing a key that is not there changes nothing; patch and remove together", () => {
+    const raw = "---\r\nstatus: building\r\n---\r\nbody\r\n";
+    expect(patchFrontmatter(raw, {}, ["hold"])).toBe(raw);
+    expect(patchFrontmatter("---\nstatus: building\nhold: x\n---\n", { status: "closed" }, ["hold"])).toBe("---\nstatus: closed\n---\n");
+  });
+
+  test("writeIntent removes keys it is told to, and refuses when the status moved on", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "intent", "a"), { recursive: true });
+      await Bun.write(join(t.path, "intent", "a", "intent.md"), "---\nstatus: building\nhold: x\n---\n# Intent: a\n");
+      const i = await readIntent(t.path, "a");
+      expect(await writeIntent(i, {}, { expectStatus: "reviewing", remove: ["hold"] })).toBe(false);
+      expect(await writeIntent(i, {}, { expectStatus: "building", remove: ["hold"] })).toBe(true);
+      expect(await Bun.file(join(t.path, "intent", "a", "intent.md")).text()).toBe("---\nstatus: building\n---\n# Intent: a\n");
+      expect(i.file.frontmatter.hold).toBe("");
+    } finally {
+      t.cleanup();
+    }
   });
 });

@@ -82,3 +82,12 @@ describe("intent frontmatter", () => {
     }
   });
 });
+
+describe("hold", () => {
+  test("a hold line is read as plain text; blank or absent reads as no hold", () => {
+    const held = parseIntentFile("---\nstatus: building\nhold: waiting for legal (John, the dashboard)\n---\n# Intent: x\n");
+    expect(held.frontmatter.hold).toBe("waiting for legal (John, the dashboard)");
+    expect(parseIntentFile("---\nstatus: building\nhold:\n---\n# Intent: x\n").frontmatter.hold).toBe("");
+    expect(parseIntentFile("---\nstatus: building\n---\n# Intent: x\n").frontmatter.hold).toBe("");
+  });
+});
