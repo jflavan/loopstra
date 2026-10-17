@@ -114,7 +114,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
             {detail && detail.denied.length > 0 && <p class="muted">Not allowed: {detail.denied.join(", ")}</p>}
             {detail && detail.files.length > 0 && <p>{detail.files.map((f) => <a key={f.name} href={f.url} target="_blank" rel="noopener noreferrer" class="chip">{f.name}</a>)}</p>}
           </div>
-          {!chat && <button class="btn" onClick={() => openDrawer(title)}>Ask the orchestrator about this</button>}
+          {!chat && <button class="btn" onClick={() => openDrawer({ slug, title })}>Ask the orchestrator about this</button>}
         </aside>
       </div>
     </section>

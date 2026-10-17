@@ -1,4 +1,5 @@
 import { computed, signal } from "@preact/signals";
+import type { About } from "./chat";
 import type { ActivityItem, Meta, Sections, StreamMessage } from "../console/types";
 
 export interface State {
@@ -41,12 +42,12 @@ export const connection = signal<Connection>("connecting");
 /** The time, refreshed every second, for clocks and ages. */
 export const now = signal(Date.now());
 
-/** The orchestrator's drawer; `about` is what it was opened from ("csv-export"), or null. */
-export const drawer = signal<{ open: boolean; about: string | null }>({ open: false, about: null });
+/** The orchestrator's drawer; `about` is the change it was opened from, or null. */
+export const drawer = signal<{ open: boolean; about: About | null }>({ open: false, about: null });
 export const paletteOpen = signal(false);
 export const helpOpen = signal(false);
 
-export function openDrawer(about: string | null = null): void {
+export function openDrawer(about: About | null = null): void {
   drawer.value = { open: true, about };
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { ActivityItem, Sections, StreamMessage } from "../../src/console/types";
+import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
@@ -10,6 +10,8 @@ import { ACTIVITY_MAX, applyMessage, connect, connection, STALE_MS, type State }
 import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
+import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
+import { aboutPrefix, addLines } from "../../src/ui/chat";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -320,5 +322,50 @@ describe("what is worth a notification", () => {
     expect(needsAPerson(item("blocked"))).toBe(true);
     expect(needsAPerson(item("waiting"))).toBe(true);
     for (const k of ["paused", "health", "sync", "config", "unreadable"]) expect(needsAPerson(item(k))).toBe(false);
+  });
+});
+
+describe("when a change page reads its detail again", () => {
+  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true };
+  test("the age in words, which the server rebuilds every few seconds, does not count", () => {
+    expect(detailKey({ ...summary, inStatus: "3 min" }, "2")).toBe(detailKey(summary, "2"));
+    expect(detailKey(null, "")).toBe(detailKey(null, ""));
+  });
+  test("a status, cost, note, waiting reason, priority or running step does", () => {
+    const base = detailKey(summary, "2");
+    for (const changed of [{ status: "review" }, { since: "2026-01-02T00:00:00Z" }, { costUsd: 2 }, { running: false }, { waiting: "b" }, { note: "n" }, { priority: "high" }]) {
+      expect(detailKey({ ...summary, ...changed }, "2")).not.toBe(base);
+    }
+    expect(detailKey(summary, "2,3")).not.toBe(base);
+  });
+  test("the diff reloads only when the status or a running step changes", () => {
+    expect(codeKey({ ...summary, costUsd: 9, note: "x" }, "2")).toBe(codeKey(summary, "2"));
+    expect(codeKey({ ...summary, status: "review" }, "2")).not.toBe(codeKey(summary, "2"));
+    expect(codeKey(summary, "3")).not.toBe(codeKey(summary, "2"));
+  });
+});
+
+describe("the chat drawer's lines", () => {
+  test("a line already shown is not added again", () => {
+    const a = { key: "m1", kind: "person" as const, text: "hi" };
+    const b = { key: "m2", kind: "loopstra" as const, text: "hello" };
+    expect(addLines([a], [a, b])).toEqual([a, b]);
+    const same = [a, b];
+    expect(addLines(same, [b])).toBe(same);
+    expect(addLines([a], [b, b])).toEqual([a, b]);
+  });
+  test("a message says which change it is about, by slug when there is one", () => {
+    expect(aboutPrefix({ slug: "csv-export", title: "CSV export" })).toBe("About csv-export (CSV export): ");
+    expect(aboutPrefix({ title: "Step 3" })).toBe("About Step 3: ");
+    expect(aboutPrefix(null)).toBe("");
+  });
+});
+
+describe("where a timeline bar ends", () => {
+  const t0 = Date.parse("2026-01-01T00:00:00Z");
+  test("a finished step ends when it ended, a running one now, a step with no end time by its duration", () => {
+    expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: "2026-01-01T00:00:10Z", status: "success", durationMs: 99 }, t0 + 60_000)).toBe(t0 + 10_000);
+    expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "running", durationMs: 0 }, t0 + 60_000)).toBe(t0 + 60_000);
+    expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "fail", durationMs: 5_000 }, t0 + 60_000)).toBe(t0 + 5_000);
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { ChangeDetail, DiffView, PhaseView, Stage } from "../../console/types";
 import { clock, duration, stepWord, usd } from "../format";
+import { barEnd, codeKey, detailKey } from "../change-key";
 import { stripFrontmatter } from "../markdown";
 import { Diff } from "../parts/Diff";
 import { Link } from "../parts/Link";
@@ -16,8 +17,8 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
   const runningSeqs = running.value?.now.filter((p) => p.slug === slug).map((p) => p.seq).join(",") ?? "";
   const [detail, setDetail] = useState<ChangeDetail | null>(null);
   const [missing, setMissing] = useState(false);
-  // Read again whenever the change's summary or its running steps change.
-  const key = `${JSON.stringify(summary ?? null)}|${runningSeqs}`;
+  // Read again when something that matters changed: the summary's "12s" age is rebuilt with every update and must not count.
+  const key = detailKey(summary, runningSeqs);
   useEffect(() => {
     let live = true;
     getJson<ChangeDetail>(`/api/changes/${slug}`).then(
@@ -26,7 +27,7 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
     );
     return () => { live = false; };
   }, [slug, key]);
-  if (missing && detail?.slug !== slug) {
+  if (missing && !detail) {
     return (
       <section class="view">
         <h1>No such change</h1>
@@ -34,7 +35,7 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
       </section>
     );
   }
-  if (!detail || detail.slug !== slug) return <section class="view"><p class="muted">Loading…</p></section>;
+  if (!detail) return <section class="view"><p class="muted">Loading…</p></section>;
   const d = detail;
   return (
     <section class="view">
@@ -44,7 +45,7 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
         <span class={`prio ${d.priority}`}>{d.priority}</span>
         {d.running && <span class="pulse" role="img" aria-label="running" />}
         <span class="grow" />
-        <button class="btn" onClick={() => openDrawer(d.title)}>Ask the orchestrator</button>
+        <button class="btn" onClick={() => openDrawer({ slug: d.slug, title: d.title })}>Ask the orchestrator</button>
       </div>
       <Stepper stage={d.stage} />
       <nav class="tabs" aria-label="Parts of this change">
@@ -53,7 +54,7 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
       {tab === "overview" && <Overview d={d} />}
       {tab === "documents" && <Documents d={d} />}
       {tab === "timeline" && <Timeline d={d} />}
-      {tab === "code" && <Code key={key} slug={slug} />}
+      {tab === "code" && <Code slug={slug} reload={codeKey(summary, runningSeqs)} />}
       {tab === "gates" && <Gates d={d} />}
     </section>
   );
@@ -74,7 +75,8 @@ function useText(url: string | null, version: string | null): string | null {
     if (!url) return;
     let live = true;
     setText(null);
-    fetch(url).then((r) => (r.ok ? r.text() : "This document could not be read.")).then((t) => { if (live) setText(t); }, () => {});
+    const failed = "This document could not be read.";
+    fetch(url).then((r) => (r.ok ? r.text() : failed)).catch(() => failed).then((t) => { if (live) setText(t); });
     return () => { live = false; };
   }, [url, version]);
   return text;
@@ -98,14 +100,15 @@ function Overview({ d }: { d: ChangeDetail }) {
 }
 
 function Documents({ d }: { d: ChangeDetail }) {
-  const [name, setName] = useState(() => (d.documents.find((x) => x.name !== "intent.md") ?? d.documents[0])?.name ?? "");
-  const doc = d.documents.find((x) => x.name === name) ?? null;
+  // What the person chose; until they choose, the first document that is not the intent (the Overview shows that), picked again if the list changes.
+  const [picked, setPicked] = useState("");
+  const doc = d.documents.find((x) => x.name === picked) ?? d.documents.find((x) => x.name !== "intent.md") ?? d.documents[0] ?? null;
   const text = useText(doc?.url ?? null, d.since);
-  if (!d.documents.length) return <p class="muted">No documents yet.</p>;
+  if (!doc) return <p class="muted">No documents yet.</p>;
   return (
     <div>
-      <div class="doc-tabs">{d.documents.map((x) => <button key={x.name} class={`btn${x.name === name ? " on" : ""}`} onClick={() => setName(x.name)}>{x.name}</button>)}</div>
-      <div class="panel">{text === null ? <p class="muted">Loading…</p> : <Markdown text={name === "intent.md" ? stripFrontmatter(text) : text} />}</div>
+      <div class="doc-tabs">{d.documents.map((x) => <button key={x.name} class={`btn${x.name === doc.name ? " on" : ""}`} onClick={() => setPicked(x.name)}>{x.name}</button>)}</div>
+      <div class="panel">{text === null ? <p class="muted">Loading…</p> : <Markdown text={doc.name === "intent.md" ? stripFrontmatter(text) : text} />}</div>
     </div>
   );
 }
@@ -113,7 +116,7 @@ function Documents({ d }: { d: ChangeDetail }) {
 function Timeline({ d }: { d: ChangeDetail }) {
   const t = now.value;
   if (!d.phases.length) return <p class="muted">No steps yet.</p>;
-  const ends = d.phases.map((p) => (p.ended ? Date.parse(p.ended) : t));
+  const ends = d.phases.map((p) => barEnd(p, t));
   const start = Math.min(...d.phases.map((p) => Date.parse(p.started)));
   const span = Math.max(1, Math.max(...ends) - start);
   const took = (p: PhaseView) => duration(p.status === "running" ? t - Date.parse(p.started) : p.durationMs);
@@ -160,7 +163,8 @@ function Timeline({ d }: { d: ChangeDetail }) {
   );
 }
 
-function Code({ slug }: { slug: string }) {
+/** The branch's diff. A reload keeps the old diff on screen until the new one arrives, so the page does not flash. */
+function Code({ slug, reload }: { slug: string; reload: string }) {
   const [diff, setDiff] = useState<DiffView | null>(null);
   useEffect(() => {
     let live = true;
@@ -169,7 +173,7 @@ function Code({ slug }: { slug: string }) {
       () => { if (live) setDiff({ exists: false, stat: "", patch: "", cut: false }); },
     );
     return () => { live = false; };
-  }, [slug]);
+  }, [slug, reload]);
   if (!diff) return <p class="muted">Loading the diff…</p>;
   if (diff.problem) return <span class="badge bad">{diff.problem}</span>;
   if (!diff.exists) return <p class="muted">This change has no branch: it has not been built yet, or it was merged and its branch removed.</p>;

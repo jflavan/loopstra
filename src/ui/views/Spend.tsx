@@ -7,9 +7,11 @@ import { getJson } from "../store";
 
 export function Spend() {
   const [v, setV] = useState<SpendView | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let live = true;
-    const load = () => getJson<SpendView>("/api/spend").then((x) => { if (live) setV(x); }, () => {});
+    // A failed read shows the numbers already on screen; the next tick tries again.
+    const load = () => getJson<SpendView>("/api/spend").then((x) => { if (live) { setV(x); setFailed(false); } }, () => { if (live) setFailed(true); });
     void load();
     const timer = setInterval(load, 30_000);
     return () => {
@@ -17,7 +19,7 @@ export function Spend() {
       clearInterval(timer);
     };
   }, []);
-  if (!v) return <section class="view"><p class="muted">Loading…</p></section>;
+  if (!v) return <section class="view"><p class="muted">{failed ? "Spend could not be read." : "Loading…"}</p></section>;
   const topHour = Math.max(0.01, ...v.byHour.map((h) => h.costUsd));
   return (
     <section class="view">
@@ -29,12 +31,16 @@ export function Spend() {
         <div class="tile"><span class="muted">Chat, all time</span><span class="v">{usd(v.chatUsd)}</span></div>
       </div>
       <h2>The last 48 hours</h2>
-      <div class="hours" role="img" aria-label="Spend per hour over the last 48 hours">
-        {v.byHour.map((h) => (
-          <i key={h.hour} style={{ height: `${(h.costUsd / topHour) * 100}%` }}
-            title={`${new Date(h.hour).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}: ${usd(h.costUsd)}`} />
-        ))}
-      </div>
+      {v.byHour.every((h) => h.costUsd <= 0)
+        ? <p class="muted">Nothing spent in the last 48 hours.</p>
+        : (
+          <div class="hours" role="img" aria-label="Spend per hour over the last 48 hours">
+            {v.byHour.map((h) => (
+              <i key={h.hour} style={{ height: `${(h.costUsd / topHour) * 100}%` }}
+                title={`${new Date(h.hour).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}: ${usd(h.costUsd)}`} />
+            ))}
+          </div>
+        )}
       <h2>By change</h2>
       <Bars rows={v.perChange.map((c) => ({ key: c.slug, label: <Link href={`/c/${c.slug}`}>{c.title}</Link>, value: c.costUsd }))} />
       <h2>By kind of step</h2>

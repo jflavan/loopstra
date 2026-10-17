@@ -1,10 +1,16 @@
+import { signal } from "@preact/signals";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { aboutPrefix, addLines, type About, type Line } from "../chat";
 import { drawer, meta } from "../store";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
 
 interface ChatMessage { id: number; from: "person" | "loopstra"; text: string }
-interface Line { key: string; kind: "person" | "loopstra" | "announce"; text: string }
+
+/** A half-typed message, kept when the drawer is closed and opened again in this tab. */
+const draft = signal("");
+/** The context the orchestrator was last told about, so the prefix is said once per opening context and not again after a close and reopen. */
+let toldAbout = "";
 
 /** One conversation per tab, kept across reloads. The server accepts only this plain shape. */
 function threadId(): string {
@@ -29,7 +35,7 @@ export function Drawer() {
     <aside class="drawer" aria-label="The orchestrator">
       <header>
         <b>Orchestrator</b>
-        <span class="muted about">{d.about ? `About ${d.about}` : "Ask how things are going, or talk through a new change."}</span>
+        <span class="muted about">{d.about ? `About ${d.about.title}` : "Ask how things are going, or talk through a new change."}</span>
         <button class="ghost" onClick={close} aria-label="Close"><Icon name="close" /></button>
       </header>
       {meta.value && !meta.value.chat ? <p class="pad muted">Chat is off in this console: it was started with --no-chat.</p> : <Chat about={d.about} />}
@@ -37,17 +43,36 @@ export function Drawer() {
   );
 }
 
-function Chat({ about }: { about: string | null }) {
+function Chat({ about }: { about: About | null }) {
   const [thread] = useState(threadId);
   const [lines, setLines] = useState<Line[]>([]);
   const [busy, setBusy] = useState(false);
-  const [text, setText] = useState("");
+  const text = draft.value;
+  const setText = (v: string | ((cur: string) => string)) => { draft.value = typeof v === "function" ? v(draft.value) : v; };
   const after = useRef(0);
   const announcementsAfter = useRef(-1);
-  const toldAbout = useRef<string | null>(null);
   const log = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+  // The poll and a send can both ask for messages after the same id; one read at a time, and one more afterwards if asked.
+  const reading = useRef(false);
+  const again = useRef(false);
 
   const refresh = async () => {
+    if (reading.current) {
+      again.current = true;
+      return;
+    }
+    reading.current = true;
+    try {
+      do {
+        again.current = false;
+        await read();
+      } while (again.current);
+    } finally {
+      reading.current = false;
+    }
+  };
+  const read = async () => {
     try {
       const r = await fetch(`/api/chat?thread=${thread}&after=${after.current}&announcementsAfter=${announcementsAfter.current}`);
       if (!r.ok) return;
@@ -58,7 +83,8 @@ function Chat({ about }: { about: string | null }) {
       ];
       if (j.messages.length) after.current = j.messages.at(-1)!.id;
       announcementsAfter.current = j.lastAnnouncementId;
-      if (more.length) setLines((l) => [...l, ...more]);
+      // A line is added once even if the same message arrives in two reads.
+      if (more.length) setLines((l) => addLines(l, more));
       setBusy(j.busy);
     } catch { /* the next poll tries again */ }
   };
@@ -67,19 +93,24 @@ function Chat({ about }: { about: string | null }) {
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, []);
+  // The cursor is in the box when the drawer opens, and when a button elsewhere reopens it for another change.
+  useEffect(() => { box.current?.focus(); }, [about?.slug, about?.title]);
   useEffect(() => { log.current?.scrollTo(0, log.current.scrollHeight); }, [lines, busy]);
 
   const send = async () => {
     const body = text.trim();
     if (!body || busy) return;
     // The first message after the drawer was opened from somewhere says what it is about.
-    const message = about && toldAbout.current !== about ? `About ${about}: ${body}` : body;
-    toldAbout.current = about;
+    const prefix = aboutPrefix(about);
+    const message = prefix && toldAbout !== prefix ? `${prefix}${body}` : body;
+    toldAbout = prefix;
     setText("");
     setBusy(true);
     // A send that never reached the server must not leave the drawer waiting for an answer.
     const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, text: message }) }).catch(() => null);
     if (!r?.ok) {
+      // The orchestrator has not heard what this was about yet.
+      toldAbout = "";
       setText((cur) => cur || body);
       const why = r?.status === 409 ? "Still answering your last message." : "That message could not be sent.";
       setLines((l) => [...l, { key: `e${Date.now()}`, kind: "announce", text: why }]);
@@ -98,6 +129,7 @@ function Chat({ about }: { about: string | null }) {
       </div>
       <form class="chat-form" onSubmit={(e) => { e.preventDefault(); void send(); }}>
         <textarea
+          ref={box}
           rows={2}
           value={text}
           placeholder="Message the orchestrator"

@@ -1,4 +1,3 @@
-
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { TranscriptItem } from "../../console/types";
 import { usd } from "../format";

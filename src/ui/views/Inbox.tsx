@@ -50,7 +50,7 @@ function Item({ it, index, selected, onSelect }: { it: AttentionItem; index: num
       <span>{it.what}</span>
       <div class="actions">
         {it.slug && <Link href={`/c/${it.slug}`} class="btn">Open</Link>}
-        <button class="btn" onClick={(e) => { e.stopPropagation(); openDrawer(it.title); }}>Ask the orchestrator</button>
+        <button class="btn" onClick={(e) => { e.stopPropagation(); openDrawer({ slug: it.slug ?? undefined, title: it.title }); }}>Ask the orchestrator</button>
       </div>
     </article>
   );

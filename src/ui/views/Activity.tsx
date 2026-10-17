@@ -38,7 +38,17 @@ export function Activity() {
   };
   // The history is read again when the filter changes and when the live stream says this page missed events.
   const missed = gaps.value;
-  useEffect(() => { void load(0, true); }, [slug, technical, missed]);
+  // A new filter empties the list first, so the old filter's items do not pass for the new one's; a reload for missed events keeps what is shown.
+  const shownFilter = useRef("");
+  useEffect(() => {
+    const filter = `${slug}|${technical}`;
+    if (filter !== shownFilter.current) {
+      shownFilter.current = filter;
+      setOlder([]);
+      setNext(0);
+    }
+    void load(0, true);
+  }, [slug, technical, missed]);
   // The live stream carries only events in plain words; the technical view loads again on Refresh.
   const newest = older[0]?.id ?? 0;
   const fresh = technical ? [] : activity.value.filter((a) => a.id > newest && (!slug || a.slug === slug)).reverse();
