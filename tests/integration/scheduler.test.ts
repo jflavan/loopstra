@@ -467,6 +467,13 @@ describe("holds", () => {
       const r = await tick(repo.path);
       expect(r.paused).toBe("Paused by John: running steps finish, nothing new starts.");
       expect(r.steps).toBeUndefined();
+      // Traced once per pause: again for a new pause by the same person, not on every tick.
+      const pauses = () => trace.lastEvents("_loop", 50).filter((e) => e.type === "pause").length;
+      await tick(repo.path);
+      expect(pauses()).toBe(1);
+      holdLoop(repo.path, "John", new Date(Date.now() + 1000));
+      await tick(repo.path);
+      expect(pauses()).toBe(2);
       releaseLoop(repo.path);
       expect((await tick(repo.path)).picked).toBe(SLUG);
     } finally {

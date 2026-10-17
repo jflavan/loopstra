@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
@@ -334,6 +334,29 @@ describe("the loop's pause by a person", () => {
       expect(loopHoldText(h)).toBe("Paused by John: running steps finish, nothing new starts.");
       expect(releaseLoop(t.path)).toBe(true);
       expect(releaseLoop(t.path)).toBe(false);
+      expect(readLoopHold(t.path)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a hold file that cannot be read, or lacks who or when, still pauses the loop", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, ".loopstra", "hold.json");
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      const mtime = new Date("2026-10-17T08:00:00.000Z");
+      for (const text of ["", "not json", "{}", "null", "[1]"]) {
+        writeFileSync(path, text);
+        utimesSync(path, mtime, mtime);
+        expect(readLoopHold(t.path)).toEqual({ by: "someone", at: mtime.toISOString() });
+      }
+      writeFileSync(path, JSON.stringify({ by: "John" }));
+      utimesSync(path, mtime, mtime);
+      expect(readLoopHold(t.path)).toEqual({ by: "John", at: mtime.toISOString() });
+      writeFileSync(path, JSON.stringify({ by: 3, at: "2026-10-17T09:00:00.000Z" }));
+      expect(readLoopHold(t.path)).toEqual({ by: "someone", at: "2026-10-17T09:00:00.000Z" });
+      expect(releaseLoop(t.path)).toBe(true);
       expect(readLoopHold(t.path)).toBeNull();
     } finally {
       t.cleanup();

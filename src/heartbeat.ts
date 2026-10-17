@@ -1,4 +1,4 @@
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
@@ -211,14 +211,25 @@ function loopHoldPath(root: string): string {
   return join(root, ".loopstra", "hold.json");
 }
 
-/** The person's pause, or null. */
+/**
+ * The person's pause, or null when there is no hold file. A file that is there but cannot be read,
+ * or lacks who or when, still pauses the loop: "someone", since the file's last change.
+ */
 export function readLoopHold(root: string): LoopHold | null {
+  const path = loopHoldPath(root);
+  let since: string;
   try {
-    const h = JSON.parse(readFileSync(loopHoldPath(root), "utf8")) as LoopHold;
-    return typeof h?.by === "string" && typeof h.at === "string" ? h : null;
-  } catch {
-    return null;
+    since = statSync(path).mtime.toISOString();
+  } catch (e) {
+    if ((e as { code?: string })?.code === "ENOENT") return null;
+    since = new Date().toISOString();
   }
+  let h: Partial<Record<keyof LoopHold, unknown>> = {};
+  try {
+    const read = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (read && typeof read === "object") h = read as typeof h;
+  } catch { /* unreadable: it still pauses */ }
+  return { by: typeof h.by === "string" ? h.by : "someone", at: typeof h.at === "string" ? h.at : since };
 }
 
 /** Pauses the loop for `by` (whole file, temp then rename). */

@@ -147,7 +147,8 @@ export async function tick(root: string): Promise<TickResult> {
     const loopHold = readLoopHold(root);
     if (loopHold) {
       out.paused = loopHoldText(loopHold);
-      trace.eventOnChange("_loop", "pause", "", { reason: out.paused, held: true }, "reason");
+      // Traced once per pause: a new pause by the same person reads the same, but starts later.
+      trace.eventOnChange("_loop", "pause", "", { reason: out.paused, held: true }, "reason", loopHold.at);
       return out;
     }
 

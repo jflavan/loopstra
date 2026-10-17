@@ -283,6 +283,8 @@ export class Orchestrator {
   private loopWhen(cfg: Config, what: string): string {
     const hold = readLoopHold(this.root);
     const loop = heartbeatState(readHeartbeat(this.root), cfg.poll_seconds, new Date(), { pause: readPause(this.root), hold });
+    // A stopped loop that is also paused by a person needs both: a start, and someone to resume it.
+    if (loop.state === "stopped" && hold) return `The loop is not running right now and is paused by ${hold.by}, so it ${what} once someone runs loopstra start and resumes the loop. I will say here when it has.`;
     if (loop.state === "stopped") return `The loop is not running right now, so it ${what} once someone runs loopstra start. I will say here when it has.`;
     if (loop.state === "not-responding") return `The loop is not responding right now; it ${what} once it is running again. I will say here when it has.`;
     if (loop.state === "paused" && hold) return `The loop is paused by ${hold.by}; it ${what} once it is resumed. I will say here when it has.`;

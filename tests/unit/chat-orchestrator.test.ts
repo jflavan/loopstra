@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator, isYes } from "../../src/chat/orchestrator";
 import { pendingRequests } from "../../src/chat/requests";
+import { holdLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
@@ -109,6 +110,25 @@ describe("the orchestrator", () => {
       expect(out.sent.at(-1)).toBe("started is planning, not a draft, so there is nothing to start.");
       // Writer phases never ran; only three turns did.
       expect(r.prompts().length).toBe(3);
+    } finally { r.cleanup(); }
+  });
+
+  test("a loop a person paused: chat says it waits to be resumed, and a stopped one to be started too", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("draft"), other: INTENT("draft") } });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { accept: { slug: "csv-export" } }));
+      await r.answer("orchestrator", 2, turn("Sure.", { accept: { slug: "other" } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      holdLoop(r.root, "John");
+      await o.handle(message("start csv-export"), out.send);
+      await o.handle(message("yes"), out.send);
+      expect(out.sent.at(-1)).toBe("Asked the loop to start csv-export. The loop is not running right now and is paused by John, so it starts it once someone runs loopstra start and resumes the loop. I will say here when it has.");
+      const at = new Date().toISOString();
+      writeHeartbeat(r.root, { pid: process.pid, startedAt: at, lastTickAt: at, lastBeatAt: at, current: null, working: [], stopping: false, stopped: false });
+      await o.handle(message("start other"), out.send);
+      await o.handle(message("yes"), out.send);
+      expect(out.sent.at(-1)).toBe("Asked the loop to start other. The loop is paused by John; it starts it once it is resumed. I will say here when it has.");
     } finally { r.cleanup(); }
   });
 
