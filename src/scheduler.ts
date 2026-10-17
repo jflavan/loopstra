@@ -13,7 +13,7 @@ import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { andList } from "./text";
-import { applyRequests, armApplier, startApplier } from "./apply";
+import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
@@ -127,7 +127,8 @@ export async function tick(root: string): Promise<TickResult> {
     const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
     await cleanupLeftovers(root, cfg, trace, ordered);
-    await packWhileNoLaneRuns(root, trace);
+    // Between the applier's passes too: no request commits while git packs.
+    await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
 
     // The assistant was unavailable a moment ago: no step runs until the pause runs out.
     const pause = activePause(root);
@@ -413,7 +414,8 @@ const GC_TIMEOUT_MS = 60 * 60_000;
 const GC_RETRY_MS = 24 * 60 * 60_000;
 
 /**
- * Lets git pack the repository when it thinks it is time, while no lane runs. Runtime commits never
+ * Lets git pack the repository when it thinks it is time, while no lane runs and no request is being
+ * applied (the tick runs it between the applier's passes, see betweenPasses). Runtime commits never
  * do it themselves (gc.auto=0): a pack of the refs during one change's commit could make another
  * change's commit fail. Traced only when it fails, and then not tried again for a day; never stops
  * the tick.

@@ -23,6 +23,25 @@ type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
  */
 const lanes = new Map<string, { tail: Promise<unknown>; queued: Promise<number> | null }>();
 
+function laneOf(root: string): { tail: Promise<unknown>; queued: Promise<number> | null } {
+  const key = resolve(root);
+  const lane = lanes.get(key) ?? { tail: Promise.resolve(), queued: null };
+  lanes.set(key, lane);
+  return lane;
+}
+
+/**
+ * Runs `fn` in the queue of the root's passes (see applyRequests): no pass runs while it does, so
+ * nothing commits for a request meanwhile. A pass already waiting runs first; one asked for meanwhile
+ * waits for `fn`. For the tick's git gc: a pack of the refs during a commit can make that commit fail.
+ */
+export function betweenPasses<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  const lane = laneOf(root);
+  const next = lane.tail.then(fn, fn);
+  lane.tail = next.catch(() => {});
+  return next;
+}
+
 /**
  * Applies every waiting request on the main checkout, as the loop: claims each (see claimRequest),
  * then applies the claimed ones oldest first through commitRecord. A request that hits an unexpected
@@ -34,9 +53,7 @@ const lanes = new Map<string, { tail: Promise<unknown>; queued: Promise<number> 
  * has not started, so it sees this caller's requests too). Gives how many were finished.
  */
 export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<number> {
-  const key = resolve(root);
-  const lane = lanes.get(key) ?? { tail: Promise.resolve(), queued: null };
-  lanes.set(key, lane);
+  const lane = laneOf(root);
   if (lane.queued) return lane.queued;
   const run = () => {
     // Started: a call from now on queues a new pass behind this one.

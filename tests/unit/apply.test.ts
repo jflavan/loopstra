@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { applyRequests, armApplier, startApplier } from "../../src/apply";
+import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
 import { applyingRequests, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Submission } from "../../src/requests";
@@ -567,6 +567,29 @@ describe("the applier", () => {
       const later = applyRequests(r.root, cfg, trace);
       expect(later).not.toBe(second);
       expect(await later).toBe(0);
+    } finally {
+      trace.close();
+      r.cleanup();
+    }
+  });
+
+  test("a pass asked for while the tick packs the repository waits until it is done", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    const trace = Trace.open(r.root, () => {});
+    try {
+      const cfg = await loadConfig(r.root);
+      let done!: () => void;
+      const packing = betweenPasses(r.root, () => new Promise<string>((resolve) => { done = () => resolve("packed"); }));
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      const pass = applyRequests(r.root, cfg, trace);
+      await Bun.sleep(300);
+      expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
+      // Not even claimed: the pass has not started.
+      expect(applyingRequests(r.root)).toEqual([]);
+      done();
+      expect(await packing).toBe("packed");
+      expect(await pass).toBe(1);
+      expect((await readIntent(r.root, "a")).file.frontmatter.hold).not.toBe("");
     } finally {
       trace.close();
       r.cleanup();
