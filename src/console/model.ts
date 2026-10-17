@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { attention, type AttentionItem } from "../attention";
 import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
 import { loadConfig, type Config } from "../config";
-import { agoText, heartbeatState, readHeartbeat, readPause, type Heartbeat, type LoopStatus } from "../heartbeat";
+import { agoText, heartbeatState, readHeartbeat, readLoopHold, readPause, type Heartbeat, type LoopStatus } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo, waitNote, type Intent, type Scan, type Status } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
@@ -105,7 +105,7 @@ function statusSince(trace: Trace, i: Intent): string | null {
 /** The loop's heartbeat and the state it shows, read the same way for every screen. */
 export function loopNow(root: string, pollSeconds: number, now: Date): { beat: Heartbeat | null; state: LoopStatus } {
   const beat = readHeartbeat(root);
-  return { beat, state: heartbeatState(beat, pollSeconds, now, { pause: readPause(root) }) };
+  return { beat, state: heartbeatState(beat, pollSeconds, now, { pause: readPause(root), hold: readLoopHold(root) }) };
 }
 
 /**

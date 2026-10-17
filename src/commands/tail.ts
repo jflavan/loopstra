@@ -1,5 +1,5 @@
 import { loadConfig } from "../config";
-import { heartbeatState, readHeartbeat, readPause } from "../heartbeat";
+import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { Trace, type EventRow } from "../trace";
 
 export interface TailCursor {
@@ -16,7 +16,7 @@ export interface TailCursor {
 export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: { slug?: string; pollSeconds: number; now?: Date }): string[] {
   const out: string[] = [];
   const hb = readHeartbeat(root);
-  const loop = heartbeatState(hb, opts.pollSeconds, opts.now, { pause: readPause(root) });
+  const loop = heartbeatState(hb, opts.pollSeconds, opts.now, { pause: readPause(root), hold: readLoopHold(root) });
   const key = `${loop.state}|${hb?.stopping ? "stopping" : ""}|${loop.working.map((w) => w.slug).join(",")}`;
   if (key !== cursor.loopKey) {
     out.push(`${clock(opts.now ?? new Date())} ${"loop".padEnd(24)} ${"heartbeat".padEnd(13)} ${loop.text}`);
