@@ -3,6 +3,7 @@ import type { ChangeDetail, DiffView, PhaseView, Stage } from "../../console/typ
 import { clock, duration, stepWord, usd } from "../format";
 import { barEnd, codeKey, detailKey } from "../change-key";
 import { stripFrontmatter } from "../markdown";
+import { Actions } from "../parts/Actions";
 import { Diff } from "../parts/Diff";
 import { Link } from "../parts/Link";
 import { Markdown } from "../parts/Markdown";
@@ -51,10 +52,13 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
         <h1>{d.title}</h1>
         <span class={`status ${d.status}`}>{d.plain}</span>
         <span class={`prio ${d.priority}`}>{d.priority}</span>
+        {d.held && <span class="badge warn" title={d.held}>Held</span>}
         {d.running && <span class="pulse" role="img" aria-label="running" />}
         <span class="grow" />
         <button class="btn" onClick={() => openDrawer({ slug: d.slug, title: d.title })}>Ask the orchestrator</button>
       </div>
+      {/* The summary comes with every update, so its offers are current; the detail is the fallback before the first one. */}
+      <Actions change={summary ?? d} />
       <Stepper stage={d.stage} />
       <nav class="tabs" aria-label="Parts of this change">
         {TABS.map((t) => <Link key={t} href={t === "overview" ? `/c/${slug}` : `/c/${slug}/${t}`} class={`tab${t === tab ? " on" : ""}`} current={t === tab}>{TAB_LABEL[t]}</Link>)}

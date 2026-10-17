@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { AttentionItem } from "../../attention";
 import { navigate } from "../nav";
+import { Actions } from "../parts/Actions";
 import { Link } from "../parts/Link";
+import { act, bodyFor } from "../requests";
 import { screenKeys } from "../shortcuts";
-import { inbox, openDrawer } from "../store";
+import { changes, inbox, openDrawer } from "../store";
 
 /** Kinds that mean something is wrong rather than waiting: drawn in red. */
 const BAD = new Set(["blocked", "health", "unreadable", "config"]);
@@ -22,7 +24,14 @@ export function Inbox() {
       const it = inbox.value?.[atRef.current];
       if (it?.slug) navigate(`/c/${it.slug}`);
     });
-    return () => { for (const k of ["j", "k", "o"]) screenKeys.delete(k); };
+    // Approves the selected item's change, when it offers Approve.
+    screenKeys.set("a", () => {
+      const it = inbox.value?.[atRef.current];
+      const c = it?.slug ? changes.value?.find((x) => x.slug === it.slug) : undefined;
+      const o = c?.offers.find((x) => x.kind === "approve");
+      if (c && o) void act(bodyFor(c, o), { note: c.note, priority: c.priority }, `${o.label}, ${c.slug}`);
+    });
+    return () => { for (const k of ["j", "k", "o", "a"]) screenKeys.delete(k); };
   }, []);
   useEffect(() => { document.getElementById(`inbox-${sel}`)?.scrollIntoView({ block: "nearest" }); }, [sel]);
   if (!items) return <section class="view"><p class="muted">Connecting…</p></section>;
@@ -37,18 +46,20 @@ export function Inbox() {
           {items.map((it, k) => <Item key={`${it.kind}:${it.slug ?? ""}:${it.title}`} it={it} index={k} selected={k === sel} onSelect={() => setAt(k)} />)}
         </div>
       )}
-      {items.length > 0 && <p class="muted"><kbd>J</kbd> <kbd>K</kbd> move, <kbd>O</kbd> opens the change.</p>}
+      {items.length > 0 && <p class="muted"><kbd>J</kbd> <kbd>K</kbd> move, <kbd>O</kbd> opens the change, <kbd>A</kbd> approves it.</p>}
     </section>
   );
 }
 
 function Item({ it, index, selected, onSelect }: { it: AttentionItem; index: number; selected: boolean; onSelect: () => void }) {
+  const change = it.slug ? changes.value?.find((c) => c.slug === it.slug) : undefined;
   return (
     <article id={`inbox-${index}`} aria-current={selected ? "true" : undefined} class={`inbox-item${BAD.has(it.kind) ? " bad" : ""}${selected ? " selected" : ""}`} onClick={onSelect}>
       <span class="kind">{it.label}</span>
       <b>{it.slug ? <Link href={`/c/${it.slug}`}>{it.title}</Link> : it.title}</b>
       <span>{it.what}</span>
       <div class="actions">
+        {change && <Actions change={change} compact />}
         {it.slug && <Link href={`/c/${it.slug}`} class="btn">Open</Link>}
         <button class="btn" onClick={(e) => { e.stopPropagation(); openDrawer({ slug: it.slug ?? undefined, title: it.title }); }}>Ask the orchestrator</button>
       </div>

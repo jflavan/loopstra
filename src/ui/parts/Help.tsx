@@ -28,6 +28,7 @@ function HelpBox() {
           ))}
           <dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Move through the inbox</dd>
           <dt><kbd>O</kbd></dt><dd>Open the inbox item you are on</dd>
+          <dt><kbd>A</kbd></dt><dd>Approve the inbox item you are on</dd>
         </dl>
       </div>
     </div>
