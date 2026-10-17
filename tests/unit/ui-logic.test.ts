@@ -111,6 +111,23 @@ describe("markdown", () => {
     expect(stripFrontmatter("---\nstatus: draft\n---\n# Intent: x\n")).toBe("# Intent: x\n");
     expect(stripFrontmatter("# No frontmatter\n")).toBe("# No frontmatter\n");
   });
+
+  test("a link whose address hides a scheme behind tabs, control characters, spaces or a line break is shown as its text", () => {
+    for (const text of [
+      "[a](<java\tscript:alert(1)>)",
+      "[a](<\x01javascript:alert(1)>)",
+      "[a](< javascript:alert(1)>)",
+      "[a]\n\n[a]: <java\tscript:alert(1)>",
+      "[a](<java\nscript:alert(1)>)",
+      "[a](<javascript:alert(1)\x7f>)",
+    ]) {
+      const html = renderMarkdown(text);
+      expect({ text, href: html.includes("href") }).toEqual({ text, href: false });
+      expect(html).toContain("a");
+    }
+    expect(renderMarkdown("[a](<java\tscript:alert(1)>)")).toBe("<p>a</p>\n");
+    expect(renderMarkdown("[docs](<./notes.md>)")).toContain('<a href="./notes.md"');
+  });
 });
 
 describe("a transcript on the page", () => {

@@ -3,8 +3,13 @@ import { Marked } from "marked";
 const escapeHtml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-/** Links go to the web or stay relative; anything else (javascript:, data:, file:) is shown as its text. */
+/**
+ * Links go to the web or stay relative; anything else (javascript:, data:, file:) is shown as its text.
+ * An address with spaces or control characters is refused first: marked passes `<java\tscript:…>` on
+ * unchanged, and browsers drop those characters, which would turn it back into a live script link.
+ */
 function safeHref(href: string): boolean {
+  if (/[\u0000- \u007f-\u009f]/.test(href)) return false;
   return /^https?:\/\//i.test(href) || !/^[a-z][a-z0-9+.-]*:/i.test(href);
 }
 
