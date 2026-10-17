@@ -137,3 +137,12 @@ export interface SpendView {
   byHour: Array<{ hour: string; costUsd: number }>;
   judges: JudgesView | null;
 }
+
+/** What a person can do to a change from the console or chat. */
+export type ActionKind = "approve" | "send-back" | "retry" | "accept" | "close" | "priority" | "hold" | "release";
+
+/** One action a change offers now: its kind, its button's words, and the status it leads to (when it sets one). */
+export interface Offer { kind: ActionKind; label: string; to?: string; confirm?: boolean }
+
+/** The priorities, in order (the same list as src/intents.ts; the page cannot import that file). */
+export const PRIORITY_NAMES = ["urgent", "high", "normal", "low"] as const;
