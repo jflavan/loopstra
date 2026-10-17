@@ -480,6 +480,22 @@ describe("holds", () => {
       trace.close(); repo.cleanup();
     }
   });
+
+  test("while a person has paused the loop, main's tests do not run, but the queue is still written", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      holdLoop(repo.path, "John");
+      const r = await tick(repo.path);
+      expect(r.paused).toBe("Paused by John: running steps finish, nothing new starts.");
+      expect(r.signal).toBeUndefined();
+      expect(trace.lastSignal("main_health")).toBeNull();
+      expect(existsSync(join(repo.path, "intent", "queue.md"))).toBe(true);
+      releaseLoop(repo.path);
+      expect((await tick(repo.path)).signal).toBe("pass");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
 });
 
 describe("sleeping between ticks", () => {

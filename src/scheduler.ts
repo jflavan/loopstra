@@ -108,9 +108,13 @@ export async function tick(root: string): Promise<TickResult> {
     // From here the applier beside the tick may apply requests too (see startApplier).
     armApplier(root);
 
+    // A person paused the loop (.loopstra/hold.json): requests still apply, the queue is still written
+    // and leftovers cleaned up, but nothing new starts until they resume it, main's tests included.
+    const loopHold = readLoopHold(root);
+
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
-    const health = mainHealthDue(root, cfg, trace);
-    if (health.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
+    const health = loopHold ? null : mainHealthDue(root, cfg, trace);
+    if (health?.due) out.signal = await runMainHealth(root, cfg, trace, health.afterSlugs);
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
@@ -146,8 +150,7 @@ export async function tick(root: string): Promise<TickResult> {
     }
     heartbeatDayPause(root, null);
 
-    // A person paused the loop (.loopstra/hold.json): nothing new starts until they resume it.
-    const loopHold = readLoopHold(root);
+    // Paused by a person (read above): no step starts.
     if (loopHold) {
       out.paused = loopHoldText(loopHold);
       // Traced once per pause: a new pause by the same person reads the same, but starts later.
