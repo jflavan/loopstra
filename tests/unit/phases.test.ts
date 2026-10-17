@@ -466,6 +466,23 @@ describe("alongside", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a person's stop of extra work ends the step quietly once both settled; a stop request still wins; a question from it is dropped", async () => {
+    const { repo, ctx, trace } = await setup();
+    let mainEnded = false;
+    const stopped = await alongside(ctx, async () => { await tick(30); mainEnded = true; return 7; }, { what: "plan ahead", run: async () => { throw new SessionStopped("John"); }, wanted: () => true }).catch((e: unknown) => e);
+    expect(stopped).toBeInstanceOf(SessionStopped);
+    expect((stopped as SessionStopped).by).toBe("John");
+    expect(mainEnded).toBe(true);
+    const stop = await alongside(ctx, async () => { throw new StopRequested(); }, { what: "x", run: async () => { throw new SessionStopped("John"); }, wanted: () => true }).catch((e: unknown) => e);
+    expect(stop).toBeInstanceOf(StopRequested);
+    const later = await alongsideFirst(ctx, async () => "pass", { what: "plan ahead", run: async () => { await tick(20); throw new SessionStopped("Ana"); }, wanted: () => true });
+    expect(await later.rest().catch((e: unknown) => e)).toBeInstanceOf(SessionStopped);
+    // A question from work run alongside is not recorded: that work is just not used (decision 7).
+    const [m, x] = await alongside(ctx, async () => 7, { what: "plan ahead", run: async () => { throw new QuestionAsked("plan", "Which?"); }, wanted: () => true });
+    expect([m, x]).toEqual([7, null]);
+    trace.close(); repo.cleanup();
+  });
+
   test("alongsideFirst returns once main wants the extra, while the extra still runs; rest waits for it", async () => {
     const { repo, ctx, trace } = await setup();
     const log: string[] = [];

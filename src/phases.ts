@@ -13,7 +13,7 @@ import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
-import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { readConversation } from "./conversation";
 import { deliverInbox, STEERABLE } from "./steering";
 import { toolTarget } from "./tools";
@@ -255,12 +255,13 @@ export function mayOverlap(ctx: StepContext): boolean {
  * does not need (lessons beside the done-check, round 1's review beside the verifier). Returns both
  * results; extra's is null when it was dropped or cancelled.
  *
- * - Extra work is optional: anything it throws but a stop request is dropped, traced, and never ends
- *   the step; main meets the same trouble on its own.
+ * - Extra work is optional: anything it throws but a stop request or a person's stop of its session
+ *   (SessionStopped) is dropped, traced, and never ends the step; main meets the same trouble on its own.
+ *   A question it asks is not recorded (see agentPhase), so that work is just not used.
  * - Once main ends, extra is cancelled (its session or command killed) unless `extra.wanted` says
  *   main's result still uses it; also when main throws.
  * - It waits for both, so each phase ends its own row; then it throws a stop request from either (so
- *   the loop stops rather than pauses), else main's error.
+ *   the loop stops rather than pauses), else the extra's SessionStopped (the step ends quietly), else main's error.
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
  * - It may run inside another alongside or alongsideFirst (a judge's shadow inside the early review,
@@ -313,7 +314,7 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
     (e: unknown) => { cancel.abort(); throw e; },
   );
   const extraDone = member(extra.run, extraSignal).catch((e: unknown) => {
-    if (e instanceof StopRequested) throw e;
+    if (e instanceof StopRequested || e instanceof SessionStopped) throw e;
     ctx.trace.event(ctx.slug, "command", { command: extra.what, note: e instanceof Cancelled ? e.message : `dropped: ${errorText(e)}` });
     return null;
   });
@@ -321,7 +322,9 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
     // Inside another group this marks that group, which decides about the pause once its work ended.
     if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) assistantReached(ctx);
     group.decided = true;
-    if (x.status === "rejected") throw x.reason; // only ever a stop request
+    const stop = [x, m].find((r) => r.status === "rejected" && r.reason instanceof StopRequested);
+    if (stop?.status === "rejected") throw stop.reason;
+    if (x.status === "rejected") throw x.reason; // only ever a person's stop of its session
     if (m.status === "rejected") throw m.reason;
     return [m.value, x.value];
   });

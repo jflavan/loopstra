@@ -71,3 +71,28 @@ describe("a session a person stopped", () => {
     } finally { trace.close(); t.cleanup(); }
   }, 90_000);
 });
+
+describe("a session that asked a question", () => {
+  test("ends its row asked once, with no error, and the question is an event of its own under that phase", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const seq = trace.phaseStart("add-numbers", "design", "agent");
+      const out = await tracedSession({
+        trace, slug: "add-numbers", seq, dir: join(t.path, "phase"), capUsd: 1,
+        read: (output) => ({ ok: true, value: output, endAs: "asked", note: "Round half up or to even?" }),
+        run: { cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE_CLAUDE },
+      });
+      expect(out.ok).toBe(true);
+      const row = trace.phases("add-numbers")[0]!;
+      expect(row).toMatchObject({ status: "asked", error: null, session_id: "fake-session-1" });
+      expect(row.cost_usd).toBeCloseTo(0.01);
+      const events = trace.events("add-numbers");
+      expect(events.filter((e) => e.type === "phase_end")).toHaveLength(1);
+      expect(JSON.parse(events.find((e) => e.type === "phase_end")!.payload)).toMatchObject({ status: "asked", error: null });
+      const question = events.find((e) => e.type === "question")!;
+      expect(question.phase_seq).toBe(seq);
+      expect(JSON.parse(question.payload)).toEqual({ question: "Round half up or to even?" });
+    } finally { trace.close(); t.cleanup(); }
+  }, 90_000);
+});

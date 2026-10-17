@@ -76,8 +76,12 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "phase_start": return `Started ${str(p.name)}.`;
     case "phase_end": {
       const name = e.phase_seq !== null ? phaseName(e.slug, e.phase_seq) : undefined;
-      const why = p.status === "fail" && p.error ? `: ${firstLine(p.error)}` : p.status === "asked" && p.question ? `: ${firstLine(p.question)}` : "";
+      const why = p.status === "fail" && p.error ? `: ${firstLine(p.error)}` : "";
       return sentence(`${capital(name ?? "a step")} ${ENDED[str(p.status)] ?? str(p.status)}${money(p.cost_usd)}${why}`);
+    }
+    case "question": {
+      const name = e.phase_seq !== null ? phaseName(e.slug, e.phase_seq) : undefined;
+      return sentence(`${capital(name ?? "a step")} asked: ${firstLine(p.question)}`);
     }
     case "gate_check": return `${capital(str(p.gate))} gate, ${str(p.check)}: ${GATE[str(p.result)] ?? str(p.result)}.`;
     case "command": return commandText(p);
