@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  assertNoLock, assertNoMainLock, claim, holdsLock, laneEnded, lanesRunning, laneStarted, mainLockKey, onMain, oneMerge, othersRunning, release,
+  assertNoCheckoutLock, assertNoLock, checkoutKey, claim, holdsLock, onCheckout, onCheckoutKey, oneMerge, oneSync, onRemoteKey, othersRunning, release,
 } from "../../src/lanes";
 import { StopRequested } from "../../src/stop";
 import { tempDir } from "../helpers";
@@ -28,12 +28,20 @@ afterEach(() => {
   dirs = [];
 });
 
-describe("the main lock", () => {
+/** A folder that looks like a linked worktree: its `.git` is a file. */
+function linkedWorktree(root: string, name: string): string {
+  const dir = join(root, ".loopstra", "worktrees", name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".git"), "gitdir: elsewhere\n");
+  return dir;
+}
+
+describe("the checkout lock", () => {
   test("serves callers in the order they arrived", async () => {
     const root = folder();
     const order: number[] = [];
     // The first caller sleeps longest: without the lock the last one would finish first.
-    await Promise.all([0, 1, 2, 3, 4].map((i) => onMain(root, async () => {
+    await Promise.all([0, 1, 2, 3, 4].map((i) => onCheckout(root, async () => {
       await Bun.sleep(10 - 2 * i);
       order.push(i);
     })));
@@ -43,7 +51,7 @@ describe("the main lock", () => {
   test("five callers never overlap: every entry is followed by its own exit", async () => {
     const root = folder();
     const log: string[] = [];
-    await Promise.all([0, 1, 2, 3, 4].map((i) => onMain(root, async () => {
+    await Promise.all([0, 1, 2, 3, 4].map((i) => onCheckout(root, async () => {
       log.push(`in ${i}`);
       await Bun.sleep(Math.floor(Math.random() * 6));
       log.push(`out ${i}`);
@@ -54,15 +62,15 @@ describe("the main lock", () => {
 
   test("a nested call in the same context goes straight in", async () => {
     const root = folder();
-    expect(await onMain(root, () => onMain(root, async () => "inside"))).toBe("inside");
+    expect(await onCheckout(root, () => onCheckout(root, async () => "inside"))).toBe("inside");
   });
 
   test("a parallel context waits until the holder is done", async () => {
     const root = folder();
     const g = gate();
     const log: string[] = [];
-    const first = onMain(root, async () => { log.push("first in"); await g.opened; log.push("first out"); });
-    const second = onMain(root, async () => { log.push("second in"); });
+    const first = onCheckout(root, async () => { log.push("first in"); await g.opened; log.push("first out"); });
+    const second = onCheckout(root, async () => { log.push("second in"); });
     await settle();
     expect(log).toEqual(["first in"]);
     g.open();
@@ -74,41 +82,66 @@ describe("the main lock", () => {
     const a = folder();
     const b = folder();
     const g = gate();
-    const held = onMain(a, () => g.opened);
-    expect(await onMain(b, async () => "free")).toBe("free");
+    const held = onCheckout(a, () => g.opened);
+    expect(await onCheckout(b, async () => "free")).toBe("free");
     g.open();
     await held;
   });
 
   test("a throw, a stop request among them, releases the lock and reaches the caller", async () => {
     const root = folder();
-    await expect(onMain(root, async () => { throw new Error("broken"); })).rejects.toThrow("broken");
-    await expect(onMain(root, async () => { throw new StopRequested(); })).rejects.toBeInstanceOf(StopRequested);
-    expect(await onMain(root, async () => "after")).toBe("after");
+    await expect(onCheckout(root, async () => { throw new Error("broken"); })).rejects.toThrow("broken");
+    await expect(onCheckout(root, async () => { throw new StopRequested(); })).rejects.toBeInstanceOf(StopRequested);
+    expect(await onCheckout(root, async () => "after")).toBe("after");
   });
 
-  test("the key is the folder's real path, and folders inside .loopstra have none", () => {
+  test("the key is the folder's real path; a linked worktree (its .git is a file) has none", () => {
     const root = folder();
-    expect(mainLockKey(root)).toBe(mainLockKey(`${root}/`));
-    expect(mainLockKey(root)).toBe(mainLockKey(join(root, "x", "..")));
-    if (process.platform === "win32") expect(mainLockKey(root)).toBe(mainLockKey(root.toUpperCase()));
-    const wt = join(root, ".loopstra", "worktrees", "x");
-    mkdirSync(wt, { recursive: true });
-    expect(mainLockKey(wt)).toBeNull();
-    expect(mainLockKey(join(root, ".loopstra", "health"))).toBeNull();
+    expect(checkoutKey(root)).toBe(checkoutKey(`${root}/`));
+    expect(checkoutKey(root)).toBe(checkoutKey(join(root, "x", "..")));
+    if (process.platform === "win32") expect(checkoutKey(root)).toBe(checkoutKey(root.toUpperCase()));
+    expect(checkoutKey(linkedWorktree(root, "x"))).toBeNull();
   });
 
-  test("a folder inside .loopstra runs without waiting for anyone", async () => {
+  test("a repository inside a folder named .loopstra still locks its main checkout", async () => {
+    const root = join(folder(), ".loopstra", "repos", "app");
+    mkdirSync(join(root, ".git"), { recursive: true });
+    expect(checkoutKey(root)).not.toBeNull();
+    let overlap = 0;
+    let most = 0;
+    await Promise.all([0, 1, 2].map(() => onCheckout(root, async () => {
+      most = Math.max(most, ++overlap);
+      await Bun.sleep(3);
+      overlap--;
+    })));
+    expect(most).toBe(1);
+  });
+
+  test("a linked worktree runs without waiting for anyone", async () => {
     const root = folder();
     const g = gate();
-    const held = onMain(root, () => g.opened);
-    expect(await onMain(join(root, ".loopstra", "worktrees", "x"), async () => "free")).toBe("free");
+    const held = onCheckout(root, () => g.opened);
+    expect(await onCheckout(linkedWorktree(root, "x"), async () => "free")).toBe("free");
     g.open();
     await held;
   });
+
+  test("the remote lock is its own: a fetch never waits for a records section, nor a records section for a fetch", async () => {
+    const key = checkoutKey(folder())!;
+    const g = gate();
+    const records = onCheckoutKey(key, () => g.opened);
+    expect(await onRemoteKey(key, async () => "fetched")).toBe("fetched");
+    g.open();
+    await records;
+    const h = gate();
+    const fetching = onRemoteKey(key, () => h.opened);
+    expect(await onCheckoutKey(key, async () => "committed")).toBe("committed");
+    h.open();
+    await fetching;
+  });
 });
 
-describe("the merge lock", () => {
+describe("the merge and sync locks", () => {
   test("holder() names the change holding it, and nobody once it is free", async () => {
     expect(oneMerge.holder()).toBeNull();
     let inside: string | null = null;
@@ -135,38 +168,42 @@ describe("the merge lock", () => {
     expect(await oneMerge.run(() => oneMerge.tryRun(async () => "again", "a"), "a")).toBe("again");
   });
 
-  test("taking it while holding a main lock is a programming error; the other order is fine", async () => {
+  test("locks are taken in the order merge, sync, checkout, remote; any other order is a programming error", async () => {
     const root = folder();
-    await expect(onMain(root, () => oneMerge.run(async () => 1, "a"))).rejects.toThrow(/main lock/);
-    await expect(onMain(root, () => oneMerge.tryRun(async () => 1, "a"))).rejects.toThrow(/main lock/);
-    expect(await oneMerge.run(() => onMain(root, async () => "ok"), "a")).toBe("ok");
+    const key = checkoutKey(root)!;
+    await expect(onCheckout(root, async () => oneMerge.run(async () => 1, "a"))).rejects.toThrow(/order/);
+    await expect(onCheckout(root, async () => oneSync.run(async () => 1))).rejects.toThrow(/order/);
+    await expect(onRemoteKey(key, async () => onCheckout(root, async () => 1))).rejects.toThrow(/order/);
+    await expect(oneSync.run(async () => oneMerge.run(async () => 1, "a"))).rejects.toThrow(/order/);
+    const inOrder = await oneMerge.run(() => oneSync.run(() => onCheckout(root, () => onRemoteKey(key, async () => "ok"))), "a");
+    expect(inOrder).toBe("ok");
     expect(oneMerge.busy()).toBe(false);
   });
 });
 
 describe("the lock assertions", () => {
-  test("assertNoLock throws under either lock, assertNoMainLock only under a main lock", async () => {
+  test("assertNoLock throws under any lock, assertNoCheckoutLock only under a checkout lock", async () => {
     const root = folder();
     expect(() => assertNoLock("alongside")).not.toThrow();
-    expect(() => assertNoMainLock("a session")).not.toThrow();
-    await expect(onMain(root, async () => assertNoLock("alongside"))).rejects.toThrow(/alongside/);
-    await expect(onMain(root, async () => assertNoMainLock("a session"))).rejects.toThrow(/a session/);
+    expect(() => assertNoCheckoutLock("a session")).not.toThrow();
+    await expect(onCheckout(root, async () => assertNoLock("alongside"))).rejects.toThrow(/alongside/);
+    await expect(onCheckout(root, async () => assertNoCheckoutLock("a session"))).rejects.toThrow(/a session/);
     await expect(oneMerge.run(async () => assertNoLock("alongside"), "a")).rejects.toThrow(/alongside/);
-    await oneMerge.run(async () => assertNoMainLock("a session"), "a");
+    await oneMerge.run(async () => assertNoCheckoutLock("a session"), "a");
   });
 
   test("holdsLock is true only inside a section, and the caller holds nothing once it has ended", async () => {
     const root = folder();
     expect(holdsLock()).toBe(false);
-    expect(await onMain(root, async () => holdsLock())).toBe(true);
+    expect(await onCheckout(root, async () => holdsLock())).toBe(true);
     expect(await oneMerge.run(async () => holdsLock(), "a")).toBe(true);
-    await oneMerge.run(() => onMain(root, async () => { await Bun.sleep(1); }), "a");
+    await oneMerge.run(() => onCheckout(root, async () => { await Bun.sleep(1); }), "a");
     expect(holdsLock()).toBe(false);
     expect(() => assertNoLock("after the sections")).not.toThrow();
   });
 });
 
-describe("claims and lanes", () => {
+describe("claims", () => {
   test("a change is claimed once until it is released; othersRunning counts the rest", () => {
     expect(claim("a")).toBe(true);
     expect(claim("a")).toBe(false);
@@ -179,16 +216,5 @@ describe("claims and lanes", () => {
     release("a");
     release("b");
     expect(othersRunning("a")).toBe(0);
-  });
-
-  test("lanesRunning counts lanes started and not yet ended", () => {
-    expect(lanesRunning()).toBe(0);
-    laneStarted();
-    laneStarted();
-    expect(lanesRunning()).toBe(2);
-    laneEnded();
-    expect(lanesRunning()).toBe(1);
-    laneEnded();
-    expect(lanesRunning()).toBe(0);
   });
 });

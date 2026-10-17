@@ -1,7 +1,7 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { activePause, agoText } from "./heartbeat";
-import { dependencyWait, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { dependencyWait, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
 import type { Trace } from "./trace";
@@ -77,9 +77,7 @@ export async function attention(root: string, config: Config | { problem: string
     }
   }
   for (const u of scan.unreadable) add("unreadable", u.slug, u.slug, u.problem);
-  const human: HumanGates = cfg
-    ? { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human }
-    : { spec: "none", plan: "none", merge: "none", done: "none" };
+  const human = humanGates(cfg);
   for (const i of intents) {
     const fm = i.file.frontmatter;
     // A depends_on only a person can untangle (a name that matches no change, a closed one, a loop).

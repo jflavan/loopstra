@@ -222,6 +222,8 @@ describe("verify stage", () => {
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
     expect(existsSync(join(repo.path, "built-by-done-check.txt"))).toBe(false);
     expect(existsSync(join(repo.path, ".loopstra", "verify", "add-numbers"))).toBe(false);
+    // Lessons read the step's snapshot of main, which goes once the step has ended.
+    await ctx.dropSnapshot();
     expect((await new Git(repo.path).run(["worktree", "list"])).out.trim().split("\n")).toHaveLength(1);
     expect(await new Git(repo.path).isDirty()).toBe(false);
     trace.close(); repo.cleanup();

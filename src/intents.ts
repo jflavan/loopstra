@@ -2,7 +2,9 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
+import type { Config } from "./config";
 import { errorText } from "./shell";
+import { andList } from "./text";
 
 export const STATUSES = [
   "draft", "accepted",
@@ -310,17 +312,19 @@ export function checkConsistency(intent: Intent): string | null {
   }
   const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
   if (missing.length) {
-    return `This request is missing ${listText(missing.map((s) => `a ${s}`))} section. Add ${missing.length > 1 ? "them" : "it"} to intent.md, then set status to accepted.`;
+    return `This request is missing ${andList(missing.map((s) => `a ${s}`))} section. Add ${missing.length > 1 ? "them" : "it"} to intent.md, then set status to accepted.`;
   }
   return null;
 }
 
-/** "a", "a and b", "a, b and c". */
-function listText(items: string[]): string {
-  return items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}` : items[0] ?? "";
-}
-
 export type HumanGates = { spec: "status" | "pr" | "none"; plan: "status" | "pr" | "none"; merge: "status" | "pr" | "none"; done: "status" | "pr" | "none" };
+
+/** Which gates have a person on them (nobody on any without a config), for the queue and for what is runnable. */
+export function humanGates(cfg: Config | null): HumanGates {
+  return cfg
+    ? { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human }
+    : { spec: "none", plan: "none", merge: "none", done: "none" };
+}
 
 /** The review statuses, and the gate whose `human` setting decides whether a person is on each. */
 export const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
@@ -355,8 +359,8 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
   return true;
 }
 
-/** Statuses whose code is in main. */
-const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
+/** Statuses whose code is in main (the change's worktree and branch are no longer needed). */
+export const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
 
 /**
  * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
@@ -513,7 +517,7 @@ export function plainStatus(status: Status): string {
   return PLAIN[status];
 }
 
-const NOBODY: HumanGates = { spec: "none", plan: "none", merge: "none", done: "none" };
+const NOBODY: HumanGates = humanGates(null);
 
 /**
  * The generated queue.md. "Needs a person" holds every change waiting for one (blocked, drafts, and

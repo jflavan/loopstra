@@ -1,17 +1,18 @@
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { lanesFor, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
-import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, type StepResult } from "./context";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { claim, laneEnded, laneStarted, oneMerge, release } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, namesText, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
-import { ownerNote, probeAssistant, setPhaseBoundary, STOPPED_NOTE } from "./phases";
-import { shareMain, syncMain } from "./remote";
+import { claim, release } from "./lanes";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
+import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, isRunnable, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { andList } from "./text";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { applyChatRequests } from "./chat/requests";
@@ -26,11 +27,11 @@ import { Trace, type EventType } from "./trace";
 
 export interface TickResult {
   /**
-   * The change of the first lane's last step, and what that step gave: with one change at a time,
-   * the step that did real work (or the last one that only looked). Every step is in `steps`.
+   * The change of the first lane's step, and what that step gave; with no lane step, the watcher's
+   * last. Every step is in `steps`, the pull request watcher's too.
    */
   picked: string | null; result?: StepResult; signal?: string;
-  /** Every step the tick ran, lane by lane, each lane's in the order they ran. */
+  /** Every step the tick ran: lane by lane, then the pull request watcher's, each in the order they ran. */
   steps?: LaneStep[];
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
@@ -46,8 +47,8 @@ export interface TickResult {
 }
 
 /**
- * One step a lane ran: the change, what the step gave, and how long it took. No result when a stop,
- * an outage or the day's budget ended it (`stopped` says it was a stop).
+ * One step a lane (or the pull request watcher) ran: the change, what the step gave, and how long it
+ * took. No result when a stop, an outage or the day's budget ended it (`stopped` says it was a stop).
  */
 export interface LaneStep { slug: string; result?: StepResult; durationMs: number; stopped?: boolean }
 
@@ -56,9 +57,6 @@ interface LaneProblem { slug: string; error: unknown }
 
 /** What the lanes of one tick share: the changes taken this tick, whether to start no more steps, and the problems met. */
 interface TickLanes { taken: Set<string>; halt: boolean; problems: LaneProblem[] }
-
-/** Statuses after a merge: the change's worktree and branch are no longer needed. */
-const MERGED_STATUSES = new Set(["merged", "verifying", "done"]);
 
 export async function tick(root: string): Promise<TickResult> {
   let cfg: Config;
@@ -79,6 +77,13 @@ export async function tick(root: string): Promise<TickResult> {
     // A git process that died (killed, or the machine went down) leaves its index lock behind, and
     // every git write after it would fail. The loop is the only automated git user: an old lock is its own.
     for (const path of await removeStaleLocks(root)) trace.event("_loop", "stale-lock-removed", { path, olderThanMinutes: STALE_LOCK_MS / 60_000 });
+
+    // A move of main that a kill cut short is put back before anything reads or writes the checkout.
+    const cutShort = await settleCutShortMove(root, trace);
+    if (cutShort) {
+      out.paused = cutShort;
+      return out;
+    }
 
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).
@@ -106,12 +111,8 @@ export async function tick(root: string): Promise<TickResult> {
 
     // Scan, check, render queue.
     const first = await scanRepo(root);
-    for (const u of first.unreadable) {
-      // Traced when the problem is new or has changed, not on every tick.
-      const last = trace.lastEvent(u.slug, "error", '"where":"scan"');
-      const lastProblem = last ? (JSON.parse(last.payload) as { problem?: string }).problem : undefined;
-      if (lastProblem !== u.problem) trace.event(u.slug, "error", { where: "scan", problem: u.problem, detail: u.detail });
-    }
+    // Traced when the problem is new or has changed, not on every tick.
+    for (const u of first.unreadable) trace.eventOnChange(u.slug, "error", '"where":"scan"', { where: "scan", problem: u.problem, detail: u.detail }, "problem");
     for (const i of first.intents) {
       trace.upsertIntent(i.slug, i.file.frontmatter.status, effectivePriority(i.file.frontmatter));
       const problem = checkConsistency(i);
@@ -136,9 +137,7 @@ export async function tick(root: string): Promise<TickResult> {
     if (loopDayUsedUp(cfg, trace)) {
       out.paused = dayPaused(root, cfg, loopDaySpent(cfg, trace));
       // Traced when the reason is new today, not on every poll.
-      const last = trace.lastEvent("_loop", "pause");
-      const same = last && last.ts >= startOfToday() && (JSON.parse(last.payload) as { reason?: string }).reason === out.paused;
-      if (!same) trace.event("_loop", "pause", { reason: out.paused });
+      trace.eventOnChange("_loop", "pause", "", { reason: out.paused }, "reason", startOfToday());
       return out;
     }
     heartbeatDayPause(root, null);
@@ -146,23 +145,24 @@ export async function tick(root: string): Promise<TickResult> {
     // Run steps for up to speed.max_parallel_changes changes at once, each in its own lane; the
     // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
     // never built on a main without it, and so does one waiting for another to merge the same files.
+    // With a remote, the changes watching their pull requests are the watcher's, beside the lanes.
     const human = humanGates(cfg);
-    const candidates = ordered.filter((i) => isRunnable(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
+    const candidates = ordered.filter((i) => forLane(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
     const lanes = lanesFor(cfg, trace);
     traceLanes(trace, cfg, lanes);
-    // With a remote, a pull request whose checks pass while another change's step runs merges
-    // between that step's phases, not only on the next tick.
-    if (hasRemote) setPhaseBoundary((ctx) => mergeReadyChanges(root, cfg, trace, ctx));
     const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
     const started = Date.now();
     // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
-    const settled = await Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    const running = Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    const watcher = hasRemote ? watchPullRequests(root, cfg, trace, shared, human, running) : Promise.resolve([]);
+    const [settled, [watched]] = await Promise.all([running, Promise.allSettled([watcher])]);
     const perLane = settled.map((s) => laneSteps(s, shared));
-    out.steps = perLane.flat();
-    // With one lane, as before: the step that did real work, or the last one that only looked.
-    const last = perLane.find((l) => l.length)?.at(-1);
-    out.picked = last?.slug ?? null;
-    out.result = last?.result;
+    const watchedSteps = laneSteps(watched, shared);
+    out.steps = [...perLane.flat(), ...watchedSteps];
+    // As with one change at a time before: the step that did real work, or the last one that only looked.
+    const firstStep = perLane.find((l) => l.length)?.at(-1) ?? watchedSteps.at(-1);
+    out.picked = firstStep?.slug ?? null;
+    out.result = firstStep?.result;
     if (lanes > 1 && out.steps.length) {
       trace.event("_loop", "command", {
         command: "changes worked on together", lanes, steps: out.steps.map((s) => s.slug),
@@ -183,50 +183,100 @@ export async function tick(root: string): Promise<TickResult> {
     out.crashed = errorText(e).split("\n")[0] ?? "";
     return out;
   } finally {
-    setPhaseBoundary(null);
     await endOfTick(root, cfg, trace, out, share);
     trace.close();
   }
 }
 
+/** Statuses whose merge step only watches the pull request (with a remote): the watcher's, never a lane's. */
+const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approved"]);
+
 /**
- * One lane: the pick loop over the tick's runnable changes (as one change at a time always ran it).
- * It runs one step after another until a step does real work; a step that only looked and found
- * nothing to do yet (a pull request still waiting on GitHub) lets it take the next change. The lanes
- * share the list, and a change is taken and claimed in one go, so two lanes never run one change and
- * the between-phases merge never runs a change a lane is running. A stop, an outage or the day's
- * budget ends the lane, and no lane starts another step; the tick handles them once every lane has
- * ended (afterLanes). It rejects only when the trace cannot be written while it records a problem
- * (a full disk, a database held too long); see laneSteps.
+ * One lane: it takes the first of the tick's runnable changes no lane has taken, and runs its step.
+ * The lanes share the list, and a change is taken and claimed in one go, so two lanes never run one
+ * change and the pull request watcher never runs a change a lane is running. A change read again
+ * that is no longer the lane's to run is passed over. A stop, an outage or the day's budget ends the
+ * lane, and no lane starts another step; the tick handles them once every lane has ended
+ * (afterLanes). It rejects only when the trace cannot be written while it records a problem (a full
+ * disk, a database held too long); see laneSteps.
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
-  const done: LaneStep[] = [];
-  laneStarted();
-  try {
-    for (;;) {
-      if (shared.halt || stopRequested()) return done;
-      const next = candidates.find((i) => takeChange(shared, i.slug));
-      if (!next) return done;
-      heartbeatWorkingOn(root, next.slug);
-      const t0 = Date.now();
-      try {
-        // Read again: a between-phases merge may have moved it since the scan.
-        const fresh = await readFresh(root, trace, next.slug);
-        if (!fresh || !isRunnable(fresh, human, hasRemote)) continue;
-        const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
-        done.push({ slug: next.slug, result, durationMs: Date.now() - t0 });
-        if (!(result.ok && result.waiting)) return done;
-      } catch (e) {
-        done.push(laneProblem(trace, shared, next.slug, e, Date.now() - t0));
-        return done;
-      } finally {
-        release(next.slug);
-        heartbeatDoneWith(root, next.slug);
-      }
-    }
-  } finally {
-    laneEnded();
+  for (;;) {
+    if (shared.halt || stopRequested()) return [];
+    const next = candidates.find((i) => takeChange(shared, i.slug));
+    if (!next) return [];
+    const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
+    if (ran) return [ran];
   }
+}
+
+/** True when a change is a lane's to run now: runnable, and (with a remote) not watching its pull request. */
+function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
+  return isRunnable(i, human, hasRemote) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+}
+
+/**
+ * Runs the step of a change already claimed, and releases it after. The change is read again first
+ * (the watcher or another lane may have moved it since the scan): null, without a step, when it is
+ * no longer `runs` (or cannot be read). A problem the step does not handle itself is recorded with
+ * laneProblem.
+ */
+async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickLanes, slug: string, runs: (i: Intent) => boolean): Promise<LaneStep | null> {
+  heartbeatWorkingOn(root, slug);
+  const t0 = Date.now();
+  try {
+    const fresh = await readFresh(root, trace, slug);
+    if (!fresh || !runs(fresh)) return null;
+    const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
+    return { slug, result, durationMs: Date.now() - t0 };
+  } catch (e) {
+    return laneProblem(trace, shared, slug, e, Date.now() - t0);
+  } finally {
+    release(slug);
+    heartbeatDoneWith(root, slug);
+  }
+}
+
+/**
+ * With a remote, beside the lanes: the merge step of every change watching its pull request, so one
+ * whose checks passed (or that was approved) merges while other changes' steps run, not only on the
+ * next tick. It looks when the lanes start, every poll_seconds while any lane runs, and once more
+ * after the last lane ended (a pull request a lane just opened, or one that could not be brought up
+ * to date while every lane was busy, is looked at this tick). A change whose step did something
+ * (brought its pull request up to date, say) waits for the next tick, when GitHub has started the
+ * checks of what was pushed. Each change runs under its claim, so never beside a lane running it. A
+ * stop, an outage or the day's budget ends it like a lane (see laneProblem). Its steps are the
+ * tick's too, with at most one that only looked per change.
+ */
+async function watchPullRequests(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, lanesDone: Promise<unknown>): Promise<LaneStep[]> {
+  const steps: LaneStep[] = [];
+  let ended = false;
+  void lanesDone.then(() => { ended = true; });
+  for (;;) {
+    const last = ended;
+    if (!(await watchOnce(root, cfg, trace, shared, human, steps)) || last) return steps;
+    await sleepUnlessStopped(cfg.poll_seconds * 1000, lanesDone);
+  }
+}
+
+/**
+ * One look of the watcher (see watchPullRequests), in queue order: at each change watching its pull
+ * request, except one whose step already did something this tick (brought it up to date, say),
+ * which is looked at again on the next tick. False once a stop or a problem ended it.
+ */
+async function watchOnce(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, steps: LaneStep[]): Promise<boolean> {
+  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true);
+  const didWork = (slug: string) => steps.some((s) => s.slug === slug && !(s.result?.ok && s.result.waiting));
+  const ordered = orderQueue((await scanRepo(root)).intents);
+  for (const i of ordered) {
+    if (shared.halt || stopRequested()) return false;
+    if (!watching(i) || didWork(i.slug) || waitingOn(i, ordered).length || !claim(i.slug)) continue;
+    const step = await runClaimed(root, cfg, trace, shared, i.slug, watching);
+    if (!step) continue;
+    if (!(step.result?.ok && step.result.waiting && steps.some((s) => s.slug === i.slug))) steps.push(step);
+    if (!step.result) return false;
+  }
+  return true;
 }
 
 /**
@@ -241,7 +291,7 @@ function laneSteps(settled: PromiseSettledResult<LaneStep[]>, shared: TickLanes)
 
 /**
  * Takes a change for a lane: false when a lane took it this tick already, or when it is claimed (the
- * between-phases merge is running it). Either way no lane takes it again this tick. Synchronous, so
+ * pull request watcher is running it). Either way no lane takes it again this tick. Synchronous, so
  * two lanes never take one change.
  */
 function takeChange(shared: TickLanes, slug: string): boolean {
@@ -363,62 +413,6 @@ async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
   }
 }
 
-/** Statuses whose merge step only watches the pull request (with a remote): a cheap look on GitHub. */
-const WATCHING_PR = new Set(["merge-review", "merge-approved"]);
-/** True while mergeReadyChanges runs: the merge steps it starts have phases of their own. */
-let mergingBetweenPhases = false;
-
-/**
- * Runs before each phase of a step (with a remote): the merge step of every other change that is
- * watching its pull request, so one whose checks passed (or that was approved) merges now rather
- * than after the whole running step. The queue is read again from disk each time, and each change
- * again just before its step. Not during a merge step itself, nor inside one started here, nor for
- * a change a lane is running (claimed). While another change is merging, the pass is skipped and
- * those changes merge later. A problem is traced and never stops the running step; only a stop
- * request passes through.
- */
-async function mergeReadyChanges(root: string, cfg: Config, trace: Trace, running: StepContext): Promise<void> {
-  if (mergingBetweenPhases || WATCHING_PR.has(running.intent.file.frontmatter.status)) return;
-  mergingBetweenPhases = true;
-  try {
-    // Without a remote a merge step runs the tests and may run sessions: never between phases.
-    if ((await new Git(root).remoteName()) === null) return;
-    const ordered = orderQueue((await scanRepo(root)).intents);
-    const human = humanGates(cfg);
-    for (const i of ordered) {
-      if (i.slug === running.slug || !WATCHING_PR.has(i.file.frontmatter.status)) continue;
-      if (!isRunnable(i, human, true) || waitingOn(i, ordered).length) continue;
-      if (!claim(i.slug)) continue;
-      try {
-        const ran = await oneMerge.tryRun(() => mergeBetweenPhases(root, cfg, trace, i.slug, running.slug), i.slug);
-        if (ran === null) return;
-      } finally {
-        release(i.slug);
-      }
-    }
-  } catch (e) {
-    if (e instanceof StopRequested) throw e;
-    trace.event("_loop", "error", { where: "merge between phases", during: running.slug, error: errorText(e) });
-  } finally {
-    mergingBetweenPhases = false;
-  }
-}
-
-/**
- * The merge step of one watched change, run between another change's phases (under the merge lock
- * and the change's claim). The change is read again first: it may have moved since the scan. Gives
- * true once it is done with the change, so the merge lock's tryRun can tell it from "busy".
- */
-async function mergeBetweenPhases(root: string, cfg: Config, trace: Trace, slug: string, during: string): Promise<true> {
-  const fresh = await readIntent(root, slug);
-  if (!WATCHING_PR.has(fresh.file.frontmatter.status) || !isRunnable(fresh, humanGates(cfg), true)) return true;
-  const ctx = new StepContext(root, cfg, trace, fresh);
-  ctx.betweenPhases = true;
-  const r = await runStepGuarded(ctx);
-  if (!(r.ok && r.waiting)) trace.event(slug, "command", { command: "merge step between phases", during, ok: r.ok });
-  return true;
-}
-
 /**
  * After the step: queue.md is brought up to date (uncommitted; the next runtime commit takes it
  * along), and with a remote, main is shared once for the whole tick. Best effort; not after a stop.
@@ -439,11 +433,6 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
   }
 }
 
-/** Which gates have a person on them, for the queue and for what is runnable. */
-function humanGates(cfg: Config): HumanGates {
-  return { spec: cfg.gates.spec.human, plan: cfg.gates.plan.human, merge: cfg.gates.merge.human, done: cfg.gates.done.human };
-}
-
 /**
  * A config that cannot be loaded is traced (once while it stays the same), so `tail` and the trace
  * show it; the attention list shows it too, from loading the config itself. Never throws.
@@ -452,8 +441,7 @@ function traceConfigProblem(root: string, error: string): void {
   try {
     const trace = Trace.open(root);
     try {
-      const last = trace.lastEvent("_loop", "error", '"where":"config"');
-      if (!last || (JSON.parse(last.payload) as { error?: string }).error !== error) trace.event("_loop", "error", { where: "config", error });
+      trace.eventOnChange("_loop", "error", '"where":"config"', { where: "config", error }, "error");
     } finally {
       trace.close();
     }
@@ -586,6 +574,17 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
+  } finally {
+    await dropSnapshot(ctx);
+  }
+}
+
+/** The step's snapshot of main is removed once it ends; a failure is traced (the next tick's start removes it). */
+async function dropSnapshot(ctx: StepContext): Promise<void> {
+  try {
+    await ctx.dropSnapshot();
+  } catch (e) {
+    ctx.trace.event(ctx.slug, "error", { where: "snapshot", what: "could not remove the step's snapshot of main", error: errorText(e) });
   }
 }
 
@@ -622,9 +621,20 @@ async function writeQueue(root: string, trace: Trace, text: string): Promise<voi
 /**
  * A merged change's worktree and branch are removed right after the merge; if that failed, try
  * again here. A closed change's worktree is removed once it holds nothing uncommitted (its branch
- * is kept, so nothing is lost). Best effort and traced; never blocks anything.
+ * is kept, so nothing is lost). Snapshots of main a killed loop left behind are removed (no step
+ * runs yet). Best effort and traced; never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
+  if (existsSync(snapshotsDir(root))) {
+    for (const name of readdirSync(snapshotsDir(root))) {
+      try {
+        await removeWorktree(new Git(root), join(snapshotsDir(root), name));
+      } catch (e) {
+        if (e instanceof StopRequested) throw e;
+        trace.event(name, "error", { where: "cleanup", what: "snapshot of main left behind", error: errorText(e) });
+      }
+    }
+  }
   for (const i of intents.filter((x) => x.file.frontmatter.status === "closed")) {
     try {
       await removeClosedWorktree(new StepContext(root, cfg, trace, i));
@@ -633,7 +643,7 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
       trace.event(i.slug, "error", { where: "cleanup", what: "closed worktree", error: errorText(e) });
     }
   }
-  const merged = intents.filter((i) => MERGED_STATUSES.has(i.file.frontmatter.status));
+  const merged = intents.filter((i) => MERGED.has(i.file.frontmatter.status));
   if (!merged.length) return;
   const refs = await new Git(root).run(["for-each-ref", "--format=%(refname:short)", "refs/heads/intent/"], true);
   const branches = new Set(refs.out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
@@ -732,11 +742,12 @@ export async function preflight(root: string, env: Record<string, string | undef
   return null;
 }
 
-/** Waits up to `ms`, or until a stop is requested. Leaves no timer behind. */
-async function sleepUnlessStopped(ms: number): Promise<void> {
+/** Waits up to `ms`, or until a stop is requested or `until` settles. Leaves no timer behind. */
+async function sleepUnlessStopped(ms: number, until?: Promise<unknown>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const ended = until ? [until.then(() => {}, () => {})] : [];
   try {
-    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); }), stopPromise()]);
+    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); }), stopPromise(), ...ended]);
   } finally {
     clearTimeout(timer);
   }
@@ -773,7 +784,7 @@ export async function start(root: string, opts: { once: boolean; installSignals?
           for (const s of r.steps ?? []) if (s.result) log(`${s.slug}: ${stepText(s.result)}`);
           const stopped = (r.steps ?? []).filter((s) => s.stopped).map((s) => s.slug);
           if (r.paused) { if (r.paused !== lastPaused) log(`paused: ${r.paused}`); }
-          else if (r.stopped) log(`stopped${stopped.length ? ` during ${namesText(stopped)}; ${stopped.length > 1 ? "they resume" : "it resumes"} on the next start` : ""}`);
+          else if (r.stopped) log(`stopped${stopped.length ? ` during ${andList(stopped)}; ${stopped.length > 1 ? "they resume" : "it resumes"} on the next start` : ""}`);
           else if (r.crashed) log(`the loop hit an unexpected problem and will try again: ${r.crashed}`);
           else if (!r.steps?.length) log("idle");
         }

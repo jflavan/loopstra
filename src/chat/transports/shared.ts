@@ -1,4 +1,5 @@
 import { userInfo } from "node:os";
+import { andList } from "../../text";
 
 /** Splits a message into parts of at most `max` characters, at line breaks where it can. */
 export function chunkText(text: string, max: number): string[] {
@@ -18,7 +19,7 @@ export function chunkText(text: string, max: number): string[] {
 /** "a, b and c" for the people who may start drafts, or who to ask when there are none. */
 export function mentionList(people: string[], setting: string): string {
   if (!people.length) return `nobody here yet (an engineer can add people to ${setting})`;
-  return people.length > 1 ? `${people.slice(0, -1).join(", ")} and ${people.at(-1)}` : people[0]!;
+  return andList(people);
 }
 
 /** Reconnects a dropped connection, waiting 1, 2, 4 ... up to 30 seconds between tries. */

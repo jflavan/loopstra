@@ -45,7 +45,8 @@ stages:
 # overlap_judges: the first review runs alongside the verifier, and lessons alongside the final
 # check. When the verifier fails, that review is stopped at once and runs again after the fix.
 # plan_ahead: the first plan is written while the spec is being checked; it is stopped if the spec
-# does not pass, and used only if the code it read has not changed (files git ignores are not compared).
+# does not pass, and used only if the code on main it read has not changed (sessions read main's last
+# commit, so uncommitted edits in the main checkout never count).
 # cheap_judges: off | shadow | first. A cheaper judge (claude.models.default) for the spec check,
 # the plan challenge and the review. shadow: it judges alongside the strong one on the same question
 # and only the strong one decides; `loopstra judges` shows how often they agreed. first: once the

@@ -5,7 +5,7 @@ import { passes, runJudge } from "../judges";
 import { phasePrompt } from "../phases";
 import { testLoop } from "./build";
 import { reviewPhase, takeEarlyReview } from "./early-review";
-import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, testResult, writeRound } from "./shared";
+import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";

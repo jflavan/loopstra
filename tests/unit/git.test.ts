@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
-import { onMain } from "../../src/lanes";
+import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
+import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
+import { moveMain } from "../../src/remote";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import { lastCommit, run, setEnv, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 afterEach(() => resetStop());
+
+/** Merges `branch` into the checked-out main as the merge step does: the merge commit, then main moved to it. */
+async function mergeInto(git: Git, branch: string, method: "squash" | "merge", message: string): Promise<void> {
+  const { from, to } = await git.mergeCommit(branch, method, message);
+  const moved = await moveMain(git, from, to);
+  if (!moved.ok) throw new GitError(["merge", branch], "", moved.error, 1);
+}
 
 describe("Git", () => {
   test("branch, worktree, commit, changed files, merge, cleanup", async () => {
@@ -30,7 +38,7 @@ describe("Git", () => {
     expect(await wtGit.changedFilesSince("main")).toEqual(["src/new.ts"]);
 
     expect(await git.isAncestor("main", "intent/x")).toBe(true);
-    await git.merge("intent/x", "squash", "merge x");
+    await mergeInto(git, "intent/x", "squash", "merge x");
     expect(existsSync(join(repo.path, "src", "new.ts"))).toBe(true);
     expect(await lastCommit(repo.path)).toContain("merge x");
 
@@ -103,27 +111,27 @@ describe("Git", () => {
     repo.cleanup();
   });
 
-  test("a conflicting merge aborts cleanly and the error mentions the conflict", async () => {
+  test("a merge commit has main and the branch as parents and the branch's tree; one that has not got main is refused", async () => {
     const repo = await tempGitRepo();
     const git = new Git(repo.path);
-    await git.createBranch("intent/conflict", "main");
-    const wt = join(repo.path, ".loopstra", "worktrees", "conflict");
-    await git.worktreeAdd(wt, "intent/conflict");
-    const wtGit = new Git(wt);
-    await Bun.write(join(wt, "README.md"), "branch change\n");
-    await wtGit.commitAll("branch change");
+    await git.createBranch("intent/x", "main");
+    const wt = join(repo.path, ".loopstra", "worktrees", "x");
+    await git.worktreeAdd(wt, "intent/x");
+    await Bun.write(join(wt, "src", "x.ts"), "export const x = 1;\n");
+    await new Git(wt).commitAll("x");
+    const before = await git.headSha();
+    await mergeInto(git, "intent/x", "merge", "x: merge");
+    expect((await git.run(["rev-parse", "main^1", "main^2"])).out.trim().split(/\r?\n/)).toEqual([before, await new Git(wt).headSha()]);
+    expect((await git.run(["rev-parse", "main^{tree}"])).out.trim()).toBe((await git.run(["rev-parse", "intent/x^{tree}"])).out.trim());
+    expect(existsSync(join(repo.path, "src", "x.ts"))).toBe(true);
+
+    // A branch whose changes clash with main is never merged in the checkout: it has not got main, so it is refused.
+    await git.createBranch("intent/conflict", "main~1");
     await Bun.write(join(repo.path, "README.md"), "main change\n");
     await git.commitAll("main change");
-
-    let error: Error | undefined;
-    try {
-      await git.merge("intent/conflict", "merge", "merge conflict");
-    } catch (e) {
-      error = e as Error;
-    }
-    expect(error).toBeDefined();
-    expect(error!.message).toMatch(/README\.md|conflict/i);
-    expect(await git.isDirty()).toBe(false);
+    const head = await git.headSha();
+    await expect(git.mergeCommit("intent/conflict", "merge", "conflict")).rejects.toThrow(/does not contain/);
+    expect(await git.headSha()).toBe(head);
     expect((await git.run(["status", "--porcelain"])).out.trim()).toBe("");
 
     await git.worktreeRemove(wt);
@@ -196,7 +204,7 @@ describe("Git", () => {
       // What the test looks for: a plain fetch does start it.
       expect(await started(() => git.run(["fetch", "--quiet", "origin"]))).toBe(true);
       expect(await started(() => git.fetch(["--quiet", "origin"]))).toBe(false);
-      expect(await started(() => git.merge("feature", "squash", "feature"))).toBe(false);
+      expect(await started(() => mergeInto(git, "feature", "squash", "feature"))).toBe(false);
     } finally { rmSync(log, { force: true }); repo.cleanup(); remote.cleanup(); }
   });
 
@@ -263,20 +271,16 @@ describe("Git", () => {
 
     // Cannot land: a person's unsaved file where the change writes one. Nothing moves.
     await Bun.write(join(repo.path, "notes.md"), "a person's unsaved notes\n");
-    await Bun.write(join(repo.path, "README.md"), "# staged by a person\n");
-    await run(["git", "add", "README.md"], repo.path);
     const before = await git.headSha();
-    await expect(git.merge("intent/x", "squash", "x: merge")).rejects.toBeInstanceOf(GitError);
+    await expect(mergeInto(git, "intent/x", "squash", "x: merge")).rejects.toBeInstanceOf(GitError);
     expect(await git.headSha()).toBe(before);
-    expect((await git.run(["diff", "--cached", "--name-only"])).out.trim()).toBe("README.md");
     expect(await Bun.file(join(repo.path, "notes.md")).text()).toBe("a person's unsaved notes\n");
     expect(existsSync(join(repo.path, "src", "a.ts"))).toBe(false);
+    expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
 
     // Lands: exactly one new commit on main, with the branch's tree, and a clean index.
-    await run(["git", "reset", "-q"], repo.path);
-    await run(["git", "checkout", "-q", "--", "README.md"], repo.path);
     rmSync(join(repo.path, "notes.md"), { force: true });
-    await git.merge("intent/x", "squash", "x: merge");
+    await mergeInto(git, "intent/x", "squash", "x: merge");
     expect((await git.run(["rev-list", "--count", `${before}..main`])).out.trim()).toBe("1");
     expect((await git.run(["rev-parse", "main^"])).out.trim()).toBe(before);
     expect((await git.run(["rev-parse", "main^{tree}"])).out.trim()).toBe((await git.run(["rev-parse", "intent/x^{tree}"])).out.trim());
@@ -287,7 +291,7 @@ describe("Git", () => {
     await Bun.write(join(repo.path, "later.md"), "later\n");
     await git.commitAll("later on main");
     const head = await git.headSha();
-    await expect(git.merge("intent/x", "squash", "x: again")).rejects.toThrow(/does not contain/);
+    await expect(git.mergeCommit("intent/x", "squash", "x: again")).rejects.toThrow(/does not contain/);
     expect(await git.headSha()).toBe(head);
 
     await git.worktreeRemove(wt);
@@ -337,48 +341,106 @@ describe("Git across systems", () => {
   });
 });
 
-describe("Git and the main lock", () => {
-  /** Holds the main lock of `root` until the returned function is called. */
-  function holdMain(root: string): () => Promise<void> {
+describe("Git and the locks", () => {
+  /** Holds the checkout lock of `root` (or with `remote`, its remote lock) until the returned function is called. */
+  function hold(root: string, which: "checkout" | "remote" = "checkout"): () => Promise<void> {
     let open = () => {};
     const opened = new Promise<void>((resolve) => { open = resolve; });
-    const held = onMain(root, () => opened);
+    const held = which === "checkout" ? onCheckout(root, () => opened) : onRemoteKey(checkoutKey(root)!, () => opened);
     return async () => { open(); await held; };
   }
 
-  test("every command in the main checkout waits for the main lock", async () => {
+  /** True when `p` is still waiting after a moment. */
+  async function waits(p: Promise<unknown>): Promise<boolean> {
+    let done = false;
+    void p.then(() => { done = true; }, () => { done = true; });
+    await Bun.sleep(400);
+    return !done;
+  }
+
+  test("a command that writes the main checkout's index or files waits for its checkout lock", async () => {
     const repo = await tempGitRepo();
     try {
-      const free = holdMain(repo.path);
-      let done = false;
-      const status = new Git(repo.path).run(["status", "--porcelain"]).then(() => { done = true; });
-      await Bun.sleep(400);
-      expect(done).toBe(false);
+      const free = hold(repo.path);
+      const status = new Git(repo.path).run(["status", "--porcelain"]);
+      expect(await waits(status)).toBe(true);
       await free();
       await status;
-      expect(done).toBe(true);
     } finally { repo.cleanup(); }
+  });
+
+  test("worktree administration, branches and reads of refs never wait for the checkout lock", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const free = hold(repo.path);
+      try {
+        expect(await git.currentBranch()).toBe("main");
+        await git.createBranch("intent/x", "main");
+        const wt = join(repo.path, ".loopstra", "worktrees", "x");
+        await git.ensureWorktree(wt, "intent/x");
+        expect(await new Git(wt).currentBranch()).toBe("intent/x");
+        await removeWorktree(git, wt);
+        expect(existsSync(wt)).toBe(false);
+        await git.deleteBranch("intent/x");
+      } finally { await free(); }
+    } finally { repo.cleanup(); }
+  });
+
+  test("fetch and push wait for the remote lock only", async () => {
+    const remote = tempDir("loopstra-remote-");
+    const repo = await tempGitRepo();
+    try {
+      await run(["git", "init", "-q", "--bare", "-b", "main"], remote.path);
+      await run(["git", "remote", "add", "origin", remote.path], repo.path);
+      const git = new Git(repo.path);
+      const freeCheckout = hold(repo.path);
+      await git.run(["push", "-q", "origin", "main"]);
+      await freeCheckout();
+      const freeRemote = hold(repo.path, "remote");
+      const fetch = git.fetch(["--quiet", "origin"]);
+      expect(await waits(fetch)).toBe(true);
+      await freeRemote();
+      await fetch;
+    } finally { repo.cleanup(); remote.cleanup(); }
   });
 
   test("a command inside the holder's own section goes straight through", async () => {
     const repo = await tempGitRepo();
     try {
       const git = new Git(repo.path);
-      expect(await onMain(repo.path, async () => (await git.currentBranch()))).toBe("main");
+      expect(await onCheckout(repo.path, async () => (await git.run(["status", "--porcelain"])).code)).toBe(0);
     } finally { repo.cleanup(); }
   });
 
-  test("a change's worktree under .loopstra takes no main lock", async () => {
+  test("a change's worktree takes no lock, whatever runs there", async () => {
     const repo = await tempGitRepo();
     try {
       const git = new Git(repo.path);
       await git.createBranch("intent/x", "main");
       const wt = join(repo.path, ".loopstra", "worktrees", "x");
       await git.worktreeAdd(wt, "intent/x");
-      const free = holdMain(repo.path);
+      const free = hold(repo.path);
       try {
-        expect(await new Git(wt).currentBranch()).toBe("intent/x");
+        expect((await new Git(wt).run(["status", "--porcelain"])).code).toBe(0);
       } finally { await free(); }
+    } finally { repo.cleanup(); }
+  });
+
+  test("a worktree whose add was killed part way (left locked) is removed, so it can be added again", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "health", "main");
+      await git.run(["worktree", "add", "--detach", dir, "main"]);
+      await git.run(["worktree", "lock", "--reason", "initializing", dir]);
+      rmSync(dir, { recursive: true, force: true });
+      await removeWorktree(git, dir);
+      await git.run(["worktree", "add", "--detach", dir, "main"]);
+      expect(existsSync(join(dir, "README.md"))).toBe(true);
+      await git.run(["worktree", "lock", dir]);
+      await removeWorktree(git, dir);
+      expect(existsSync(dir)).toBe(false);
     } finally { repo.cleanup(); }
   });
 });

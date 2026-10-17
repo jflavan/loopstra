@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
-import { bookkeeping, Git, withDetachedWorktree } from "./git";
+import { commitRecord } from "./context";
+import { Git, withDetachedWorktree } from "./git";
 import { projectCommand } from "./phases";
 import { errorText } from "./shell";
 import { StopRequested } from "./stop";
+import { andList } from "./text";
 import type { Trace } from "./trace";
 
 export type HealthResult = "pass" | "fail" | "error";
@@ -77,7 +79,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);
   rmSync(pendingPath(root), { force: true });
-  if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, git, trace, afterSlugs, output);
+  if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, cfg.main_branch, trace, afterSlugs, output);
   return result;
 }
 
@@ -92,18 +94,19 @@ function brokeWhen(afterSlugs: string[]): string {
   const names = afterSlugs.map((s) => `"${s}"`);
   if (names.length === 0) return "on the main branch";
   if (names.length === 1) return `after the change ${names[0]} merged`;
-  return `after the changes ${names.slice(0, -1).join(", ")} and ${names.at(-1)} merged`;
+  return `after the changes ${andList(names)} merged`;
 }
 
 /** Opens a draft for the failing tests, named after the first change merged since the last check. */
-async function openFailureIntent(root: string, git: Git, trace: Trace, afterSlugs: string[], output: string): Promise<void> {
+async function openFailureIntent(root: string, main: string, trace: Trace, afterSlugs: string[], output: string): Promise<void> {
   const today = localDate();
   const slug = afterSlugs[0] ? `fix-tests-after-${afterSlugs[0]}` : `fix-tests-on-main-${today}`;
   const dir = join(root, "intent", slug);
   if (existsSync(dir)) return;
-  mkdirSync(dir, { recursive: true });
   const what = brokeWhen(afterSlugs);
-  await Bun.write(join(dir, "intent.md"), `---
+  await commitRecord(root, main, slug, "open intent for failing tests on main", async () => {
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(join(dir, "intent.md"), `---
 status: draft
 priority: high
 author: loopstra
@@ -127,6 +130,6 @@ Everyone working on this repository.
 ## Open questions
 Should the change be reverted, or fixed forward?
 `);
-  trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlugs, output });
-  await git.commitPaths([`intent/${slug}`], bookkeeping(`loopstra(${slug}): open intent for failing tests on main`));
+    trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlugs, output });
+  });
 }
