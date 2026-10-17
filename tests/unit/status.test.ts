@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { attention } from "../../src/attention";
 import { renderStatus } from "../../src/commands/status";
-import { configPath } from "../../src/config";
+import { configPath, loadConfig } from "../../src/config";
+import { holdLoop } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -115,6 +117,34 @@ describe("renderStatus", () => {
       expect(lines[at]!.slice(noteAt)).toStartWith("The reviewer");
       expect(lines[at + 1]!.slice(0, noteAt).trim()).toBe("");
       expect(lines.slice(at).map((l) => l.slice(noteAt)).join(" ")).toContain("An engineer needs to look at the change.");
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("attention", () => {
+  test("a held change is in the list as Held, with why; a person's pause of the loop is there too", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "a", "status: building\nhold: waiting for legal (John, the dashboard)");
+      await intent(t.path, "d", "status: done\nhold: left over");
+      holdLoop(t.path, "John");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = await attention(t.path, await loadConfig(t.path), trace, new Date());
+        expect(items.filter((i) => i.kind === "held")).toEqual([{
+          kind: "held", label: "Held", slug: "a", title: "a",
+          what: "Held: waiting for legal (John, the dashboard). The loop starts no step for it until it is released, in the console or by removing the hold line from intent.md.",
+        }]);
+        expect(items[0]).toEqual({
+          kind: "paused", label: "Paused", slug: null, title: "Loopstra is paused",
+          what: "Paused by John: running steps finish, nothing new starts. Resume it in the console, or delete .loopstra/hold.json.",
+        });
+      } finally {
+        trace.close();
+      }
     } finally {
       t.cleanup();
     }
