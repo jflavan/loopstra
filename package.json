@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "description": "Unattended, Claude Code based SDLC loop. Code owns the loop; agents own bounded phases.",
   "type": "module",
-  "bin": { "loopstra": "./src/cli.ts" },
+  "bin": {
+    "loopstra": "./src/cli.ts"
+  },
   "scripts": {
     "test": "bun scripts/test.ts",
     "test:serial": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@preact/signals": "^2.11.3",
+    "marked": "^16.4.2",
+    "preact": "^10.29.8",
     "yaml": "^2.6.0",
     "zod": "^4.0.0"
   },
