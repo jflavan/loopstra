@@ -217,7 +217,9 @@ export class Hub {
         else for (const name of changed) this.broadcast(frame({ type: "section", name, value: model.sections[name] } satisfies StreamMessage));
         this.sendNewEvents(trace);
       } catch (e) {
-        this.note(errorText(e));
+        // A look for a trace that was since closed must not mark its problem as traced: the next
+        // start would then never trace it.
+        if (this.trace === trace) this.note(errorText(e));
       }
     })().finally(() => { this.running = null; });
     return this.running;

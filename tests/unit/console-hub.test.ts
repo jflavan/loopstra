@@ -285,6 +285,34 @@ describe("the console's live stream", () => {
     });
   });
 
+  test("a look still running when the last page leaves does not note its problem into the next start", async () => {
+    let gate: Promise<void> | null = null;
+    let release = () => {};
+    let held = false;
+    const scan = async (): Promise<Scan> => {
+      if (gate) { held = true; await gate; }
+      return { intents: null } as unknown as Scan;
+    };
+    await withHub({ ...FAST, scan }, async ({ root, hub }) => {
+      await config(root);
+      const problems = () => withTrace(root, (trace) => trace.eventsAfter(0, 100).filter((e) => e.type === "error").length);
+      const off = await hub.connect(page().send);
+      expect(problems()).toBe(1);
+      gate = new Promise((r) => { release = r; });
+      await intent(root, "one", "status: accepted"); // the folder changed, so the next look reads it again
+      await until(() => held); // a look is held in that read
+      const leaving = off();
+      gate = null;
+      release(); // it fails now, after the hub was stopped
+      await leaving;
+      await hub.whenStopped();
+      const again = await hub.connect(page().send);
+      await again();
+      await hub.whenStopped();
+      expect(problems()).toBe(2);
+    });
+  });
+
   test("pings keep a quiet stream alive", async () => {
     await withHub({ ...FAST, pingMs: 30 }, async ({ root, connect }) => {
       await config(root);
