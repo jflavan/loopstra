@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyRequests } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
-import { CONSOLE, requestState, submitRequest } from "../../src/requests";
+import { applyingRequests, CONSOLE, pendingRequests, requestState, submitRequest, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
-import { lastCommit } from "../helpers";
+import { lastCommit, run } from "../helpers";
 
 const by = { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "" };
 /** A person on every gate, so approve and send back are theirs to give. */
@@ -116,6 +116,152 @@ describe("applying requests", () => {
       const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
       await apply(r.root);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "a cannot be approved now: nobody reviews that step, so the loop goes on by itself." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("retry only from blocked, even when an old block named the status", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("spec-review", "x") }, config: PEOPLE });
+    try {
+      const t = Trace.open(r.root, () => {});
+      t.statusChange("a", "merge-approved", "blocked", "n", { retry: "merge-approved" });
+      t.close();
+      const q = submitRequest(r.root, { ...by, kind: "retry", slug: "a", expect: "spec-review" as "blocked", to: "merge-approved" });
+      await apply(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("spec-review");
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, status: "spec-review", text: "a is not blocked, so there is nothing to retry." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("undo only takes back the step that happened last, never jumps forward", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-approved", "x") }, config: PEOPLE });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "plan-approved", to: "merge-review", note: "" });
+      await apply(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-approved");
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "a cannot go back from plan-approved to merge-review." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an empty send-back note is refused", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "  \n " });
+      await apply(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-review");
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "Say what should change, and send it back again." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a request that cannot be read is finished at once, and traced as refused", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const bad = [
+        submitRequest(r.root, { ...by, kind: "priority", slug: "a", expect: "building", priority: "bogus" as "high" }),
+        submitRequest(r.root, { ...by, kind: "new", title: "t" } as unknown as Submission),
+        submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: 3, update: false }] } as unknown as Submission),
+        submitRequest(r.root, { ...by, kind: "approve", slug: "../x", expect: "plan-review" }),
+        submitRequest(r.root, { ...by, kind: "close", slug: "a", expect: "nowhere" as "building" }),
+        submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "building", to: "plan-review", note: 5 as unknown as string }),
+        submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: {} as string }),
+        submitRequest(r.root, { ...by, kind: "explode", slug: "a" } as unknown as Submission),
+      ];
+      expect(await apply(r.root)).toBe(bad.length);
+      for (const q of bad) expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "That request could not be read, so nothing changed." });
+      expect(pendingRequests(r.root)).toEqual([]);
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ result: "refused" });
+      trace.close();
+      expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8")).toBe(INTENT("building", "x"));
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a request that fails every pass is given up after five, but a checkout off main only waits", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      // The checkout off main: not a try; the request waits however many passes it takes.
+      await run(["git", "checkout", "-q", "-b", "elsewhere"], r.root);
+      for (let i = 0; i < 6; i++) await apply(r.root);
+      expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
+      expect(applyingRequests(r.root)[0]!.tries ?? 0).toBe(0);
+      await run(["git", "checkout", "-q", "main"], r.root);
+      // A commit git refuses every time: five tries, then a plain answer.
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      for (let i = 0; i < 4; i++) {
+        expect(await apply(r.root)).toBe(0);
+        expect(applyingRequests(r.root)[0]!.tries).toBe(i + 1);
+      }
+      expect(await apply(r.root)).toBe(1);
+      rmSync(lock);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  for (const kind of ["hold", "release"] as const) {
+    test(`a ${kind} whose commit failed is committed on the next pass, not refused as done already`, async () => {
+      const start = kind === "release" ? INTENT("building", "x").replace("status: building", "status: building\nhold: legal") : INTENT("building", "x");
+      const r = await chatRepo({ intents: { a: start } });
+      try {
+        const q = submitRequest(r.root, kind === "hold" ? { ...by, kind, slug: "a", expect: "building", reason: "legal" } : { ...by, kind, slug: "a", expect: "building" });
+        const lock = join(r.root, ".git", "index.lock");
+        writeFileSync(lock, "");
+        expect(await apply(r.root)).toBe(0);
+        rmSync(lock);
+        expect(await apply(r.root)).toBe(1);
+        expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+        expect(await lastCommit(r.root)).toContain(`loopstra(a): ${kind === "hold" ? "held" : "released"} by John from the dashboard`);
+        expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+      } finally {
+        r.cleanup();
+      }
+    }, 60_000);
+  }
+
+  test("a hold of a held change, or a release of one not held, is refused and traced", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x").replace("status: building", "status: building\nhold: legal"), b: INTENT("building", "y") } });
+    try {
+      const h = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "again" });
+      const l = submitRequest(r.root, { ...by, kind: "release", slug: "b", expect: "building" });
+      await apply(r.root);
+      expect(requestState(r.root, h.id)).toMatchObject({ ok: false, text: "a is held already; nothing changed." });
+      expect(requestState(r.root, l.id)).toMatchObject({ ok: false, text: "b is not held; nothing changed." });
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ kind: "hold", result: "refused" });
+      expect(JSON.parse(trace.lastEvent("b", "request")!.payload)).toMatchObject({ kind: "release", result: "refused" });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("start from the console answers in console words; chat keeps its own", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft", "x"), b: INTENT("building", "y"), c: INTENT("draft", "z") } });
+    try {
+      const started = submitRequest(r.root, { ...by, kind: "accept", slug: "a" });
+      const moved = submitRequest(r.root, { ...by, kind: "accept", slug: "b" });
+      const missing = submitRequest(r.root, { ...by, kind: "accept", slug: "nope" });
+      const chat = submitRequest(r.root, { ...by, via: "Slack", transport: "slack", kind: "accept", slug: "c" });
+      await apply(r.root);
+      expect(requestState(r.root, started.id)).toMatchObject({ ok: true, text: "Accepted: a is now waiting to be designed." });
+      expect(requestState(r.root, moved.id)).toMatchObject({ ok: false, text: "b is building now, not a draft; nothing changed." });
+      expect(requestState(r.root, missing.id)).toMatchObject({ ok: false, text: "There is no change called nope in the main code." });
+      expect(requestState(r.root, chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("c", "chat-request")!.payload)).toMatchObject({ via: "Slack", result: "accepted" });
+      trace.close();
     } finally {
       r.cleanup();
     }

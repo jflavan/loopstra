@@ -18,8 +18,9 @@ export const CONSOLE = "console";
  * `via`: where the person was, in words ("the dashboard", "Slack"), for the commit and the trace.
  * `written`: the slugs whose intent.md the loop already wrote for this request. A request whose
  * commit failed is tried again, and must not then read its own write as someone else's.
+ * `tries`: how many passes failed to apply it (see applyRequests, which gives up after a few).
  */
-interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[] }
+interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; tries?: number }
 
 /** What a request asks for. `expect` is the status the person saw. */
 export type RequestBody =
@@ -38,7 +39,7 @@ export type RequestBody =
 export type Request = RequestBase & RequestBody;
 
 /** What submitRequest takes: everything but the id and the time. */
-export type Submission = Omit<RequestBase, "id" | "at" | "written"> & RequestBody;
+export type Submission = Omit<RequestBase, "id" | "at" | "written" | "tries"> & RequestBody;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
@@ -70,8 +71,10 @@ export function submitRequest(root: string, req: Submission): Request {
 function readDir(dir: string): Request[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((n) => n.endsWith(".json")).sort()
-    .map((n) => readJson<Request>(join(dir, n)))
-    .filter((r): r is Request => !!r && typeof r.id === "string" && ID.test(r.id))
+    .map((n) => ({ n, r: readJson<Request>(join(dir, n)) }))
+    // Named for its own id, or claiming, cancelling and finishing it would act on another file.
+    .filter((x): x is { n: string; r: Request } => !!x.r && typeof x.r.id === "string" && ID.test(x.r.id) && x.n === `${x.r.id}.json`)
+    .map((x) => x.r)
     // Requests chat left before `via` existed came from chat.
     .map((r) => ({ ...r, via: r.via ?? "chat" }));
 }
@@ -102,14 +105,14 @@ export function claimRequest(root: string, id: string): boolean {
   }
 }
 
-/** Writes a claimed request back (its `written` list changed). */
+/** Writes a claimed request back (its `written` list or its `tries` changed). */
 export function saveApplying(root: string, req: Request): void {
   writeJson(join(applyingDir(root), `${req.id}.json`), req);
 }
 
 /** Leaves the result for whoever asked and removes the claimed request. */
 export function finishRequest(root: string, req: Request, o: Outcome): void {
-  const slug = "slug" in req ? req.slug : null;
+  const slug = "slug" in req && typeof req.slug === "string" ? req.slug : null;
   writeJson(join(resultsDir(root), `${req.id}.json`), { id: req.id, kind: req.kind, slug, transport: req.transport, thread: req.thread, text: o.text, ok: o.ok, status: o.status, at: new Date().toISOString() } satisfies RequestResult);
   rmSync(join(applyingDir(root), `${req.id}.json`), { force: true });
 }

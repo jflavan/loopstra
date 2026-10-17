@@ -68,6 +68,19 @@ describe("request files", () => {
     }
   });
 
+  test("a file not named for the id inside it is not a request", () => {
+    const t = tempDir();
+    try {
+      const a = submitRequest(t.path, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      // A copy under another name would be claimed by one id and applied as another.
+      writeFileSync(join(requestsDir(t.path), "copy.json"), JSON.stringify(a));
+      writeFileSync(join(requestsDir(t.path), "000000000000001-1-0001.json"), JSON.stringify(a));
+      expect(pendingRequests(t.path).map((r) => r.id)).toEqual([a.id]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("the old chat folders are drained once; old results older than a day are pruned", () => {
     const t = tempDir();
     try {

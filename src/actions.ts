@@ -101,6 +101,23 @@ export function undoAllowed(from: Status, to: Status): boolean {
   return APPROVE_TO[to] === from || SEND_BACK_TO[to] === from;
 }
 
+/**
+ * True when an undo from `expect` back to `to` takes back the step that really happened last: the
+ * pair is one undoAllowed accepts, and the newest status change the trace has for the change went
+ * from `to` to `expect`. A pair alone could jump a change forward (plan-approved to merge-review).
+ */
+export function undoMatches(trace: Trace, slug: string, expect: Status, to: Status): boolean {
+  if (!undoAllowed(expect, to)) return false;
+  const e = trace.lastEvent(slug, "status_change");
+  if (!e) return false;
+  try {
+    const p = JSON.parse(e.payload) as { from?: unknown; to?: unknown };
+    return p.from === to && p.to === expect;
+  } catch {
+    return false;
+  }
+}
+
 /** What a request did, for the commit subject and the trace: "plan approved", "build sent back". */
 export function doneWords(r: RequestShape): string {
   switch (r.kind) {

@@ -24,6 +24,7 @@ describe("events in plain words", () => {
     expect(describeEvent(row("error", { where: "scan", problem: "The status line is wrong" }))).toBe("Problem (scan): The status line is wrong.");
     expect(describeEvent(row("pause", { reason: "The assistant is unavailable." }))).toBe("Paused: The assistant is unavailable.");
     expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", result: "accepted" }))).toBe("ana accepted it from chat.");
+    expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", via: "the dashboard", result: "accepted" }))).toBe("ana accepted it from the dashboard.");
     expect(describeEvent(row("tick", {}))).toBeNull();
     expect(describeEvent(row("claude_event", { type: "assistant" }))).toBeNull();
   });

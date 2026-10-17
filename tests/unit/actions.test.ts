@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { askText, doneWords, offers, requestLabel, resultText, retryTargets, targetOf, undoAllowed } from "../../src/actions";
+import { askText, doneWords, offers, requestLabel, resultText, retryTargets, targetOf, undoAllowed, undoMatches } from "../../src/actions";
 import { humanGates, parseIntentFile, type Frontmatter } from "../../src/intents";
+import { Trace } from "../../src/trace";
+import { tempDir } from "../helpers";
 
 const fm = (status: string, more = ""): Frontmatter => parseIntentFile(`---\nstatus: ${status}\n${more}---\n# Intent: x\n`).frontmatter;
 const everyone = { spec: "status", plan: "status", merge: "status", done: "status" } as const;
@@ -62,6 +64,26 @@ describe("where an action leads, and undo", () => {
     expect(undoAllowed("plan-approved", "merge-review")).toBe(true);
     expect(undoAllowed("building", "plan-review")).toBe(false);
     expect(undoAllowed("closed", "building")).toBe(false);
+  });
+
+  test("an undo matches only the step that really happened last", () => {
+    const dir = tempDir();
+    const trace = Trace.open(dir.path, () => {});
+    try {
+      // Nothing happened yet: nothing to undo.
+      expect(undoMatches(trace, "a", "plan-approved", "plan-review")).toBe(false);
+      trace.statusChange("a", "plan-review", "plan-approved", "");
+      expect(undoMatches(trace, "a", "plan-approved", "plan-review")).toBe(true);
+      // A pair undoAllowed accepts, but not what happened: it would jump the change forward.
+      expect(undoMatches(trace, "a", "plan-approved", "merge-review")).toBe(false);
+      expect(undoMatches(trace, "b", "plan-approved", "plan-review")).toBe(false);
+      // A later step happened since: the approve is no longer the last step.
+      trace.statusChange("a", "plan-approved", "building", "");
+      expect(undoMatches(trace, "a", "plan-approved", "plan-review")).toBe(false);
+    } finally {
+      trace.close();
+      dir.cleanup();
+    }
   });
 });
 

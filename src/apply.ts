@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoAllowed } from "./actions";
+import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoMatches } from "./actions";
 import type { Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
-import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
-import { applyingRequests, claimRequest, drainOld, finishRequest, pruneResults, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
+import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, STATUSES, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { errorText } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -21,7 +21,9 @@ let chain: Promise<unknown> = Promise.resolve();
  * Applies every waiting request on the main checkout, as the loop: claims each (see claimRequest),
  * then applies the claimed ones oldest first through commitRecord. A request that hits an unexpected
  * problem (a commit refused, the checkout off main) is traced and stays claimed for the next pass; one
- * that cannot be done gets a plain result saying why. Passes run one after another, never side by side.
+ * that cannot be done gets a plain result saying why. One that cannot be read (see badShape) is
+ * finished at once, and one that failed MAX_TRIES passes is given up with a plain result (a checkout
+ * off main is not a try: it is a reason to wait). Passes run one after another, never side by side.
  * Gives how many were finished.
  */
 export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<number> {
@@ -30,12 +32,22 @@ export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<
   return next;
 }
 
+/** How many passes may fail to apply a request before the loop gives up on it. */
+const MAX_TRIES = 5;
+
 async function applyPass(root: string, cfg: Config, trace: Trace): Promise<number> {
   drainOld(root);
   pruneResults(root);
   for (const id of waitingIds(root)) claimRequest(root, id);
   let applied = 0;
   for (const req of applyingRequests(root)) {
+    const bad = badShape(req);
+    if (bad) {
+      shapeTraced(trace, req, "refused", { problem: bad });
+      finishRequest(root, req, { ok: false, status: null, text: "That request could not be read, so nothing changed." });
+      applied++;
+      continue;
+    }
     try {
       finishRequest(root, req, await applyOne(root, cfg, trace, req));
       applied++;
@@ -43,9 +55,47 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       if (e instanceof StopRequested) throw e;
       // Traced once while it stays the same: a checkout off main would otherwise add a line every 2 s.
       trace.eventOnChange("_loop", "error", `"where":"request","id":"${req.id}"`, { where: "request", id: req.id, kind: req.kind, error: e instanceof MainCheckoutMoved ? e.message : errorText(e) }, "error");
+      if (e instanceof MainCheckoutMoved) continue;
+      req.tries = (req.tries ?? 0) + 1;
+      if (req.tries < MAX_TRIES) { saveApplying(root, req); continue; }
+      shapeTraced(trace, req, "failed", { tries: req.tries });
+      finishRequest(root, req, { ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
+      applied++;
     }
   }
   return applied;
+}
+
+const KINDS: ReadonlySet<string> = new Set(["accept", "new", "approve", "send-back", "retry", "close", "priority", "hold", "release", "undo"]);
+const isStatus = (v: unknown): boolean => typeof v === "string" && (STATUSES as readonly string[]).includes(v);
+
+/**
+ * Why a request file cannot be read as the request it says it is, or null when it can. Checked
+ * before applying: a request with a wrong field would otherwise fail the same way every pass.
+ */
+function badShape(req: Request): string | null {
+  const r = req as unknown as Record<string, unknown>;
+  if (typeof r.kind !== "string" || !KINDS.has(r.kind)) return "it asks for nothing the loop knows";
+  if (r.kind === "new") {
+    const ok = Array.isArray(r.intents) && r.intents.every((i: unknown) => {
+      const x = i as Record<string, unknown> | null;
+      return !!x && typeof x === "object" && typeof x.slug === "string" && typeof x.text === "string" && typeof x.update === "boolean";
+    });
+    return ok ? null : "its changes are not a list of slug, text and update";
+  }
+  if (typeof r.slug !== "string" || !SLUG.test(r.slug)) return "its slug is not a change name";
+  if (r.kind === "accept") return null;
+  if (!isStatus(r.expect)) return "the status it saw is not a status";
+  if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
+  if (r.kind === "priority" && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
+  for (const k of ["note", "reason"]) if (r[k] !== undefined && typeof r[k] !== "string") return `its ${k} is not text`;
+  return null;
+}
+
+/** A request event for a request that may not be well formed: under its slug when it has a real one. */
+function shapeTraced(trace: Trace, req: Request, result: string, more: Record<string, unknown>): void {
+  const slug = "slug" in req && typeof req.slug === "string" && SLUG.test(req.slug) ? req.slug : "_loop";
+  trace.event(slug, "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result, ...more });
 }
 
 function applyOne(root: string, cfg: Config, trace: Trace, req: Request): Promise<Outcome> {
@@ -70,9 +120,11 @@ function markWritten(root: string, req: Request, slug: string): void {
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
   const path = join(root, "intent", req.slug, "intent.md");
+  // The console words results like its other actions; chat speaks as itself.
+  const fromConsole = req.transport === CONSOLE;
   if (!SLUG.test(req.slug) || !existsSync(path)) {
-    trace.event(CHAT_SLUG, "chat-request", { id: req.id, kind: "accept", slug: req.slug, by: req.byName, result: "missing" });
-    return { ok: false, status: null, text: `I could not start ${req.slug}: it is not in the main code. If it came from a pull request, that needs to be merged first.` };
+    trace.event(CHAT_SLUG, "chat-request", { id: req.id, kind: "accept", slug: req.slug, by: req.byName, via: req.via, result: "missing" });
+    return { ok: false, status: null, text: fromConsole ? `There is no change called ${req.slug} in the main code.` : `I could not start ${req.slug}: it is not in the main code. If it came from a pull request, that needs to be merged first.` };
   }
   let refused = null as Status | null;
   await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async () => {
@@ -87,12 +139,12 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
     markWritten(root, req, req.slug);
   });
   if (refused !== null) {
-    trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, result: "not-draft", status: refused });
-    return { ok: false, status: refused, text: `I did not start ${req.slug}: it is ${refused} now, not a draft, so someone already changed it.` };
+    trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, via: req.via, result: "not-draft", status: refused });
+    return { ok: false, status: refused, text: fromConsole ? `${req.slug} is ${refused} now, not a draft; nothing changed.` : `I did not start ${req.slug}: it is ${refused} now, not a draft, so someone already changed it.` };
   }
   trace.statusChange(req.slug, "draft", "accepted", `accepted by ${byWhom(req)}`);
-  trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, byId: req.by, transport: req.transport, result: "accepted" });
-  return { ok: true, status: "accepted", text: `Started ${req.slug}. I will say here when it needs anyone, and when it is done.` };
+  trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, byId: req.by, via: req.via, transport: req.transport, result: "accepted" });
+  return { ok: true, status: "accepted", text: fromConsole ? resultText({ kind: "accept", expect: "draft" }, req.slug, "accepted") : `Started ${req.slug}. I will say here when it needs anyone, and when it is done.` };
 }
 
 async function applyNew(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "new" }>): Promise<Outcome> {
@@ -143,14 +195,19 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
   switch (req.kind) {
     case "approve": case "send-back":
       if (!targetOf(req)) return `${req.slug} cannot be ${req.kind === "approve" ? "approved" : "sent back"} while it is ${req.expect}.`;
-      return personReviews(req.expect, human) ? null : `${req.slug} cannot be ${req.kind === "approve" ? "approved" : "sent back"} now: nobody reviews that step, so the loop goes on by itself.`;
+      if (!personReviews(req.expect, human)) return `${req.slug} cannot be ${req.kind === "approve" ? "approved" : "sent back"} now: nobody reviews that step, so the loop goes on by itself.`;
+      return req.kind === "send-back" && !(req.note ?? "").trim() ? "Say what should change, and send it back again." : null;
     case "retry": {
+      // An old block's retry status says nothing about a change that is not blocked now. The type
+      // says blocked; a request file can say anything.
+      const saw: Status = req.expect;
+      if (saw !== "blocked") return `${req.slug} is not blocked, so there is nothing to retry.`;
       const options = retryOptions(trace, req.slug, fm.note);
       if (options.includes(req.to)) return null;
       return options.length ? `${req.slug} cannot be retried from ${req.to}; its note names ${options.join(" or ")}.` : `${req.slug} cannot be retried from ${req.to}; its note names no status to retry from.`;
     }
     case "close": return isOpen(req.expect) ? null : `${req.slug} is ${req.expect} already.`;
-    case "undo": return undoAllowed(req.expect, req.to) ? null : `${req.slug} cannot go back from ${req.expect} to ${req.to}.`;
+    case "undo": return undoMatches(trace, req.slug, req.expect, req.to) ? null : `${req.slug} cannot go back from ${req.expect} to ${req.to}.`;
   }
 }
 
@@ -159,7 +216,7 @@ function noteFor(req: StatusRequest): string {
   switch (req.kind) {
     case "send-back": return `Sent back by ${byWhom(req)}: ${req.note.trim()}`;
     case "close": return `Closed by ${byWhom(req)}.`;
-    case "undo": return req.note;
+    case "undo": return req.note ?? "";
     default: return "";
   }
 }
@@ -187,8 +244,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
       refused = fresh.file.frontmatter.status;
       return false;
     }
-    req.written = [...new Set([...(req.written ?? []), req.slug])];
-    saveApplying(root, req);
+    markWritten(root, req, req.slug);
   });
   if (refused !== null) { traced(trace, req, "moved-on", { status: refused }); return { ok: false, status: refused, text: `${req.slug} moved on to ${refused}; nothing changed.` }; }
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
@@ -201,7 +257,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
 
 /** The hold line for a hold request: the reason, then who and where. */
 function holdLine(req: Extract<Request, { kind: "hold" }>): string {
-  const reason = oneLine(req.reason, 300).replace(/[.\s]+$/, "") || "held";
+  const reason = oneLine(req.reason ?? "", 300).replace(/[.\s]+$/, "") || "held";
   return `${reason} (${oneLine(req.byName, 80)}, ${oneLine(req.via, 40)})`;
 }
 
@@ -214,12 +270,15 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
-  if (req.kind === "hold" && fm.hold.trim()) return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` };
-  if (req.kind === "release" && !fm.hold.trim()) return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` };
+  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as done.
+  const ours = (req.written ?? []).includes(req.slug);
+  if (!ours && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
+  if (!ours && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
   const patch: Partial<Frontmatter> = req.kind === "priority" ? { priority: req.priority } : req.kind === "hold" ? { hold: holdLine(req) } : {};
   const remove: Array<keyof Frontmatter> = req.kind === "release" ? ["hold"] : [];
   await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async () => {
     await writeIntent(await readIntent(root, req.slug), patch, { remove });
+    markWritten(root, req, req.slug);
   });
   if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, req.priority);
   traced(trace, req, "applied", { status: fm.status, what: doneWords(req) });
