@@ -17,7 +17,7 @@ export function toolTarget(name: string, input: unknown, cwd?: string): string {
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   let target: string;
   switch (name) {
-    case "Bash": target = str(i.command).split(/\r?\n/)[0] ?? ""; break;
+    case "Bash": target = str(i.command).split(/\r?\n/).find((l) => l.trim())?.trim() ?? ""; break;
     case "Read": case "Edit": case "MultiEdit": case "Write": target = relativePath(str(i.file_path), cwd); break;
     case "NotebookEdit": target = relativePath(str(i.notebook_path), cwd); break;
     case "Grep": case "Glob": target = str(i.pattern); break;
@@ -30,6 +30,7 @@ export function toolTarget(name: string, input: unknown, cwd?: string): string {
   return target.length > TARGET_MAX ? `${target.slice(0, TARGET_MAX - 1)}…` : target;
 }
 
+/** The verb for each tool in a now-line; other tools read "Using <tool>". */
 const VERBS: Record<string, string> = {
   Bash: "Running", Read: "Reading", Edit: "Editing", MultiEdit: "Editing", Write: "Writing", NotebookEdit: "Editing",
   Grep: "Searching for", Glob: "Looking for", WebFetch: "Fetching", WebSearch: "Searching the web for",

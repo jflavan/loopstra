@@ -5,6 +5,7 @@ import { nowText, relativePath, toolTarget } from "../../src/tools";
 describe("tool calls in a few words", () => {
   test("a tool call's target: the command's first line, the file, the pattern", () => {
     expect(toolTarget("Bash", { command: "bun test\nmore" })).toBe("bun test");
+    expect(toolTarget("Bash", { command: "\n  bun test\n" })).toBe("bun test");
     expect(toolTarget("Edit", { file_path: "C:\\repo\\wt\\src\\a.ts" }, "C:\\repo\\wt")).toBe("src/a.ts");
     expect(toolTarget("Read", { file_path: "/home/x/wt/README.md" }, "/home/x/wt/")).toBe("README.md");
     expect(toolTarget("Read", { file_path: "/elsewhere/a.md" }, "/home/x/wt")).toBe("/elsewhere/a.md");
