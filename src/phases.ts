@@ -13,6 +13,7 @@ import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./s
 import { clearPause } from "./heartbeat";
 import { assertNoLock, assertNoMainLock, holdsLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, LoopBudgetReached, notTheStepsFault, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { toolTarget } from "./tools";
 
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
@@ -426,7 +427,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       signal,
       onEvent: (e) => {
         writer.write(JSON.stringify(e) + "\n");
-        if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e), seq);
+        if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e, spec.cwd ?? ctx.root), seq);
       },
     });
 
@@ -516,12 +517,18 @@ export async function probeAssistant(root: string, cfg: Config, trace: Trace, sl
   return { reached, detail };
 }
 
-function summarize(e: Record<string, unknown>): Record<string, unknown> {
+/** A raw session event, cut down for the trace: tools with their targets, text, the model, the result. */
+export function summarize(e: Record<string, unknown>, cwd?: string): Record<string, unknown> {
   if (e.type === "assistant") {
-    const content = (e as { message?: { content?: Array<{ type: string; name?: string; text?: string }> } }).message?.content ?? [];
-    return { type: "assistant", items: content.map((c) => c.type === "tool_use" ? `tool:${c.name}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type) };
+    const content = (e as { message?: { content?: Array<{ type: string; name?: string; text?: string; input?: unknown }> } }).message?.content ?? [];
+    return {
+      type: "assistant",
+      items: content.map((c) => c.type === "tool_use" ? `tool:${c.name}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type),
+      targets: content.map((c) => c.type === "tool_use" ? toolTarget(c.name ?? "", c.input, cwd) : ""),
+    };
   }
   if (e.type === "result") return { type: "result", subtype: e.subtype, cost: e.total_cost_usd };
+  if (e.type === "system" && e.subtype === "init") return { type: "system", subtype: "init", model: typeof e.model === "string" ? e.model : null };
   return { type: e.type, subtype: e.subtype };
 }
 
