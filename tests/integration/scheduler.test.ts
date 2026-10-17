@@ -5,11 +5,12 @@ import { configPath } from "../../src/config";
 import { Git, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
-import { readPause } from "../../src/heartbeat";
-import { claudeOverrideProblem, missingTools, preflight, start, tick } from "../../src/scheduler";
+import { holdLoop, readPause, releaseLoop } from "../../src/heartbeat";
+import { claudeOverrideProblem, missingTools, preflight, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { init } from "../../src/init";
-import { FAKE_CLAUDE, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { touchWake, wakeStamp } from "../../src/wake";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
@@ -437,5 +438,58 @@ describe("scheduler resilience", () => {
       chmodSync(exe, 0o755);
       expect(claudeOverrideProblem({ LOOPSTRA_CLAUDE_EXECUTABLE: exe })).toBeNull();
     } finally { t.cleanup(); }
+  });
+});
+
+describe("holds", () => {
+  test("a held change gets no step; released, it runs again", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      const path = join(repo.path, "intent", SLUG, "intent.md");
+      await Bun.write(path, (await Bun.file(path).text()).replace("status: accepted", "status: accepted\nhold: waiting for legal"));
+      await run(["git", "commit", "-qam", "hold it"], repo.path);
+      const r = await tick(repo.path);
+      expect(r.steps ?? []).toEqual([]);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("accepted");
+      await Bun.write(path, (await Bun.file(path).text()).replace("hold: waiting for legal\n", ""));
+      await run(["git", "commit", "-qam", "release it"], repo.path);
+      const again = await tick(repo.path);
+      expect(again.picked).toBe(SLUG);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("while a person has paused the loop, the tick starts no step and says so", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      holdLoop(repo.path, "John");
+      const r = await tick(repo.path);
+      expect(r.paused).toBe("Paused by John: running steps finish, nothing new starts.");
+      expect(r.steps).toBeUndefined();
+      releaseLoop(repo.path);
+      expect((await tick(repo.path)).picked).toBe(SLUG);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+});
+
+describe("sleeping between ticks", () => {
+  test("ends at once when the wake file changed since the tick began, early when it changes, else at the timeout", async () => {
+    const t = tempDir();
+    try {
+      const seen = wakeStamp(t.path);
+      touchWake(t.path);
+      expect(await sleepBetweenTicks(t.path, 60_000, seen, 20)).toBe("woken");
+      const now = wakeStamp(t.path);
+      setTimeout(() => touchWake(t.path), 50);
+      const t0 = Date.now();
+      expect(await sleepBetweenTicks(t.path, 60_000, now, 20)).toBe("woken");
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(await sleepBetweenTicks(t.path, 30, wakeStamp(t.path), 10)).toBe("timeout");
+    } finally {
+      t.cleanup();
+    }
   });
 });

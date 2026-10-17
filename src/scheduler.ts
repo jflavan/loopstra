@@ -7,7 +7,7 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, pauseAfterUnavailable, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
@@ -24,6 +24,7 @@ import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
+import { wakeStamp } from "./wake";
 
 export interface TickResult {
   /**
@@ -36,8 +37,8 @@ export interface TickResult {
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
   /**
-   * Set when no step ran because the repository needs a person first, or because the assistant is
-   * unavailable and the loop is backing off (plain words).
+   * Set when no step ran because the repository needs a person first, because the assistant is
+   * unavailable and the loop is backing off, or because a person paused the loop (plain words).
    */
   paused?: string;
   /** A stop was requested during the tick; the step was interrupted, not blocked. */
@@ -142,6 +143,14 @@ export async function tick(root: string): Promise<TickResult> {
     }
     heartbeatDayPause(root, null);
 
+    // A person paused the loop (.loopstra/hold.json): nothing new starts until they resume it.
+    const loopHold = readLoopHold(root);
+    if (loopHold) {
+      out.paused = loopHoldText(loopHold);
+      trace.eventOnChange("_loop", "pause", "", { reason: out.paused, held: true }, "reason");
+      return out;
+    }
+
     // Run steps for up to speed.max_parallel_changes changes at once, each in its own lane; the
     // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
     // never built on a main without it, and so does one waiting for another to merge the same files.
@@ -202,7 +211,8 @@ const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approve
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
   for (;;) {
-    if (shared.halt || stopRequested()) return [];
+    // A pause a person set during the tick lets running steps finish and starts nothing more.
+    if (shared.halt || stopRequested() || readLoopHold(root)) return [];
     const next = candidates.find((i) => takeChange(shared, i.slug));
     if (!next) return [];
     const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
@@ -210,9 +220,14 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
   }
 }
 
-/** True when a change is a lane's to run now: runnable, and (with a remote) not watching its pull request. */
+/** True when a change is a lane's to run now: runnable, not held, and (with a remote) not watching its pull request. */
 function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
-  return isRunnable(i, human, hasRemote) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+  return isRunnable(i, human, hasRemote) && !held(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+}
+
+/** A person (or chat) has put the change on hold (`hold:` in intent.md): no step starts for it. */
+function held(i: Intent): boolean {
+  return i.file.frontmatter.hold.trim() !== "";
 }
 
 /**
@@ -265,11 +280,11 @@ async function watchPullRequests(root: string, cfg: Config, trace: Trace, shared
  * which is looked at again on the next tick. False once a stop or a problem ended it.
  */
 async function watchOnce(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, steps: LaneStep[]): Promise<boolean> {
-  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true);
+  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !held(i);
   const didWork = (slug: string) => steps.some((s) => s.slug === slug && !(s.result?.ok && s.result.waiting));
   const ordered = orderQueue((await scanRepo(root)).intents);
   for (const i of ordered) {
-    if (shared.halt || stopRequested()) return false;
+    if (shared.halt || stopRequested() || readLoopHold(root)) return false;
     if (!watching(i) || didWork(i.slug) || waitingOn(i, ordered).length || !claim(i.slug)) continue;
     const step = await runClaimed(root, cfg, trace, shared, i.slug, watching);
     if (!step) continue;
@@ -753,6 +768,27 @@ async function sleepUnlessStopped(ms: number, until?: Promise<unknown>): Promise
   }
 }
 
+/**
+ * The loop's wait between ticks: up to `ms`, ending early on a stop or when `.loopstra/wake` no
+ * longer says `seen` (someone asked for something: a request, a resume). `seen` is read when the
+ * tick began, so a wake during the tick ends this wait at once. Checks the file every `checkMs`.
+ */
+export async function sleepBetweenTicks(root: string, ms: number, seen: string, checkMs = 1000): Promise<"woken" | "timeout" | "stop"> {
+  if (wakeStamp(root) !== seen) return "woken";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let check: ReturnType<typeof setInterval> | undefined;
+  try {
+    return await Promise.race([
+      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), ms); }),
+      stopPromise().then(() => "stop" as const),
+      new Promise<"woken">((resolve) => { check = setInterval(() => { if (wakeStamp(root) !== seen) resolve("woken"); }, checkMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    clearInterval(check);
+  }
+}
+
 /** What a step gave, for the console line. */
 function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
@@ -776,6 +812,8 @@ export async function start(root: string, opts: { once: boolean; installSignals?
     // The last pause logged: a pause that lasts (the loop's day, until midnight) is logged once, not every poll.
     let lastPaused = "";
     for (;;) {
+      // Read as the tick begins: a wake during the tick ends the sleep after it at once.
+      const seen = wakeStamp(root);
       try {
         beat.tickStarted();
         const r = await tick(root);
@@ -799,7 +837,7 @@ export async function start(root: string, opts: { once: boolean; installSignals?
       beat.tickEnded();
       if (opts.once || stopRequested()) break;
       const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
-      await sleepUnlessStopped(poll * 1000);
+      await sleepBetweenTicks(root, poll * 1000, seen);
       if (stopRequested()) break;
     }
   } finally {
