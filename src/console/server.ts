@@ -1,0 +1,139 @@
+import page from "../ui/index.html";
+import type { DashboardTransport } from "../chat/transports/dashboard";
+import { loadConfig, type Config } from "../config";
+import { SLUG } from "../intents";
+import { Trace } from "../trace";
+import { eventsPage } from "./describe";
+import { changeDetail, spendView } from "./detail";
+import { changeDiff } from "./diff";
+import { resolveDocument, resolveRunFile } from "./files";
+import { Hub, type Send } from "./hub";
+import { streamSession } from "./session";
+
+/** Host names the console answers to: a page on another name that resolves here (DNS rebinding) gets nothing. */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+/** A change's name, or one of the trace's own (_chat, _loop, _signals). */
+const ANY_SLUG = /^_?[a-z0-9][a-z0-9-]*$/;
+const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" };
+const NOT_FOUND = () => new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+
+type Timeouts = { timeout(req: Request, seconds: number): void };
+
+/**
+ * The console on 127.0.0.1. Bun bundles the page once at start and serves it and its chunks itself,
+ * on the screens' paths (the page's router knows the same ones). They are the same static code for
+ * everyone and never reach `fetch`, so only the data routes check the host. Read-only, apart from
+ * `/api/chat` when `chat` is given (see DashboardTransport).
+ */
+export function serveConsole(root: string, port = 4646, opts: { chat?: DashboardTransport; hub?: Hub } = {}): ReturnType<typeof Bun.serve> {
+  const hub = opts.hub ?? new Hub(root, { chat: !!opts.chat });
+  return Bun.serve({
+    port,
+    hostname: "127.0.0.1",
+    development: false,
+    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/spend": page, "/c/*": page, "/s/*": page },
+    async fetch(req, server) {
+      const url = new URL(req.url);
+      if (!LOCAL_HOSTS.has(url.hostname)) return new Response("Forbidden", { status: 403 });
+      if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
+      if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
+      return (await read(root, hub, req, url, server)) ?? NOT_FOUND();
+    },
+  });
+}
+
+/**
+ * The data routes: `/api/stream`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
+ * `/api/events`, `/api/spend`, run files under `/files/`, a change's documents under `/docs/`. Null: not found.
+ */
+async function read(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
+  const path = url.pathname;
+  if (path === "/api/stream") {
+    const last = Number(req.headers.get("last-event-id") ?? 0);
+    return sse(server, req, async (send) => {
+      const off = await hub.connect(send, Number.isFinite(last) && last > 0 ? last : 0);
+      return () => void off();
+    });
+  }
+  const change = path.match(/^\/api\/changes\/([^/]+)(\/diff)?$/);
+  if (change) {
+    const slug = decode(change[1]!);
+    if (!slug || !SLUG.test(slug)) return null;
+    if (change[2]) return Response.json(await changeDiff(root, (await config(root))?.main_branch ?? "main", slug));
+    const d = await withTrace(root, (t) => changeDetail(root, t, slug));
+    return d ? Response.json(d) : null;
+  }
+  const session = path.match(/^\/api\/sessions\/([^/]+)\/(\d+)\/stream$/);
+  if (session) {
+    const slug = decode(session[1]!);
+    const seq = Number(session[2]);
+    if (!slug || !ANY_SLUG.test(slug)) return null;
+    if (!(await withTrace(root, (t) => t.phase(slug, seq) !== null))) return null;
+    const from = Number(req.headers.get("last-event-id") ?? url.searchParams.get("from") ?? 0);
+    return sse(server, req, (send, close) => streamSession(root, slug, seq, Number.isFinite(from) && from > 0 ? from : 0, send, close) ?? (close(), () => {}));
+  }
+  if (path === "/api/events") {
+    const slug = url.searchParams.get("slug") || undefined;
+    if (slug && !ANY_SLUG.test(slug)) return Response.json({ error: "slug" }, { status: 400 });
+    const before = Number(url.searchParams.get("before") ?? 0);
+    return Response.json(await withTrace(root, (t) => eventsPage(t, Number.isFinite(before) && before > 0 ? before : 0, slug, url.searchParams.get("technical") === "1")));
+  }
+  if (path === "/api/spend") {
+    const cfg = await config(root);
+    return Response.json(await withTrace(root, (t) => spendView(root, t, cfg)));
+  }
+  if (path.startsWith("/files/")) {
+    const rel = decode(path.slice("/files/".length));
+    const file = rel === null ? null : resolveRunFile(root, rel);
+    return file ? new Response(Bun.file(file), { headers: PLAIN_TEXT }) : null;
+  }
+  if (path.startsWith("/docs/")) {
+    const parts = path.slice("/docs/".length).split("/").map(decode);
+    const file = parts.length === 2 && parts[0] && parts[1] ? resolveDocument(root, parts[0], parts[1]) : null;
+    return file ? new Response(Bun.file(file), { headers: PLAIN_TEXT }) : null;
+  }
+  return null;
+}
+
+/**
+ * An SSE response. `start` gets a writer and a closer and gives back the function that stops it,
+ * which runs once, when the page goes away. The request's idle limit is lifted, since a quiet
+ * stream is still alive.
+ */
+function sse(server: Timeouts, req: Request, start: (send: Send, close: () => void) => (() => void) | Promise<() => void>): Response {
+  server.timeout(req, 0);
+  let stop: (() => void) | null = null;
+  let gone = false;
+  const end = () => {
+    if (gone) return;
+    gone = true;
+    stop?.();
+  };
+  const stream = new ReadableStream<string>({
+    async start(controller) {
+      const send: Send = (text) => {
+        if (gone) return false;
+        try { controller.enqueue(text); return true; } catch { return false; }
+      };
+      const close = () => { try { controller.close(); } catch { /* already closed */ } };
+      stop = await start(send, close);
+      if (gone) stop();
+    },
+    cancel: end,
+  });
+  req.signal.addEventListener("abort", end);
+  return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+}
+
+function decode(part: string): string | null {
+  try { return decodeURIComponent(part); } catch { return null; }
+}
+
+async function config(root: string): Promise<Config | null> {
+  try { return await loadConfig(root); } catch { return null; }
+}
+
+async function withTrace<T>(root: string, fn: (t: Trace) => T | Promise<T>): Promise<T> {
+  const trace = Trace.open(root);
+  try { return await fn(trace); } finally { trace.close(); }
+}

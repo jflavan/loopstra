@@ -6,8 +6,10 @@ import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/dis
 import { chunkText } from "../../src/chat/transports/shared";
 import { SlackTransport } from "../../src/chat/transports/slack";
 import { TerminalTransport } from "../../src/chat/transports/terminal";
-import { buildState, serveUi } from "../../src/commands/ui";
+import { Hub } from "../../src/console/hub";
+import { serveConsole } from "../../src/console/server";
 import { chatRepo, turn } from "../chat-helpers";
+import { model, sseFrames } from "../console-helpers";
 
 /** Waits until `check` holds (or fails after a few seconds). */
 async function until(check: () => boolean | Promise<boolean>, ms = 8_000): Promise<void> {
@@ -58,7 +60,8 @@ describe("the dashboard panel", () => {
     const dash = new DashboardTransport(r.root, "ana");
     const service = new ChatService(r.root, [dash], { announce: false, pollMs: 60_000 });
     await service.start();
-    const server = serveUi(r.root, 0, { chat: dash });
+    const hub = new Hub(r.root, { chat: true });
+    const server = serveConsole(r.root, 0, { chat: dash, hub });
     try {
       await r.answer("orchestrator", 1, turn("Hello from Loopstra."));
       const base = `http://127.0.0.1:${server.port}`;
@@ -83,12 +86,14 @@ describe("the dashboard panel", () => {
       expect((await fetch(`${base}/api/chat?thread=bad`)).status).toBe(400);
       // A page on another host name that resolves here (DNS rebinding) gets nothing.
       expect((await fetch(`${base}/api/chat?thread=${thread}`, { headers: { host: "evil.test" } })).status).toBe(403);
-      // Everything else stays read-only, and the page is told it has a chat panel.
-      expect((await fetch(`${base}/api/state`, { method: "POST" })).status).toBe(405);
-      expect((await (await fetch(`${base}/api/state`)).json() as { chat: boolean }).chat).toBe(true);
-      expect(await (await fetch(`${base}/`)).text()).toContain('id="chat-section"');
+      // Everything else stays read-only, and the page is told it has chat.
+      expect((await fetch(`${base}/api/spend`, { method: "POST" })).status).toBe(405);
+      const [first] = await sseFrames(`${base}/api/stream`, 1);
+      expect(first!.data).toMatchObject({ type: "snapshot", meta: { chat: true } });
     } finally {
       server.stop(true);
+      await until(() => hub.latest() === null);
+      await hub.whenStopped();
       await service.stop();
       r.cleanup();
     }
@@ -100,10 +105,10 @@ describe("the dashboard panel", () => {
       await r.answer("orchestrator", 1, turn("hi"), { cost: 0.25 });
       const { Orchestrator } = await import("../../src/chat/orchestrator");
       await new Orchestrator(r.root).handle({ transport: "terminal", via: "t", thread: "l", authorId: "a", authorName: "a", text: "hi", canAccept: true, acceptors: "you" }, async () => {});
-      const state = await buildState(r.root, 0);
-      expect(state.chat).toBe(false);
-      expect(state.totals.todayUsd).toBeCloseTo(0.25);
-      const server = serveUi(r.root, 0);
+      const m = await model(r.root);
+      expect(m.meta.chat).toBe(false);
+      expect(m.sections.totals.todayUsd).toBeCloseTo(0.25);
+      const server = serveConsole(r.root, 0);
       try {
         expect((await fetch(`http://127.0.0.1:${server.port}/api/chat?thread=tab-abcdefgh`)).status).toBe(404);
       } finally { server.stop(true); }
