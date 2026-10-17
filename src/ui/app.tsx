@@ -51,8 +51,10 @@ function App() {
     <div class="shell">
       <TopBar />
       <Rail />
-      <main class="main" id="main"><Screen /></main>
-      {connection.value === "stale" && <div class="reconnecting" role="status">Reconnecting… what you see may be out of date.</div>}
+      <main class="main" id="main">
+        {connection.value === "stale" && <div class="reconnecting" role="status">Reconnecting… what you see may be out of date.</div>}
+        <Screen />
+      </main>
       <Drawer />
       <Palette />
       <Help />
