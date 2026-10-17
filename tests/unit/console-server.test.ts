@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { Hub } from "../../src/console/hub";
+import { Hub, type HubOptions } from "../../src/console/hub";
 import { serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
 import { Trace } from "../../src/trace";
@@ -30,9 +30,9 @@ async function seeded() {
 }
 
 /** A console on a free port, with its hub at hand so a test can wait for it to let go of the trace. */
-async function withConsole(fn: (base: string, hub: Hub) => Promise<void>) {
+async function withConsole(fn: (base: string, hub: Hub) => Promise<void>, hubOpts: HubOptions = {}) {
   const t = await seeded();
-  const hub = new Hub(t.path);
+  const hub = new Hub(t.path, hubOpts);
   const server = serveConsole(t.path, 0, { hub });
   try {
     await fn(`http://127.0.0.1:${server.port}`, hub);
@@ -80,7 +80,14 @@ describe("the console's server", () => {
         expect({ path, status: (await fetch(base + path, { headers: { host: "evil.test" } })).status }).toEqual({ path, status: 403 });
         expect({ path, status: (await fetch(base + path)).status }).toEqual({ path, status: 200 });
       }
+      // The streams and the diff check it too, before any stream is opened or git is run.
+      for (const path of ["/api/stream", "/api/sessions/one/1/stream", "/api/changes/one/diff"]) {
+        const r = await fetch(base + path, { headers: { host: "evil.test" } });
+        expect({ path, status: r.status }).toEqual({ path, status: 403 });
+        await r.body?.cancel();
+      }
       expect((await fetch(base + "/api/spend", { headers: { host: "localhost" } })).status).toBe(200);
+      expect((await fetch(base + "/api/spend", { headers: { host: "[::1]:4646" } })).status).toBe(200);
       expect((await fetch(base + "/api/spend", { method: "POST" })).status).toBe(405);
       expect((await fetch(base + "/api/chat?thread=tab-abcdefgh")).status).toBe(404); // no chat in this console
       expect((await fetch(base + "/nope")).status).toBe(404);
@@ -115,6 +122,20 @@ describe("the console's server", () => {
       expect(first!.data).toMatchObject({ type: "snapshot", meta: { chat: false }, sections: { changes: [{ slug: "one" }] } });
       expect(Number(first!.id)).toBeGreaterThan(0);
     });
+  });
+
+  test("a page that leaves the live stream lets the hub go", async () => {
+    await withConsole(async (base, hub) => {
+      const ac = new AbortController();
+      const r = await fetch(`${base}/api/stream`, { signal: ac.signal });
+      const reader = r.body!.getReader();
+      await reader.read(); // the snapshot: the hub is running for this page
+      expect(hub.latest()).not.toBeNull();
+      ac.abort();
+      await reader.cancel().catch(() => {});
+      await until(() => hub.latest() === null);
+      await hub.whenStopped();
+    }, { intervalMs: 60_000, pingMs: 60_000 }); // no look or ping in the meantime finds the page gone by failing to write to it
   });
 
   test("a page opening a new stream names the newest event it saw in ?after=, and gets the ones it missed before its snapshot", async () => {
