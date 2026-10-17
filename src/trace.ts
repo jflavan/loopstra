@@ -312,6 +312,51 @@ export class Trace {
     return this.db.query<EventRow, [number, number]>("SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?").all(afterId, limit).reverse();
   }
 
+  /** The newest event's id, or 0 when there is none. */
+  lastEventId(): number {
+    return this.db.query<{ id: number | null }, []>("SELECT MAX(id) AS id FROM events").get()?.id ?? 0;
+  }
+
+  /** Up to `limit` events after `afterId`, oldest first. */
+  eventsAfter(afterId: number, limit: number): EventRow[] {
+    return this.db.query<EventRow, [number, number]>("SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?").all(afterId, limit);
+  }
+
+  /** Up to `limit` events older than `beforeId` (any, when it is 0), newest first; only one slug's when given. */
+  eventsBefore(beforeId: number, limit: number, slug?: string): EventRow[] {
+    const before = beforeId > 0 ? beforeId : Number.MAX_SAFE_INTEGER;
+    return slug
+      ? this.db.query<EventRow, [string, number, number]>("SELECT * FROM events WHERE slug = ? AND id < ? ORDER BY id DESC LIMIT ?").all(slug, before, limit)
+      : this.db.query<EventRow, [number, number]>("SELECT * FROM events WHERE id < ? ORDER BY id DESC LIMIT ?").all(before, limit);
+  }
+
+  /** The newest `limit` events of one phase, oldest first. */
+  phaseEvents(slug: string, seq: number, limit: number): EventRow[] {
+    return this.db.query<EventRow, [string, number, number]>(
+      "SELECT * FROM events WHERE slug = ? AND phase_seq = ? ORDER BY id DESC LIMIT ?").all(slug, seq, limit).reverse();
+  }
+
+  /** The first event of a type in one phase, or null. */
+  firstEvent(slug: string, seq: number, type: EventType): EventRow | null {
+    return this.db.query<EventRow, [string, number, string]>(
+      "SELECT * FROM events WHERE slug = ? AND phase_seq = ? AND type = ? ORDER BY id LIMIT 1").get(slug, seq, type) ?? null;
+  }
+
+  /** One phase, or null. */
+  phase(slug: string, seq: number): PhaseRow | null {
+    return this.db.query<PhaseRow, [string, number]>("SELECT * FROM phases WHERE slug = ? AND seq = ?").get(slug, seq) ?? null;
+  }
+
+  /** Every phase of every slug (chat's too), in the order they started. */
+  allPhases(): PhaseRow[] {
+    return this.db.query<PhaseRow, []>("SELECT * FROM phases ORDER BY started, rowid").all();
+  }
+
+  /** The newest `limit` ended phases of any slug, newest first. */
+  recentPhases(limit: number): PhaseRow[] {
+    return this.db.query<PhaseRow, [number]>("SELECT * FROM phases WHERE ended IS NOT NULL ORDER BY ended DESC, rowid DESC LIMIT ?").all(limit);
+  }
+
   phases(slug: string): PhaseRow[] {
     return this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE slug = ? ORDER BY seq").all(slug);
   }
