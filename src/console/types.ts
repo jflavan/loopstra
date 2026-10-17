@@ -100,7 +100,11 @@ export type TranscriptItem =
   | { kind: "todos"; items: Array<{ text: string; state: string }> }
   | { kind: "result"; ok: boolean; summary: string; costUsd: number | null };
 
-/** A message on /api/sessions/<slug>/<seq>/stream. */
+/**
+ * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame is a resume point (a byte
+ * offset in the file, see TranscriptReader.read), not a unique key: the items of one line share the
+ * line's start, so the page must not dedupe or key items by it.
+ */
 export type SessionMessage =
   | { type: "phase"; name: string; status: string; started: string; ended: string | null }
   | { type: "item"; item: TranscriptItem }
@@ -113,6 +117,8 @@ export interface DiffView {
   patch: string;
   /** The patch was cut at the size limit (or, empty, was too big for git to produce in time). */
   cut: boolean;
+  /** Set when git could not produce the diff: "The diff could not be read: <what git said>". Stat and patch are then empty. */
+  problem?: string;
 }
 
 export interface SpendView {
