@@ -18,7 +18,7 @@ export function Rail() {
   return (
     <nav class="rail" aria-label="Screens">
       {SCREENS.map((s) => (
-        <Link key={s.href} href={s.href} class={`rail-item${s.on.includes(at) ? " on" : ""}`} title={s.label}>
+        <Link key={s.href} href={s.href} class={`rail-item${s.on.includes(at) ? " on" : ""}`} current={s.on.includes(at)} title={s.label}>
           <Icon name={s.icon} />
           <span class="label">{s.label}</span>
           {s.href === "/" && agents > 0 && <span class="chip">{agents}</span>}

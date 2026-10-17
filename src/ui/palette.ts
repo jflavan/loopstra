@@ -31,3 +31,8 @@ export function filterCommands<T extends { title: string }>(items: T[], query: s
     .slice(0, limit)
     .map((x) => x.item);
 }
+
+/** The highlighted row, kept inside a list of `length` rows (0 when there are none). */
+export function clampAt(at: number, length: number): number {
+  return Math.max(0, Math.min(at, length - 1));
+}

@@ -20,6 +20,8 @@ export const screenKeys = new Map<string, () => void>();
 export function installKeys(): void {
   const press = keyMatcher(SHORTCUTS);
   window.addEventListener("keydown", (e) => {
+    // Keys that pick a character in an input method (Japanese, Chinese, ...) are not shortcuts.
+    if (e.isComposing) return;
     const name = keyName(e);
     if (!name) return;
     const typing = typingIn(e.target);
@@ -28,7 +30,7 @@ export function installKeys(): void {
     const action = press(name, Date.now());
     if (!action) {
       const handler = screenKeys.get(name);
-      if (handler && !typing && !paletteOpen.value) {
+      if (handler && !typing && !paletteOpen.value && !helpOpen.value) {
         e.preventDefault();
         handler();
       }

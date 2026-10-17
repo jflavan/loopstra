@@ -40,3 +40,22 @@ export function typingIn(target: EventTarget | null): boolean {
   const el = target as { tagName?: string; isContentEditable?: boolean } | null;
   return !!el && (el.isContentEditable === true || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName ?? ""));
 }
+
+/** Whether this is an Apple platform, where the shortcut key is Cmd and not Ctrl. Read once: it cannot change during a visit. */
+export const onMac: boolean = (() => {
+  if (typeof navigator === "undefined") return false;
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return /mac|iphone|ipad|ipod/i.test(nav.userAgentData?.platform || nav.platform || "");
+})();
+
+/** A binding's keys as a person reads them: "Ctrl K" (or the Command sign on a Mac), "G L", "Esc". */
+export function keyLabel(keys: string, mac: boolean): string {
+  return keys
+    .split(" ")
+    .map((k) => {
+      if (k === "escape") return "Esc";
+      if (k.startsWith("mod+")) return `${mac ? "⌘" : "Ctrl "}${k.slice(4).toUpperCase()}`;
+      return k.toUpperCase();
+    })
+    .join(" ");
+}

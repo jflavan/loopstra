@@ -6,7 +6,8 @@ export const route = signal<Route>(parseRoute(location.pathname));
 
 /** Goes to `path` without reloading the page. */
 export function navigate(path: string): void {
-  if (path !== location.pathname) history.pushState(null, "", path);
+  // A path with a query string ("/c/x?tab=y") is compared with its query, or it would push every time.
+  if (path !== location.pathname + location.search) history.pushState(null, "", path);
   route.value = parseRoute(location.pathname);
   document.getElementById("main")?.scrollTo(0, 0);
 }

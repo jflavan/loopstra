@@ -2,12 +2,14 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, usd } from "../../src/ui/format";
-import { keyMatcher, keyName, typingIn } from "../../src/ui/keys";
+import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
-import { filterCommands, fuzzyScore } from "../../src/ui/palette";
+import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, STALE_MS, type State } from "../../src/ui/store";
 import { addItems, EMPTY } from "../../src/ui/transcript";
+import { needsAPerson } from "../../src/ui/alerts";
+import { nextTheme } from "../../src/ui/theme";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -266,5 +268,45 @@ describe("the page's live stream", () => {
       (globalThis as { EventSource?: unknown }).EventSource = real;
     }
     expect(FakeSource.opened.at(-1)!.closed).toBe(true);
+  });
+});
+
+describe("labels for keys", () => {
+  test("Ctrl becomes the Command sign on Apple platforms, and words are capitalised", () => {
+    expect(keyLabel("mod+k", false)).toBe("Ctrl K");
+    expect(keyLabel("mod+k", true)).toBe("⌘K");
+    expect(keyLabel("g l", true)).toBe("G L");
+    expect(keyLabel("escape", false)).toBe("Esc");
+    expect(keyLabel("?", false)).toBe("?");
+  });
+});
+
+describe("the theme button", () => {
+  test("from the system's own theme it goes to the opposite first, then the system's own, then back to system", () => {
+    expect(nextTheme("system", true)).toBe("light");
+    expect(nextTheme("light", true)).toBe("dark");
+    expect(nextTheme("dark", true)).toBe("system");
+    expect(nextTheme("system", false)).toBe("dark");
+    expect(nextTheme("dark", false)).toBe("light");
+    expect(nextTheme("light", false)).toBe("system");
+  });
+});
+
+describe("the highlighted row of a list", () => {
+  test("stays inside the list, and is 0 when the list is empty", () => {
+    expect(clampAt(0, 0)).toBe(0);
+    expect(clampAt(-1, 5)).toBe(0);
+    expect(clampAt(3, 5)).toBe(3);
+    expect(clampAt(7, 5)).toBe(4);
+    expect(clampAt(2, 0)).toBe(0);
+  });
+});
+
+describe("what is worth a notification", () => {
+  test("only things a person must act on", () => {
+    const item = (kind: string) => ({ kind }) as Parameters<typeof needsAPerson>[0];
+    expect(needsAPerson(item("blocked"))).toBe(true);
+    expect(needsAPerson(item("waiting"))).toBe(true);
+    for (const k of ["paused", "health", "sync", "config", "unreadable"]) expect(needsAPerson(item(k))).toBe(false);
   });
 });
