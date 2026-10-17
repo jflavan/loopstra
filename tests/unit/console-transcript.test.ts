@@ -65,8 +65,13 @@ describe("session transcripts", () => {
       writeFileSync(path, jsonl(RAW.slice(0, 4)));
       const first = reader.read();
       expect(first.map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
-      expect(first[0]!.offset).toBe(first[1]!.offset); // two items from one line share its end
-      expect(first[2]!.offset).toBeGreaterThan(first[1]!.offset);
+      // Of two items from one line, the first has the line's start and the last its end: a page
+      // that reconnects after the first gets the line again rather than losing the second.
+      expect(first.map((r) => r.offset)).toEqual([
+        Buffer.byteLength(jsonl(RAW.slice(0, 2))), Buffer.byteLength(jsonl(RAW.slice(0, 3))), Buffer.byteLength(jsonl(RAW.slice(0, 4))),
+      ]);
+      expect(new TranscriptReader(path, first[0]!.offset).read().map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
+      expect(new TranscriptReader(path, first[1]!.offset).read().map((r) => r.item)).toEqual(EXPECTED.slice(2, 3));
       expect(reader.atEnd()).toBe(true);
 
       const line = JSON.stringify(RAW[4]);
@@ -138,6 +143,26 @@ describe("session transcripts", () => {
       const after: TranscriptItem[] = [];
       for (let k = 0; k < 20 && !long.atEnd(); k++) after.push(...long.read(200).map((r) => r.item));
       expect(after).toEqual([{ kind: "text", text: "Café, résumé, naïve." }]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a last read takes a line the file ends without a newline; an unreadable one is passed over", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "raw.jsonl");
+      writeFileSync(path, `${jsonl(RAW.slice(0, 2))}${JSON.stringify(RAW[11])}`);
+      const reader = new TranscriptReader(path);
+      expect(reader.read()).toEqual([]);
+      expect(reader.atEnd()).toBe(false);
+      expect(reader.read(undefined, { final: true })).toEqual([{ item: EXPECTED[8]!, offset: Bun.file(path).size }]);
+      expect(reader.atEnd()).toBe(true);
+
+      writeFileSync(path, `${jsonl(RAW.slice(0, 4))}{"type":"assist`);
+      const cut = new TranscriptReader(path);
+      expect(cut.read(undefined, { final: true }).map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
+      expect(cut.atEnd()).toBe(true);
     } finally {
       t.cleanup();
     }

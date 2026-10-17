@@ -141,8 +141,13 @@ export class TranscriptReader {
     return !existsSync(this.path) || statSync(this.path).size <= this.offset;
   }
 
-  /** The items of the finished lines after the offset, each with the offset just after its line. */
-  read(maxBytes = READ_MAX): Array<{ item: TranscriptItem; offset: number }> {
+  /**
+   * The items of the finished lines after the offset. Each has its line's start as its offset,
+   * except the line's last item, which has the line's end: a page that reconnects after an earlier
+   * item of a line gets that line again, rather than losing the items after it. With `final` the
+   * file is known to be complete, so its end also ends a last line written without a newline.
+   */
+  read(maxBytes = READ_MAX, opts: { final?: boolean } = {}): Array<{ item: TranscriptItem; offset: number }> {
     if (!existsSync(this.path)) return [];
     const size = statSync(this.path).size;
     if (size <= this.offset) return [];
@@ -160,17 +165,20 @@ export class TranscriptReader {
     }
     const out: Array<{ item: TranscriptItem; offset: number }> = [];
     let start = 0;
-    for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10, start)) {
-      const line = buf.subarray(start, nl).toString("utf8");
-      start = nl + 1;
-      const e = rawEvent(line);
-      if (!e) continue;
+    /** Takes the line from `start` to `end`; the next one begins at `next`. */
+    const line = (end: number, next: number) => {
+      const e = rawEvent(buf.subarray(start, end).toString("utf8"));
+      const lineStart = this.offset + start;
+      start = next;
+      if (!e) return;
       if (e.type === "system" && e.subtype === "init" && typeof e.cwd === "string") this.cwd = e.cwd;
       // An event in a shape nothing here expected is passed over, so the lines after it still come.
       let items: TranscriptItem[];
-      try { items = toItems(e, this.cwd); } catch { continue; }
-      for (const item of items) out.push({ item, offset: this.offset + nl + 1 });
-    }
+      try { items = toItems(e, this.cwd); } catch { return; }
+      items.forEach((item, k) => out.push({ item, offset: k === items.length - 1 ? this.offset + next : lineStart }));
+    };
+    for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10, start)) line(nl, nl + 1);
+    if (opts.final && start < buf.length && this.offset + buf.length >= size) line(buf.length, buf.length);
     // A line longer than one whole read is skipped, so one huge event cannot stall the stream.
     if (start === 0 && buf.length === maxBytes) start = buf.length;
     this.offset += start;
