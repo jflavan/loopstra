@@ -60,6 +60,20 @@ describe("the console's server", () => {
     });
   });
 
+  test("the page carries its content security policy, and every script it runs comes from the console itself", async () => {
+    await withConsole(async (base) => {
+      const html = await (await fetch(base + "/")).text();
+      expect(html).toContain(`<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">`);
+      const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+      expect(scripts.length).toBeGreaterThan(0);
+      for (const [, attrs, body] of scripts) {
+        expect(body!.trim()).toBe(""); // script-src 'self' would block an inline one
+        expect(attrs).toMatch(/\bsrc="\/[^/"]/);
+      }
+      for (const [, url] of html.matchAll(/<link\b[^>]*\bhref="([^"]+)"/g)) expect(url).toMatch(/^(\/[^/]|data:)/);
+    });
+  });
+
   test("data needs a local host name, and nothing but chat takes anything but GET", async () => {
     await withConsole(async (base) => {
       for (const path of ["/api/spend", "/api/events", "/api/changes/one", "/files/one/phases/1-build/prompt.md", "/docs/one/intent.md"]) {
