@@ -1,0 +1,33 @@
+export interface Command { id: string; title: string; hint?: string; run: () => void }
+
+/**
+ * How well `query` matches `text`: null when its letters are not all there in order; otherwise
+ * higher for letters that follow each other and for letters that start a word.
+ */
+export function fuzzyScore(query: string, text: string): number | null {
+  const q = query.toLowerCase().replace(/\s+/g, "");
+  const t = text.toLowerCase();
+  let score = 0;
+  let from = 0;
+  let prev = -2;
+  for (const ch of q) {
+    const i = t.indexOf(ch, from);
+    if (i < 0) return null;
+    score += i === prev + 1 ? 3 : 1;
+    if (i === 0 || /[\s\-_/]/.test(t[i - 1]!)) score += 2;
+    prev = i;
+    from = i + 1;
+  }
+  return score;
+}
+
+/** The items whose title matches, best first (ties keep their order), at most `limit`. */
+export function filterCommands<T extends { title: string }>(items: T[], query: string, limit = 12): T[] {
+  if (!query.trim()) return items.slice(0, limit);
+  return items
+    .map((item) => ({ item, score: fuzzyScore(query, item.title) }))
+    .filter((x): x is { item: T; score: number } => x.score !== null)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.item);
+}
