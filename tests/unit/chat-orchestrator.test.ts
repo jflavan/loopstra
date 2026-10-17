@@ -174,6 +174,22 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a turn that sets both accept and action proposes the start, and the trace says the action was dropped", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("draft"), other: INTENT("building") } });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { accept: { slug: "csv-export" }, action: { kind: "close", slug: "other", note: "", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("start csv-export and close other"), out.send);
+      expect(out.sent.at(-1)).toBe("Start work on csv-export now? Reply yes to go ahead.");
+      expect(o.store.get("terminal", "local").pending).toMatchObject({ kind: "accept", slug: "csv-export" });
+      const trace = Trace.open(r.root, () => {});
+      try {
+        expect(JSON.parse(trace.lastEvent(CHAT_SLUG, "error")!.payload)).toEqual({ where: "chat", error: "the turn set both accept and action, so its close of other was dropped" });
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+
   test("an action the change does not offer now is explained, not asked", async () => {
     const r = await chatRepo({ intents: { "csv-export": INTENT("building") } });
     try {

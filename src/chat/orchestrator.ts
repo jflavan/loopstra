@@ -199,7 +199,11 @@ export class Orchestrator {
     const turn = r.value;
     if (turn.reply.trim()) await say(turn.reply.trim());
     if (turn.handoff) await this.proposeHandoff(t, m, turn.handoff, say);
-    else if (turn.accept) await this.proposeAccept(t, m, turn.accept.slug.trim(), say);
+    else if (turn.accept) {
+      // The prompt says never both; when it happens anyway, the start goes ahead and the trace says what was dropped.
+      if (turn.action) trace.event(CHAT_SLUG, "error", { where: "chat", error: `the turn set both accept and action, so its ${turn.action.kind} of ${turn.action.slug} was dropped` });
+      await this.proposeAccept(t, m, turn.accept.slug.trim(), say);
+    }
     else if (turn.action) await this.proposeAction(cfg, trace, t, m, turn.action, say);
   }
 
