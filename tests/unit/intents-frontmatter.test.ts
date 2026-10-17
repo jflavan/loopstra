@@ -91,3 +91,17 @@ describe("hold", () => {
     expect(parseIntentFile("---\nstatus: building\n---\n# Intent: x\n").frontmatter.hold).toBe("");
   });
 });
+
+describe("question", () => {
+  test("question: open is read and written; blank or absent reads as none and gets no line, as a blank hold does", () => {
+    const open = parseIntentFile("---\nstatus: designing\nquestion: open\n---\n# Intent: x\n");
+    expect(open.frontmatter.question).toBe("open");
+    expect(serializeIntentFile(open)).toContain("question: open\n");
+    const none = parseIntentFile("---\nstatus: designing\nquestion:\nhold:\n---\n# Intent: x\n");
+    expect(none.frontmatter.question).toBe("");
+    const text = serializeIntentFile(none);
+    expect(text).not.toContain("question");
+    expect(text).not.toContain("hold");
+    expect(text).toStartWith("---\nstatus: designing\n");
+  });
+});

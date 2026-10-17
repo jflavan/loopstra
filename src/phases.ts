@@ -13,7 +13,8 @@ import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
-import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, readQuestion, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
 import { deliverInbox, STEERABLE } from "./steering";
 import { toolTarget } from "./tools";
@@ -48,7 +49,7 @@ export interface AgentPhaseSpec {
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
-  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number }
+  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number; seq?: number }
   | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -196,7 +197,15 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
   return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
 }
 
-/** Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it. */
+/**
+ * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it.
+ *
+ * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
+ * ends quietly and the change waits. Once it is answered, the first session of that phase resumes the asking
+ * session with the answer (one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS
+ * asked at this status the prompt says no more may be, and one more fails the phase. Work run alongside never
+ * asks: a question fails it, and that work is just not used.
+ */
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
   const prompt = rendered === undefined ? await phasePrompt(ctx, spec) : rendered;
   if (prompt === null) {
@@ -205,11 +214,49 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   }
 
   const traceName = spec.traceName ?? spec.name;
-  const first = await attempt(ctx, spec, prompt, traceName);
-  if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
-  ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-  return attempt(ctx, spec, prompt, `${traceName}-retry`);
+  const here = ASKERS.has(spec.name) && !cancelSignal();
+  const atLimit = here && askedAt(ctx.root, ctx.slug, ctx.intent.file.frontmatter.status) >= MAX_QUESTIONS;
+  const ask: AskRule | null = !ASKERS.has(spec.name) ? null : !here ? { refuse: "It asked a question" } : atLimit ? { refuse: TOO_MANY_NOTE } : {};
+  const limited = (p: string) => (atLimit ? `${p.trimEnd()}\n\n${NO_MORE_QUESTIONS}\n` : p);
+  // One run of the phase on `p`, retried once on a timeout or crash.
+  const tries = async (p: string, resume: string | undefined): Promise<Attempted<N>> => {
+    const s = { ...spec, resume };
+    const first = await attempt(ctx, s, limited(p), traceName, ask);
+    if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
+    ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
+    return attempt(ctx, s, limited(p), `${traceName}-retry`, ask);
+  };
+
+  let r: Attempted<N>;
+  const answered = here ? readQuestion(ctx.root, ctx.slug)?.open : null;
+  if (answered?.answer && answered.phase === spec.name) {
+    // The answer goes to the session that asked; one that cannot be resumed starts fresh with the normal prompt.
+    r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId) : await tries(prompt, spec.resume);
+    if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined);
+    closeQuestion(ctx.root, ctx.slug);
+  } else {
+    r = await tries(prompt, spec.resume);
+  }
+  if (!r.ok) return r;
+  const { asked, traceName: endedAs, ...ok } = r as Asking<N>;
+  if (!asked) return ok;
+  await recordQuestion(ctx, { phase: spec.name, traceName: endedAs, seq: ok.seq!, sessionId: ok.sessionId, ...asked });
+  throw new QuestionAsked(spec.name, asked.text);
 }
+
+/** The phases whose sessions may ask a person a question (see src/questions.ts). */
+export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "fix", "reconcile", "revise"]);
+
+/**
+ * What a session of an asker does with a question in its report: it is recorded (no `refuse`), or the
+ * session fails with `refuse` as its note (work run alongside, or a step that asked the most it may).
+ */
+type AskRule = { refuse?: string };
+
+/** A successful attempt, with the trace name its row ended under and, when it asked one, its question. */
+type Asking<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: true }> & { traceName: string; asked?: Question };
+/** One attempt's result (see attempt). */
+type Attempted<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: false }> | Asking<N>;
 
 /**
  * Two pieces of work running at once (see alongside): whether a session in them succeeded, whether
@@ -358,7 +405,7 @@ export const STOPPED_NOTE = "stopped by request; the step resumes on the next st
  * minutes, and every record, sync and merge would wait for it (under the merge lock is fine: the
  * merge checks run fix sessions).
  */
-async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string, ask: AskRule | null): Promise<Attempted<N>> {
   assertNoCheckoutLock(`The ${traceName} session`);
   throwIfStopping();
   const signal = cancelSignal();
@@ -368,6 +415,9 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");
+  // The session's question, when it asked one (see agentPhase); `refused`: the note when it may not ask.
+  let asked: Question | null = null;
+  let refused: string | null = null;
   const out = await tracedSession({
     trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE,
     run: {
@@ -391,7 +441,15 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       const parsed = Envelopes[spec.name].safeParse(output);
       if (!parsed.success) return { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
       const envelope = parsed.data as Envelope<N>;
-      return envelope.status === "fail" ? { ok: false, reason: "agent-fail", detail: envelope.summary } : { ok: true, value: envelope };
+      if (envelope.status === "fail") return { ok: false, reason: "agent-fail", detail: envelope.summary };
+      const q = ask ? questionIn(envelope) : null;
+      if (!q) return { ok: true, value: envelope };
+      if (ask?.refuse) {
+        refused = ask.refuse;
+        return { ok: false, reason: "agent-fail", detail: `${ask.refuse}: ${q.text}` };
+      }
+      asked = q;
+      return { ok: true, value: envelope, endAs: "asked", note: q.text };
     },
     // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
     // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
@@ -400,12 +458,13 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
   if (!out.ok) {
+    if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
     const reason = out.reason as BlockingReason;
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx);
-  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd };
+  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, traceName, ...(asked ? { asked } : {}) };
 }
 
 /** The test files the protect-tests hook refused during a phase, once each, in the order refused. */

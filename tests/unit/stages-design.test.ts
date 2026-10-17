@@ -6,7 +6,8 @@ import { readIntent } from "../../src/intents";
 import { claim, release } from "../../src/lanes";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD } from "../../src/stages/plan";
-import { requestStop, resetStop, StopRequested } from "../../src/stop";
+import { QuestionAsked, requestStop, resetStop, StopRequested } from "../../src/stop";
+import { readConversation } from "../../src/conversation";
 import { writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -181,13 +182,14 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("intake with a question blocks the intent", async () => {
+  test("intake with a question asks it: the change waits with question: open, not blocked", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-question");
-    await runDesignStep(ctx);
+    expect(await runDesignStep(ctx).then(() => null, (e: unknown) => e)).toBeInstanceOf(QuestionAsked);
     const i = await readIntent(repo.path, "add-numbers");
-    expect(i.file.frontmatter.status).toBe("blocked");
-    expect(i.file.frontmatter.note).toContain("Which portal page");
+    expect(i.file.frontmatter.status).not.toBe("blocked");
+    expect(i.file.frontmatter.question).toBe("open");
+    expect(i.file.frontmatter.note).toBe("");
     trace.close(); repo.cleanup();
   });
 
@@ -212,13 +214,12 @@ describe("design stage", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("intake's question is the note, with how to continue; nothing else runs", async () => {
+  test("intake's question is recorded and its row ends asked; nothing else runs", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:intake-question");
-    await runDesignStep(ctx);
-    const i = await readIntent(repo.path, "add-numbers");
-    expect(i.file.frontmatter.note).toBe("Which portal page should show the status? Update intent.md, then set status to accepted.");
-    expect(phaseNames(trace)).toEqual(["intake"]);
+    expect(await runDesignStep(ctx).then(() => null, (e: unknown) => e)).toBeInstanceOf(QuestionAsked);
+    expect(readConversation(repo.path, "add-numbers")).toContain("intake asks\nWhich portal page should show the status?");
+    expect(trace.phases("add-numbers").map((p) => [p.name, p.status])).toEqual([["intake", "asked"]]);
     trace.close(); repo.cleanup();
   });
 });

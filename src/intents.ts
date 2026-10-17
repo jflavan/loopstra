@@ -45,6 +45,8 @@ export const Frontmatter = z.object({
    * Written by the runtime (a hold from the console or chat) or by a person; blank reads as absent.
    */
   hold: blankableString,
+  /** "open" while an agent's question waits for a person (runtime-managed; see src/questions.ts). Blank reads as absent. */
+  question: blankableString,
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
 
@@ -99,11 +101,13 @@ function parseSections(body: string): Record<string, string> {
   return sections;
 }
 
+/** Runtime-managed fields that get no line while blank. */
+const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question"]);
+
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
-  // A blank hold is no hold: it gets no line, so a released change's file does not say `hold: ""`.
-  const { hold, ...rest } = file.frontmatter;
-  const fm = stringify(hold ? file.frontmatter : rest, { lineWidth: 0 }).trimEnd();
+  // A blank hold or question is none: it gets no line, so a released change's file does not say `hold: ""`.
+  const fm = stringify(Object.fromEntries(Object.entries(file.frontmatter).filter(([k, v]) => !(BLANK_LEFT_OUT.has(k) && !v))), { lineWidth: 0 }).trimEnd();
   const body = file.body.replace(/^\r?\n/, "");
   const text = `---\n${fm}\n---\n${body}`;
   return crlf ? text.replace(/\r?\n/g, "\r\n") : text;

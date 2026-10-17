@@ -18,13 +18,17 @@ const requirement = z.object({
   evidence: z.string(),
 });
 
+/** A question for a person (only when the decision is theirs and there is no sensible default). Optional: absent means none. */
+const question = z.object({ text: z.string(), why: z.string(), options: z.array(z.string()).optional() }).optional();
+
 /** The files a change touched come from git, never from the agent's own list. */
 const codeChange = base.extend({
   commit_message: z.string(),
+  question,
 });
 
 export const Envelopes = {
-  /** Missing sections never reach intake: the consistency check blocks on them first. */
+  /** Missing sections never reach intake: the consistency check blocks on them first. A non-empty question asks it (see src/questions.ts). */
   intake: base.extend({
     priority: z.enum(["low", "normal", "high", "urgent"]),
     question: z.string(),
@@ -32,6 +36,7 @@ export const Envelopes = {
   /** Concerns are a heading inside spec_markdown, where the owner reads them. */
   design: base.extend({
     spec_markdown: z.string(),
+    question,
   }),
   "spec-check": base.extend({
     approved: z.boolean(),
@@ -40,6 +45,7 @@ export const Envelopes = {
   /** The files the plan touches are read from its "Files that change" list, the one source. */
   plan: base.extend({
     plan_markdown: z.string(),
+    question,
   }),
   "plan-challenge": base.extend({
     approved: z.boolean(),
@@ -47,7 +53,7 @@ export const Envelopes = {
   }),
   build: codeChange,
   fix: codeChange,
-  reconcile: base.extend({ plan_markdown: z.string() }),
+  reconcile: base.extend({ plan_markdown: z.string(), question }),
   verify: base.extend({
     passed: z.boolean(),
     observations: z.array(z.string()),
