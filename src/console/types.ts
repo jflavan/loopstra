@@ -107,11 +107,11 @@ export type SessionMessage =
   | { type: "end" };
 
 export interface DiffView {
-  /** False when the change has no branch (not built yet, or merged and cleaned up). */
+  /** False when the change has no branch (not built yet, or merged and cleaned up), or main cannot be found. */
   exists: boolean;
   stat: string;
   patch: string;
-  /** The patch was cut at the size limit. */
+  /** The patch was cut at the size limit (or, empty, was too big for git to produce in time). */
   cut: boolean;
 }
 
