@@ -168,6 +168,7 @@ table.list { width: 100%; border-collapse: collapse; background: var(--bg-raised
 table.list th, table.list td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.list th { font-size: 12px; font-weight: 600; color: var(--fg-3); }
 table.list tr:last-child td { border-bottom: 0; }
+.table-wrap { overflow-x: auto; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 details.folded { margin-top: 16px; }
 details.folded summary { cursor: pointer; color: var(--fg-2); margin-bottom: 10px; }
