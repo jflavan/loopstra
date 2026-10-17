@@ -97,6 +97,21 @@ describe("diffs", () => {
       { kind: "file", text: "src/csv.ts" }, { kind: "hunk", text: "@@ edit @@" }, { kind: "del", text: "a" }, { kind: "add", text: "c" },
     ]);
   });
+
+  test("a rename, a new or deleted file, and a mode change say so, even with no lines changed", () => {
+    const git = [
+      "diff --git a/old.ts b/new.ts", "similarity index 100%", "rename from old.ts", "rename to new.ts",
+      "diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755",
+      "diff --git a/added.ts b/added.ts", "new file mode 100644", "index 0000000..ce01362", "--- /dev/null", "+++ b/added.ts", "@@ -0,0 +1 @@", "+x",
+      "diff --git a/gone.ts b/gone.ts", "deleted file mode 100644", "index ce01362..0000000", "--- a/gone.ts", "+++ /dev/null", "@@ -1 +0,0 @@", "-x",
+    ].join("\n");
+    expect(parseDiff(git)).toEqual([
+      { kind: "file", text: "new.ts" }, { kind: "meta", text: "rename from old.ts" }, { kind: "meta", text: "rename to new.ts" },
+      { kind: "file", text: "run.sh" }, { kind: "meta", text: "old mode 100644" }, { kind: "meta", text: "new mode 100755" },
+      { kind: "file", text: "added.ts" }, { kind: "meta", text: "new file mode 100644" }, { kind: "hunk", text: "@@ -0,0 +1 @@" }, { kind: "add", text: "x" },
+      { kind: "file", text: "gone.ts" }, { kind: "meta", text: "deleted file mode 100644" }, { kind: "hunk", text: "@@ -1 +0,0 @@" }, { kind: "del", text: "x" },
+    ]);
+  });
 });
 
 describe("markdown", () => {

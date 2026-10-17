@@ -24,6 +24,23 @@ describe("a change's diff", () => {
     }
   });
 
+  test("the patch names its files a/ and b/ even in a repository set to leave those prefixes out", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await run(["git", "config", "diff.noprefix", "true"], repo.path);
+      await run(["git", "checkout", "-q", "-b", "intent/csv"], repo.path);
+      await Bun.write(join(repo.path, "src.txt"), "hello\n");
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-q", "-m", "add"], repo.path);
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      const d = await changeDiff(repo.path, "main", "csv");
+      expect(d.patch).toContain("diff --git a/src.txt b/src.txt");
+      expect(d.patch).toContain("+++ b/src.txt");
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   test("none for a name that is not a change's, a main that is not a branch, or one that is missing; git that does not answer in time is not an error", async () => {
     const repo = await tempGitRepo();
     try {

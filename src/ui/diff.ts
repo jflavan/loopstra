@@ -17,8 +17,9 @@ export function parseDiff(text: string): DiffRow[] {
       if (!header) rows.push({ kind: "file", text: line.slice(4).replace(/^a\//, "") });
       k++;
     } else if (header && !line.startsWith("@@")) {
-      // git's index, mode and rename lines are left out; a binary file says so.
-      if (line.startsWith("Binary files")) rows.push({ kind: "meta", text: line });
+      // A rename, a new or deleted file, a mode change and a binary file say so: a file changed only
+      // that way has no hunks, so its header is all there is to show. The index line is left out.
+      if (/^(Binary files|rename (from|to) |new file mode |deleted file mode |old mode |new mode )/.test(line)) rows.push({ kind: "meta", text: line });
     } else if (line.startsWith("@@")) {
       rows.push({ kind: "hunk", text: line });
       header = false;
