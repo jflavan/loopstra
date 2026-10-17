@@ -125,6 +125,14 @@ export function withBunOnPath(env: Record<string, string | undefined>): Record<s
   return { ...env, [key]: current ? `${dir}${delimiter}${current}` : dir };
 }
 
+/** What a caller writes to a process whose stdin is kept open (see SpawnOptions.stdin). */
+export interface StdinWriter {
+  /** Writes `text`; false when the process can no longer take it (it ended, or stdin was closed). */
+  write(text: string): boolean;
+  /** Closes stdin (once). */
+  end(): void;
+}
+
 export interface SpawnOptions {
   cmd: string[];
   cwd: string;
@@ -132,8 +140,14 @@ export interface SpawnOptions {
   env?: Record<string, string | undefined>;
   /** How long the call may take (until the process exits, or with `onLine` until reading ends). */
   timeoutMs: number;
-  /** Written to the child's stdin, which is then closed. Without it stdin is not connected. */
-  stdin?: string;
+  /**
+   * What goes to the child's stdin. A string is written and stdin closed; `{ open }` is written and stdin
+   * left open, its writer handed to `onStdin` (it is closed once reading or the process ends). Without it
+   * stdin is not connected.
+   */
+  stdin?: string | { open: string };
+  /** Gets the writer of a stdin kept open (`stdin: { open }`), once the process has started. */
+  onStdin?: (w: StdinWriter) => void;
   /**
    * What a stop request does: "kill" kills the process tree at once; "grace" gives it `graceMs` to
    * finish on its own first; "ignore" lets it run (a cleanup call, still bounded by the timeout).
@@ -196,12 +210,26 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   const cancel = () => { cancelled = true; void killTree(proc); };
   o.signal?.addEventListener("abort", cancel, { once: true });
 
+  let closeStdin = () => {};
   if (o.stdin !== undefined) {
-    const stdin = proc.stdin as Bun.FileSink;
-    try {
-      stdin.write(o.stdin);
-      void Promise.resolve(stdin.end()).catch(() => {});
-    } catch { /* the process already exited; its result says so */ }
+    const sink = proc.stdin as Bun.FileSink;
+    let open = true;
+    const end = () => {
+      if (!open) return;
+      open = false;
+      try { void Promise.resolve(sink.end()).catch(() => {}); } catch { /* the process already exited */ }
+    };
+    const write = (text: string): boolean => {
+      if (!open) return false;
+      try {
+        sink.write(text);
+        void Promise.resolve(sink.flush()).catch(() => {});
+        return true;
+      } catch { open = false; return false; } // the process already exited; its result says so
+    };
+    closeStdin = end;
+    if (typeof o.stdin === "string") { write(o.stdin); end(); }
+    else { write(o.stdin.open); o.onStdin?.({ write, end }); }
   }
 
   let out = "";
@@ -236,6 +264,8 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   // With onLine the deadline bounds the reading; otherwise it bounds the exit.
   const done = await within((o.onLine ? outDone : proc.exited).then(() => true), o.timeoutMs, false);
   const timedOut = !done;
+  // An open stdin must never keep a finished process waiting.
+  closeStdin();
   if (o.onLine) void reader.cancel().catch(() => {});
   let code = timedOut ? null : await within(proc.exited, graceMs, null);
   if (code === null) {

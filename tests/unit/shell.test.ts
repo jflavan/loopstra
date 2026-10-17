@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCommand, spawnBounded, withBunOnPath, within } from "../../src/shell";
+import { runCommand, spawnBounded, withBunOnPath, within, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
@@ -136,6 +136,42 @@ setInterval(() => {}, 1000);
       parent.kill("SIGTERM");
       expect(await within(parent.exited, 5_000, "hung")).toBe(130);
       expect(await gone(pid)).toBe(true);
+    } finally { t.cleanup(); }
+  });
+});
+
+describe("spawnBounded's stdin", () => {
+  test("stdin kept open: a writer goes to the caller, and what it writes reaches the process", async () => {
+    const t = tempDir();
+    try {
+      let w: StdinWriter | null = null;
+      const lines: string[] = [];
+      const script = "for await (const c of Bun.stdin.stream()) process.stdout.write(new TextDecoder().decode(c));";
+      const r = await spawnBounded({
+        cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 10_000, onStop: "kill",
+        stdin: { open: "first\n" },
+        onStdin: (writer) => { w = writer; },
+        onLine: (l) => { lines.push(l); if (l === "first") w!.write("second\n"); if (l === "second") w!.end(); return false; },
+      });
+      expect(r.code).toBe(0);
+      expect(r.timedOut).toBe(false);
+      expect(lines).toEqual(["first", "second"]);
+      // Closed, the writer takes nothing more.
+      expect(w!.write("third\n")).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
+  test("an open stdin is closed once reading ends, so the process can exit by itself", async () => {
+    const t = tempDir();
+    try {
+      // Prints a line, then waits for stdin to close before it exits.
+      const script = "console.log('ready'); for await (const _ of Bun.stdin.stream()) {} process.exit(7);";
+      const r = await spawnBounded({
+        cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 10_000, onStop: "kill", graceMs: 5_000,
+        stdin: { open: "" },
+        onLine: (l) => l === "ready",
+      });
+      expect(r.code).toBe(7);
     } finally { t.cleanup(); }
   });
 });
