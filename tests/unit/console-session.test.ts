@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { streamSession } from "../../src/console/session";
 import { TranscriptReader } from "../../src/console/transcript";
@@ -101,6 +101,41 @@ describe("a session's stream", () => {
     }
   });
 
+  test("a whole line written after the phase was seen ended still comes before the end", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    const phase = Trace.prototype.phase;
+    const stops: Array<() => void> = [];
+    try {
+      const seq = trace.phaseStart("one", "build", "agent");
+      const path = raw(t.path, "one", seq, "build");
+      writeFileSync(path, lines(START));
+      trace.phaseEnd("one", seq, { status: "success", costUsd: 0.1 });
+      // The phase is recorded as ended a moment before its writer is done: the rest of the file
+      // arrives between two of the stream's checks, after the stream has seen the phase ended.
+      let late = false;
+      Trace.prototype.phase = function (this: Trace, ...args: Parameters<Trace["phase"]>) {
+        const row = phase.apply(this, args);
+        if (row?.ended && !late) {
+          late = true;
+          setTimeout(() => appendFileSync(path, lines(REST)), 30);
+        }
+        return row;
+      };
+      const p = page();
+      stops.push(streamSession(t.path, "one", seq, 0, p.send, p.close, 100)!);
+      await until(() => p.closed, 3_000);
+      expect(late).toBe(true);
+      expect(kinds(p.frames)).toEqual(["text", "tool", "tool-result", "result"]);
+      expect(messages(p.frames).at(-1)!.msg).toEqual({ type: "end" });
+    } finally {
+      Trace.prototype.phase = phase;
+      for (const stop of stops) stop();
+      trace.close();
+      t.cleanup();
+    }
+  });
+
   test("a transcript that cannot be read, or a page that cannot be written to, ends the stream without throwing", async () => {
     const t = tempDir();
     const trace = Trace.open(t.path);
@@ -175,6 +210,28 @@ describe("a session's stream", () => {
     } finally {
       for (const stop of stops) stop();
       trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("no stream, and no throw, when the trace cannot be opened or the phase cannot be read; what was opened is closed", () => {
+    const t = tempDir();
+    const phase = Trace.prototype.phase;
+    const close = Trace.prototype.close;
+    let closed = 0;
+    try {
+      // `.loopstra` is a file, so the trace's folder cannot be made.
+      writeFileSync(join(t.path, ".loopstra"), "not a folder");
+      expect(streamSession(t.path, "one", 1, 0, () => true, () => {})).toBeNull();
+      rmSync(join(t.path, ".loopstra"));
+
+      Trace.prototype.phase = () => { throw new Error("database is locked"); };
+      Trace.prototype.close = function (this: Trace) { closed++; return close.call(this); };
+      expect(streamSession(t.path, "one", 1, 0, () => true, () => {})).toBeNull();
+      expect(closed).toBe(1);
+    } finally {
+      Trace.prototype.phase = phase;
+      Trace.prototype.close = close;
       t.cleanup();
     }
   });

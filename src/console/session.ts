@@ -19,13 +19,15 @@ function sizeOf(path: string): number {
  * every `intervalMs` (watching a growing file is unreliable on Windows). Once the phase has ended
  * and its file is read to the end, sends the phase again and `end`, then closes. If anything goes
  * wrong it closes too, and never throws. Gives the function that stops it, or null when there is
- * no such phase.
+ * no such phase (or the trace or the phase cannot be read).
  */
 export function streamSession(root: string, slug: string, seq: number, from: number, send: Send, close: () => void, intervalMs = 250): (() => void) | null {
-  const trace = Trace.open(root);
-  const first = trace.phase(slug, seq);
+  let trace: Trace;
+  try { trace = Trace.open(root); } catch { return null; }
+  let first: PhaseRow | null = null;
+  try { first = trace.phase(slug, seq); } catch { /* unreadable is treated like missing: there is nothing to stream */ }
   if (!first) {
-    trace.close();
+    try { trace.close(); } catch { /* already closed */ }
     return null;
   }
   const path = join(runsDir(root), slug, "phases", `${seq}-${first.name}`, "raw.jsonl");
