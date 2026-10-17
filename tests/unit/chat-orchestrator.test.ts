@@ -202,6 +202,22 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a hold on a held change, or a release of one not held, says so, not that its status is the reason", async () => {
+    const heldOne = INTENT("building").replace("status: building", "status: building\nhold: waiting for legal");
+    const r = await chatRepo({ intents: { "csv-export": heldOne, other: INTENT("building") } });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "hold", slug: "csv-export", note: "", priority: null } }));
+      await r.answer("orchestrator", 2, turn("Sure.", { action: { kind: "release", slug: "other", note: "", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("hold csv-export"), out.send);
+      expect(out.sent.at(-1)).toBe("csv-export is held already.");
+      await o.handle(message("release other"), out.send);
+      expect(out.sent.at(-1)).toBe("other is not held.");
+      expect(o.store.get("terminal", "local").pending).toBeNull();
+    } finally { r.cleanup(); }
+  });
+
   test("a retry starts from the status the block names, or the one asked for when it names more", async () => {
     const note = "The spec did not pass its automatic check. Set status to spec-approved to accept the spec as it is, or to accepted to write it again.";
     const blocked = INTENT("blocked").replace("status: blocked", `status: blocked\nnote: ${JSON.stringify(note)}`);

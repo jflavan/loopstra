@@ -327,7 +327,14 @@ export class Orchestrator {
     let fm: Frontmatter;
     try { fm = (await readIntent(this.root, slug)).file.frontmatter; } catch { await say(`${slug}'s intent.md cannot be read, so I cannot do that.`); return; }
     const offered = offers(fm, humanGates(cfg), fm.status === "blocked" ? retryOptions(trace, slug, fm.note) : []).filter((o) => o.kind === a.kind);
-    if (!offered.length) { await say(`${slug} is ${plainStatus(fm.status)} now, so that is not something I can do to it.`); return; }
+    if (!offered.length) {
+      const held = !!fm.hold.trim();
+      // A hold on a held change, or a release of one not held: its status is not the reason.
+      if (a.kind === "hold" && held) await say(`${slug} is held already.`);
+      else if (a.kind === "release" && !held) await say(`${slug} is not held.`);
+      else await say(`${slug} is ${plainStatus(fm.status)} now, so that is not something I can do to it.`);
+      return;
+    }
     const note = a.note.trim();
     const expect = fm.status;
     let request: RequestBody & RequestShape;
