@@ -83,6 +83,23 @@ describe("the chat prompts", () => {
     } finally { t.cleanup(); }
   });
 
+  test("an old orchestrator prompt loses the sentence that left every action to the person", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "loopstra", "prompts"), { recursive: true });
+      // Word for word as init copied it before actions existed.
+      const old = "A person on the acceptors list can ask you to start a draft. When they ask for that, set `accept` to that draft's slug; Loopstra asks them to confirm and then starts it. Set it only when they ask to start a specific draft, and only for one at a time. If the context says they cannot accept, tell them so instead and leave `accept` null.";
+      const sentence = " Anything else (approving a spec, retrying a blocked change, closing one) you explain: say what to edit in which `intent.md`, and leave it to them.";
+      await Bun.write(join(t.path, "loopstra", "prompts", "orchestrator.md"), `## Starting work\n\n${old}${sentence}\n\n## How to answer\n\nPlainly.\n`);
+      const text = await chatTemplate(t.path, "orchestrator");
+      expect(text).toStartWith(`## Starting work\n\n${old}\n\n## How to answer\n\nPlainly.\n\n## Acting on a change\n`);
+      expect(text).not.toContain("Anything else");
+      // Reworded by an engineer: their words stay.
+      await Bun.write(join(t.path, "loopstra", "prompts", "orchestrator.md"), "Anything else you explain.\n");
+      expect(await chatTemplate(t.path, "orchestrator")).toStartWith("Anything else you explain.\n\n## Acting on a change\n");
+    } finally { t.cleanup(); }
+  });
+
   test("init stamps them with the others", async () => {
     const repo = await tempGitRepo();
     try {

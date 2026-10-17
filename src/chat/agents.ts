@@ -21,11 +21,15 @@ const BUNDLED = join(import.meta.dir, "..", "..", "templates", "prompts");
 /** The orchestrator's section on actions, written after init had copied the prompt into repositories. */
 const ACTING = "## Acting on a change";
 
+/** What the orchestrator prompt said before chat could act on changes; the section on actions contradicts it. */
+const NO_ACTIONS = " Anything else (approving a spec, retrying a blocked change, closing one) you explain: say what to edit in which `intent.md`, and leave it to them.";
+
 /**
  * The prompt template for a chat phase: the repository's own copy in loopstra/prompts/ (an engineer
  * may tune it), else the one shipped with Loopstra, so a repository set up before chat existed works.
  * init copies the prompt once and never updates it, so an orchestrator prompt copied before actions
  * existed gets the shipped "Acting on a change" section added: without it chat never offers one.
+ * Its old sentence leaving every action to the person goes, when it is word for word the shipped one.
  */
 export async function chatTemplate(root: string, name: ChatPhase): Promise<string> {
   const own = join(root, "loopstra", "prompts", `${name}.md`);
@@ -33,7 +37,7 @@ export async function chatTemplate(root: string, name: ChatPhase): Promise<strin
   if (!existsSync(own)) return Bun.file(shipped).text();
   const text = await Bun.file(own).text();
   if (name !== "orchestrator" || text.split(/\r?\n/).some((l) => l.trim() === ACTING)) return text;
-  return `${text.trimEnd()}\n\n${sectionOf(await Bun.file(shipped).text(), ACTING)}\n`;
+  return `${text.replace(NO_ACTIONS, "").trimEnd()}\n\n${sectionOf(await Bun.file(shipped).text(), ACTING)}\n`;
 }
 
 /** A markdown section: from its heading up to the next "## " heading, or the end. */
