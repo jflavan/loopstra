@@ -513,7 +513,9 @@ describe("cheaper judges on the spec check", () => {
     const { repo, ctx, trace } = await setupRepo("accepted", { config: "speed:\n  cheap_judges: shadow\n  plan_ahead: false\nclaude:\n  max_budget_usd_per_day: 2.5\n  max_budget_usd: 1\n" });
     await runDesignStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
-    expect(phaseNames(trace)).toEqual(["intake", "design", "spec-check", "spec-check-cheap"]);
+    // The two judges start together, so either row may come first.
+    expect(phaseNames(trace).slice(0, 2)).toEqual(["intake", "design"]);
+    expect(phaseNames(trace).slice(2).sort()).toEqual(["spec-check", "spec-check-cheap"]);
     expect(trace.judgeRows().map((r) => `${r.cheap}/${r.strong}`)).toEqual(["pass/pass"]);
     trace.close(); repo.cleanup();
   });
