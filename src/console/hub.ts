@@ -6,7 +6,7 @@ import { errorText } from "../shell";
 import { Trace } from "../trace";
 import { activityItem, phaseNamer } from "./describe";
 import { buildModel, type Model } from "./model";
-import { SECTION_NAMES, type ActivityItem, type SectionName, type StreamMessage } from "./types";
+import { SECTION_NAMES, type SectionName, type StreamMessage } from "./types";
 
 /** Writes one frame to a page; false when the page is gone. */
 export type Send = (text: string) => boolean;
@@ -30,8 +30,10 @@ export interface HubOptions {
   scan?: (root: string) => Promise<Scan>;
 }
 
-/** The most events read for one look, or for a page catching up. */
+/** The most events read at once, and the most a page coming back is sent. */
 const CATCH_UP = 500;
+/** The most reads of new events one look makes, so a flood of them cannot hold a look forever. */
+const EVENT_READS = 10;
 
 /** When a file was last written and how big it is; "-" when it is missing. */
 function stamp(path: string): string {
@@ -76,22 +78,47 @@ export class Hub {
   }
 
   /**
-   * Adds a page. A page coming back (`lastEventId` above 0) first gets the events it missed; every
-   * page then gets a snapshot whose id is the newest event, so its next reconnect continues from
-   * there. Gives the function that removes the page.
+   * Adds a page. A page coming back (`lastEventId` above 0) first gets the events it missed, or
+   * `gap` when it missed too many; every page then gets a snapshot whose id is the newest event the
+   * hub has sent, so its next reconnect continues from there. Gives the function that removes the
+   * page. Throws what `send` throws; the hub is then left stopped if no other page is open.
    */
   async connect(send: Send, lastEventId = 0): Promise<() => Promise<void>> {
     this.connecting++;
+    let added = false;
     try {
+      // The last page may have just left (a reload): the hub lets go of everything first, so the
+      // look below builds from the trace this start opens, not from the one being closed.
+      await this.stopping;
       this.start();
       await this.look(true);
-      if (lastEventId > 0) for (const item of this.events(lastEventId, false)) send(frame({ type: "event", item } satisfies StreamMessage, item.id));
+      if (lastEventId > 0) this.catchUp(send, lastEventId);
       if (this.model) send(frame({ type: "snapshot", meta: this.model.meta, sections: this.model.sections } satisfies StreamMessage, this.lastEventId));
       this.clients.add(send);
+      added = true;
     } finally {
       this.connecting--;
+      // A page that failed while connecting must not leave the hub running for nobody.
+      if (!added && !this.clients.size && !this.connecting) await this.stop();
     }
     return () => this.remove(send);
+  }
+
+  /**
+   * The events after `afterId` that a returning page missed, up to the newest one the hub has sent:
+   * any after that go to every page with the next look, so none comes twice.
+   */
+  private catchUp(send: Send, afterId: number): void {
+    if (!this.trace || afterId >= this.lastEventId) return;
+    const rows = this.trace.eventsAfter(afterId, CATCH_UP + 1).filter((e) => e.id <= this.lastEventId);
+    if (rows.length > CATCH_UP) {
+      send(frame({ type: "gap" } satisfies StreamMessage));
+      return;
+    }
+    for (const e of rows) {
+      const item = activityItem(e, this.name);
+      if (item.text !== null) send(frame({ type: "event", item } satisfies StreamMessage, item.id));
+    }
   }
 
   private remove(send: Send): Promise<void> {
@@ -131,8 +158,12 @@ export class Hub {
     this.sent.clear();
     this.signature = "";
     this.scanned = null;
-    // A look still running uses the trace; it is closed once that look ends.
-    this.stopping = (this.running ?? Promise.resolve()).finally(() => trace?.close());
+    this.noted.clear();
+    // A look still running uses the trace; it is closed once that look ends. The promise never
+    // fails: every later connect waits on it.
+    this.stopping = (this.running ?? Promise.resolve()).finally(() => {
+      try { trace?.close(); } catch { /* already closed */ }
+    });
     return this.stopping;
   }
 
@@ -145,9 +176,13 @@ export class Hub {
     }, wait);
   }
 
-  /** Rebuilds and sends what changed, when anything did (always, when forced). One look at a time. */
+  /**
+   * Rebuilds and sends what changed, when anything did (always, when forced). One look at a time:
+   * a forced one waits for the look under way and then builds its own, since that one may have
+   * been for a trace that has since been closed.
+   */
   private look(force = false): Promise<void> {
-    if (this.running) return this.running;
+    if (this.running) return force ? this.running.then(() => this.look(true)) : this.running;
     const trace = this.trace;
     if (!trace) return Promise.resolve();
     // Cleared from `finally`, not inside: a look that finds nothing returns before its first await,
@@ -161,14 +196,17 @@ export class Hub {
         this.lastBuild = Date.now();
         const model = await buildModel(this.root, trace, new Date(), { chat: this.opts.chat, scan: await this.intents(key) });
         if (this.trace !== trace) return;
+        // Everything is recorded before anything is sent: a send can drop the last page and stop
+        // the hub, which must then stay cleared.
         this.model = model;
-        for (const name of SECTION_NAMES) {
+        const changed = SECTION_NAMES.filter((name) => {
           const json = JSON.stringify(model.sections[name]);
           const before = this.sent.get(name);
           this.sent.set(name, json);
-          if (before !== undefined && before !== json) this.broadcast(frame({ type: "section", name, value: model.sections[name] } satisfies StreamMessage));
-        }
-        for (const item of this.events(this.lastEventId, true)) this.broadcast(frame({ type: "event", item } satisfies StreamMessage, item.id));
+          return before !== undefined && before !== json;
+        });
+        for (const name of changed) this.broadcast(frame({ type: "section", name, value: model.sections[name] } satisfies StreamMessage));
+        this.sendNewEvents(trace);
       } catch (e) {
         this.note(errorText(e));
       }
@@ -200,7 +238,8 @@ export class Hub {
       if (e.isFile()) { parts.push(e.name); continue; }
       let files = "";
       try { files = readdirSync(join(dir, e.name)).sort().join(","); } catch { /* not a folder */ }
-      parts.push(`${e.name}[${files}]${stamp(join(dir, e.name, "intent.md"))}`);
+      // The plan too: the files it names decide which changes wait for each other.
+      parts.push(`${e.name}[${files}]${stamp(join(dir, e.name, "intent.md"))}${stamp(join(dir, e.name, "plan.md"))}`);
     }
     return parts.join("|");
   }
@@ -218,16 +257,26 @@ export class Hub {
     return this.scanned.scan;
   }
 
-  /** The plain-words events after `afterId`; with `advance`, the hub's own mark moves past every event read. */
-  private events(afterId: number, advance: boolean): ActivityItem[] {
-    if (!this.trace) return [];
-    const rows = this.trace.eventsAfter(afterId, CATCH_UP);
-    if (advance && rows.length) this.lastEventId = rows.at(-1)!.id;
-    return rows.map((e) => activityItem(e, this.name)).filter((a) => a.text !== null);
+  /** Sends every page the new events in plain words, and moves the hub's mark past them. */
+  private sendNewEvents(trace: Trace): void {
+    for (let read = 0; read < EVENT_READS && this.trace === trace; read++) {
+      const rows = trace.eventsAfter(this.lastEventId, CATCH_UP);
+      if (rows.length) this.lastEventId = rows.at(-1)!.id;
+      for (const e of rows) {
+        const item = activityItem(e, this.name);
+        if (item.text !== null) this.broadcast(frame({ type: "event", item } satisfies StreamMessage, item.id));
+      }
+      if (rows.length < CATCH_UP) return;
+    }
   }
 
   private broadcast(text: string): void {
-    for (const send of [...this.clients]) if (!send(text)) void this.remove(send);
+    for (const send of [...this.clients]) {
+      let ok = false;
+      // A page whose write throws is as gone as one that says so.
+      try { ok = send(text); } catch { /* gone */ }
+      if (!ok) void this.remove(send);
+    }
   }
 
   /** Traces a problem once, not on every look. */

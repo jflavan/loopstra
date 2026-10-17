@@ -71,7 +71,9 @@ export interface ActivityItem { id: number; slug: string; seq: number | null; ts
 export type StreamMessage =
   | { type: "snapshot"; meta: Meta; sections: Sections }
   | { type: "section"; name: SectionName; value: Sections[SectionName] }
-  | { type: "event"; item: ActivityItem };
+  | { type: "event"; item: ActivityItem }
+  /** The page came back too far behind to be sent every event it missed; its activity list has a hole. */
+  | { type: "gap" };
 
 export interface PhaseView {
   seq: number; name: string; kind: string; status: string; started: string; ended: string | null;
