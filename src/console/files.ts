@@ -34,15 +34,17 @@ export function resolveRunFile(root: string, rel: string): string | null {
 /**
  * The real path of one of a change's own documents, `intent/<slug>/<name>`, or null. The slug must
  * be a valid change name and the name one of the documents Loopstra knows (intent.md, spec.md, ...);
- * the real path (after links) must stay inside the change's folder and be a regular file.
+ * the real path (after links) must stay inside the change's folder and be a regular file, and the
+ * change's folder must itself be inside the intent folder (a linked folder could be anywhere).
  */
 export function resolveDocument(root: string, slug: string, name: string): string | null {
   if (!SLUG.test(slug) || !(ARTIFACTS as readonly string[]).includes(name)) return null;
   const dir = join(intentRoot(root), slug);
   try {
+    const realRoot = realpathSync(intentRoot(root));
     const realDir = realpathSync(dir);
     const real = realpathSync(join(dir, name));
-    if (!real.startsWith(realDir + sep) || !statSync(real).isFile()) return null;
+    if (!realDir.startsWith(realRoot + sep) || !real.startsWith(realDir + sep) || !statSync(real).isFile()) return null;
     return real;
   } catch {
     return null;

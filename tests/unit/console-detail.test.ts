@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { changeDetail, spendView } from "../../src/console/detail";
@@ -105,6 +105,28 @@ describe("a change's page", () => {
       expect(resolveDocument(t.path, "one", "secret.txt")).toBeNull();
       expect(resolveDocument(t.path, "One", "intent.md")).toBeNull();
       expect(resolveDocument(t.path, "..", "intent.md")).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a linked folder does not serve files from outside the intent folder or the runs folder", async () => {
+    const t = await seeded();
+    try {
+      const outside = join(t.path, "outside");
+      mkdirSync(outside);
+      await Bun.write(join(outside, "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
+      await Bun.write(join(outside, "prompt.md"), "no");
+      try {
+        symlinkSync(outside, join(t.path, "intent", "linked"), "junction");
+        symlinkSync(outside, join(t.path, ".loopstra", "runs", "linked"), "junction");
+      } catch {
+        console.warn("skipped: this system does not allow making links");
+        return;
+      }
+      expect(resolveDocument(t.path, "linked", "intent.md")).toBeNull();
+      expect(resolveRunFile(t.path, "linked/prompt.md")).toBeNull();
+      expect(resolveDocument(t.path, "one", "intent.md")).not.toBeNull();
     } finally {
       t.cleanup();
     }
