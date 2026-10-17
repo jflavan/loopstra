@@ -6,7 +6,7 @@ import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { Git } from "./git";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, STATUSES, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
-import { applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
+import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
@@ -79,15 +79,16 @@ export function armApplier(root: string): void {
 
 /**
  * Applies requests beside the tick, so one lands while steps run: every `everyMs` (2 s) and when a
- * file appears in `.loopstra/requests/`, once the tick has armed it. Each pass loads the config and
- * opens the trace itself. Never throws; `stop` waits for a pass in flight.
+ * file appears in `.loopstra/requests/`, once the tick has armed it. A pass with nothing to apply (see
+ * anythingToApply) ends at once; one with work loads the config and opens the trace itself. Never
+ * throws; `stop` waits for a pass in flight.
  */
 export function startApplier(root: string, opts: { everyMs?: number } = {}): { stop(): Promise<void> } {
   const key = resolve(root);
   let inFlight: Promise<void> | null = null;
   let stopped = false;
   const pass = () => {
-    if (stopped || inFlight || !armed.has(key) || stopRequested()) return;
+    if (stopped || inFlight || !armed.has(key) || stopRequested() || !anythingToApply(root)) return;
     inFlight = (async () => {
       let cfg: Config;
       try { cfg = await loadConfig(root); } catch { return; }
@@ -145,9 +146,18 @@ function isNewRequest(dir: string, name: string | Buffer | null): boolean {
 const MAX_TRIES = 5;
 const GIVE_UP_MS = 10 * 60_000;
 
+/** How often a root's results nobody read are pruned (see pruneResults): a day's results need no look every 2 s. */
+const PRUNE_EVERY_MS = 60 * 60_000;
+/** When each root's results were last pruned (by its resolved path). */
+const pruned = new Map<string, number>();
+
 async function applyPass(root: string, cfg: Config, trace: Trace): Promise<number> {
   drainOld(root);
-  pruneResults(root);
+  const key = resolve(root);
+  if (Date.now() - (pruned.get(key) ?? 0) >= PRUNE_EVERY_MS) {
+    pruned.set(key, Date.now());
+    pruneResults(root);
+  }
   for (const id of waitingIds(root)) claimRequest(root, id);
   let applied = 0;
   for (const req of applyingRequests(root)) {

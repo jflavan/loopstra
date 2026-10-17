@@ -164,9 +164,25 @@ export function takeResults(root: string, transports: ReadonlySet<string>): Requ
   return out;
 }
 
+/** The folders chat used before (`.loopstra/chat/requests|results/`), each with the one it moved to. */
+function oldDirs(root: string): ReadonlyArray<readonly [string, string]> {
+  return [[join(chatDir(root), "requests"), requestsDir(root)], [join(chatDir(root), "results"), resultsDir(root)]];
+}
+
+/**
+ * True when an applier pass has something to do: a request file waiting or claimed, or a folder chat
+ * used before still there to drain. Cheap, so an idle applier does next to nothing every 2 s.
+ */
+export function anythingToApply(root: string): boolean {
+  const hasJson = (dir: string) => {
+    try { return readdirSync(dir).some((n) => n.endsWith(".json")); } catch { return false; }
+  };
+  return hasJson(requestsDir(root)) || hasJson(applyingDir(root)) || oldDirs(root).some(([from]) => existsSync(from));
+}
+
 /** Moves what chat left in the folders it used before (`.loopstra/chat/requests|results/`) into the new ones. */
 export function drainOld(root: string): void {
-  for (const [from, to] of [[join(chatDir(root), "requests"), requestsDir(root)], [join(chatDir(root), "results"), resultsDir(root)]] as const) {
+  for (const [from, to] of oldDirs(root)) {
     if (!existsSync(from)) continue;
     mkdirSync(to, { recursive: true });
     for (const n of readdirSync(from)) {

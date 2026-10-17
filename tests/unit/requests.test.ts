@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { applyingRequests, cancelRequest, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults } from "../../src/requests";
+import { anythingToApply, applyingRequests, cancelRequest, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { wakeStamp } from "../../src/wake";
 import { tempDir } from "../helpers";
 
@@ -113,6 +113,27 @@ describe("request files", () => {
       utimesSync(stale, twoDays, twoDays);
       pruneResults(t.path);
       expect(readdirSync(join(requestsDir(t.path), "results"))).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("there is something to apply only with a request waiting or claimed, or an old chat folder to drain", () => {
+    const t = tempDir();
+    try {
+      expect(anythingToApply(t.path)).toBe(false);
+      // Results alone are not work for a pass.
+      mkdirSync(join(requestsDir(t.path), "results"), { recursive: true });
+      writeFileSync(join(requestsDir(t.path), "results", "000000000000003-1-0000.json"), "{}");
+      expect(anythingToApply(t.path)).toBe(false);
+      const q = submitRequest(t.path, { kind: "accept", slug: "a", by: "u", byName: "U", via: "chat", transport: "terminal", thread: "local" });
+      expect(anythingToApply(t.path)).toBe(true);
+      claimRequest(t.path, q.id);
+      expect(anythingToApply(t.path)).toBe(true);
+      rmSync(join(requestsDir(t.path), "applying", `${q.id}.json`));
+      expect(anythingToApply(t.path)).toBe(false);
+      mkdirSync(join(t.path, ".loopstra", "chat", "requests"), { recursive: true });
+      expect(anythingToApply(t.path)).toBe(true);
     } finally {
       t.cleanup();
     }
