@@ -82,7 +82,7 @@ export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Off
 }
 
 /** The parts of a request these rules read. */
-export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null }
+export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null; note?: string; reason?: string }
 
 /** The status a status-changing request leads to, from the request alone; null for one that sets no status, or that is not allowed from `expect`. */
 export function targetOf(r: RequestShape): Status | null {
@@ -148,16 +148,22 @@ export function requestLabel(r: RequestShape): string {
   }
 }
 
-/** The question chat asks before it submits a request. */
+/**
+ * The question chat asks before it submits a request. A send back's note and a hold's reason are
+ * the model's words and go on with the request, so the question quotes them on their own lines:
+ * the person says yes to exactly what will be sent.
+ */
 export function askText(r: RequestShape, slug: string): string {
+  const note = (r.note ?? "").trim();
+  const reason = (r.reason ?? "").trim();
   switch (r.kind) {
     case "approve": return r.expect === "verifying" ? `Confirm ${slug} is done?` : r.expect === "merge-review" ? `Approve merging ${slug}?` : `Approve the ${REVIEWED[r.expect] ?? "work"} of ${slug}?`;
-    case "send-back": return `Send ${slug} back with your note, so its ${REVIEWED[r.expect] ?? "work"} is done again?`;
+    case "send-back": return `Send ${slug} back, so its ${REVIEWED[r.expect] ?? "work"} is done again, with this note?\n\n${note}`;
     case "retry": return `Retry ${slug} from ${r.to}?`;
     case "accept": return `Start work on ${slug} now?`;
     case "close": return `Close ${slug}? It stops for good.`;
     case "priority": return `Set ${slug}'s priority to ${r.priority ?? "normal"}?`;
-    case "hold": return `Hold ${slug}, so the loop starts no step for it?`;
+    case "hold": return reason ? `Hold ${slug}, so the loop starts no step for it, with this reason?\n\n${reason}` : `Hold ${slug}, so the loop starts no step for it?`;
     case "release": return `Release ${slug}, so the loop goes on with it?`;
     case "undo": return `Take ${slug} back to ${r.to}?`;
   }

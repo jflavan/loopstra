@@ -166,6 +166,20 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a send back's note and a hold's reason are shown in the question, on their own lines", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("plan-review"), other: INTENT("building") }, config: PLAN_PERSON });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "send-back", slug: "csv-export", note: "Split step 3 into two.", priority: null } }));
+      await r.answer("orchestrator", 2, turn("Sure.", { action: { kind: "hold", slug: "other", note: "Waiting on legal.", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("send it back, step 3 is too big"), out.send);
+      expect(out.sent.at(-1)).toBe("Send csv-export back, so its plan is done again, with this note?\n\nSplit step 3 into two.\n\nReply yes to go ahead.");
+      await o.handle(message("hold other for legal"), out.send);
+      expect(out.sent.at(-1)).toBe("Hold other, so the loop starts no step for it, with this reason?\n\nWaiting on legal.\n\nReply yes to go ahead.");
+    } finally { r.cleanup(); }
+  });
+
   test("send back needs a note", async () => {
     const r = await chatRepo({ intents: { "csv-export": INTENT("plan-review") }, config: PLAN_PERSON });
     try {

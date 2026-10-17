@@ -97,6 +97,10 @@ describe("words", () => {
     expect(requestLabel({ kind: "hold", expect: "building" })).toBe("Hold");
     expect(askText({ kind: "approve", expect: "plan-review" }, "csv-export")).toBe("Approve the plan of csv-export?");
     expect(askText({ kind: "close", expect: "building" }, "csv-export")).toBe("Close csv-export? It stops for good.");
+    // The model's own words, quoted on their own lines: the person says yes to exactly what goes on.
+    expect(askText({ kind: "send-back", expect: "plan-review", note: " Split step 3. " }, "csv-export")).toBe("Send csv-export back, so its plan is done again, with this note?\n\nSplit step 3.");
+    expect(askText({ kind: "hold", expect: "building", reason: "Waiting on legal." }, "csv-export")).toBe("Hold csv-export, so the loop starts no step for it, with this reason?\n\nWaiting on legal.");
+    expect(askText({ kind: "hold", expect: "building", reason: "" }, "csv-export")).toBe("Hold csv-export, so the loop starts no step for it?");
     expect(resultText({ kind: "approve", expect: "plan-review" }, "csv-export", "plan-approved")).toBe("Plan approved: csv-export is now plan approved, waiting to build.");
     expect(resultText({ kind: "hold", expect: "building" }, "csv-export", "building")).toBe("csv-export is held: the loop starts no step for it until it is released.");
   });

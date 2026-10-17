@@ -321,7 +321,8 @@ export class Orchestrator {
     }
     const ask = askText(request, slug);
     t.pending = { kind: "action", request, ask, by: m.authorId, at: new Date().toISOString() };
-    await say(`${ask} Reply yes to go ahead.`);
+    // A quoted note or reason stands on its own lines (see askText); the go-ahead comes after it.
+    await say(`${ask}${ask.includes("\n") ? "\n\n" : " "}Reply yes to go ahead.`);
   }
 
   private async doAction(cfg: Config, m: IncomingMessage, request: RequestBody, say: Send): Promise<void> {
