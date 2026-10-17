@@ -21,6 +21,7 @@ import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
+import { sweepInbox } from "./steering";
 import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
@@ -588,10 +589,12 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
 /**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
  * plain note (the detail goes to the trace); only a stop request passes through. A session a person
- * stopped, or a question an agent asked, ends the step quietly: the change keeps its status.
+ * stopped, or a question an agent asked, ends the step quietly: the change keeps its status. First,
+ * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come.
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
+    sweepInbox(ctx);
     return await runStep(ctx);
   } catch (e) {
     if (e instanceof SessionStopped) {

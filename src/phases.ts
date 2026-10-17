@@ -14,6 +14,7 @@ import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./s
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { deliverInbox } from "./steering";
 import { toolTarget } from "./tools";
 
 /**
@@ -366,6 +367,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
       signal,
+      // Live: what people send this session while it runs reaches it (see src/steering.ts).
+      live: { attach: (ctl) => deliverInbox(ctx, seq, spec.name, ctl) },
     },
     onEvent: (e) => { if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e, cwd), seq); },
     read: (output) => {
