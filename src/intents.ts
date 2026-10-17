@@ -486,9 +486,10 @@ export function planFilesNeeded(status: Status): boolean {
 /**
  * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
  * lists a file that another change's plan lists, and that change is building, in review or waiting to
- * merge, or is at plan-approved earlier in the queue and not waiting on its own depends_on. Building
- * both would end in a rebase conflict, which needs an engineer. No deadlock: a holder is past
- * plan-approved, or earlier in the queue and free to go. `files` gives each change's planned files
+ * merge (held or not: its branch exists), or is at plan-approved earlier in the queue, not held and not
+ * waiting on its own depends_on. Building both would end in a rebase conflict, which needs an engineer.
+ * No deadlock: a holder is past plan-approved, or earlier in the queue and free to go (a held change
+ * never runs, so it holds no plan-approved change back). `files` gives each change's planned files
  * (null or missing: the plan has no file list, so it never waits and holds nobody). Gives the change
  * each waiting change waits for (the first in queue order).
  */
@@ -501,7 +502,7 @@ export function fileHolds(ordered: Intent[], files: ReadonlyMap<string, string[]
     const holder = ordered.find((h, hat) => {
       if (h === i) return false;
       const s = h.file.frontmatter.status;
-      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !waitingOn(h, ordered).length);
+      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !h.file.frontmatter.hold.trim() && !waitingOn(h, ordered).length);
       return holding && (listed(h) ?? []).some((f) => mine.includes(f));
     });
     if (holder) holds.set(i.slug, holder.slug);
