@@ -1,20 +1,19 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { attention, healthView, type AttentionItem } from "../attention";
 import { startOfToday } from "../budget";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readPause, type LoopStatus } from "../heartbeat";
-import { ARTIFACTS, effectivePriority, intentRoot, orderQueue, plainStatus, scanRepo, shownNote, SLUG, type Intent, type Unreadable } from "../intents";
+import { ARTIFACTS, effectivePriority, orderQueue, plainStatus, scanRepo, shownNote, type Intent, type Unreadable } from "../intents";
 import { Trace } from "../trace";
+import { PHASE_FILES, resolveDocument, resolveRunFile, runsDir } from "../console/files";
+export { resolveDocument, resolveRunFile } from "../console/files";
 import { errorText } from "../shell";
 import { judgesView, type JudgesView } from "./judges";
 import { CHAT_SLUG } from "../chat/agents";
 import type { DashboardTransport } from "../chat/transports/dashboard";
 
 export type { AttentionItem } from "../attention";
-
-/** Files a phase can leave behind, in the order the dashboard lists them. */
-const PHASE_FILES = ["prompt.md", "envelope.json", "raw.jsonl"] as const;
 
 export interface PhaseView {
   seq: number; name: string; kind: string; status: string; started: string; ended: string | null;
@@ -157,50 +156,6 @@ function totals(phases: Array<Pick<PhaseView, "started" | "costUsd">>, now: Date
 
 function parsePayload(text: string): unknown {
   try { return JSON.parse(text); } catch { return text; }
-}
-
-function runsDir(root: string): string {
-  return join(root, ".loopstra", "runs");
-}
-
-/**
- * The real path of a file under `.loopstra/runs/`, or null. `rel` is the part of the URL after
- * `/files/`, already decoded. Refuses `..`, absolute and drive paths, stream names, anything that
- * is not a regular file, and anything whose real path (after links) leaves the runs directory.
- */
-export function resolveRunFile(root: string, rel: string): string | null {
-  if (!rel || rel.includes("\0") || rel.includes(":") || isAbsolute(rel) || /^[\\/]/.test(rel)) return null;
-  const parts = rel.split(/[\\/]+/);
-  if (parts.some((p) => p === ".." || p === "." || p === "")) return null;
-  const base = runsDir(root);
-  if (!existsSync(base)) return null;
-  try {
-    const realBase = realpathSync(base);
-    const real = realpathSync(resolve(base, ...parts));
-    if (!real.startsWith(realBase + sep)) return null;
-    if (!statSync(real).isFile()) return null;
-    return real;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The real path of one of a change's own documents, `intent/<slug>/<name>`, or null. The slug must
- * be a valid change name and the name one of the documents Loopstra knows (intent.md, spec.md, ...);
- * the real path (after links) must stay inside the change's folder and be a regular file.
- */
-export function resolveDocument(root: string, slug: string, name: string): string | null {
-  if (!SLUG.test(slug) || !(ARTIFACTS as readonly string[]).includes(name)) return null;
-  const dir = join(intentRoot(root), slug);
-  try {
-    const realDir = realpathSync(dir);
-    const real = realpathSync(join(dir, name));
-    if (!real.startsWith(realDir + sep) || !statSync(real).isFile()) return null;
-    return real;
-  } catch {
-    return null;
-  }
 }
 
 const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" };
