@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { attention, type AttentionItem } from "../attention";
 import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
 import { loadConfig, type Config } from "../config";
-import { agoText, heartbeatState, readHeartbeat, readPause } from "../heartbeat";
+import { agoText, heartbeatState, readHeartbeat, readPause, type Heartbeat, type LoopStatus } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo, waitNote, type Intent, type Scan, type Status } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
@@ -49,9 +49,9 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   const scan = opts.scan ?? await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
   const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
-  const beat = readHeartbeat(root);
-  const hb = heartbeatState(beat, pollSeconds, now, { pause: readPause(root) });
-  const runningNow = await safely("running steps", () => runningPhases(trace, hb.working.map((w) => w.slug), beat?.lastTickAt ?? null, titles), [] as RunningPhase[]);
+  const live = loopNow(root, pollSeconds, now);
+  const { beat, state: hb } = live;
+  const runningNow = await safely("running steps", () => runningPhases(trace, runningRows(trace, live), titles), [] as RunningPhase[]);
   const busy = new Set(runningNow.map((p) => p.slug));
   const loop: LoopSection = {
     ...hb,
@@ -102,15 +102,32 @@ function statusSince(trace: Trace, i: Intent): string | null {
   try { return statSync(join(i.dir, "intent.md")).mtime.toISOString(); } catch { return null; }
 }
 
+/** The loop's heartbeat and the state it shows, read the same way for every screen. */
+export function loopNow(root: string, pollSeconds: number, now: Date): { beat: Heartbeat | null; state: LoopStatus } {
+  const beat = readHeartbeat(root);
+  return { beat, state: heartbeatState(beat, pollSeconds, now, { pause: readPause(root) }) };
+}
+
 /**
- * The phases running now for the changes the heartbeat names, in the order they started. Only those
- * started since the tick began (`since`): a row a killed process left running is not current.
+ * The phases running now, per change, for the board and a change's page alike: of the changes a
+ * live heartbeat says the loop is working on (none without one), the phases started since its
+ * current tick began. A row a killed process left running is not current.
  */
-function runningPhases(trace: Trace, working: string[], since: string | null, titles: ReadonlyMap<string, string>): RunningPhase[] {
+export function runningRows(trace: Trace, loop: { beat: Heartbeat | null; state: LoopStatus }): Map<string, PhaseRow[]> {
+  const since = loop.beat?.lastTickAt ?? null;
+  const out = new Map<string, PhaseRow[]>();
+  for (const { slug } of loop.state.working) {
+    const rows = trace.phases(slug).filter((p) => p.status === "running" && !(since && p.started < since));
+    if (rows.length) out.set(slug, rows);
+  }
+  return out;
+}
+
+/** The running phases as cards, in the order the heartbeat names their changes. */
+function runningPhases(trace: Trace, running: ReadonlyMap<string, PhaseRow[]>, titles: ReadonlyMap<string, string>): RunningPhase[] {
   const out: RunningPhase[] = [];
-  for (const slug of working) {
-    for (const p of trace.phases(slug)) {
-      if (p.status !== "running" || (since && p.started < since)) continue;
+  for (const [slug, rows] of running) {
+    for (const p of rows) {
       const events = trace.phaseEvents(slug, p.seq, STRIP * 2).filter((e) => e.type === "claude_event").map((e) => parsePayload(e.payload) as Summary);
       out.push({
         slug, title: titles.get(slug) ?? slug, seq: p.seq, name: p.name, started: p.started,

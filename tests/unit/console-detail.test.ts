@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { changeDetail, spendView } from "../../src/console/detail";
 import { resolveDocument, resolveRunFile } from "../../src/console/files";
+import { buildModel } from "../../src/console/model";
+import { writeHeartbeat } from "../../src/heartbeat";
 import { templateSha } from "../../src/judges";
 import { Trace } from "../../src/trace";
 import { config, intent, setStarted } from "../console-helpers";
@@ -45,6 +47,33 @@ describe("a change's page", () => {
       expect(d!.phases[1]).toMatchObject({ name: "fix-1", status: "fail", denied: ["Bash(git tag v1)"], files: [] });
       expect(d!.gates[0]).toMatchObject({ gate: "plan", check: "headings", result: "pass" });
       expect(await changeDetail(t.path, trace, "nope")).toBeNull();
+    } finally {
+      trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("it says the change is running just when the board does: a live loop working on it, in a step started this tick", async () => {
+    const t = await seeded();
+    const trace = Trace.open(t.path);
+    try {
+      await config(t.path);
+      const seq = trace.phaseStart("one", "fix-1", "agent");
+      const now = new Date();
+      const iso = (secondsAgo: number) => new Date(now.getTime() - secondsAgo * 1000).toISOString();
+      setStarted(t.path, "one", seq, iso(10));
+      const both = async () => [(await changeDetail(t.path, trace, "one", now))!.running, (await buildModel(t.path, trace, now)).sections.changes[0]!.running];
+
+      // A row left running, with no loop at all: a killed process's.
+      expect(await both()).toEqual([false, false]);
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, working: ["one"], stopping: false, stopped: false });
+      expect(await both()).toEqual([true, true]);
+      // The step started before the current tick: left over from an earlier run.
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(5), lastBeatAt: iso(1), current: { slug: "one" }, working: ["one"], stopping: false, stopped: false });
+      expect(await both()).toEqual([false, false]);
+      // The loop is working on something else.
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "two" }, working: ["two"], stopping: false, stopped: false });
+      expect(await both()).toEqual([false, false]);
     } finally {
       trace.close();
       t.cleanup();

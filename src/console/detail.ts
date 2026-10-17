@@ -3,12 +3,11 @@ import { join } from "node:path";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { loadConfig, type Config } from "../config";
-import { readHeartbeat } from "../heartbeat";
 import { ARTIFACTS, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES, runsDir } from "./files";
-import { changeSummary, totalsOf } from "./model";
+import { changeSummary, loopNow, runningRows, totalsOf } from "./model";
 import type { ChangeDetail, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
@@ -17,12 +16,16 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   const i = ordered.find((x) => x.slug === slug);
   if (!i) return null;
   let lanes = 1;
-  try { lanes = (await loadConfig(root)).speed.max_parallel_changes; } catch { /* the inbox says what is wrong with the config */ }
+  let pollSeconds = 60;
+  try {
+    const cfg = await loadConfig(root);
+    lanes = cfg.speed.max_parallel_changes;
+    pollSeconds = cfg.poll_seconds;
+  } catch { /* the inbox says what is wrong with the config */ }
   const holds = await sameFileHolds(lanes, ordered);
   const rows = trace.phases(slug);
-  // Running since the current tick began; a row a killed process left running is not.
-  const tickStart = readHeartbeat(root)?.lastTickAt ?? null;
-  const busy = new Set(rows.some((p) => p.status === "running" && (!tickStart || p.started >= tickStart)) ? [slug] : []);
+  // The board's rule, so the two never disagree.
+  const busy = new Set(runningRows(trace, loopNow(root, pollSeconds, now)).keys());
   const denied = trace.deniedCommands(slug);
   const phases: PhaseView[] = rows.map((p) => {
     const end = p.ended ? Date.parse(p.ended) : now.getTime();
