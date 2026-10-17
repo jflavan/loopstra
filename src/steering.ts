@@ -47,10 +47,9 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
   const look = () => {
     for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
       if (m.kind === "stop") {
-        if (markDone(ctx.root, ctx.slug, m, "delivered")) {
-          ctx.trace.event(ctx.slug, "steer", { kind: "stop", by: m.by, via: m.via, seq });
-          ctl.stop(m.by);
-        }
+        // A stop that comes once the session has finished is too late, and is dropped.
+        const took = ctl.stop(m.by);
+        if (markDone(ctx.root, ctx.slug, m, took ? "delivered" : "dropped") && took) ctx.trace.event(ctx.slug, "steer", { kind: "stop", by: m.by, via: m.via, seq });
       } else if (!steerable) {
         keepForNext(ctx, m);
       } else if (m.kind === "message") {
@@ -60,7 +59,7 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
         ctx.trace.event(ctx.slug, "steer", { kind: "message", by: m.by, via: m.via, seq, text: m.text });
         record(ctx, () => appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "message", who: m.by, via: m.via, phase: name, text: m.text, at: new Date() }));
       } else {
-        if (!ctl.redirect(redirectText(m))) continue;
+        if (!ctl.redirect(redirectText(m), m.by)) continue;
         markDone(ctx.root, ctx.slug, m, "delivered");
         ctx.trace.event(ctx.slug, "steer", { kind: "redirect", by: m.by, via: m.via, seq, text: m.text });
         record(ctx, () => appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "redirect", who: m.by, via: m.via, phase: name, text: m.text, at: new Date() }));
