@@ -49,7 +49,8 @@ function promptOf(runDir: string, p: PhaseRow): Promise<string> {
 
 describe("verify stage", () => {
   test("lessons runs alongside the done-check; with speed.overlap_judges off, after it", async () => {
-    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    // A long done-check: the two add their copies of main one after the other, and a slow machine takes a while over each.
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "done-check=4000,lessons=600" });
     try {
       for (const on of [true, false]) {
         const { repo, ctx, trace } = await merged({ config: `speed:
@@ -67,10 +68,10 @@ describe("verify stage", () => {
     } finally {
       restore();
     }
-  });
+  }, 90_000);
 
   test("with a daily budget, lessons runs alongside only when the day has room for two whole sessions", async () => {
-    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "600" });
+    const restore = setEnv({ LOOPSTRA_FAKE_DELAY_MS: "done-check=4000,lessons=600" });
     try {
       // No session cap: the first session would hold the rest of the day and starve the other.
       for (const [config, overlaps] of [
@@ -88,7 +89,7 @@ describe("verify stage", () => {
     } finally {
       restore();
     }
-  });
+  }, 90_000);
 
   test("with another change running a step, lessons runs alongside only when the day also has room for that change's session", async () => {
     claim("say-goodbye");

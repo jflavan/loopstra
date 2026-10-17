@@ -110,10 +110,10 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
     if (watcher) return;
     try {
       mkdirSync(dir, { recursive: true });
-      const w = watch(dir, (_event, name) => {
+      const w = watch(dir, () => {
         // A deleted folder's watcher fires without end (Bun on Windows): drop it, the timer watches again.
         if (!existsSync(dir)) return unwatch(w);
-        if (isNewRequest(dir, name)) pass();
+        if (newRequestWaiting(root)) pass();
       });
       w.on("error", () => unwatch(w));
       watcher = w;
@@ -133,12 +133,13 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
 }
 
 /**
- * True when a watch event names a request file waiting in the requests folder itself. Writes under
- * `applying/` and `results/` (a pass's own), and a request claimed or cancelled meanwhile, start no
- * pass: a failed pass rewrites its claimed request, and that would start the next pass at once.
+ * True when a request waits in the requests folder itself, not yet claimed: what a watch event starts
+ * a pass for. Writes under `applying/` and `results/` (a pass's own) start none: a failed pass rewrites
+ * its claimed request, and that would start the next pass at once. The event's file name is not used:
+ * a request is written to a temporary file and renamed, and macOS may name either one, or none.
  */
-function isNewRequest(dir: string, name: string | Buffer | null): boolean {
-  return typeof name === "string" && /^[^/\\]+\.json$/.test(name) && existsSync(join(dir, name));
+function newRequestWaiting(root: string): boolean {
+  return waitingIds(root).length > 0;
 }
 
 /**
