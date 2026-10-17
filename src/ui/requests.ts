@@ -97,6 +97,11 @@ export function follow(id: string, onDone: (d: Done) => void): () => void {
   };
 }
 
+/** The toast when an action could not be sent at all: plain words; the error itself goes to the browser's console. */
+export function unsentText(label: string): string {
+  return `${label}: it could not be sent. Try again.`;
+}
+
 /**
  * Sends an action and keeps the person told: a toast at once (with Undo for 10 s when the action has
  * one), then the loop's answer. Undo cancels the request if the loop has not claimed it yet;

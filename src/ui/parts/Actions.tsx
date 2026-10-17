@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { PRIORITY_NAMES, type ChangeSummary, type Offer } from "../../console/types";
-import { act, bodyFor } from "../requests";
+import { act, bodyFor, unsentText } from "../requests";
 import { requests, toast } from "../store";
 
 /** Actions that open a small form first: a note, a reason, or a confirmation. */
@@ -51,10 +51,12 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
   /** Sends `o` for the change `c` as the person saw it; gives whether it was sent. Never throws: a failure is a toast. */
   const run = async (c: ChangeSummary, o: Offer, input: { note?: string; priority?: string; reason?: string } = {}): Promise<boolean> => {
     setBusy(true);
+    const label = `${o.label}, ${c.slug}`;
     try {
-      return await act(bodyFor(c, o, input), { note: c.note, priority: c.statedPriority }, `${o.label}, ${c.slug}`);
+      return await act(bodyFor(c, o, input), { note: c.note, priority: c.statedPriority }, label);
     } catch (e) {
-      toast(`${o.label}, ${c.slug}: it could not be sent (${e instanceof Error ? e.message : String(e)}).`, "bad");
+      console.error(`${label}: it could not be sent`, e);
+      toast(unsentText(label), "bad");
       return false;
     } finally {
       setBusy(false);

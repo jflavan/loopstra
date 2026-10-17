@@ -12,7 +12,7 @@ import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { act, bodyFor, nextPoll, undoFor } from "../../src/ui/requests";
+import { act, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -460,5 +460,9 @@ describe("requests from the page", () => {
     expect(nextPoll(30)).toBe(5000);
     expect(nextPoll(143)).toBe(5000);
     expect(nextPoll(144)).toBeNull();
+  });
+
+  test("an action that could not be sent says so plainly, without the error itself", () => {
+    expect(unsentText("Approve the plan, a")).toBe("Approve the plan, a: it could not be sent. Try again.");
   });
 });
