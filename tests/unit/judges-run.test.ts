@@ -5,7 +5,7 @@ import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
 import { claim, release } from "../../src/lanes";
-import { setPhaseBoundary, type AgentPhaseSpec } from "../../src/phases";
+import type { AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { fixture, fixtureDir, judgeNotes, seedCaught, setupRepo, withEnv } from "../helpers";
@@ -287,28 +287,17 @@ describe("runJudge first", () => {
     });
   }
 
-  test("earned and escalated: the recorded times are the sessions' own, not the merge work run before each phase", async () => {
+  test("earned and escalated: each session's time is its own, so the two one after the other fit in the call's wall time", async () => {
     await withRepo(FIRST, { "spec-check@sonnet": fixture("spec-check-reject"), "spec-check@opus": fixture("spec-check-reject") }, async ({ repo, ctx, trace }) => {
       seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
-      // A slow boundary, like merging another change whose pull request became ready.
-      let boundaryMs = 0;
-      setPhaseBoundary(async () => {
-        const started = Date.now();
-        await Bun.sleep(800);
-        boundaryMs += Date.now() - started;
-      });
       const started = Date.now();
-      try {
-        expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ decidedBy: "strong" });
-      } finally {
-        setPhaseBoundary(null);
-      }
+      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ decidedBy: "strong" });
       const wall = Date.now() - started;
       const row = trace.judgeRows().at(-1)!;
       expect(row).toMatchObject({ how: "escalated" });
-      expect(boundaryMs).toBeGreaterThan(0);
-      // Each session and each boundary took its own time, so together they fit in the call's wall time.
-      expect(row.cheap_ms! + row.strong_ms! + boundaryMs).toBeLessThanOrEqual(wall + 50);
+      expect(row.cheap_ms!).toBeGreaterThan(0);
+      expect(row.strong_ms!).toBeGreaterThan(0);
+      expect(row.cheap_ms! + row.strong_ms!).toBeLessThanOrEqual(wall + 50);
     });
   });
 

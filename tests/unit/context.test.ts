@@ -6,10 +6,11 @@ import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
-  StepContext, block, blockNote, clearMarker, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
+  StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
   readArtifact, setStatus, writeArtifact, writeIntentPriority, loadSessions, saveSession,
 } from "../../src/context";
-import { lastCommit, tempGitRepo } from "../helpers";
+import { requestStop, resetStop, StopRequested } from "../../src/stop";
+import { lastCommit, run, tempGitRepo } from "../helpers";
 
 async function setup() {
   const repo = await tempGitRepo();
@@ -148,6 +149,39 @@ describe("StepContext", () => {
     expect(await lastCommit(repo.path)).toContain("loopstra(x): record priority");
     expect(await new Git(repo.path).isDirty()).toBe(false);
     trace.close(); repo.cleanup();
+  });
+
+  test("a stop that lands while a record is written still commits it; one asked for before writes nothing", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      // Asked for between the write and the commit: the commit still lands, so main is never left with a record half saved.
+      await commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
+        requestStop();
+      });
+      // (Read with plain git: Loopstra's own git calls refuse to start after a stop.)
+      expect((await run(["git", "log", "-1", "--format=%s"], repo.path)).out).toContain("loopstra(x): a note");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      // Asked for before: nothing is written, and the stop goes on.
+      let wrote = false;
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "another", async () => { wrote = true; })).rejects.toBeInstanceOf(StopRequested);
+      expect(wrote).toBe(false);
+    } finally {
+      resetStop();
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a stop asked for while setStatus checks the branch is a stop, never 'the main checkout is on a different branch'", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      requestStop();
+      await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(StopRequested);
+      expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("accepted");
+    } finally {
+      resetStop();
+      trace.close(); repo.cleanup();
+    }
   });
 
   test("onceMarker is true only the first time; clearMarker resets it", async () => {

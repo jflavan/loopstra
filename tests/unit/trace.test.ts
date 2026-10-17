@@ -48,6 +48,47 @@ describe("Trace", () => {
     t.cleanup();
   });
 
+  test("the lookups each tick makes have indexes, and an old database gains them when it is opened", () => {
+    const t = tempDir();
+    try {
+      // A trace.db from before the indexes: only the events table and its first index.
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      const old = new Database(join(t.path, ".loopstra", "trace.db"));
+      old.exec("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL); CREATE INDEX events_slug ON events (slug, id);");
+      old.close();
+      const trace = Trace.open(t.path);
+      trace.close();
+      const db = new Database(join(t.path, ".loopstra", "trace.db"));
+      const indexes = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((r) => r.name);
+      expect(indexes).toEqual(expect.arrayContaining(["events_slug", "events_slug_type", "signals_name", "gates_check", "phases_started"]));
+      // lastEvent on the loop's rows (one per tick) is an index search, not a scan of every _loop row.
+      const plan = db.query<{ detail: string }, []>("EXPLAIN QUERY PLAN SELECT * FROM events WHERE slug = '_loop' AND type = 'error' AND instr(payload, 'gc') > 0 ORDER BY id DESC LIMIT 1").all().map((r) => r.detail).join("\n");
+      expect(plan).toContain("events_slug_type");
+      db.close();
+    } finally { t.cleanup(); }
+  });
+
+  test("eventOnChange records an event only when the field differs from the newest one like it, or that one is too old", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const pauses = () => trace.events("_loop").filter((e) => e.type === "pause").map((e) => JSON.parse(e.payload).reason);
+      trace.eventOnChange("_loop", "pause", "", { reason: "spent" }, "reason");
+      trace.eventOnChange("_loop", "pause", "", { reason: "spent" }, "reason");
+      expect(pauses()).toEqual(["spent"]);
+      trace.eventOnChange("_loop", "pause", "", { reason: "held" }, "reason");
+      expect(pauses()).toEqual(["spent", "held"]);
+      // The same again, but the newest is older than `since`: recorded anew (a new day, say).
+      trace.eventOnChange("_loop", "pause", "", { reason: "held" }, "reason", new Date(Date.now() + 60_000).toISOString());
+      expect(pauses()).toEqual(["spent", "held", "held"]);
+      // Only events like it count: another slug's, or one whose payload lacks `like`, do not.
+      trace.eventOnChange("x", "error", '"where":"scan"', { where: "scan", problem: "p" }, "problem");
+      trace.event("x", "error", { where: "elsewhere", problem: "q" });
+      trace.eventOnChange("x", "error", '"where":"scan"', { where: "scan", problem: "p" }, "problem");
+      expect(trace.events("x").map((e) => JSON.parse(e.payload).problem)).toEqual(["p", "q"]);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
   test("lastGate returns the newest row for one gate check only", () => {
     const t = tempDir();
     const trace = Trace.open(t.path);

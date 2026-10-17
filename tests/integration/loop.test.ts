@@ -95,11 +95,14 @@ describe("the loop", () => {
         const total = phases.reduce((sum, p) => sum + p.cost_usd, 0);
         expect(trace.costIn({ except: CHAT_SLUG }, startOfToday())).toBeCloseTo(total, 6);
         // Golden, with the default of one change at a time: the phases and status changes come out in today's order.
-        expect(phases.map((p) => `${p.name}:${p.status}`)).toEqual([
+        // The done-check and the lessons beside it each make a copy of main first, so either may start first.
+        const rows = phases.map((p) => `${p.name}:${p.status}`);
+        expect(rows.slice(0, -2)).toEqual([
           "intake:success", "design:success", "spec-check:success", "early-plan:success", "plan-challenge:success",
           "branch:success", "build:success", "drift:success", "test-1:success", "verify:success", "early-review:success",
-          "merge:success", "early-lessons:success", "done-check:success",
+          "merge:success",
         ]);
+        expect(rows.slice(-2).sort()).toEqual(["done-check:success", "early-lessons:success"]);
         const moves = trace.events("add-numbers").filter((e) => e.type === "status_change").map((e) => JSON.parse(e.payload) as { from: string; to: string });
         expect(moves.map((m) => `${m.from}>${m.to}`)).toEqual([
           "accepted>designing", "designing>spec-approved", "spec-approved>planning", "planning>plan-approved",

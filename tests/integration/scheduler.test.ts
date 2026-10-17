@@ -297,6 +297,38 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a snapshot of main a killed loop left behind is removed at the start of the next tick, and a step's own is gone when it ends", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    const git = new Git(repo.path);
+    const left = join(repo.path, ".loopstra", "snapshots", "gone-change");
+    await git.run(["worktree", "add", "--detach", left, "main"]);
+    await tick(repo.path); // the design step reads its own snapshot, then removes it
+    expect(existsSync(left)).toBe(false);
+    expect(existsSync(join(repo.path, ".loopstra", "snapshots", ctx.slug))).toBe(false);
+    expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)).toHaveLength(1);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a move of main that a kill cut short is put back before the tick does anything else", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const git = new Git(repo.path);
+    const from = await git.headSha();
+    await Bun.write(join(repo.path, "moved.md"), "moved\n");
+    await git.commitAll("later");
+    const to = await git.headSha();
+    await git.run(["reset", "-q", "--hard", from]);
+    // As a killed move leaves it: the new commit's file written, the branch not moved, the marker there.
+    await Bun.write(join(repo.path, "moved.md"), "moved\n");
+    await Bun.write(join(repo.path, ".loopstra", "moving-main"), `${from}\n${to}\n`);
+    await tick(repo.path);
+    expect(existsSync(join(repo.path, "moved.md"))).toBe(false);
+    expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+    expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    expect(trace.events("_loop").some((e) => e.payload.includes("a move of main cut short was put back"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
   test("a change set to merged by hand whose branch never merged keeps its branch and worktree, traced once", async () => {
     const { repo, ctx, trace } = await setupRepo("merged");
     const git = new Git(repo.path);

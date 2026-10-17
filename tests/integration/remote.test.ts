@@ -178,18 +178,21 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
-  test("checks that pass while another change's step runs: the pull request merges between that step's phases, not after the step", async () => {
+  test("checks that pass while another change's step runs: the watcher merges the pull request then, not after the step", async () => {
     const s = await remoteSetup();
     mkdirSync(join(s.repo, "intent", "other"), { recursive: true });
     await Bun.write(join(s.repo, "intent", "other", "intent.md"), "---\nstatus: plan-approved\n---\n# Intent: other\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
     await Bun.write(join(s.repo, "intent", "other", "spec.md"), "# Spec\n\n## Summary\ns\n");
     await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN);
-    // The test command of the next build: GitHub's checks finish while it runs.
+    // The test command of the next build: GitHub's checks pass while it runs, and it keeps running
+    // until the pull request has merged (or 30 seconds have passed).
     await Bun.write(join(s.repo, "flip-checks.ts"), [
       "const path = process.env.LOOPSTRA_FAKE_GH_STATE!;",
       "const state = await Bun.file(path).json();",
       "for (const pr of Object.values(state.prs) as { checks: string }[]) pr.checks = \"pass\";",
       "await Bun.write(path, JSON.stringify(state));",
+      "const until = Date.now() + 30_000;",
+      "while (Date.now() < until && !(Object.values((await Bun.file(path).json()).prs) as { merged: boolean }[]).some((p) => p.merged)) await Bun.sleep(100);",
       "",
     ].join("\n"));
     await new Git(s.repo).commitAll("another change");
@@ -199,10 +202,10 @@ describe("the loop with a GitHub remote", () => {
       await tick(s.repo); // review, pull request
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
 
-      await Bun.write(configPath(s.repo), "version: 1\ncommands:\n  test: bun flip-checks.ts\n");
+      await Bun.write(configPath(s.repo), "version: 1\ncommands:\n  test: bun flip-checks.ts\npoll_seconds: 1\n");
       await new Git(s.repo).commitAll("test command");
       await run(["git", "push", "-q", "origin", "main"], s.repo);
-      const r = await tick(s.repo); // add-numbers still waits; then other is built, and its tests let the checks pass
+      const r = await tick(s.repo); // other is built, its tests let the checks pass, and add-numbers merges meanwhile
       expect(r.picked).toBe("other");
       expect((await readIntent(s.repo, "other")).file.frontmatter.status).toBe("reviewing");
       expect((await intentOf(s.repo)).status).toBe("merged");
@@ -210,7 +213,11 @@ describe("the loop with a GitHub remote", () => {
       expect(await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true).then((x) => x.code)).toBe(0);
       const trace = Trace.open(s.repo);
       try {
-        expect(trace.events(SLUG).some((e) => e.type === "command" && e.payload.includes("\"merge step between phases\"") && e.payload.includes("\"during\":\"other\""))).toBe(true);
+        // The merge started while other's test command still ran, which waited for it (well under its 30 seconds).
+        const test = trace.events("other").filter((e) => e.type === "command" && e.payload.includes("flip-checks")).at(-1)!;
+        const mergeStarted = trace.events(SLUG).find((e) => e.type === "phase_start" && e.payload.includes("\"name\":\"merge\""))!;
+        expect(mergeStarted.id).toBeLessThan(test.id);
+        expect(JSON.parse(test.payload).durationMs).toBeLessThan(25_000);
       } finally {
         trace.close();
       }

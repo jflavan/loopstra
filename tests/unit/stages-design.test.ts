@@ -344,17 +344,24 @@ describe("plan ahead", () => {
     }
   });
 
-  test("a plan whose session changed the code it read is not kept", async () => {
+  test("the plan written ahead reads the design step's snapshot of main, and is kept with the commit it read", async () => {
     const plan = fixture("plan").split("\n");
     plan.splice(1, 0, JSON.stringify({ type: "fake_action", write: { path: "NEW.md", content: "new\n" } }));
     const dir = fixtureDir({ "plan-1": plan.join("\n") });
     try {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
         const { repo, ctx, trace } = await setupRepo("accepted");
+        await Bun.write(join(repo.path, "uncommitted.md"), "a person's work in progress\n");
         await runDesignStep(ctx);
         expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
-        expect(planAheadNotes(trace)).toEqual(["not kept: the code on main changed while it was written"]);
-        expect(existsSync(join(ctx.runDir, PLAN_AHEAD))).toBe(false);
+        expect(planAheadNotes(trace)).toEqual(["kept for the plan step"]);
+        // What a session leaves in its snapshot never reaches the main checkout.
+        expect(existsSync(join(repo.path, "NEW.md"))).toBe(false);
+        // The commit main was on when the step's first session started (the step had just recorded designing).
+        const base = JSON.parse(readFileSync(join(ctx.runDir, PLAN_AHEAD), "utf8")).base as string;
+        expect((await new Git(repo.path).run(["log", "-1", "--format=%s", base])).out).toContain("accepted → designing");
+        expect((await new Git(repo.path).run(["cat-file", "-e", `${base}:uncommitted.md`], true)).code).not.toBe(0);
+        await ctx.dropSnapshot();
         trace.close(); repo.cleanup();
       });
     } finally {

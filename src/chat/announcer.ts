@@ -2,6 +2,7 @@ import { appendFileSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { join } from "node:path";
 import { attention } from "../attention";
 import { loadConfig, type Config } from "../config";
+import { pidAlive } from "../heartbeat";
 import { scanRepo, type Status } from "../intents";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
@@ -62,10 +63,6 @@ interface AnnouncerState {
 /** How long a lock holder may go without polling before another process takes over. */
 const LOCK_STALE_MS = 5 * 60_000;
 
-function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; }
-}
-
 /**
  * Takes or keeps the announcer lock, `.loopstra/chat/announcer.lock`: true when this process is the
  * one that writes announcements. Taking it is atomic: the file is created only if it does not exist.
@@ -89,7 +86,7 @@ export function holdAnnouncerLock(root: string, pid = process.pid, now = Date.no
   if (!held) {
     // Being written this moment, or damaged: damaged only once it has stayed unreadable a while.
     try { if (now - statSync(path).mtimeMs < LOCK_STALE_MS) return false; } catch { return create(); }
-  } else if (alive(held.pid) && now - Date.parse(held.at) <= LOCK_STALE_MS) {
+  } else if (pidAlive(held.pid) && now - Date.parse(held.at) <= LOCK_STALE_MS) {
     return false;
   }
   const aside = `${path}.stale-${pid}-${now}`;

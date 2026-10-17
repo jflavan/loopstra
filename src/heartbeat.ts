@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
 import { onStop } from "./stop";
+import { andList } from "./text";
 
 /**
  * The loop's heartbeat, `.loopstra/heartbeat.json`. The scheduler writes it on start, at the start
@@ -45,10 +46,6 @@ function workingOf(hb: Heartbeat): Array<{ slug: string }> {
   return slugs.map((slug) => ({ slug }));
 }
 
-/** "a", "a and b", "a, b and c". */
-export function namesText(names: string[]): string {
-  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
 
 /** How often a live loop refreshes `lastBeatAt`. */
 export const BEAT_MS = 5_000;
@@ -125,7 +122,7 @@ export function heartbeatState(
   if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, working: workingOf(hb) };
   if (hb.pausedUntil && Date.parse(hb.pausedUntil) > t) return { state: "paused", text: `Paused — ${hb.pauseReason ?? ""}`.trimEnd(), working: [] };
   const working = workingOf(hb);
-  const on = working.length ? `working on ${namesText(working.map((w) => w.slug))}, ` : "";
+  const on = working.length ? `working on ${andList(working.map((w) => w.slug))}, ` : "";
   return { state: "running", text: `Running — ${on}${lastCheck}`, working };
 }
 

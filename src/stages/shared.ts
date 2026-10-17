@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, passOn } from "../git";
-import { onMain } from "../lanes";
+import { onCheckout } from "../lanes";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Status } from "../intents";
 import { errorText } from "../shell";
@@ -11,8 +9,8 @@ import { errorText } from "../shell";
 /**
  * Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the
  * command and its output go to the trace. In the main checkout (the design, plan and verify stages)
- * they run under its main lock, inside the phase: they may write files or run git there, and must
- * never run alongside another change's commit, sync or merge. The command time limit bounds the wait.
+ * they run under its checkout lock, inside the phase: they may write files or run git there, and
+ * must never run alongside a record's commit, a sync or a merge. The command time limit bounds the wait.
  */
 export async function runHookCommands(ctx: StepContext, which: "before" | "after", stage: keyof StepContext["cfg"]["stages"], cwd = ctx.root): Promise<StepResult> {
   const cmds = ctx.cfg.stages[stage][which];
@@ -25,7 +23,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
     }
     return { ok: true as const };
   };
-  const r = await codePhase(ctx, `${stage}-${which}`, () => (cwd === ctx.root ? onMain(ctx.root, runAll) : runAll()));
+  const r = await codePhase(ctx, `${stage}-${which}`, () => (cwd === ctx.root ? onCheckout(ctx.root, runAll) : runAll()));
   if (r.ok) return { ok: true };
   const what = timedOut ? "did not finish in time" : "failed";
   return block(ctx, `A project command that runs ${which} the ${stage} stage ${what}. An engineer needs to look at it.`, { detail: r.detail });
@@ -148,23 +146,9 @@ export function takeKept<N extends PhaseName>(ctx: StepContext, marker: string, 
 /** What is not the code: the loop's records and run folders, and its config (what of it a session sees is in its prompt). */
 const NOT_CODE = [":(exclude)intent", ":(exclude).loopstra", ":(exclude)loopstra/config.yaml"];
 
-/**
- * A fingerprint of a checkout's code as it is now, measured from `base` (a commit): how its tracked
- * files differ from base, staged or not, and each untracked file git does not ignore, with its
- * contents. The same fingerprint from the same base means the same code, whatever was committed in
- * between. Ignored files do not count. Null when base is not a commit there.
- */
-export async function codeState(git: Git, base: string): Promise<string | null> {
-  const diff = await git.run(["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base, "--", ".", ...NOT_CODE], true);
-  if (diff.code !== 0) return null;
-  const untracked = (await git.run(["ls-files", "-z", "--others", "--exclude-standard", "--", ".", ...NOT_CODE])).out.split("\0").filter(Boolean).sort();
-  const hash = new Bun.CryptoHasher("sha256");
-  hash.update(diff.out);
-  for (const path of untracked) {
-    hash.update(`\0${path}\0`);
-    try { hash.update(readFileSync(join(git.cwd, path))); } catch { hash.update("unreadable"); }
-  }
-  return hash.digest("hex");
+/** True when commits `a` and `b` differ in their code (see NOT_CODE); a commit git cannot read counts as different. */
+export async function codeDiffers(git: Git, a: string, b: string): Promise<boolean> {
+  return (await git.run(["diff", "--quiet", "--no-ext-diff", "--no-textconv", a, b, "--", ".", ...NOT_CODE], true)).code !== 0;
 }
 
 export const TESTS_PASSED = "The test command passed after the latest change.";
@@ -181,7 +165,7 @@ export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
 /** Run-folder marker written just before merging (holds main's commit before the merge). */
 export const MERGING = "merging";
 
-/** Run-folder marker: the pull request waits for main here to get changes merged on GitHub (traced once). */
+/** Run-folder marker: the pull request waits for main here to get changes merged on GitHub that the sync could not bring in yet (traced once). */
 export const REMOTE_AHEAD = "remote-ahead";
 
 /**

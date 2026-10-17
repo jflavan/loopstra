@@ -1,12 +1,11 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
-import { CHAT_SLUG, limitOf, MIN_SESSION_USD, sessionCost, staleBefore, startOfToday } from "../budget";
-import { runPhase, type FailureReason } from "../claude";
+import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
+import type { FailureReason } from "../claude";
 import { modelFor, type Config, type ModelRef } from "../config";
 import { jsonSchemaOf } from "../envelopes";
-import { errorText } from "../shell";
-import { StopRequested } from "../stop";
+import { issuesText, tracedSession } from "../sessions";
 import type { Trace } from "../trace";
 
 export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
@@ -92,18 +91,10 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     const why = day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
-  const seq = held.seq;
-  const started = Date.now();
-  const dir = join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${seq}-${o.name}`);
-  let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
-  // What the session cost, once it ended (null until then): kept if the turn fails after it.
-  let costUsd: number | null = null;
-  try {
-    mkdirSync(dir, { recursive: true });
-    await Bun.write(join(dir, "prompt.md"), o.prompt);
-    const raw = Bun.file(join(dir, "raw.jsonl")).writer();
-    writer = raw;
-    const r = await runPhase({
+  const out = await tracedSession({
+    trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd,
+    dir: join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${held.seq}-${o.name}`),
+    run: {
       cwd: o.root,
       prompt: o.prompt,
       schema: jsonSchemaOf(o.schema),
@@ -115,34 +106,15 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       maxBudgetUsd: held.heldUsd,
       resume: o.resume ?? undefined,
       env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
-      onEvent: (e) => { raw.write(JSON.stringify(e) + "\n"); },
-    });
-    costUsd = sessionCost(r, r.durationMs, held.heldUsd);
-    if (!r.ok) {
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd, sessionId: r.sessionId ?? undefined, error: `${r.reason}: ${r.detail}`, denied: r.denied });
-      return { ok: false, reason: r.reason, detail: r.detail, sessionId: r.sessionId, costUsd };
-    }
-    const parsed = o.schema.safeParse(r.structuredOutput);
-    await Bun.write(join(dir, "envelope.json"), JSON.stringify({ valid: parsed.success, output: r.structuredOutput }, null, 2));
-    if (!parsed.success) {
-      const detail = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: `invalid-envelope: ${detail}` });
-      return { ok: false, reason: "invalid-envelope", detail, sessionId: r.sessionId, costUsd: r.costUsd };
-    }
-    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "success", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, denied: r.denied });
-    return { ok: true, value: parsed.data, sessionId: r.sessionId, costUsd: r.costUsd };
-  } catch (e) {
-    if (e instanceof StopRequested) {
-      // A session the stop killed never reported its cost.
-      const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, held.heldUsd);
-      o.trace.phaseEnd(CHAT_SLUG, seq, { status: "interrupted", costUsd: spent, error: "stopped by request" });
-      throw e;
-    }
-    o.trace.phaseEnd(CHAT_SLUG, seq, { status: "fail", costUsd: costUsd ?? 0, error: `crash: runtime error: ${errorText(e)}` });
-    return { ok: false, reason: "crash", detail: errorText(e), sessionId: null, costUsd: costUsd ?? 0 };
-  } finally {
-    if (writer) { try { await writer.end(); } catch { /* already closed */ } }
-  }
+    },
+    read: (output) => {
+      const parsed = o.schema.safeParse(output);
+      return parsed.success ? { ok: true, value: parsed.data } : { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
+    },
+  });
+  return out.ok
+    ? { ok: true, value: out.value, sessionId: out.sessionId, costUsd: out.costUsd }
+    : { ok: false, reason: out.reason, detail: out.detail, sessionId: out.sessionId, costUsd: out.costUsd };
 }
 
 /** What chat has spent since local midnight, in sessions that have ended (not what running ones hold). */

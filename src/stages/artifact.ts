@@ -152,7 +152,6 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
         await callOff(pending);
         throw e;
       }
-      // The comparison first: until the work's rest is called, no merge runs while the cheaper judge reads.
       await finishComparison(ctx, s, pending.comparison);
       await keepAhead(ctx, pending.ahead);
       return { ok: true };
