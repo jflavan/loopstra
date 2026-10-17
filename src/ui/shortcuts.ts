@@ -1,2 +1,47 @@
+import { keyMatcher, keyName, typingIn, type Binding } from "./keys";
+import { navigate } from "./nav";
+import { drawer, helpOpen, paletteOpen } from "./store";
+
+export const SHORTCUTS: Array<Binding & { label: string }> = [
+  { keys: "mod+k", action: "palette", label: "Search and commands" },
+  { keys: "mod+j", action: "drawer", label: "Ask the orchestrator" },
+  { keys: "g l", action: "go:/", label: "Go to Live" },
+  { keys: "g i", action: "go:/inbox", label: "Go to Inbox" },
+  { keys: "g c", action: "go:/changes", label: "Go to Changes" },
+  { keys: "g a", action: "go:/activity", label: "Go to Activity" },
+  { keys: "g s", action: "go:/spend", label: "Go to Spend" },
+  { keys: "?", action: "help", label: "Show these keys" },
+  { keys: "escape", action: "escape", label: "Close what is open" },
+];
+
+/** Keys one screen handles while it is shown (the inbox's j, k and o): it adds them when it opens and removes them when it closes. */
 export const screenKeys = new Map<string, () => void>();
-export function installKeys(): void {}
+
+export function installKeys(): void {
+  const press = keyMatcher(SHORTCUTS);
+  window.addEventListener("keydown", (e) => {
+    const name = keyName(e);
+    if (!name) return;
+    const typing = typingIn(e.target);
+    // In a text box, letters are typing: only Ctrl or Cmd shortcuts and Escape count there.
+    if (typing && !name.startsWith("mod+") && name !== "escape") return;
+    const action = press(name, Date.now());
+    if (!action) {
+      const handler = screenKeys.get(name);
+      if (handler && !typing && !paletteOpen.value) {
+        e.preventDefault();
+        handler();
+      }
+      return;
+    }
+    e.preventDefault();
+    if (action === "palette") paletteOpen.value = !paletteOpen.value;
+    else if (action === "drawer") drawer.value = { ...drawer.value, open: !drawer.value.open };
+    else if (action === "help") helpOpen.value = !helpOpen.value;
+    else if (action === "escape") {
+      paletteOpen.value = false;
+      helpOpen.value = false;
+      drawer.value = { ...drawer.value, open: false };
+    } else if (action.startsWith("go:")) navigate(action.slice(3));
+  });
+}
