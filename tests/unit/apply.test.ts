@@ -293,6 +293,29 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("an approve written again over a person's edit since its last try keeps no hash, so a give-up leaves the edit", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
+      // The person sets the status back by hand and edits the text; the next try writes again over it.
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("status: plan-approved", "status: plan-review").replace("x", "x, and also y"));
+      expect(await apply(r.root)).toBe(0);
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-approved");
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toBeUndefined();
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, text: expect.stringContaining("holds changes it did not make") });
+      expect(readFileSync(path, "utf8")).toContain("x, and also y");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a request given up on never undoes a person's edit made before its write", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
