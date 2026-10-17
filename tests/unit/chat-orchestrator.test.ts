@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator, isYes } from "../../src/chat/orchestrator";
 import { pendingRequests } from "../../src/requests";
-import { holdLoop, writeHeartbeat } from "../../src/heartbeat";
+import { holdLoop, releaseLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
@@ -192,22 +192,27 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
-  test("a loop a person paused: chat says it waits to be resumed, and a stopped one to be started too", async () => {
-    const r = await chatRepo({ intents: { "csv-export": INTENT("draft"), other: INTENT("draft") } });
+  test("when the loop acts: once started when stopped, within seconds when running, and a person's pause only holds new steps", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("draft"), other: INTENT("draft"), third: INTENT("draft") } });
     try {
       await r.answer("orchestrator", 1, turn("Sure.", { accept: { slug: "csv-export" } }));
       await r.answer("orchestrator", 2, turn("Sure.", { accept: { slug: "other" } }));
+      await r.answer("orchestrator", 3, turn("Sure.", { accept: { slug: "third" } }));
       const o = new Orchestrator(r.root);
       const out = sink();
       holdLoop(r.root, "John");
       await o.handle(message("start csv-export"), out.send);
       await o.handle(message("yes"), out.send);
-      expect(out.sent.at(-1)).toBe("Asked the loop to start csv-export. The loop is not running right now and is paused by John, so it starts it once someone runs loopstra start and resumes the loop. I will say here when it has.");
+      expect(out.sent.at(-1)).toBe("Asked the loop to start csv-export. The loop is not running right now, so it starts it once someone runs loopstra start. The loop is paused by John, so new steps then wait until someone resumes it. I will say here when it has.");
       const at = new Date().toISOString();
       writeHeartbeat(r.root, { pid: process.pid, startedAt: at, lastTickAt: at, lastBeatAt: at, current: null, working: [], stopping: false, stopped: false });
       await o.handle(message("start other"), out.send);
       await o.handle(message("yes"), out.send);
-      expect(out.sent.at(-1)).toBe("Asked the loop to start other. The loop is paused by John; it starts it once it is resumed. I will say here when it has.");
+      expect(out.sent.at(-1)).toBe("Asked the loop to start other. It starts it within a few seconds. The loop is paused by John, so new steps wait until someone resumes it. I will say here when it has.");
+      releaseLoop(r.root);
+      await o.handle(message("start third"), out.send);
+      await o.handle(message("yes"), out.send);
+      expect(out.sent.at(-1)).toBe("Asked the loop to start third. It starts it within a few seconds, and I will say here when it has.");
     } finally { r.cleanup(); }
   });
 

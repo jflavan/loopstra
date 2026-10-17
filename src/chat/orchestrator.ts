@@ -331,15 +331,18 @@ export class Orchestrator {
     await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);
   }
 
-  /** When the loop will act on a request, in words: on its next check, once it is resumed, or when it is started. */
+  /**
+   * When the loop will act on a request, in words. `what` is what it does ("starts it"). A running
+   * loop applies requests within a few seconds, paused or not; a person's pause only keeps new steps
+   * waiting. A stopped loop applies them once it is started.
+   */
   private loopWhen(cfg: Config, what: string): string {
     const hold = readLoopHold(this.root);
     const loop = heartbeatState(readHeartbeat(this.root), cfg.poll_seconds, new Date(), { pause: readPause(this.root), hold });
-    // A stopped loop that is also paused by a person needs both: a start, and someone to resume it.
-    if (loop.state === "stopped" && hold) return `The loop is not running right now and is paused by ${hold.by}, so it ${what} once someone runs loopstra start and resumes the loop. I will say here when it has.`;
-    if (loop.state === "stopped") return `The loop is not running right now, so it ${what} once someone runs loopstra start. I will say here when it has.`;
+    const held = hold ? ` The loop is paused by ${hold.by}, so new steps then wait until someone resumes it.` : "";
+    if (loop.state === "stopped") return `The loop is not running right now, so it ${what} once someone runs loopstra start.${held} I will say here when it has.`;
     if (loop.state === "not-responding") return `The loop is not responding right now; it ${what} once it is running again. I will say here when it has.`;
-    if (loop.state === "paused" && hold) return `The loop is paused by ${hold.by}; it ${what} once it is resumed. I will say here when it has.`;
-    return `It ${what} on its next check, within about ${cfg.poll_seconds} seconds, and I will say here when it has.`;
+    if (hold) return `It ${what} within a few seconds. The loop is paused by ${hold.by}, so new steps wait until someone resumes it. I will say here when it has.`;
+    return `It ${what} within a few seconds, and I will say here when it has.`;
   }
 }
