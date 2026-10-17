@@ -41,6 +41,11 @@ describe("formatting", () => {
     expect(pillText({ state: "running", text: "Stopping — last check 3s ago", working: [{ slug: "a" }] })).toBe("Stopping");
     expect(pillText({ state: "not-responding", text: "Not responding (last check 14 min ago)", working: [] })).toBe("Not responding");
   });
+
+  test("a loop a person paused says so in the top bar, even while its last steps finish", () => {
+    const heldLoop = { state: "paused" as const, text: "Paused by John: running steps finish, nothing new starts.", held: { by: "John", at: "2026-10-17T10:00:00Z" }, working: [{ slug: "a", phase: "build" }] };
+    expect(pillText(heldLoop)).toBe("Paused by John");
+  });
 });
 
 describe("routes", () => {

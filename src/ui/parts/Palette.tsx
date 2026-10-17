@@ -3,7 +3,8 @@ import { notificationsOn, setNotifications } from "../alerts";
 import { keyLabel, onMac } from "../keys";
 import { navigate } from "../nav";
 import { clampAt, filterCommands, type Command } from "../palette";
-import { changes, openDrawer, paletteOpen, running, toast } from "../store";
+import { setLoopHeld } from "../requests";
+import { changes, loop, openDrawer, paletteOpen, running, toast } from "../store";
 import { cycleTheme } from "../theme";
 import { useReturnFocus } from "./focus";
 
@@ -17,6 +18,9 @@ function commands(): Command[] {
     { id: "spend", title: "Go to Spend", hint: "g s", run: () => navigate("/spend") },
     { id: "ask", title: "Ask the orchestrator", hint: keyLabel("mod+j", onMac), run: () => openDrawer() },
     { id: "theme", title: "Change the theme", run: cycleTheme },
+    loop.value?.held
+      ? { id: "resume", title: "Resume the loop", run: () => void setLoopHeld(false) }
+      : { id: "pause", title: "Pause the loop", hint: "running steps finish", run: () => void setLoopHeld(true) },
     {
       id: "notify",
       title: notificationsOn() ? "Turn off notifications" : "Turn on notifications",
