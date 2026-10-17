@@ -243,6 +243,23 @@ describe("the console's live stream", () => {
     });
   });
 
+  test("a problem is traced once while pages are open, and again once they have all left and one comes back", async () => {
+    const broken = async () => ({ intents: null }) as unknown as Scan;
+    await withHub({ ...FAST, scan: broken }, async ({ root, hub }) => {
+      await config(root);
+      const problems = () => withTrace(root, (trace) => trace.eventsAfter(0, 100).filter((e) => e.type === "error").length);
+      const off = await hub.connect(page().send);
+      await Bun.sleep(100); // several more looks, each failing the same way
+      expect(problems()).toBe(1);
+      await off();
+      await hub.whenStopped();
+      const again = await hub.connect(page().send);
+      await again();
+      await hub.whenStopped();
+      expect(problems()).toBe(2);
+    });
+  });
+
   test("pings keep a quiet stream alive", async () => {
     await withHub({ ...FAST, pingMs: 30 }, async ({ root, connect }) => {
       await config(root);
