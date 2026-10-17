@@ -213,12 +213,14 @@ export class Git {
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
-  async worktreePrune(): Promise<void> { await this.run(["worktree", "prune"]); }
+  async worktreePrune(): Promise<void> { await worktreeAdmin(this, () => this.run(["worktree", "prune"])); }
 
   /** Always prunes first, so a worktree whose directory was deleted by hand does not block the add. */
   async worktreeAdd(path: string, branch: string): Promise<void> {
-    await this.worktreePrune();
-    await this.run(["worktree", "add", path, branch]);
+    await worktreeAdmin(this, async () => {
+      await this.run(["worktree", "prune"]);
+      await this.run(["worktree", "add", path, branch]);
+    });
   }
 
   /**
@@ -247,13 +249,15 @@ export class Git {
    * "initializing" lock behind), then prunes git's records of worktrees whose folder is gone.
    */
   async worktreeRemove(path: string): Promise<void> {
-    const r = await this.run(["worktree", "remove", "--force", "--force", path], true);
-    if (r.code !== 0) {
-      // Windows can hold a brief open handle on a just-written file; retry once after a short wait.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      await this.run(["worktree", "remove", "--force", "--force", path]);
-    }
-    await this.run(["worktree", "prune"]);
+    await worktreeAdmin(this, async () => {
+      const r = await this.run(["worktree", "remove", "--force", "--force", path], true);
+      if (r.code !== 0) {
+        // Windows can hold a brief open handle on a just-written file; retry once after a short wait.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await this.run(["worktree", "remove", "--force", "--force", path]);
+      }
+      await this.run(["worktree", "prune"]);
+    });
   }
 
   async isDirty(): Promise<boolean> { return (await this.run(["status", "--porcelain"])).out.trim().length > 0; }
@@ -406,15 +410,36 @@ export async function removeWorktree(git: Git, dir: string): Promise<void> {
       rmSync(dir, { recursive: true, force: true });
     }
   }
-  await git.run(["worktree", "unlock", dir], true);
-  await git.run(["worktree", "prune"], true);
+  await worktreeAdmin(git, async () => {
+    await git.run(["worktree", "unlock", dir], true);
+    await git.run(["worktree", "prune"], true);
+  });
 }
 
 /** Makes `dir` a detached worktree of `ref` (never the owner's checkout); a leftover directory there is removed first. */
 export async function addDetachedWorktree(git: Git, dir: string, ref: string): Promise<void> {
   await removeWorktree(git, dir);
   mkdirSync(dirname(dir), { recursive: true });
-  await git.run(["worktree", "add", "--detach", dir, ref]);
+  await worktreeAdmin(git, () => git.run(["worktree", "add", "--detach", dir, ref]));
+}
+
+/** The worktree administration in flight, by repository (see worktreeAdmin). */
+const admin = new Map<string, Promise<unknown>>();
+
+/**
+ * Runs git's worktree administration (add, remove, prune, unlock) for the repository at `git` one at a
+ * time in this process. Two at once can trip over each other: worktrees whose folders share a name
+ * (a change's snapshot of main and its done-check copy) race for one record under .git/worktrees, and
+ * a prune can take the record of a worktree another add has only begun. Not a lock in the lock order:
+ * nothing runs inside it but those git commands, so it never waits for another lock.
+ */
+function worktreeAdmin<T>(git: Git, fn: () => Promise<T>): Promise<T> {
+  const key = realPathKey(git.cwd);
+  const next = (admin.get(key) ?? Promise.resolve()).then(fn, fn);
+  const tail = next.catch(() => {});
+  admin.set(key, tail);
+  void tail.then(() => { if (admin.get(key) === tail) admin.delete(key); });
+  return next;
 }
 
 /** Runs `fn` in a throwaway detached worktree of `ref` at `dir` (see addDetachedWorktree), and always removes it afterwards. */

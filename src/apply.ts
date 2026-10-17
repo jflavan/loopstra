@@ -102,10 +102,13 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
     if (watcher === w) watcher = null;
   };
   // Watched again on each timer pass when it is not: the folder was deleted, or watching it failed.
+  // A watcher whose folder is gone is dropped here too: on macOS deleting the folder may never fire it.
   const rewatch = () => {
-    if (watcher || stopped) return;
+    if (stopped) return;
+    const dir = requestsDir(root);
+    if (watcher && !existsSync(dir)) unwatch(watcher);
+    if (watcher) return;
     try {
-      const dir = requestsDir(root);
       mkdirSync(dir, { recursive: true });
       const w = watch(dir, (_event, name) => {
         // A deleted folder's watcher fires without end (Bun on Windows): drop it, the timer watches again.

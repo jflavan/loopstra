@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
+import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
 import { moveMain } from "../../src/remote";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -442,5 +442,24 @@ describe("Git and the locks", () => {
       await removeWorktree(git, dir);
       expect(existsSync(dir)).toBe(false);
     } finally { repo.cleanup(); }
+  });
+});
+
+describe("worktree administration", () => {
+  test("worktrees whose folders share a name (a snapshot and a done-check copy) can be added and removed at once", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      // Both folders end in the same name, so git records both under .git/worktrees/<name>: added at
+      // the same moment, with prunes beside them, one used to fail ("could not open ... gitdir").
+      for (let round = 0; round < 8; round++) {
+        const seen = await Promise.all(["snapshots", "verify", "sync"].map((where) =>
+          withDetachedWorktree(git, join(repo.path, ".loopstra", where, "add-numbers"), "main", async (dir) => existsSync(join(dir, "README.md")))));
+        expect(seen).toEqual([true, true, true]);
+      }
+      expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)?.length).toBe(1);
+    } finally {
+      repo.cleanup();
+    }
   });
 });
