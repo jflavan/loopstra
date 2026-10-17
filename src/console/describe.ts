@@ -40,22 +40,26 @@ const CANCELLED_FIELDS = new Set(["command", "note", "where"]);
 
 /** A `command` event: a project command that ran or was stopped, or a step the loop took, with what came of it. */
 function commandText(p: Payload): string {
-  const what = firstLine(p.command, 80);
+  const command = firstLine(p.command, 80);
+  const what = command || "a command";
   if (typeof p.code === "number") return p.code === 0 ? `Ran ${what}.` : `Ran ${what}: exit code ${p.code}.`;
   if (p.note === CANCELLED && Object.keys(p).every((k) => CANCELLED_FIELDS.has(k))) return `Stopped ${what}.`;
-  if (first(p.note)) return sentence(`${capital(what)}: ${firstLine(p.note)}`);
-  if (first(p.waiting)) return `${capital(what)}: waiting.`;
-  return sentence(capital(what));
+  // What happened, in the call site's own words: a note, what it waits for, or why it kept something.
+  const said = firstLine(first(p.note, p.waiting, p.reason));
+  if (said) return sentence(command ? `${capital(command)}: ${said}` : capital(said));
+  return command ? sentence(capital(command)) : "Ran a command.";
 }
 
 /**
  * An `error` event: whichever field its call site used for what went wrong, and where. One that names
- * both what failed and the error (a cleanup that could not remove a worktree, say) says both.
+ * both what failed (`what`, `problem` or `note`) and the error itself (a cleanup that could not remove a
+ * worktree, say) says both.
  */
 function errorLine(p: Payload): string {
   const where = p.where ? ` (${str(p.where)})` : "";
-  const why = first(p.what) && first(p.error) ? firstLine(p.error) : "";
-  const what = firstLine(why ? `${firstLine(p.what)}: ${why}` : first(p.what, p.problem, p.error, p.note, p.reason, p.detail, p.value));
+  const failed = first(p.what, p.problem, p.note);
+  const why = failed && first(p.error) ? firstLine(p.error) : "";
+  const what = firstLine(why ? `${firstLine(failed)}: ${why}` : first(p.what, p.problem, p.error, p.note, p.reason, p.detail, p.value));
   if (what) return sentence(`Problem${where}: ${what}`);
   if (p.expected !== undefined && p.actual !== undefined) return `Problem${where}: expected ${str(p.expected)}, found ${str(p.actual)}.`;
   return `Problem${where}.`;

@@ -40,7 +40,14 @@ describe("events in plain words", () => {
     expect(describeEvent(row("command", { command: "share main", pushed: 0, note: "the remote has newer commits; the next sync brings them in first", error: "x" })))
       .toBe("Share main: the remote has newer commits; the next sync brings them in first.");
     expect(describeEvent(row("command", { command: "drift", changed: ["a"], note: "first\nsecond" }))).toBe("Drift: first.");
-    expect(describeEvent(row("command", { command: "merge lock", waiting: "waits for two to finish merging first" }))).toBe("Merge lock: waiting.");
+    expect(describeEvent(row("command", { command: "merge lock", waiting: "waits for two to finish merging first" }))).toBe("Merge lock: waits for two to finish merging first.");
+    expect(describeEvent(row("command", { command: "up to date", waiting: "main on GitHub has changes\nthat main here could not take yet" }))).toBe("Up to date: main on GitHub has changes.");
+    expect(describeEvent(row("command", { command: "clean up closed change", kept: "/wt", reason: "the worktree has uncommitted work" }))).toBe("Clean up closed change: the worktree has uncommitted work.");
+    // A note comes first; a command with nothing to say about it is only named; with no command at all it is a command.
+    expect(describeEvent(row("command", { command: "drift", note: "the plan has no Files section", reason: "r", waiting: "w" }))).toBe("Drift: the plan has no Files section.");
+    expect(describeEvent(row("command", { note: "kept for later" }))).toBe("Kept for later.");
+    expect(describeEvent(row("command", {}))).toBe("Ran a command.");
+    expect(describeEvent(row("command", { code: 2 }))).toBe("Ran a command: exit code 2.");
     expect(describeEvent(row("command", { command: "sync main", pulled: 2 }))).toBe("Sync main.");
     expect(describeEvent(row("command", { command: "clean up closed change", removed: "/wt", branchKept: "b" }))).toBe("Clean up closed change.");
     // Errors name what went wrong, from whichever field the call site used.
@@ -54,6 +61,12 @@ describe("events in plain words", () => {
     expect(describeEvent(row("error", { where: "cleanup", what: "worktree", error: "fatal: 'wt' is locked\nuse 'git worktree unlock'" })))
       .toBe("Problem (cleanup): worktree: fatal: 'wt' is locked.");
     expect(describeEvent(row("error", { where: "cleanup", what: "branch", error: "" }))).toBe("Problem (cleanup): branch.");
+    // Likewise when the call site called it a problem or a note.
+    expect(describeEvent(row("error", { where: "lane", problem: "the change could not be read", error: "ENOENT: no such file\n  at x" })))
+      .toBe("Problem (lane): the change could not be read: ENOENT: no such file.");
+    expect(describeEvent(row("error", { where: "move main", note: "putting back a move of main failed; it is tried again on the next tick", error: "fatal: locked" })))
+      .toBe("Problem (move main): putting back a move of main failed; it is tried again on the next tick: fatal: locked.");
+    expect(describeEvent(row("error", { where: "lane", problem: "", error: "boom" }))).toBe("Problem (lane): boom.");
     expect(describeEvent(row("error", { where: "cleanup", what: "worktree", error: "a".repeat(200) }))).toBe(`Problem (cleanup): worktree: ${"a".repeat(149)}…`);
     // Pauses: a reason, or a note when the loop is still backing off.
     expect(describeEvent(row("pause", { note: "the probe could not reach the assistant either; still backing off" })))
