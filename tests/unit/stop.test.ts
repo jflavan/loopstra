@@ -81,8 +81,12 @@ describe("stop", () => {
   test("an agent phase stopped mid-run is marked interrupted, not failed, and is not retried", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "x FIXTURE:hang");
-    stopAfter(500);
+    // Asked for once the session is running: a fixed delay can come before a slow machine has started it.
+    const started = setInterval(() => {
+      if (trace.phases("add-numbers").some((p) => p.status === "running")) { clearInterval(started); setTimeout(requestStop, 200); }
+    }, 25);
     await expect(agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} })).rejects.toBeInstanceOf(StopRequested);
+    clearInterval(started);
     expect(trace.phases("add-numbers").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
     // After the stop nothing new starts.
     await expect(agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} })).rejects.toBeInstanceOf(StopRequested);

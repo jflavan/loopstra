@@ -348,7 +348,8 @@ describe("the first review alongside the verifier", () => {
     } finally {
       restore();
     }
-  });
+    // A whole build step and a merge step, with two-second sessions: a slow Windows runner needs more than 30 s.
+  }, 90_000);
 
   test("it reads a throwaway copy of the tested commit, not the worktree the verifier runs commands in", async () => {
     const t = tempDir("loopstra-prompts-");
