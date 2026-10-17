@@ -79,6 +79,13 @@ describe("events in plain words", () => {
     expect(describeEvent(row("status_change", { from: "draft" }))).toBeNull();
   });
 
+  test("requests: who did what, and from where; ones not applied say why", () => {
+    expect(describeEvent(row("request", { kind: "approve", by: "John", via: "the dashboard", result: "applied", what: "plan approved" }))).toBe("Plan approved by John from the dashboard.");
+    expect(describeEvent(row("request", { kind: "hold", by: "Ana", via: "Slack", result: "applied", what: "held" }))).toBe("Held by Ana from Slack.");
+    expect(describeEvent(row("request", { kind: "approve", by: "John", via: "the dashboard", result: "moved-on", status: "building" }))).toBe("John's approve from the dashboard was not applied: the change had moved on to building.");
+    expect(describeEvent(row("request", { kind: "retry", by: "John", via: "the dashboard", result: "refused" }))).toBe("John's retry from the dashboard was not applied.");
+  });
+
   test("the technical line is the type and the payload's fields on one line", () => {
     expect(technicalText(row("command", { command: "bun test\n--bail", code: 0 }))).toBe("command command=bun test --bail code=0");
     expect(technicalText(row("tick", {}))).toBe("tick");
