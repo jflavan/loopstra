@@ -45,7 +45,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
 
   // Read once and shared with the inbox: it is the costliest part of a rebuild.
-  const scan = await safely("changes", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
+  const scan = await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
   const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
   const beat = readHeartbeat(root);

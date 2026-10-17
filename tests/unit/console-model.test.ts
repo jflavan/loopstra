@@ -190,6 +190,22 @@ describe("the loop and running steps", () => {
       t.cleanup();
     }
   });
+
+  test("an intent folder that cannot be read is named in the inbox, and the rest of the model is still built", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await Bun.write(join(t.path, "intent"), "not a folder");
+      const m = await model(t.path);
+      expect(m.sections.changes).toEqual([]);
+      expect(m.sections.loop.state).toBe("stopped");
+      expect(m.sections.inbox).toHaveLength(1);
+      expect(m.sections.inbox[0]).toMatchObject({ title: "Part of the console could not be read" });
+      expect(m.sections.inbox[0]!.what).toStartWith("intent folder: ");
+    } finally {
+      t.cleanup();
+    }
+  });
 });
 
 describe("needs attention", () => {
