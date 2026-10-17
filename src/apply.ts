@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
+import { conversationPath, readConversation, withEntry } from "./conversation";
 import { Git } from "./git";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
@@ -200,10 +201,11 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
 
 /**
  * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
- * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note. Only a file
- * that still holds exactly what the request wrote: one changed since (a person's edit), one that held
- * a person's uncommitted edit before the write (see ownBefore), or one whose write an older request
- * did not record, is left as it is; the person's edit is what it says now.
+ * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note and its
+ * conversation.md entry. Only an intent.md that still holds exactly what the request wrote: one
+ * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
+ * ownBefore), or one whose write an older request did not record, is left as it is; the person's
+ * edit is what it says now.
  * Under the checkout lock, so it never meets a commit half way. Gives the slugs it left as they are,
  * or null (traced) when it could not be done: the request then stays claimed, and the next pass tries
  * it again.
@@ -216,14 +218,8 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       const git = new Git(root);
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      for (const slug of slugs.filter((s) => !kept.includes(s))) {
-        const path = `intent/${slug}/intent.md`;
-        if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
-        else {
-          await git.run(["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
-          rmSync(join(root, path), { force: true });
-        }
-      }
+      for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
+      if (req.kind === "send-back" && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -233,6 +229,32 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
   if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
   return kept;
+}
+
+/** A file as it is at HEAD, or gone when HEAD has none. Under the checkout lock. */
+async function asAtHead(git: Git, root: string, path: string): Promise<void> {
+  if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
+  else {
+    await git.run(["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
+    rmSync(join(root, path), { force: true });
+  }
+}
+
+/**
+ * A send back that never landed takes its conversation.md entry back: the record as main has it.
+ * A problem is traced: the entry then stays until a person removes it.
+ */
+async function putBackConversation(root: string, main: string, trace: Trace, req: StatusRequest): Promise<void> {
+  try {
+    await onCheckout(root, async () => {
+      const git = new Git(root);
+      if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
+      await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+    });
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event(req.slug, "error", { where: "request", id: req.id, kind: req.kind, error: `the send back's conversation.md entry could not be taken back: ${errorText(e)}` });
+  }
 }
 
 const KINDS: ReadonlySet<string> = new Set(REQUEST_KINDS);
@@ -428,11 +450,14 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
 
 /**
  * A status request whose change moved on. A send back whose write landed before a failed commit
- * kept its note in the run folder (see writeSentBack): that goes too, or it would steer the next
- * session though the send back never happened.
+ * kept its note in the run folder (see writeSentBack) and wrote its conversation.md entry: both go
+ * too, or they would steer the next session though the send back never happened.
  */
-function movedOn(root: string, trace: Trace, req: StatusRequest, status: Status): Outcome {
-  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug);
+async function movedOn(root: string, main: string, trace: Trace, req: StatusRequest, status: Status): Promise<Outcome> {
+  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) {
+    dropSentBack(root, req.slug);
+    await putBackConversation(root, main, trace, req);
+  }
   traced(trace, req, "moved-on", { status });
   return { ok: false, status, text: `${req.slug} moved on to ${status}; nothing changed.` };
 }
@@ -458,7 +483,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Written by an earlier try of this request whose commit failed: commit it now.
   const ours = (req.written ?? []).includes(req.slug) && was === to;
-  if (!ours && was !== req.expect) return movedOn(root, trace, req, was);
+  if (!ours && was !== req.expect) return movedOn(root, cfg.main_branch, trace, req, was);
   const problem = ours ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
   const note = noteFor(req);
@@ -472,11 +497,16 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
         return false;
       }
       markWritten(root, req, req.slug, own);
+      // Its first write only: a later try commits the entry already on disk, never adds it twice.
+      if (req.kind === "send-back") {
+        const entry = { kind: "sent-back" as const, who: req.byName, via: req.via, text: req.note.trim(), at: new Date() };
+        await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), entry));
+      }
     }
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
     if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
   });
-  if (refused !== null) return movedOn(root, trace, req, refused);
+  if (refused !== null) return movedOn(root, cfg.main_branch, trace, req, refused);
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });

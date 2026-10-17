@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
+import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo, TEMPLATES } from "../helpers";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -179,6 +179,57 @@ describe("agentPhase tools and prompt", () => {
     ctx.cfg.claude.allowed_tools = ["Read", "Bash"];
     expect(commandsFor(ctx, "build")).toBe("any command");
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("conversation.md in the prompt", () => {
+  const RECORD = "# Conversation\n\n## 2026-10-17 09:00 · John (the dashboard) → build\nUse the CSV parser.\n";
+  const design = { name: "design" as const, model: "default" as const, permissionMode: "default" as const, tools: "read" as const, vars: { intent: "i" } };
+  const prompt = (repo: { path: string }, dir: string) => Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", dir, "prompt.md")).text();
+  const shipped = (repo: { path: string }, name: string) => copyFileSync(join(TEMPLATES, `${name}.md`), join(repo.path, "loopstra", "prompts", `${name}.md`));
+
+  test("a work session's prompt has what people told earlier sessions; a check's does not", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      shipped(repo, "design");
+      shipped(repo, "spec-check");
+      await Bun.write(join(repo.path, "intent", "x", "conversation.md"), RECORD);
+      await agentPhase(ctx, design);
+      await agentPhase(ctx, { ...design, name: "spec-check", vars: { intent: "i", spec: "s" } });
+      const work = await prompt(repo, "1-design");
+      expect(work).toContain(`${CONVERSATION_HEADING}\n\n${RECORD}`);
+      expect(work.split("Use the CSV parser.")).toHaveLength(2);
+      const judged = await prompt(repo, "2-spec-check");
+      expect(judged).not.toContain("Use the CSV parser.");
+      expect(judged).not.toContain(CONVERSATION_HEADING);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("with no record, the prompt says (none) there", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      shipped(repo, "design");
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "1-design")).toContain(`${CONVERSATION_HEADING}\n\n(none)\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a repository prompt without {{conversation}} gets the record at its end, and nothing when there is none", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Write the spec for {{slug}}.\n");
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "1-design")).toBe(`Write the spec for x.\n\n${CONTRACT}\n`);
+      await Bun.write(join(repo.path, "intent", "x", "conversation.md"), RECORD);
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "2-design")).toBe(`Write the spec for x.\n\n${CONVERSATION_HEADING}\n\n${RECORD}\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
   });
 });
 

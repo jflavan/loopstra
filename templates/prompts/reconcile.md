@@ -8,4 +8,8 @@ Files changed on the branch but not in the plan:
 
 {{findings}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 Return the full updated plan in `plan_markdown`.

@@ -8,6 +8,10 @@ Spec:
 
 {{spec}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 Concerns from the previous attempt; address each one:
 
 {{concerns}}

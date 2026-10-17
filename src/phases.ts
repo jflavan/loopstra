@@ -14,7 +14,8 @@ import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./s
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
-import { deliverInbox } from "./steering";
+import { readConversation } from "./conversation";
+import { deliverInbox, STEERABLE } from "./steering";
 import { toolTarget } from "./tools";
 
 /**
@@ -156,13 +157,25 @@ export function ownerNote(reason: BlockingReason): string {
 /** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
 const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
-/** The prompt a phase would be sent, or null when its prompt file is missing. */
+/** What heads conversation.md in a work session's prompt (the shipped templates say the same). */
+export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
+
+/**
+ * The prompt a phase would be sent, or null when its prompt file is missing. A work session (see
+ * STEERABLE) gets conversation.md as {{conversation}}; a repository prompt older than that variable
+ * gets the record at its end instead, when there is one.
+ */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
   const promptPath = promptFile(ctx, spec.name);
   if (!existsSync(promptPath)) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
-  return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
+  const record: PromptVars = STEERABLE.has(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
+  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
+  const template = await Bun.file(promptPath).text();
+  let rendered = skillsLine + renderPrompt(template, vars);
+  const said = vars.conversation?.trim() ?? "";
+  if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
+  return withContract(rendered);
 }
 
 /** The repository's prompt file for a phase. */

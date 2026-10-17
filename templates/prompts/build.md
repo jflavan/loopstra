@@ -8,6 +8,10 @@ Spec, for reference:
 
 {{spec}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 A person's notes on an earlier build of this change; address each one:
 
 {{feedback}}

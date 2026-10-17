@@ -73,6 +73,20 @@ describe("applying requests", () => {
     }
   });
 
+  test("send back writes its note into conversation.md, in the same commit as the status", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3.\n" });
+      await apply(r.root);
+      const show = (path: string) => run(["git", "show", `HEAD:${path}`], r.root);
+      expect((await show("intent/a/intent.md")).out).toContain("status: spec-approved");
+      expect((await show("intent/a/conversation.md")).out).toMatch(/^# Conversation\n\n## \d{4}-\d\d-\d\d \d\d:\d\d · John \(the dashboard\) sent it back\nSplit step 3\.\n$/);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("undo of a send back restores the review and its note, and drops the kept note", async () => {
     const r = await chatRepo({ intents: { a: withNote("plan-review", "Read plan.md.") }, config: PEOPLE });
     try {
@@ -276,6 +290,8 @@ describe("applying requests", () => {
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
       expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-review");
       expect(existsSync(kept)).toBe(false);
+      // The send back never happened: its conversation.md entry goes with it.
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
 
       const n = submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: INTENT("draft", "y"), update: false }] });
       expect(await apply(r.root)).toBe(0);
@@ -422,6 +438,7 @@ describe("applying requests", () => {
       expect(await apply(r.root)).toBe(1);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "a moved on to closed; nothing changed." });
       expect(existsSync(kept)).toBe(false);
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
     } finally {
       r.cleanup();
     }

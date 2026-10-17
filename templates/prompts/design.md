@@ -4,6 +4,10 @@ Intent `{{slug}}`:
 
 {{intent}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 Findings from a check of an earlier version of this spec; address each one:
 
 {{findings}}
