@@ -12,6 +12,7 @@ import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
+import { bodyFor, nextPoll, undoFor } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -385,5 +386,35 @@ describe("reading JSON", () => {
     } finally {
       globalThis.fetch = real;
     }
+  });
+});
+
+describe("requests from the page", () => {
+  const change = { slug: "a", status: "plan-review", note: "Read plan.md.", priority: "normal" } as unknown as ChangeSummary;
+
+  test("the body names the change, the status the person saw, and what the action needs", () => {
+    expect(bodyFor(change, { kind: "approve", label: "Approve the plan", to: "plan-approved" })).toEqual({ kind: "approve", slug: "a", expect: "plan-review" });
+    expect(bodyFor(change, { kind: "send-back", label: "Send back", to: "spec-approved" }, { note: "Split it." })).toEqual({ kind: "send-back", slug: "a", expect: "plan-review", note: "Split it." });
+    expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
+    expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
+    expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
+  });
+
+  test("undo puts back what the action changed, from where it left the change", () => {
+    const before = { note: "Read plan.md.", priority: "normal" };
+    expect(undoFor({ kind: "approve", slug: "a", expect: "plan-review" }, before, "plan-approved")).toEqual({ kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "Read plan.md." });
+    expect(undoFor({ kind: "send-back", slug: "a", expect: "plan-review", note: "x" }, before, "spec-approved")).toEqual({ kind: "undo", slug: "a", expect: "spec-approved", to: "plan-review", note: "Read plan.md." });
+    expect(undoFor({ kind: "priority", slug: "a", expect: "building", priority: "high" }, before, "building")).toEqual({ kind: "priority", slug: "a", expect: "building", priority: "normal" });
+    expect(undoFor({ kind: "hold", slug: "a", expect: "building", reason: "" }, before, "building")).toEqual({ kind: "release", slug: "a", expect: "building" });
+    expect(undoFor({ kind: "close", slug: "a", expect: "building" }, before, "closed")).toBeNull();
+    expect(undoFor({ kind: "approve", slug: "a", expect: "plan-review" }, before, null)).toBeNull();
+  });
+
+  test("results are asked for every second for half a minute, then every 5 s, for about ten minutes", () => {
+    expect(nextPoll(0)).toBe(1000);
+    expect(nextPoll(29)).toBe(1000);
+    expect(nextPoll(30)).toBe(5000);
+    expect(nextPoll(143)).toBe(5000);
+    expect(nextPoll(144)).toBeNull();
   });
 });
