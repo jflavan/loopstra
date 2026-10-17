@@ -1,10 +1,12 @@
-import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
+import { Git } from "./git";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, STATUSES, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
+import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
 import { Trace } from "./trace";
@@ -25,8 +27,8 @@ const lanes = new Map<string, { tail: Promise<unknown>; queued: Promise<number> 
  * then applies the claimed ones oldest first through commitRecord. A request that hits an unexpected
  * problem (a commit refused, the checkout off main) is traced and stays claimed for the next pass; one
  * that cannot be done gets a plain result saying why. One that cannot be read (see badShape) is
- * finished at once, and one that failed MAX_TRIES passes is given up with a plain result (a checkout
- * off main is not a try: it is a reason to wait). Passes on a root run one after another, never side
+ * finished at once, and one that kept failing (see giveUp) is given up with a plain result once what it
+ * wrote is put back (a checkout off main is not a try: it is a reason to wait). Passes on a root run one after another, never side
  * by side, and at most one waits behind the running one: a call while one waits gets that pass (it
  * has not started, so it sees this caller's requests too). Gives how many were finished.
  */
@@ -75,25 +77,55 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
       try { await applyRequests(root, cfg, trace); } catch { /* a stop, or traced inside; the next pass tries again */ } finally { trace.close(); }
     })().finally(() => { inFlight = null; });
   };
-  const timer = setInterval(pass, opts.everyMs ?? 2_000);
   let watcher: FSWatcher | null = null;
-  try {
-    mkdirSync(requestsDir(root), { recursive: true });
-    watcher = watch(requestsDir(root), () => pass());
-  } catch { /* the timer alone */ }
+  const unwatch = (w: FSWatcher) => {
+    try { w.close(); } catch { /* closed already */ }
+    if (watcher === w) watcher = null;
+  };
+  // Watched again on each timer pass when it is not: the folder was deleted, or watching it failed.
+  const rewatch = () => {
+    if (watcher || stopped) return;
+    try {
+      const dir = requestsDir(root);
+      mkdirSync(dir, { recursive: true });
+      const w = watch(dir, (_event, name) => {
+        // A deleted folder's watcher fires without end (Bun on Windows): drop it, the timer watches again.
+        if (!existsSync(dir)) return unwatch(w);
+        if (isNewRequest(dir, name)) pass();
+      });
+      w.on("error", () => unwatch(w));
+      watcher = w;
+    } catch { /* the timer alone until the next try */ }
+  };
+  rewatch();
+  const timer = setInterval(() => { rewatch(); pass(); }, opts.everyMs ?? 2_000);
   return {
     async stop() {
       stopped = true;
       clearInterval(timer);
-      watcher?.close();
+      if (watcher) unwatch(watcher);
       armed.delete(key);
       await inFlight;
     },
   };
 }
 
-/** How many passes may fail to apply a request before the loop gives up on it. */
+/**
+ * True when a watch event names a request file waiting in the requests folder itself. Writes under
+ * `applying/` and `results/` (a pass's own), and a request claimed or cancelled meanwhile, start no
+ * pass: a failed pass rewrites its claimed request, and that would start the next pass at once.
+ */
+function isNewRequest(dir: string, name: string | Buffer | null): boolean {
+  return typeof name === "string" && /^[^/\\]+\.json$/.test(name) && existsSync(join(dir, name));
+}
+
+/**
+ * When the loop gives up on a request that keeps failing: after MAX_TRIES failed passes and at least
+ * GIVE_UP_MS since the first one, so a problem a person can clear in a few minutes (a stuck git lock)
+ * does not cost the request.
+ */
 const MAX_TRIES = 5;
+const GIVE_UP_MS = 10 * 60_000;
 
 async function applyPass(root: string, cfg: Config, trace: Trace): Promise<number> {
   drainOld(root);
@@ -117,13 +149,48 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       trace.eventOnChange("_loop", "error", `"where":"request","id":"${req.id}"`, { where: "request", id: req.id, kind: req.kind, error: e instanceof MainCheckoutMoved ? e.message : errorText(e) }, "error");
       if (e instanceof MainCheckoutMoved) continue;
       req.tries = (req.tries ?? 0) + 1;
-      if (req.tries < MAX_TRIES) { saveApplying(root, req); continue; }
+      if (!Number.isFinite(Date.parse(req.firstFailedAt ?? ""))) req.firstFailedAt = new Date().toISOString();
+      const failing = Date.now() - Date.parse(req.firstFailedAt!);
+      if (req.tries < MAX_TRIES || failing < GIVE_UP_MS) { saveApplying(root, req); continue; }
+      // Never say it failed while its write is still on disk: the scheduler would act on it anyway.
+      if (!(await putBack(root, cfg.main_branch, trace, req))) { saveApplying(root, req); continue; }
       shapeTraced(trace, req, "failed", { tries: req.tries });
       finishRequest(root, req, { ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
       applied++;
     }
   }
   return applied;
+}
+
+/**
+ * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
+ * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note. Under the
+ * checkout lock, so it never meets a commit half way. False (traced) when that could not be done: the
+ * request then stays claimed, and the next pass tries it again.
+ */
+async function putBack(root: string, main: string, trace: Trace, req: Request): Promise<boolean> {
+  const slugs = (req.written ?? []).filter((s) => SLUG.test(s));
+  try {
+    await onCheckout(root, async () => {
+      const git = new Git(root);
+      // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
+      if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
+      for (const slug of slugs) {
+        const path = `intent/${slug}/intent.md`;
+        if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
+        else {
+          await git.run(["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
+          rmSync(join(root, path), { force: true });
+        }
+      }
+    });
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.eventOnChange("_loop", "error", `"where":"request give-up","id":"${req.id}"`, { where: "request give-up", id: req.id, kind: req.kind, written: slugs, error: `what it wrote could not be put back, so it stays claimed: ${errorText(e)}` }, "error");
+    return false;
+  }
+  if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
+  return true;
 }
 
 const KINDS: ReadonlySet<string> = new Set(["accept", "new", "approve", "send-back", "retry", "close", "priority", "hold", "release", "undo"]);
@@ -298,19 +365,21 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const note = noteFor(req);
   let refused = null as Status | null;
   await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async () => {
-    if (ours) return;
-    const fresh = await readIntent(root, req.slug);
-    if (!(await writeIntent(fresh, statusPatch(req.expect, to, note), { expectStatus: req.expect }))) {
-      refused = fresh.file.frontmatter.status;
-      return false;
+    if (!ours) {
+      const fresh = await readIntent(root, req.slug);
+      if (!(await writeIntent(fresh, statusPatch(req.expect, to, note), { expectStatus: req.expect }))) {
+        refused = fresh.file.frontmatter.status;
+        return false;
+      }
+      markWritten(root, req, req.slug);
     }
-    markWritten(root, req, req.slug);
+    // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
+    if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
   });
   if (refused !== null) { traced(trace, req, "moved-on", { status: refused }); return { ok: false, status: refused, text: `${req.slug} moved on to ${refused}; nothing changed.` }; }
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });
-  if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
   if (req.kind === "undo") dropSentBack(root, req.slug);
   return { ok: true, status: to, text: resultText(req, req.slug, to) };
 }

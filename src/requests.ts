@@ -18,9 +18,10 @@ export const CONSOLE = "console";
  * `via`: where the person was, in words ("the dashboard", "Slack"), for the commit and the trace.
  * `written`: the slugs whose intent.md the loop already wrote for this request. A request whose
  * commit failed is tried again, and must not then read its own write as someone else's.
- * `tries`: how many passes failed to apply it (see applyRequests, which gives up after a few).
+ * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
+ * applyRequests, which gives up after a few, and not before some minutes).
  */
-interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; tries?: number }
+interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; tries?: number; firstFailedAt?: string }
 
 /** What a request asks for. `expect` is the status the person saw. */
 export type RequestBody =
@@ -39,7 +40,7 @@ export type RequestBody =
 export type Request = RequestBase & RequestBody;
 
 /** What submitRequest takes: everything but the id and the time. */
-export type Submission = Omit<RequestBase, "id" | "at" | "written" | "tries"> & RequestBody;
+export type Submission = Omit<RequestBase, "id" | "at" | "written" | "tries" | "firstFailedAt"> & RequestBody;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
