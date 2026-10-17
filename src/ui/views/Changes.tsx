@@ -35,8 +35,8 @@ export function Changes() {
       <div class="toolbar">
         <input type="search" placeholder="Filter by name" value={query} onInput={(e) => setQuery(e.currentTarget.value)} aria-label="Filter changes" />
         <span class="grow" />
-        <button class={`btn${view === "board" ? " on" : ""}`} onClick={() => pick("board")}>Board</button>
-        <button class={`btn${view === "list" ? " on" : ""}`} onClick={() => pick("list")}>List</button>
+        <button class={`btn${view === "board" ? " on" : ""}`} aria-pressed={view === "board"} onClick={() => pick("board")}>Board</button>
+        <button class={`btn${view === "list" ? " on" : ""}`} aria-pressed={view === "list"} onClick={() => pick("list")}>List</button>
       </div>
       {view === "board" ? (
         <div class="board">
@@ -66,7 +66,7 @@ function Column({ label, items, bad }: { label: string; items: ChangeSummary[]; 
 function Card({ c }: { c: ChangeSummary }) {
   return (
     <Link href={`/c/${c.slug}`} class={`ccard${c.running ? " running" : ""}`}>
-      <span class="ccard-title">{c.running && <span class="pulse" aria-label="running" />}{c.title}</span>
+      <span class="ccard-title">{c.running && <span class="pulse" role="img" aria-label="running" />}{c.title}</span>
       <span class="ccard-meta"><span class={`prio ${c.priority}`}>{c.priority}</span><span>{c.plain}</span></span>
       <span class="ccard-meta"><span>{c.inStatus ? `for ${c.inStatus}` : ""}</span><span>{usd(c.costUsd)}</span></span>
       {c.waiting && <span class="badge warn">{c.waiting}</span>}

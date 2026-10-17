@@ -1,10 +1,11 @@
 import type { RunningPhase } from "../../console/types";
-import { ago, costSoFar, duration, shortModel, usd } from "../format";
+import type { Status } from "../../intents";
+import { ago, costSoFar, duration, shortModel, stepWord, usd } from "../format";
 import { Link } from "../parts/Link";
 import { changes, loop, meta, now, running } from "../store";
 
 /** Changes waiting their turn: in progress, or approved and ready for their next step. */
-const WAITING = new Set(["accepted", "designing", "spec-approved", "planning", "plan-approved", "building", "reviewing", "merge-approved", "merged", "verifying"]);
+const WAITING: ReadonlySet<Status> = new Set<Status>(["accepted", "designing", "spec-approved", "planning", "plan-approved", "building", "reviewing", "merge-approved", "merged", "verifying"]);
 
 export function Live() {
   const r = running.value;
@@ -14,7 +15,7 @@ export function Live() {
   const t = now.value;
   if (!r || !list || !l || !m) return <section class="view"><p class="muted">Connecting…</p></section>;
   const busy = new Set(r.now.map((p) => p.slug));
-  const next = list.filter((c) => !busy.has(c.slug) && WAITING.has(c.status)).slice(0, 6);
+  const next = list.filter((c) => !busy.has(c.slug) && WAITING.has(c.status as Status)).slice(0, 6);
   const when = (iso: string) => {
     const a = ago(iso, t);
     return a === "now" ? "just now" : `${a} ago`;
@@ -48,7 +49,7 @@ export function Live() {
         <ul class="rows">
           {r.recent.map((p) => (
             <li key={`${p.slug}:${p.seq}`}>
-              <span class={`status ${p.status}`}>{p.status === "success" ? "passed" : p.status === "fail" ? "failed" : p.status}</span>
+              <span class={`status ${p.status}`}>{stepWord(p.status)}</span>
               <Link href={`/s/${p.slug}/${p.seq}`}>{p.slug} · {p.name}</Link>
               <span class="when">{duration(p.durationMs)} · {usd(p.costUsd)} · {when(p.ended)}</span>
             </li>

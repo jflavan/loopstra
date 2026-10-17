@@ -17,7 +17,7 @@ export function Inbox() {
   useEffect(() => {
     const last = () => Math.max(0, (inbox.value?.length ?? 1) - 1);
     screenKeys.set("j", () => setAt((k) => Math.min(k + 1, last())));
-    screenKeys.set("k", () => setAt((k) => Math.max(k - 1, 0)));
+    screenKeys.set("k", () => setAt((k) => Math.max(Math.min(k, last()) - 1, 0)));
     screenKeys.set("o", () => {
       const it = inbox.value?.[atRef.current];
       if (it?.slug) navigate(`/c/${it.slug}`);
@@ -44,7 +44,7 @@ export function Inbox() {
 
 function Item({ it, index, selected, onSelect }: { it: AttentionItem; index: number; selected: boolean; onSelect: () => void }) {
   return (
-    <article id={`inbox-${index}`} class={`inbox-item${BAD.has(it.kind) ? " bad" : ""}${selected ? " selected" : ""}`} onClick={onSelect}>
+    <article id={`inbox-${index}`} aria-current={selected ? "true" : undefined} class={`inbox-item${BAD.has(it.kind) ? " bad" : ""}${selected ? " selected" : ""}`} onClick={onSelect}>
       <span class="kind">{it.label}</span>
       <b>{it.slug ? <Link href={`/c/${it.slug}`}>{it.title}</Link> : it.title}</b>
       <span>{it.what}</span>
