@@ -58,6 +58,11 @@ describe("chat with the loop", () => {
       await service.poll();
       expect(t.sent.length).toBe(1);
       expect(o.store.get("terminal", "local").messages.at(-1)!.text).toContain("Added to the queue as drafts");
+      // The agent hears of the yes and of the loop's answer on its next turn.
+      expect(o.store.get("terminal", "local").since).toEqual([
+        'Ana said yes: "CSV export" was written up as csv-export, csv-dates, and the loop was asked to add it to the queue.',
+        "The loop answered: Added to the queue as drafts: csv-export, csv-dates. Read them in intent/, then set status to accepted, or ask me to start one.",
+      ]);
     } finally { r.cleanup(); }
   });
 

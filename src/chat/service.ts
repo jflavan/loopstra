@@ -107,7 +107,8 @@ export class ChatService {
       for (const r of takeResults(this.root, new Set(this.transports.map((t) => t.name)))) {
         const t = this.transport(r.transport);
         if (!t) continue;
-        try { await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text)); } catch (e) { this.traceError("chat-result", e); }
+        // The agent hears it too, on its next turn: it proposed the request, and would think it still open.
+        try { await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text), `The loop answered: ${r.text}`); } catch (e) { this.traceError("chat-result", e); }
       }
       if (Date.now() - this.lastPrCheck >= PR_CHECK_MS) {
         this.lastPrCheck = Date.now();

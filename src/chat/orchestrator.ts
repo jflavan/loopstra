@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { askText, offers, retryOptions, type RequestShape } from "../actions";
+import { askedWords, askText, offers, retryOptions, type RequestShape } from "../actions";
 import { limitOf } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
@@ -16,7 +16,7 @@ import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPro
 import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest, type RequestBody } from "../requests";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
-import { ThreadStore, threadKey, type ThreadState } from "./threads";
+import { oneLine, ThreadStore, threadKey, type ThreadState } from "./threads";
 
 /** A message from a person, as a transport delivers it. */
 export interface IncomingMessage {
@@ -49,6 +49,19 @@ const HISTORY_IN_CONTEXT = 30;
 /** How long a proposal waits for its yes. */
 export const PENDING_TTL_MS = 24 * 60 * 60_000;
 
+/**
+ * A display name is the person's own choice: kept to one line with no tags, wherever it goes, so it
+ * cannot end the context block or open another.
+ */
+function plainName(s: string): string {
+  return s.replace(/[\s<>"]+/g, " ").trim() || "someone";
+}
+
+/** Text with any tag that could end the context or message block, or open another, made harmless. */
+function untagged(s: string): string {
+  return s.replace(/<\/?(message|context)\b/gi, (x) => x.replace("<", "&lt;"));
+}
+
 export class Orchestrator {
   readonly store: ThreadStore;
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -71,10 +84,14 @@ export class Orchestrator {
     return next;
   }
 
-  /** Puts a message from Loopstra into a thread's log (not through the agent) and sends it. */
-  async deliver(transport: string, thread: string, text: string, send: Send): Promise<void> {
+  /**
+   * Puts a message from Loopstra into a thread's log (not through the agent) and sends it. `since`:
+   * a line for the agent's next turn about it (see ThreadState.since), as for a request's result.
+   */
+  async deliver(transport: string, thread: string, text: string, send: Send, since?: string): Promise<void> {
     await this.withThread(transport, thread, async (t) => {
       this.store.addMessage(t, { from: "loopstra", text });
+      if (since) this.store.noteSince(t, since);
       this.store.save(t);
     });
     await send(text);
@@ -108,8 +125,8 @@ export class Orchestrator {
           const expired = Date.now() - Date.parse(pending.at) > PENDING_TTL_MS;
           if (isYes(m.text) && !expired) {
             if (pending.kind === "handoff") await this.doHandoff(cfg, trace, t, m, pending.handoff, say);
-            else if (pending.kind === "action") await this.doAction(cfg, m, pending.request, say);
-            else await this.doAccept(cfg, m, pending.slug, say);
+            else if (pending.kind === "action") await this.doAction(cfg, t, m, pending.request, say);
+            else await this.doAccept(cfg, t, m, pending.slug, say);
             return;
           }
           const why = expired ? "the person's answer came over a day later, so it was not acted on" : "the person did not say yes";
@@ -146,6 +163,7 @@ export class Orchestrator {
       return;
     }
     const seenUpTo = new AnnouncementLog(this.root).lastId();
+    const told = t.since.length;
     const message = await this.messageBlock(cfg, t, m, declined, seenUpTo);
     const capUsd = limitOf(cfg.claude.max_budget_usd);
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
@@ -161,7 +179,11 @@ export class Orchestrator {
     if (r.sessionId) t.sessionId = r.sessionId;
     // Only what was in the message block counts as seen, and only once the agent has had it: a failed
     // turn shows them again next time. Announcements made during the turn come next time.
-    if (r.ok) t.lastAnnouncementSeen = seenUpTo;
+    // The same for the lines of what happened since its last turn.
+    if (r.ok) {
+      t.lastAnnouncementSeen = seenUpTo;
+      t.since = t.since.slice(told);
+    }
     if (!r.ok && r.budgetUsedUp) {
       await say(this.budgetUsedUp(cfg, r.budgetUsedUp));
       return;
@@ -188,9 +210,7 @@ export class Orchestrator {
     const since = (t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0)).filter((a) => a.id <= upTo);
     const announced = since.slice(-ANNOUNCEMENTS_IN_CONTEXT);
     const handoffs = t.handoffs.map((h) => `- "${h.title}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
-    // A display name is the person's own choice: kept to one line with no tags, wherever it goes, so it
-    // cannot end the context block or open another.
-    const name = m.authorName.replace(/[\s<>"]+/g, " ").trim() || "someone";
+    const name = plainName(m.authorName);
     const history = await this.recentHistory(cfg);
     const lines = [
       `From: ${name}, ${m.canAccept ? "who may ask you to start drafts and to act on changes" : `who may not start drafts or act on changes (${m.acceptors} may)`}`,
@@ -201,8 +221,9 @@ export class Orchestrator {
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
     ];
+    if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${untagged(oneLine(l, 1000))}`).join("\n")}`);
     if (declined) lines.push(declined);
-    const text = m.text.replace(/<\/?(message|context)\b/gi, (s) => s.replace("<", "&lt;"));
+    const text = untagged(m.text);
     return `<context>\n${lines.join("\n")}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
   }
 
@@ -266,21 +287,24 @@ export class Orchestrator {
     if (out.kind === "failed") {
       // Stopped by the budget: the proposal still stands, so a later yes writes it up.
       if (out.budget) t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
+      this.store.noteSince(t, `${plainName(m.authorName)} said yes to handing off "${h.title.trim()}", but it could not be written up: ${out.problem}`);
       await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`);
       return;
     }
     const slugs = out.intents.map((i) => i.slug);
+    this.store.noteSince(t, `${plainName(m.authorName)} said yes: "${h.title.trim()}" was written up as ${slugs.join(", ")}${out.kind === "pr" ? `, in pull request ${out.url}` : ", and the loop was asked to add it to the queue"}.`);
     t.handoffs.push({ title: h.title.trim(), slugs, at: new Date().toISOString(), by: m.authorName, pr: out.kind === "pr" ? { number: out.number, url: out.url, branch: out.branch, state: "OPEN" } : null, local: out.kind === "local" });
     const list = out.intents.map((i) => `${i.slug}${i.update ? " (updated)" : ""}`).join(", ");
     if (out.kind === "pr") await say(`Opened a pull request with ${list}: ${out.url}\nOnce it is merged they are drafts in the queue; ask me to start one when you are ready.`);
     else await say(`Wrote ${list}. ${this.loopWhen(cfg, "adds them to the queue as drafts")}`);
   }
 
-  private async doAccept(cfg: Config, m: IncomingMessage, slug: string, say: Send): Promise<void> {
+  private async doAccept(cfg: Config, t: ThreadState, m: IncomingMessage, slug: string, say: Send): Promise<void> {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can start work, so I have not started ${slug}.`); return; }
     const st = await this.statusOf(slug);
     if (st !== "draft") { await say(`${slug} is ${st ?? "not in the main code"} now, not a draft, so I have not started it.`); return; }
     submitRequest(this.root, { kind: "accept", slug, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
+    this.store.noteSince(t, `${plainName(m.authorName)} said yes: asked the loop to start ${slug}.`);
     await say(`Asked the loop to start ${slug}. ${this.loopWhen(cfg, "starts it")}`);
   }
 
@@ -325,9 +349,10 @@ export class Orchestrator {
     await say(`${ask}${ask.includes("\n") ? "\n\n" : " "}Reply yes to go ahead.`);
   }
 
-  private async doAction(cfg: Config, m: IncomingMessage, request: RequestBody, say: Send): Promise<void> {
+  private async doAction(cfg: Config, t: ThreadState, m: IncomingMessage, request: RequestBody & RequestShape, say: Send): Promise<void> {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can do that, so I have not.`); return; }
     submitRequest(this.root, { ...request, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
+    this.store.noteSince(t, `${plainName(m.authorName)} said yes: asked the loop to ${askedWords(request, request.slug)}.`);
     await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);
   }
 

@@ -169,6 +169,21 @@ export function askText(r: RequestShape, slug: string): string {
   }
 }
 
+/** What a request asks the loop to do, after "asked the loop to": "approve the plan of csv-export". */
+export function askedWords(r: RequestShape, slug: string): string {
+  switch (r.kind) {
+    case "approve": return r.expect === "verifying" ? `confirm ${slug} is done` : r.expect === "merge-review" ? `approve merging ${slug}` : `approve the ${REVIEWED[r.expect] ?? "work"} of ${slug}`;
+    case "send-back": return `send ${slug} back, so its ${REVIEWED[r.expect] ?? "work"} is done again`;
+    case "retry": return `retry ${slug} from ${r.to}`;
+    case "accept": return `start ${slug}`;
+    case "close": return `close ${slug}`;
+    case "priority": return `set ${slug}'s priority to ${r.priority ?? "normal"}`;
+    case "hold": return `hold ${slug}`;
+    case "release": return `release ${slug}`;
+    case "undo": return `take ${slug} back to ${r.to}`;
+  }
+}
+
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** The plain result of a request that was applied; `now` is the change's status after it. */

@@ -134,6 +134,46 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
+  test("the next turn hears of a yes and of the loop's answer, once", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("plan-review") }, config: PLAN_PERSON });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "approve", slug: "csv-export", note: "", priority: null } }));
+      await r.answer("orchestrator", 2, turn("It is approved."));
+      await r.answer("orchestrator", 3, turn("Nothing new."));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("approve the plan"), out.send);
+      await o.handle(message("yes"), out.send);
+      await o.deliver("terminal", "local", "Plan approved: csv-export is now plan approved, waiting to build.", out.send, "The loop answered: Plan approved: csv-export is now plan approved, waiting to build.");
+      // A message passed on with no line for the agent (a pull request's news) adds none.
+      await o.deliver("terminal", "local", "Something else.", out.send);
+      expect(o.store.get("terminal", "local").since).toEqual([
+        "Ana said yes: asked the loop to approve the plan of csv-export.",
+        "The loop answered: Plan approved: csv-export is now plan approved, waiting to build.",
+      ]);
+      await o.handle(message("how did it go?"), out.send);
+      expect(r.prompts()[1]!.prompt).toContain("Since your last turn:\n- Ana said yes: asked the loop to approve the plan of csv-export.\n- The loop answered: Plan approved: csv-export is now plan approved, waiting to build.\n");
+      expect(o.store.get("terminal", "local").since).toEqual([]);
+      await o.handle(message("and now?"), out.send);
+      expect(r.prompts()[2]!.prompt).not.toContain("Since your last turn:");
+    } finally { r.cleanup(); }
+  });
+
+  test("a thread keeps only the newest ten lines for the agent, and one saved before them has none", async () => {
+    const r = await chatRepo();
+    try {
+      const o = new Orchestrator(r.root);
+      const t = o.store.get("terminal", "local");
+      for (let i = 1; i <= 12; i++) o.store.noteSince(t, `line ${i}`);
+      expect(t.since).toEqual(Array.from({ length: 10 }, (_, i) => `line ${i + 3}`));
+      // As an older Loopstra saved it.
+      delete (t as Partial<typeof t>).since;
+      o.store.save(t);
+      expect(o.store.get("terminal", "local").since).toEqual([]);
+      expect(o.store.all()[0]!.since).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
   test("an action the change does not offer now is explained, not asked", async () => {
     const r = await chatRepo({ intents: { "csv-export": INTENT("building") } });
     try {
