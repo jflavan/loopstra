@@ -79,6 +79,19 @@ describe("the loop and running steps", () => {
     }
   });
 
+  test("a heartbeat with a last check that is not a time gives no next check, and does not stop the model", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "poll_seconds: 60\n");
+      const now = new Date();
+      const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(600), lastTickAt: "not a time", lastBeatAt: iso(1), current: null, working: [], stopping: false, stopped: false });
+      expect((await model(t.path, now)).sections.loop).toMatchObject({ state: "running", nextCheck: null });
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a running step's card: its model, what it is doing, and its activity", async () => {
     const t = tempDir();
     try {

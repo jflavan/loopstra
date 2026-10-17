@@ -9,6 +9,7 @@ import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
 import { nowText } from "../tools";
 import type { EventRow, PhaseRow, Trace } from "../trace";
+import { parsePayload } from "./describe";
 import type { ChangeSummary, FinishedPhase, LoopSection, Meta, RunningPhase, Sections, Stage, Totals } from "./types";
 
 /** The board column of each status: where the change is, or is heading next. */
@@ -44,7 +45,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
 
   // Read once and shared with the inbox: it is the costliest part of a rebuild.
-  const scan = await scanRepo(root);
+  const scan = await safely("changes", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
   const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
   const beat = readHeartbeat(root);
@@ -54,8 +55,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   const loop: LoopSection = {
     ...hb,
     working: hb.working.map((w) => ({ slug: w.slug, phase: runningNow.filter((p) => p.slug === w.slug).map((p) => p.name).join(" + ") || null })),
-    nextCheck: hb.state === "running" && !hb.working.length && beat?.lastTickAt
-      ? new Date(Date.parse(beat.lastTickAt) + pollSeconds * 1000).toISOString() : null,
+    nextCheck: nextCheck(hb.state === "running" && !hb.working.length ? beat?.lastTickAt : null, pollSeconds),
   };
   const holds = cfg ? await safely("same-file waits", () => sameFileHolds(cfg.speed.max_parallel_changes, ordered), new Map<string, string>()) : new Map<string, string>();
   const changes = await safely("changes", () => ordered.map((i) => changeSummary(trace, i, ordered, holds.get(i.slug), busy, now)), [] as ChangeSummary[]);
@@ -67,6 +67,12 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
     meta: { chat: opts.chat ?? false, usdPerMinute: USD_PER_MINUTE, pollSeconds },
     sections: { loop, inbox, changes, running: { now: runningNow, recent }, totals },
   };
+}
+
+/** When the next tick is due, from the last one; null without one, or when it is not a time a file could be trusted for. */
+function nextCheck(lastTickAt: string | null | undefined, pollSeconds: number): string | null {
+  const last = lastTickAt ? Date.parse(lastTickAt) : NaN;
+  return Number.isFinite(last) ? new Date(last + pollSeconds * 1000).toISOString() : null;
 }
 
 /** One change as the board and the lists show it. `heldBy`: the change it waits for over the same files. */
@@ -91,12 +97,8 @@ export function endedCost(phases: PhaseRow[]): number {
  */
 function statusSince(trace: Trace, i: Intent): string | null {
   const last = trace.lastEvent(i.slug, "status_change");
-  if (last && (parse(last.payload) as { to?: string }).to === i.file.frontmatter.status) return last.ts;
+  if (last && parsePayload(last.payload).to === i.file.frontmatter.status) return last.ts;
   try { return statSync(join(i.dir, "intent.md")).mtime.toISOString(); } catch { return null; }
-}
-
-function parse(text: string): unknown {
-  try { return JSON.parse(text); } catch { return {}; }
 }
 
 /**
@@ -108,7 +110,7 @@ function runningPhases(trace: Trace, working: string[], since: string | null, ti
   for (const slug of working) {
     for (const p of trace.phases(slug)) {
       if (p.status !== "running" || (since && p.started < since)) continue;
-      const events = trace.phaseEvents(slug, p.seq, STRIP * 2).filter((e) => e.type === "claude_event").map((e) => parse(e.payload) as Summary);
+      const events = trace.phaseEvents(slug, p.seq, STRIP * 2).filter((e) => e.type === "claude_event").map((e) => parsePayload(e.payload) as Summary);
       out.push({
         slug, title: titles.get(slug) ?? slug, seq: p.seq, name: p.name, started: p.started,
         model: modelOf(trace.firstEvent(slug, p.seq, "claude_event")),
@@ -121,7 +123,7 @@ function runningPhases(trace: Trace, working: string[], since: string | null, ti
 }
 
 function modelOf(e: EventRow | null): string | null {
-  const s = (e ? parse(e.payload) : {}) as Summary;
+  const s = (e ? parsePayload(e.payload) : {}) as Summary;
   return s.type === "system" && s.subtype === "init" && typeof s.model === "string" ? s.model : null;
 }
 
