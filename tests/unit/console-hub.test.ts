@@ -51,6 +51,23 @@ describe("the console's live stream", () => {
     }
   });
 
+  test("a look that finds nothing new does not stop the next ones", async () => {
+    const t = tempDir();
+    const hub = new Hub(t.path, FAST);
+    let off = async () => {};
+    try {
+      await config(t.path);
+      const p = page();
+      off = await hub.connect(p.send);
+      await Bun.sleep(200); // many idle looks
+      await intent(t.path, "late", "status: accepted");
+      await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "changes"));
+    } finally {
+      await off();
+      t.cleanup();
+    }
+  });
+
   test("a page that comes back gets the events it missed, then a snapshot", async () => {
     const t = tempDir();
     const hub = new Hub(t.path, FAST);

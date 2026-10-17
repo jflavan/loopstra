@@ -144,6 +144,8 @@ export class Hub {
     if (this.running) return this.running;
     const trace = this.trace;
     if (!trace) return Promise.resolve();
+    // Cleared from `finally`, not inside: a look that finds nothing returns before its first await,
+    // and would clear the mark before it is set.
     this.running = (async () => {
       try {
         const signature = this.signatureOf(trace);
@@ -162,10 +164,8 @@ export class Hub {
         for (const item of this.events(this.lastEventId, true)) this.broadcast(frame({ type: "event", item } satisfies StreamMessage, item.id));
       } catch (e) {
         this.note(errorText(e));
-      } finally {
-        this.running = null;
       }
-    })();
+    })().finally(() => { this.running = null; });
     return this.running;
   }
 
