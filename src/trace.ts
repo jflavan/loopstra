@@ -6,7 +6,7 @@ import { errorText } from "./shell";
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
   | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
-  | "chat-message" | "chat-request" | "chat-pr" | "judge";
+  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -215,8 +215,8 @@ export class Trace {
     );
   }
 
-  statusChange(slug: string, from: string, to: string, note = ""): void {
-    this.event(slug, "status_change", { from, to, note });
+  statusChange(slug: string, from: string, to: string, note = "", extra: Record<string, unknown> = {}): void {
+    this.event(slug, "status_change", { from, to, note, ...extra });
   }
 
   /**
