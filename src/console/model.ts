@@ -1,16 +1,18 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import { offers, requestLabel, retryOptions } from "../actions";
 import { attention, type AttentionItem } from "../attention";
 import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
 import { loadConfig, type Config } from "../config";
-import { agoText, heartbeatState, readHeartbeat, readLoopHold, readPause, type Heartbeat, type LoopStatus } from "../heartbeat";
-import { effectivePriority, orderQueue, plainStatus, scanRepo, waitNote, type Intent, type Scan, type Status } from "../intents";
+import { agoText, heartbeatState, readHeartbeat, readLoopHold, readPause, type Heartbeat, type LoopHold, type LoopStatus } from "../heartbeat";
+import { effectivePriority, humanGates, orderQueue, plainStatus, scanRepo, waitNote, type HumanGates, type Intent, type Scan, type Status } from "../intents";
+import { pendingRequests, type Request } from "../requests";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
 import { nowText } from "../tools";
 import type { EventRow, PhaseRow, Trace } from "../trace";
 import { parsePayload } from "./describe";
-import type { ChangeSummary, FinishedPhase, LoopSection, Meta, RunningPhase, Sections, Stage, Totals } from "./types";
+import type { ChangeSummary, FinishedPhase, LoopSection, Meta, PendingRequest, RunningPhase, Sections, Stage, Totals } from "./types";
 
 /** The board column of each status: where the change is, or is heading next. */
 const STAGE: Record<Status, Stage> = {
@@ -57,16 +59,19 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
     ...hb,
     working: hb.working.map((w) => ({ slug: w.slug, phase: runningNow.filter((p) => p.slug === w.slug).map((p) => p.name).join(" + ") || null })),
     nextCheck: nextCheck(hb.state === "running" && !hb.working.length ? beat?.lastTickAt : null, pollSeconds),
+    held: live.held,
   };
+  const human = humanGates(cfg);
   const holds = cfg ? await safely("same-file waits", () => sameFileHolds(cfg.speed.max_parallel_changes, ordered), new Map<string, string>()) : new Map<string, string>();
-  const changes = await safely("changes", () => ordered.map((i) => changeSummary(trace, i, ordered, holds.get(i.slug), busy, now)), [] as ChangeSummary[]);
+  const changes = await safely("changes", () => ordered.map((i) => changeSummary(trace, i, ordered, holds.get(i.slug), busy, now, human)), [] as ChangeSummary[]);
   const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);
   const totals = await safely("costs", () => totalsOf(trace.allPhases(), now), { todayUsd: 0, weekUsd: 0, allUsd: 0 });
+  const requests = await safely("waiting requests", () => pendingRequests(root).map(pendingView), [] as PendingRequest[]);
   for (const what of problems) inbox.push({ kind: "config", label: "Console", slug: null, title: "Part of the console could not be read", what });
   return {
     meta: { chat: opts.chat ?? false, usdPerMinute: USD_PER_MINUTE, pollSeconds },
-    sections: { loop, inbox, changes, running: { now: runningNow, recent }, totals },
+    sections: { loop, inbox, changes, running: { now: runningNow, recent }, totals, requests },
   };
 }
 
@@ -76,15 +81,28 @@ function nextCheck(lastTickAt: string | null | undefined, pollSeconds: number): 
   return Number.isFinite(last) ? new Date(last + pollSeconds * 1000).toISOString() : null;
 }
 
-/** One change as the board and the lists show it. `heldBy`: the change it waits for over the same files. */
-export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: string | undefined, busy: ReadonlySet<string>, now: Date): ChangeSummary {
+/**
+ * One change as the board and the lists show it. `heldBy`: the change it waits for over the same
+ * files. `human`: who sits on each gate, which decides whether Approve and Send back are offered.
+ */
+export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: string | undefined, busy: ReadonlySet<string>, now: Date, human: HumanGates): ChangeSummary {
   const fm = i.file.frontmatter;
   const since = statusSince(trace, i);
   return {
     slug: i.slug, title: i.file.title || i.slug, status: fm.status, plain: plainStatus(fm.status), priority: effectivePriority(fm),
     stage: STAGE[fm.status], since, inStatus: since ? agoText(now.getTime() - Date.parse(since)) : null,
     costUsd: endedCost(trace.phases(i.slug)), waiting: waitNote(i, all, heldBy) || null, note: fm.note, running: busy.has(i.slug),
+    held: fm.hold.trim() || null,
+    offers: offers(fm, human, fm.status === "blocked" ? retryOptions(trace, i.slug, fm.note) : []),
   };
+}
+
+/** A waiting request as the page shows it. */
+function pendingView(r: Request): PendingRequest {
+  const slug = "slug" in r ? r.slug : null;
+  // An accept has no `expect`, which requestLabel does not read for it.
+  const label = r.kind === "new" ? `Add ${r.intents.length} written intent${r.intents.length === 1 ? "" : "s"}` : requestLabel(r as Parameters<typeof requestLabel>[0]);
+  return { id: r.id, kind: r.kind, slug, label, byName: r.byName, via: r.via, at: r.at };
 }
 
 /** What phases cost; a running one's budget hold is not spending. */
@@ -103,9 +121,10 @@ function statusSince(trace: Trace, i: Intent): string | null {
 }
 
 /** The loop's heartbeat and the state it shows, read the same way for every screen. */
-export function loopNow(root: string, pollSeconds: number, now: Date): { beat: Heartbeat | null; state: LoopStatus } {
+export function loopNow(root: string, pollSeconds: number, now: Date): { beat: Heartbeat | null; state: LoopStatus; held: LoopHold | null } {
   const beat = readHeartbeat(root);
-  return { beat, state: heartbeatState(beat, pollSeconds, now, { pause: readPause(root), hold: readLoopHold(root) }) };
+  const held = readLoopHold(root);
+  return { beat, state: heartbeatState(beat, pollSeconds, now, { pause: readPause(root), hold: held }), held };
 }
 
 /**

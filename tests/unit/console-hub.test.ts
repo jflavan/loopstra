@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { Hub, PING, type HubOptions, type Send } from "../../src/console/hub";
-import type { StreamMessage } from "../../src/console/types";
-import { writeHeartbeat } from "../../src/heartbeat";
+import type { Sections, StreamMessage } from "../../src/console/types";
+import { holdLoop, writeHeartbeat } from "../../src/heartbeat";
+import { CONSOLE, submitRequest } from "../../src/requests";
 import { scanRepo, type Scan } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import { config, intent, parseFrames, until, withTrace } from "../console-helpers";
@@ -310,6 +311,21 @@ describe("the console's live stream", () => {
       await again();
       await hub.whenStopped();
       expect(problems()).toBe(2);
+    });
+  });
+
+  test("the loop's pause and a request made show at once", async () => {
+    await withHub(FAST, async ({ root, connect }) => {
+      await config(root);
+      await intent(root, "one", "status: building");
+      const p = page();
+      await connect(p.send);
+      const sections = (name: string) => p.messages().map((m) => m.msg).filter((m) => m.type === "section" && m.name === name) as Array<Extract<StreamMessage, { type: "section" }>>;
+      // Well inside the ten-second bucket that would rebuild the model anyway.
+      holdLoop(root, "John");
+      await until(() => sections("loop").some((m) => (m.value as Sections["loop"]).held?.by === "John"), 3_000);
+      submitRequest(root, { by: "u", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "hold", slug: "one", expect: "building", reason: "" });
+      await until(() => sections("requests").some((m) => (m.value as Sections["requests"]).length === 1), 3_000);
     });
   });
 
