@@ -13,7 +13,7 @@ import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { andList } from "./text";
-import { applyRequests } from "./apply";
+import { applyRequests, armApplier, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
@@ -105,6 +105,8 @@ export async function tick(root: string): Promise<TickResult> {
 
     // What people asked for (chat, the console): only the loop writes main.
     await applyRequests(root, cfg, trace);
+    // From here the applier beside the tick may apply requests too (see startApplier).
+    armApplier(root);
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
@@ -809,6 +811,8 @@ export async function start(root: string, opts: { once: boolean; installSignals?
   resetStop();
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
   const beat = startHeartbeat(root);
+  // Applies requests while steps run, once the first tick has settled the checkout (see armApplier).
+  const applier = startApplier(root);
   try {
     // The last pause logged: a pause that lasts (the loop's day, until midnight) is logged once, not every poll.
     let lastPaused = "";
@@ -842,6 +846,7 @@ export async function start(root: string, opts: { once: boolean; installSignals?
       if (stopRequested()) break;
     }
   } finally {
+    await applier.stop();
     beat.stopped();
     uninstall();
   }

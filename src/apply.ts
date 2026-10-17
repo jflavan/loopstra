@@ -1,21 +1,24 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
+import { join, resolve } from "node:path";
 import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoMatches } from "./actions";
-import type { Config } from "./config";
+import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, STATUSES, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
-import { applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
+import { applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { errorText } from "./shell";
-import { StopRequested } from "./stop";
-import type { Trace } from "./trace";
+import { StopRequested, stopRequested } from "./stop";
+import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./chat/threads";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
 
-/** One pass at a time per process: the tick's and the applier's never overlap (see applyRequests). */
-let chain: Promise<unknown> = Promise.resolve();
+/**
+ * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
+ * to start (`queued`), so the tick's and the applier's passes never overlap or pile up.
+ */
+const lanes = new Map<string, { tail: Promise<unknown>; queued: Promise<number> | null }>();
 
 /**
  * Applies every waiting request on the main checkout, as the loop: claims each (see claimRequest),
@@ -23,13 +26,70 @@ let chain: Promise<unknown> = Promise.resolve();
  * problem (a commit refused, the checkout off main) is traced and stays claimed for the next pass; one
  * that cannot be done gets a plain result saying why. One that cannot be read (see badShape) is
  * finished at once, and one that failed MAX_TRIES passes is given up with a plain result (a checkout
- * off main is not a try: it is a reason to wait). Passes run one after another, never side by side.
- * Gives how many were finished.
+ * off main is not a try: it is a reason to wait). Passes on a root run one after another, never side
+ * by side, and at most one waits behind the running one: a call while one waits gets that pass (it
+ * has not started, so it sees this caller's requests too). Gives how many were finished.
  */
 export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<number> {
-  const next = chain.then(() => applyPass(root, cfg, trace), () => applyPass(root, cfg, trace));
-  chain = next.catch(() => {});
+  const key = resolve(root);
+  const lane = lanes.get(key) ?? { tail: Promise.resolve(), queued: null };
+  lanes.set(key, lane);
+  if (lane.queued) return lane.queued;
+  const run = () => {
+    // Started: a call from now on queues a new pass behind this one.
+    if (lane.queued === next) lane.queued = null;
+    return applyPass(root, cfg, trace);
+  };
+  const next: Promise<number> = lane.tail.then(run, run);
+  lane.queued = next;
+  lane.tail = next.catch(() => {});
   return next;
+}
+
+/** The roots whose loop has settled the main checkout this run (see armApplier). */
+const armed = new Set<string>();
+
+/**
+ * Lets the applier at `root` apply requests. The tick calls it once it has applied requests itself:
+ * by then a move of main that a kill cut short has been put back, and the checkout is on main.
+ */
+export function armApplier(root: string): void {
+  armed.add(resolve(root));
+}
+
+/**
+ * Applies requests beside the tick, so one lands while steps run: every `everyMs` (2 s) and when a
+ * file appears in `.loopstra/requests/`, once the tick has armed it. Each pass loads the config and
+ * opens the trace itself. Never throws; `stop` waits for a pass in flight.
+ */
+export function startApplier(root: string, opts: { everyMs?: number } = {}): { stop(): Promise<void> } {
+  const key = resolve(root);
+  let inFlight: Promise<void> | null = null;
+  let stopped = false;
+  const pass = () => {
+    if (stopped || inFlight || !armed.has(key) || stopRequested()) return;
+    inFlight = (async () => {
+      let cfg: Config;
+      try { cfg = await loadConfig(root); } catch { return; }
+      const trace = Trace.open(root, () => {});
+      try { await applyRequests(root, cfg, trace); } catch { /* a stop, or traced inside; the next pass tries again */ } finally { trace.close(); }
+    })().finally(() => { inFlight = null; });
+  };
+  const timer = setInterval(pass, opts.everyMs ?? 2_000);
+  let watcher: FSWatcher | null = null;
+  try {
+    mkdirSync(requestsDir(root), { recursive: true });
+    watcher = watch(requestsDir(root), () => pass());
+  } catch { /* the timer alone */ }
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      watcher?.close();
+      armed.delete(key);
+      await inFlight;
+    },
+  };
 }
 
 /** How many passes may fail to apply a request before the loop gives up on it. */

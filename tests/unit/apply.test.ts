@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { applyRequests } from "../../src/apply";
+import { applyRequests, armApplier, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
 import { applyingRequests, CONSOLE, pendingRequests, requestState, submitRequest, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
+import { until } from "../console-helpers";
 import { lastCommit, run } from "../helpers";
 
 const by = { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "" };
@@ -274,6 +275,49 @@ describe("applying requests", () => {
       await apply(r.root);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, status: null, text: "There is no change called nope in the main code." });
     } finally {
+      r.cleanup();
+    }
+  });
+});
+
+describe("the applier", () => {
+  test("once armed, it applies a request within a couple of seconds and stops cleanly", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    const applier = startApplier(r.root, { everyMs: 50 });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      await Bun.sleep(200);
+      // Not armed yet: the first tick has not put a cut-short move of main back.
+      expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
+      armApplier(r.root);
+      await until(async () => (await readIntent(r.root, "a")).file.frontmatter.hold !== "", 5_000);
+    } finally {
+      await applier.stop();
+      r.cleanup();
+    }
+  });
+
+  test("passes do not pile up: one runs, and every caller meanwhile shares the one queued behind it", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    const trace = Trace.open(r.root, () => {});
+    try {
+      const cfg = await loadConfig(r.root);
+      submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      const first = applyRequests(r.root, cfg, trace);
+      // The first pass is running now (committing the hold).
+      await Bun.sleep(0);
+      const second = applyRequests(r.root, cfg, trace);
+      const third = applyRequests(r.root, cfg, trace);
+      expect(second).not.toBe(first);
+      expect(third).toBe(second);
+      expect(await first).toBe(1);
+      expect(await second).toBe(0);
+      // Once the queued pass has started, a new call queues a new one.
+      const later = applyRequests(r.root, cfg, trace);
+      expect(later).not.toBe(second);
+      expect(await later).toBe(0);
+    } finally {
+      trace.close();
       r.cleanup();
     }
   });
