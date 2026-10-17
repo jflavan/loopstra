@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { applyRequests, armApplier, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
-import { applyingRequests, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, type Submission } from "../../src/requests";
+import { applyingRequests, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { until } from "../console-helpers";
@@ -383,7 +383,9 @@ describe("applying requests", () => {
       expect(requestState(r.root, started.id)).toMatchObject({ ok: true, text: "Accepted: a is now waiting to be designed." });
       expect(requestState(r.root, moved.id)).toMatchObject({ ok: false, text: "b is building now, not a draft; nothing changed." });
       expect(requestState(r.root, missing.id)).toMatchObject({ ok: false, text: "There is no change called nope in the main code." });
-      expect(requestState(r.root, chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
+      // Read the way chat reads it: the console never takes it.
+      expect(requestState(r.root, chat.id)).toBeNull();
+      expect(takeResults(r.root, new Set(["slack"])).find((x) => x.id === chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("c", "chat-request")!.payload)).toMatchObject({ via: "Slack", result: "accepted" });
       trace.close();
