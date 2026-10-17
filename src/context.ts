@@ -303,6 +303,21 @@ export function clearSession(ctx: StepContext, key: string): void {
   writeMarker(ctx, SESSIONS, JSON.stringify(all, null, 2));
 }
 
+/** Run-folder file: the note a person sent the change back with, for the next writing or build session (see takeSentBack). */
+export const SENT_BACK = "sent-back.md";
+
+/** Keeps the note a person sent a change back with, until the next session of the stage it went back to has used it. */
+export function writeSentBack(root: string, slug: string, note: string): void {
+  const dir = join(root, ".loopstra", "runs", slug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, SENT_BACK), note);
+}
+
+/** Drops a kept sent-back note (its send back was undone). */
+export function dropSentBack(root: string, slug: string): void {
+  rmSync(join(root, ".loopstra", "runs", slug, SENT_BACK), { force: true });
+}
+
 
 /**
  * Records a priority only when the owner stated none; an owner's own priority is never overwritten.

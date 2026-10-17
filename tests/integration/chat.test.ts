@@ -81,7 +81,7 @@ describe("chat with the loop", () => {
       const csv = await readIntent(r.root, "csv-export");
       expect(["accepted", "designing", "spec-approved", "blocked"]).toContain(csv.file.frontmatter.status);
       const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
-      expect(log).toContain("loopstra(csv-export): accepted by Ana from chat [skip ci]");
+      expect(log).toContain("loopstra(csv-export): accepted by Ana from the terminal [skip ci]");
       expect((await readIntent(r.root, "other")).file.frontmatter.status).toBe("closed");
       const results = takeResults(r.root, new Set(["terminal"]));
       expect(results.map((x) => x.text)).toEqual([
@@ -91,7 +91,7 @@ describe("chat with the loop", () => {
       const trace = Trace.open(r.root);
       try {
         const change = trace.events("csv-export").find((e) => e.type === "status_change");
-        expect(JSON.parse(change!.payload)).toEqual({ from: "draft", to: "accepted", note: "accepted by Ana from chat" });
+        expect(JSON.parse(change!.payload)).toEqual({ from: "draft", to: "accepted", note: "accepted by Ana from the terminal" });
       } finally { trace.close(); }
     } finally { r.cleanup(); }
   });
@@ -113,7 +113,7 @@ describe("chat with the loop", () => {
         "Added to the queue as drafts: c. Read them in intent/, then set status to accepted, or ask me to start one.",
       ]);
       const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
-      expect(log).toContain("loopstra(a): accepted by U from chat");
+      expect(log).toContain("loopstra(a): accepted by U from the terminal");
       expect(log).toContain("loopstra(c): open intent from chat");
     } finally { r.cleanup(); }
   });

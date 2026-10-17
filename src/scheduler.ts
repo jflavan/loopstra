@@ -13,9 +13,9 @@ import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { andList } from "./text";
+import { applyRequests } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
-import { applyChatRequests } from "./chat/requests";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
@@ -103,8 +103,8 @@ export async function tick(root: string): Promise<TickResult> {
     // Shared at the end only after a sync that went through: a sync that waits or fails says why itself.
     share = hasRemote && (await syncMain(root, cfg, trace)) === "pass";
 
-    // What people asked for in chat (start a draft, add written intents): only the loop writes main.
-    await applyChatRequests(root, cfg, trace);
+    // What people asked for (chat, the console): only the loop writes main.
+    await applyRequests(root, cfg, trace);
 
     // Signals: after a merge, or on the interval. Both are read from disk and the trace.
     const health = mainHealthDue(root, cfg, trace);
