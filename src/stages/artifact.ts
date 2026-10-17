@@ -1,5 +1,5 @@
 import { headingsPresent } from "../checks";
-import { block, clearMarker, onceMarker, readArtifact, readMarker, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, onceMarker, readArtifact, readMarker, SENT_BACK, sentBackNote, setStatus, writeArtifact, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
@@ -103,12 +103,16 @@ export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext,
 
 /** One writing session (or an answer written earlier, see take): the artifact is written, then the after commands run. */
 async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, findings: string): Promise<StepResult> {
-  const phase = writerPhase(ctx, s, await artifacts(ctx), findings);
+  // A person's note from sending the change back comes first; the check's findings (a rewrite) after it.
+  const all = [sentBackNote(ctx), findings].filter(Boolean).join("\n\n");
+  const phase = writerPhase(ctx, s, await artifacts(ctx), all);
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent.
   const prompt = await phasePrompt(ctx, phase);
   const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
   if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, s.artifact, s.text(r.envelope));
+  // Used: the artifact it asked to change is written again.
+  clearMarker(ctx, SENT_BACK);
   return runHookCommands(ctx, "after", s.stage);
 }
 

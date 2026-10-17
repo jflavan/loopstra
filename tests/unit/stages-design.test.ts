@@ -7,6 +7,7 @@ import { claim, release } from "../../src/lanes";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD } from "../../src/stages/plan";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
+import { writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { FIRST_NEEDS } from "../../src/judges";
 import { fixture, fixtureDir, judgeNotes, seedCaught, setEnv, setupRepo, stopAfterPass, withEnv } from "../helpers";
@@ -43,6 +44,21 @@ function planAheadNotes(trace: Trace): string[] {
 }
 
 describe("design stage", () => {
+  test("a change sent back with a note gives the note to the next design session, once", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runDesignStep(ctx);
+      const design = trace.phases("add-numbers").find((p) => p.name === "design")!;
+      const prompt = await Bun.file(join(ctx.runDir, "phases", `${design.seq}-design`, "prompt.md")).text();
+      expect(prompt).toContain("A person sent the earlier version back with this note:\nCover negative numbers too.");
+      expect(existsSync(join(ctx.runDir, "sent-back.md"))).toBe(false);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with no human gate, accepted → spec-approved in one step: spec written, checks run in the same step", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     const r = await runDesignStep(ctx);

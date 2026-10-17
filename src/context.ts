@@ -303,7 +303,7 @@ export function clearSession(ctx: StepContext, key: string): void {
   writeMarker(ctx, SESSIONS, JSON.stringify(all, null, 2));
 }
 
-/** Run-folder file: the note a person sent the change back with, for the next writing or build session (see takeSentBack). */
+/** Run-folder file: the note a person sent the change back with, for the next writing or build session (see sentBackNote). */
 export const SENT_BACK = "sent-back.md";
 
 /** Keeps the note a person sent a change back with, until the next session of the stage it went back to has used it. */
@@ -311,6 +311,12 @@ export function writeSentBack(root: string, slug: string, note: string): void {
   const dir = join(root, ".loopstra", "runs", slug);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, SENT_BACK), note);
+}
+
+/** The note the change was sent back with, worded for a session ("" when there is none). */
+export function sentBackNote(ctx: StepContext): string {
+  const note = readMarker(ctx, SENT_BACK)?.trim() ?? "";
+  return note ? `A person sent the earlier version back with this note:\n${note}` : "";
 }
 
 /** Drops a kept sent-back note (its send back was undone). */

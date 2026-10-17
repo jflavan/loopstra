@@ -8,6 +8,10 @@ Spec, for reference:
 
 {{spec}}
 
+A person's notes on an earlier build of this change; address each one:
+
+{{feedback}}
+
 Rules:
 
 - Implement what the plan lists. If you must touch a file the plan does not list, do it and say so in your summary.

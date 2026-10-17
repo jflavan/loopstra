@@ -9,7 +9,7 @@ import { runBuildStep } from "../../src/stages/build";
 import { runMergeStep } from "../../src/stages/merge";
 import { reviewAhead } from "../../src/stages/early-review";
 import { PR_LEASE, PR_PUSHING, REMOTE_AHEAD } from "../../src/stages/shared";
-import { readMarker, writeMarker } from "../../src/context";
+import { readMarker, writeMarker, writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
@@ -59,6 +59,27 @@ function meeting(codes: { test: number; lint: number }): { test: string; lint: s
 const LONG = `bun -e "setTimeout(() => {}, 30000)"`;
 
 describe("build stage", () => {
+  test("a change sent back with a note gives the note to the next build session, once; with none, the prompt says so", async () => {
+    const first = await planned({ test: "echo ok" });
+    try {
+      await runBuildStep(first.ctx);
+      expect(await promptOf(first.ctx.runDir, first.trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\n(none)");
+    } finally {
+      first.trace.close();
+      first.repo.cleanup();
+    }
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      writeSentBack(repo.path, "add-numbers", "Cover negative numbers too.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("Cover negative numbers too.");
+      expect(existsSync(join(ctx.runDir, "sent-back.md"))).toBe(false);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with speed.parallel_checks, test, lint and build start together inside one test phase", async () => {
     const m = meeting({ test: 0, lint: 0 });
     const { repo, ctx, trace } = await planned({ test: m.test, lint: m.lint, build: "echo built" }, "speed:\n  parallel_checks: true\n");

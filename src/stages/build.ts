@@ -1,5 +1,5 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, clearMarker, saveSession, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, alongside, codePhase, mayOverlap, projectCommand } from "../phases";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
@@ -39,13 +39,15 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   const build = await agentPhase(ctx, {
     name: "build", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test }, skills: stage.skills,
+    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback: readMarker(ctx, SENT_BACK)?.trim() ?? "" }, skills: stage.skills,
   });
   if (!build.ok) return block(ctx, build.note);
   // The build session is what fix, reconcile, and revise resume.
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);
   const saved = await saveWork(ctx, wt, build.envelope.commit_message || `loopstra(${ctx.slug}): build`);
   if (!saved.ok) return block(ctx, saved.note, saved);
+  // Used: the build it asked to change is saved.
+  clearMarker(ctx, SENT_BACK);
 
   // Plan drift: files changed that main's plan did not list.
   let plan = a.plan;
