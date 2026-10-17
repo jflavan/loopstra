@@ -6,7 +6,7 @@ import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
-import { config, intent, model, setStarted } from "../console-helpers";
+import { config, intent, model, setStarted, withTrace } from "../console-helpers";
 import { tempDir } from "../helpers";
 
 describe("changes", () => {
@@ -16,11 +16,11 @@ describe("changes", () => {
       await config(t.path);
       await intent(t.path, "one", "status: building\npriority: high", "One");
       await intent(t.path, "two", "status: accepted\ndepends_on: one");
-      const trace = Trace.open(t.path);
-      const a = trace.phaseStart("one", "build", "agent");
-      trace.phaseEnd("one", a, { status: "success", costUsd: 0.3 });
-      trace.phaseStart("one", "fix-1", "agent", 2); // running, holding $2: a hold is not spending
-      trace.close();
+      withTrace(t.path, (trace) => {
+        const a = trace.phaseStart("one", "build", "agent");
+        trace.phaseEnd("one", a, { status: "success", costUsd: 0.3 });
+        trace.phaseStart("one", "fix-1", "agent", 2); // running, holding $2: a hold is not spending
+      });
       const m = await model(t.path);
       expect(m.sections.changes.map((c) => c.slug)).toEqual(["one", "two"]);
       expect(m.sections.changes[0]).toMatchObject({ title: "One", status: "building", plain: "building and testing", priority: "high", stage: "build", waiting: null, running: false });
@@ -33,6 +33,28 @@ describe("changes", () => {
       t.cleanup();
     }
   });
+
+  test("with changes worked on together, one whose plan lists a file another holds waits for it", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "speed:\n  max_parallel_changes: 2\n");
+      await intent(t.path, "alpha", "status: building");
+      await intent(t.path, "beta", "status: plan-approved");
+      await intent(t.path, "gamma", "status: plan-approved");
+      const plan = (files: string) => `# Plan\n\n## Files that change\n${files}\n\n## Steps\n1. Do it.\n`;
+      await Bun.write(join(t.path, "intent", "alpha", "plan.md"), plan("- `src/csv.ts`\n- src/a.ts (new)"));
+      await Bun.write(join(t.path, "intent", "beta", "plan.md"), plan("- src/csv.ts: export rows"));
+      await Bun.write(join(t.path, "intent", "gamma", "plan.md"), plan("- src/other.ts"));
+      const by = Object.fromEntries((await model(t.path)).sections.changes.map((c) => [c.slug, c.waiting]));
+      expect(by).toEqual({ alpha: null, beta: "Waits for alpha to be merged first, because both change the same files.", gamma: null });
+
+      // One change at a time: the loop never builds two at once, so nothing waits for files.
+      await config(t.path);
+      expect((await model(t.path)).sections.changes.every((c) => c.waiting === null)).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
 });
 
 describe("the loop and running steps", () => {
@@ -41,9 +63,7 @@ describe("the loop and running steps", () => {
     try {
       await config(t.path, "poll_seconds: 60\n");
       await intent(t.path, "one", "status: building");
-      const trace = Trace.open(t.path);
-      trace.phaseStart("one", "build", "agent");
-      trace.close();
+      withTrace(t.path, (trace) => trace.phaseStart("one", "build", "agent"));
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
       expect((await model(t.path, now)).sections.loop).toMatchObject({ state: "stopped", text: "Stopped", nextCheck: null });
@@ -52,10 +72,10 @@ describe("the loop and running steps", () => {
       // Two phases at once: both are named, in the order they started. A row left running before
       // this tick (its process was killed) is not.
       setStarted(t.path, "one", 1, iso(60));
-      const t2 = Trace.open(t.path);
-      t2.phaseStart("one", "verify", "agent");
-      t2.phaseStart("one", "early-review", "agent");
-      t2.close();
+      withTrace(t.path, (trace) => {
+        trace.phaseStart("one", "verify", "agent");
+        trace.phaseStart("one", "early-review", "agent");
+      });
       expect((await model(t.path, now)).sections.loop).toMatchObject({ working: [{ slug: "one", phase: "verify + early-review" }] });
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(3600), lastTickAt: iso(840), lastBeatAt: iso(840), current: null, stopping: false, stopped: false });
       expect((await model(t.path, now)).sections.loop).toMatchObject({ state: "not-responding", text: "Not responding (last check 14 min ago)" });
@@ -97,16 +117,18 @@ describe("the loop and running steps", () => {
     try {
       await config(t.path, "poll_seconds: 60\n");
       await intent(t.path, "one", "status: building", "One");
-      const trace = Trace.open(t.path);
-      const old = trace.phaseStart("one", "plan", "agent");
-      const seq = trace.phaseStart("one", "build", "agent");
-      trace.event("one", "claude_event", { type: "system", subtype: "init", model: "claude-sonnet-5-5" }, seq);
-      trace.event("one", "claude_event", { type: "assistant", items: ["text:Reading the parser first.", "tool:Read"], targets: ["", "src/csv.ts"] }, seq);
-      trace.event("one", "claude_event", { type: "user" }, seq);
-      trace.event("one", "claude_event", { type: "assistant", items: ["tool:Bash"], targets: ["bun test"] }, seq);
-      trace.close();
+      const [old, seq] = withTrace(t.path, (trace) => {
+        const plan = trace.phaseStart("one", "plan", "agent");
+        const build = trace.phaseStart("one", "build", "agent");
+        trace.event("one", "claude_event", { type: "system", subtype: "init", model: "claude-sonnet-5-5" }, build);
+        trace.event("one", "claude_event", { type: "assistant", items: ["text:Reading the parser first.", "tool:Read"], targets: ["", "src/csv.ts"] }, build);
+        trace.event("one", "claude_event", { type: "user" }, build);
+        trace.event("one", "claude_event", { type: "assistant", items: ["tool:Bash"], targets: ["bun test"] }, build);
+        return [plan, build];
+      });
       const now = new Date();
       const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
+      // The plan phase was left running by a process killed before this tick: still running, but not current.
       setStarted(t.path, "one", old, iso(600));
       writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(900), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, working: ["one"], stopping: false, stopped: false });
       const m = await model(t.path, now);
@@ -134,11 +156,11 @@ describe("the loop and running steps", () => {
     const t = tempDir();
     try {
       await config(t.path);
-      const trace = Trace.open(t.path);
-      const a = trace.phaseStart("one", "build", "agent"); trace.phaseEnd("one", a, { status: "success", costUsd: 0.2 });
-      const c = trace.phaseStart("_chat", "orchestrator", "agent"); trace.phaseEnd("_chat", c, { status: "success" });
-      const b = trace.phaseStart("two", "design", "agent"); trace.phaseEnd("two", b, { status: "fail" });
-      trace.close();
+      withTrace(t.path, (trace) => {
+        const a = trace.phaseStart("one", "build", "agent"); trace.phaseEnd("one", a, { status: "success", costUsd: 0.2 });
+        const c = trace.phaseStart("_chat", "orchestrator", "agent"); trace.phaseEnd("_chat", c, { status: "success" });
+        const b = trace.phaseStart("two", "design", "agent"); trace.phaseEnd("two", b, { status: "fail" });
+      });
       const m = await model(t.path);
       expect(m.sections.running.recent.map((p) => [p.slug, p.name, p.status])).toEqual([["two", "design", "fail"], ["one", "build", "success"]]);
     } finally {
@@ -182,10 +204,10 @@ describe("needs attention", () => {
       await intent(t.path, "busy", "status: building");
       mkdirSync(join(t.path, "intent", "broken"), { recursive: true });
       await Bun.write(join(t.path, "intent", "broken", "intent.md"), "---\nstatus: nearly-done\n---\n# Intent: broken\n");
-      const trace = Trace.open(t.path);
-      trace.signal("main_health", "pass", "");
-      trace.signal("main_health", "fail", "1 failing");
-      trace.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_health", "pass", "");
+        trace.signal("main_health", "fail", "1 failing");
+      });
 
       const inbox = (await model(t.path)).sections.inbox;
       const by = Object.fromEntries(inbox.map((a) => [a.slug ?? a.kind, a]));
@@ -208,18 +230,18 @@ describe("needs attention", () => {
     const t = tempDir();
     try {
       await config(t.path);
-      const trace = Trace.open(t.path);
-      trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
-      trace.signal("main_health", "error", "install failed");
-      trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
-      trace.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
+        trace.signal("main_health", "error", "install failed");
+        trace.signal("main_health", "fail", "MSB1009: Project file does not exist.");
+      });
       const inbox = (await model(t.path)).sections.inbox;
       expect(inbox).toHaveLength(1);
       expect(inbox[0]?.what).toMatch(/^The tests on main have not passed yet \(checked .* ago\)\. On a new repository that is expected until the first change merges\.$/);
-      const t2 = Trace.open(t.path);
-      t2.signal("main_health", "pass", "");
-      t2.signal("main_health", "fail", "1 failing");
-      t2.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_health", "pass", "");
+        trace.signal("main_health", "fail", "1 failing");
+      });
       expect((await model(t.path)).sections.inbox[0]?.what).toContain("The tests on main are failing");
     } finally {
       t.cleanup();
@@ -230,16 +252,16 @@ describe("needs attention", () => {
     const t = tempDir();
     try {
       await intent(t.path, "busy", "status: building");
-      const trace = Trace.open(t.path);
-      trace.signal("main_health", "error", "install failed");
-      trace.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_health", "error", "install failed");
+      });
       const inbox = (await model(t.path)).sections.inbox;
       expect(inbox.map((a) => a.kind).sort()).toEqual(["config", "health"]);
       expect(inbox.find((a) => a.kind === "config")?.what).toContain("loopstra init");
       await config(t.path);
-      const t2 = Trace.open(t.path);
-      t2.signal("main_health", "pass", "");
-      t2.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_health", "pass", "");
+      });
       expect((await model(t.path)).sections.inbox).toEqual([]);
     } finally {
       t.cleanup();
@@ -275,13 +297,13 @@ describe("needs attention", () => {
     const t = tempDir();
     try {
       await config(t.path);
-      const trace = Trace.open(t.path);
-      trace.signal("main_sync", "waiting", SYNC_TEXT.ownCommits);
-      trace.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_sync", "waiting", SYNC_TEXT.ownCommits);
+      });
       expect((await model(t.path)).sections.inbox).toEqual([{ kind: "sync", label: "GitHub", slug: null, title: "Main and GitHub", what: SYNC_TEXT.ownCommits }]);
-      const t2 = Trace.open(t.path);
-      t2.signal("main_sync", "pass", SYNC_TEXT.inStep);
-      t2.close();
+      withTrace(t.path, (trace) => {
+        trace.signal("main_sync", "pass", SYNC_TEXT.inStep);
+      });
       expect((await model(t.path)).sections.inbox).toEqual([]);
     } finally {
       t.cleanup();
@@ -296,12 +318,13 @@ describe("totals", () => {
       await config(t.path);
       await intent(t.path, "one", "status: building");
       await intent(t.path, "two", "status: accepted");
-      const trace = Trace.open(t.path);
-      const a = trace.phaseStart("one", "build", "agent"); trace.phaseEnd("one", a, { status: "success", costUsd: 0.3 });
-      const b = trace.phaseStart("one", "fix-1", "agent"); trace.phaseEnd("one", b, { status: "fail", costUsd: 1 });
-      const c = trace.phaseStart("two", "intake", "agent"); trace.phaseEnd("two", c, { status: "success", costUsd: 2 });
-      trace.statusChange("one", "plan-approved", "building");
-      trace.close();
+      const [a, b, c] = withTrace(t.path, (trace) => {
+        const build = trace.phaseStart("one", "build", "agent"); trace.phaseEnd("one", build, { status: "success", costUsd: 0.3 });
+        const fix = trace.phaseStart("one", "fix-1", "agent"); trace.phaseEnd("one", fix, { status: "fail", costUsd: 1 });
+        const intake = trace.phaseStart("two", "intake", "agent"); trace.phaseEnd("two", intake, { status: "success", costUsd: 2 });
+        trace.statusChange("one", "plan-approved", "building");
+        return [build, fix, intake];
+      });
       // Wednesday 30 September 2026, noon, local time. The week starts on Monday the 28th.
       const now = new Date(2026, 8, 30, 12, 0, 0);
       setStarted(t.path, "one", a, new Date(2026, 8, 30, 9, 0, 0).toISOString());

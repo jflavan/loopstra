@@ -19,10 +19,21 @@ export async function config(root: string, extra = ""): Promise<void> {
   await Bun.write(configPath(root), `version: 1\ncommands:\n  test: echo ok\n${extra}`);
 }
 
-/** Moves a phase's start (and end) time, which the trace otherwise stamps with the real clock. */
+/** Moves a phase's start (and end, once it has ended) time, which the trace otherwise stamps with the real clock. */
 export function setStarted(root: string, slug: string, seq: number, iso: string): void {
   const db = new Database(join(root, ".loopstra", "trace.db"));
-  try { db.run("UPDATE phases SET started = ?, ended = ? WHERE slug = ? AND seq = ?", [iso, iso, slug, seq]); } finally { db.close(); }
+  try {
+    // A running phase keeps no end time: giving it one would make it look finished to every query.
+    db.run("UPDATE phases SET started = ?, ended = CASE WHEN ended IS NULL THEN NULL ELSE ? END WHERE slug = ? AND seq = ?", [iso, iso, slug, seq]);
+  } finally {
+    db.close();
+  }
+}
+
+/** Runs `fn` with the repository's trace open, and closes it however `fn` ends (Windows keeps an open file locked). */
+export function withTrace<T>(root: string, fn: (trace: Trace) => T): T {
+  const trace = Trace.open(root);
+  try { return fn(trace); } finally { trace.close(); }
 }
 
 /** The console's model of a repository, with a trace opened and closed around it. */
