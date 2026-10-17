@@ -112,16 +112,20 @@ describe("the console's live stream", () => {
       await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "loop"));
       expect(scans).toBe(1);
 
-      await Bun.write(join(root, "intent", "one", "spec.md"), "# Spec\n");
-      await until(() => scans === 2);
-      await intent(root, "two", "status: accepted");
-      await until(() => scans === 3);
+      // Writing a file can be seen twice (the folder empty, then the file; size 0, then full), so
+      // these wait for "read again" (more than before), never for an exact count.
+      const readAgain = async (change: () => Promise<unknown>) => {
+        await Bun.sleep(100); // a second look at the last change must not count for this one
+        const before = scans;
+        await change();
+        await until(() => scans > before);
+      };
+      await readAgain(() => Bun.write(join(root, "intent", "one", "spec.md"), "# Spec\n"));
+      await readAgain(() => intent(root, "two", "status: accepted"));
       await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "changes"));
-      await Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n");
-      await until(() => scans === 4);
+      await readAgain(() => Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n"));
       // The same files, but the plan says something else now (which files it touches, say).
-      await Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n\nTouches src/a.ts.\n");
-      await until(() => scans === 5);
+      await readAgain(() => Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n\nTouches src/a.ts.\n"));
     });
   });
 
@@ -257,6 +261,27 @@ describe("the console's live stream", () => {
       await again();
       await hub.whenStopped();
       expect(problems()).toBe(2);
+    });
+  });
+
+  test("a page connected while the first rebuild failed gets a snapshot, not section diffs, from the first one that works", async () => {
+    let calls = 0;
+    // A read of the intent folder that cannot be used makes the model's build throw, once.
+    const scan = async (root: string): Promise<Scan> => (calls++ === 0 ? ({ intents: null } as unknown as Scan) : scanRepo(root));
+    await withHub({ ...FAST, scan }, async ({ root, connect }) => {
+      await config(root);
+      await intent(root, "one", "status: accepted");
+      const p = page();
+      await connect(p.send);
+      expect(p.messages()).toEqual([]);
+      // The folder changes, so the next look reads it again (the broken read is kept until then).
+      await intent(root, "two", "status: accepted");
+      await until(() => p.messages().length > 0);
+      const [first] = p.messages();
+      if (first?.msg.type !== "snapshot") throw new Error(`the first message is a ${first?.msg.type}, not a snapshot`);
+      expect(first.id).toBe("0");
+      expect(first.msg.sections.changes.map((c) => c.slug)).toEqual(["one", "two"]);
+      expect(p.messages().some((m) => m.msg.type === "section")).toBe(false);
     });
   });
 

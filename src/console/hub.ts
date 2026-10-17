@@ -93,7 +93,7 @@ export class Hub {
       this.start();
       await this.look(true);
       if (lastEventId > 0) this.catchUp(send, lastEventId);
-      if (this.model) send(frame({ type: "snapshot", meta: this.model.meta, sections: this.model.sections } satisfies StreamMessage, this.lastEventId));
+      if (this.model) send(this.snapshot(this.model));
       this.clients.add(send);
       added = true;
     } finally {
@@ -102,6 +102,10 @@ export class Hub {
       if (!added && !this.clients.size && !this.connecting) await this.stop();
     }
     return () => this.remove(send);
+  }
+
+  private snapshot(model: Model): string {
+    return frame({ type: "snapshot", meta: model.meta, sections: model.sections } satisfies StreamMessage, this.lastEventId);
   }
 
   /**
@@ -177,12 +181,13 @@ export class Hub {
   }
 
   /**
-   * Rebuilds and sends what changed, when anything did (always, when forced). One look at a time:
-   * a forced one waits for the look under way and then builds its own, since that one may have
-   * been for a trace that has since been closed.
+   * Rebuilds and sends what changed, when anything did (always, when forced). One look at a time,
+   * and a look asked for while one runs joins it: several pages connecting together share one
+   * rebuild. (A look under way cannot be for a closed trace: connect waits for the hub to let go
+   * of it first.)
    */
   private look(force = false): Promise<void> {
-    if (this.running) return force ? this.running.then(() => this.look(true)) : this.running;
+    if (this.running) return this.running;
     const trace = this.trace;
     if (!trace) return Promise.resolve();
     // Cleared from `finally`, not inside: a look that finds nothing returns before its first await,
@@ -198,6 +203,9 @@ export class Hub {
         if (this.trace !== trace) return;
         // Everything is recorded before anything is sent: a send can drop the last page and stop
         // the hub, which must then stay cleared.
+        // A page was added without a snapshot when the build before this one failed, so it has
+        // nothing to apply section diffs to.
+        const first = this.model === null;
         this.model = model;
         const changed = SECTION_NAMES.filter((name) => {
           const json = JSON.stringify(model.sections[name]);
@@ -205,7 +213,8 @@ export class Hub {
           this.sent.set(name, json);
           return before !== undefined && before !== json;
         });
-        for (const name of changed) this.broadcast(frame({ type: "section", name, value: model.sections[name] } satisfies StreamMessage));
+        if (first) this.broadcast(this.snapshot(model));
+        else for (const name of changed) this.broadcast(frame({ type: "section", name, value: model.sections[name] } satisfies StreamMessage));
         this.sendNewEvents(trace);
       } catch (e) {
         this.note(errorText(e));
@@ -257,7 +266,11 @@ export class Hub {
     return this.scanned.scan;
   }
 
-  /** Sends every page the new events in plain words, and moves the hub's mark past them. */
+  /**
+   * Sends every page the new events in plain words, and moves the hub's mark past them. Past
+   * EVENT_READS x CATCH_UP new events the rest arrive with a later look (at most the next
+   * ten-second bucket away, since the newest event id is part of the signature).
+   */
   private sendNewEvents(trace: Trace): void {
     for (let read = 0; read < EVENT_READS && this.trace === trace; read++) {
       const rows = trace.eventsAfter(this.lastEventId, CATCH_UP);
@@ -282,6 +295,8 @@ export class Hub {
   /** Traces a problem once, not on every look. */
   private note(what: string): void {
     if (this.noted.has(what)) return;
+    // Problems whose text differs each time must not pile up for as long as a page stays open.
+    if (this.noted.size >= 100) this.noted.clear();
     this.noted.add(what);
     try { this.trace?.event("_loop", "error", { where: "console", what }); } catch { /* the console never stops over its own trace */ }
   }
