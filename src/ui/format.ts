@@ -6,8 +6,9 @@ export function usd(n: number, estimate = false): string {
   return estimate ? `~${v}` : v;
 }
 
-/** "45s", "6m 12s", "2h 3m", "4d 4h". */
+/** "45s", "6m 12s", "2h 3m", "4d 4h"; a dash for a time that could not be read. */
 export function duration(ms: number): string {
+  if (!Number.isFinite(ms)) return "–";
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -17,9 +18,11 @@ export function duration(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-/** How long ago, short: "now", "4s", "3m", "2h", "5d". */
+/** How long ago, short: "now", "4s", "3m", "2h", "5d"; a dash for a time that could not be read. */
 export function ago(iso: string, now: number): string {
-  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  const ms = now - Date.parse(iso);
+  if (!Number.isFinite(ms)) return "–";
+  const s = Math.max(0, Math.round(ms / 1000));
   if (s < 2) return "now";
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;

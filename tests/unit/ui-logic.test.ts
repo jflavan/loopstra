@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
-import { costSoFar, duration, pillText, shortModel, usd } from "../../src/ui/format";
+import { ago, costSoFar, duration, pillText, shortModel, usd } from "../../src/ui/format";
 import { keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { filterCommands, fuzzyScore } from "../../src/ui/palette";
@@ -20,6 +20,11 @@ describe("formatting", () => {
     expect(duration(7_380_000)).toBe("2h 3m");
     expect(duration(100 * 3_600_000)).toBe("4d 4h");
     expect(costSoFar(new Date(0).toISOString(), 5 * 60_000, 0.2)).toBeCloseTo(1);
+    expect(ago(new Date(0).toISOString(), 3 * 60_000)).toBe("3m");
+    // A missing or unreadable time shows a dash, not "NaNd".
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) expect(duration(bad)).toBe("–");
+    expect(ago("not a time", Date.now())).toBe("–");
+    expect(ago(new Date(0).toISOString(), Number.NaN)).toBe("–");
     expect(shortModel("claude-sonnet-5-5")).toBe("sonnet 5.5");
     expect(shortModel("claude-haiku-4-5-20251001")).toBe("haiku 4.5");
     expect(shortModel("opus")).toBe("opus");
@@ -66,6 +71,11 @@ describe("keys", () => {
     expect(keyName(key("Escape"))).toBe("escape");
     expect(keyName(key("J"))).toBe("j");
     expect(keyName(key("x", { altKey: true }))).toBeNull();
+    // A modifier pressed on its own is the start of a combination, not a key of its own.
+    for (const mod of ["Shift", "Control", "Alt", "Meta", "CapsLock", "AltGraph", "OS", "NumLock", "ScrollLock", "Fn", "Hyper", "Super", "Symbol", "FnLock", "SymbolLock"]) {
+      expect({ mod, name: keyName(key(mod)) }).toEqual({ mod, name: null });
+      expect({ mod, name: keyName(key(mod, { ctrlKey: true })) }).toEqual({ mod, name: null });
+    }
     expect(typingIn({ tagName: "TEXTAREA" } as unknown as EventTarget)).toBe(true);
     expect(typingIn({ tagName: "DIV", isContentEditable: true } as unknown as EventTarget)).toBe(true);
     expect(typingIn({ tagName: "DIV" } as unknown as EventTarget)).toBe(false);

@@ -25,9 +25,12 @@ export function keyMatcher(bindings: Binding[], windowMs = 1000): (key: string, 
   };
 }
 
-/** "mod+k" for Ctrl or Cmd with K, "escape", "j"; null with Alt, which the page leaves to the browser. */
+/** Keys that only change another key; pressed on their own they start a combination, so they are not shortcuts. */
+const MODIFIERS = new Set(["shift", "control", "alt", "altgraph", "meta", "os", "capslock", "numlock", "scrolllock", "fn", "fnlock", "hyper", "super", "symbol", "symbollock"]);
+
+/** "mod+k" for Ctrl or Cmd with K, "escape", "j"; null with Alt, which the page leaves to the browser, and for a modifier on its own. */
 export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null {
-  if (e.altKey) return null;
+  if (e.altKey || MODIFIERS.has(e.key.toLowerCase())) return null;
   const key = e.key.toLowerCase();
   return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
 }
