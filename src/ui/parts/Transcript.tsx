@@ -18,16 +18,28 @@ export function Transcript({ shown, live }: { shown: Shown; live: boolean }) {
   const [follow, setFollow] = useState(true);
   const [all, setAll] = useState(false);
   const skipped = all ? 0 : Math.max(0, shown.items.length - SHOWN);
+  // Runs when rows arrive (or following starts), not when a row's own state changes, so a result landing
+  // on a tool row the person just opened does not pull the page away from it.
   useLayoutEffect(() => {
-    if (follow && box.current) box.current.scrollTop = box.current.scrollHeight;
-  }, [shown, follow]);
+    const b = box.current;
+    if (!follow || !b) return;
+    const toEnd = () => { b.scrollTop = b.scrollHeight; };
+    toEnd();
+    // Off-screen rows are only estimated in height (content-visibility), so the first scroll can fall short once they are measured.
+    const again = requestAnimationFrame(toEnd);
+    return () => cancelAnimationFrame(again);
+  }, [shown.items.length, live, follow]);
   const onScroll = () => {
     const b = box.current;
     if (b) setFollow(b.scrollHeight - b.scrollTop - b.clientHeight < 80);
   };
+  // Opening or closing a row means the person is reading it: stop following the end until they jump back.
+  const onClick = (e: MouseEvent) => {
+    if ((e.target as Element).closest(".t-head")) setFollow(false);
+  };
   return (
     <div class="transcript-wrap">
-      <div class="transcript" ref={box} onScroll={onScroll}>
+      <div class="transcript" ref={box} onScroll={onScroll} onClick={onClick}>
         {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
         {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results[item.id] : undefined} />)}
         {!shown.items.length && !live && <p class="muted">This step left no transcript.</p>}
