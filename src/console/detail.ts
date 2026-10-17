@@ -61,6 +61,8 @@ export async function spendView(root: string, trace: Trace, cfg: Config | null, 
   const byHour = Array.from({ length: HOURS }, (_, k) => ({ hour: new Date((firstHour + k) * 3_600_000).toISOString(), costUsd: 0 }));
   let chatUsd = 0;
   for (const p of all) {
+    // A running phase counts in its kind's count at no cost (its budget hold is not spending yet),
+    // and each phase's whole cost goes in the hour it started, however long it ran.
     const cost = p.status === "running" ? 0 : p.cost_usd ?? 0;
     if (p.slug === CHAT_SLUG) chatUsd += cost;
     else perChange.set(p.slug, (perChange.get(p.slug) ?? 0) + cost);
