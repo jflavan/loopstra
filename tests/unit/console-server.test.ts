@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Hub } from "../../src/console/hub";
@@ -85,6 +85,28 @@ describe("the console's server", () => {
       expect((await fetch(base + "/api/chat?thread=tab-abcdefgh")).status).toBe(404); // no chat in this console
       expect((await fetch(base + "/nope")).status).toBe(404);
     });
+  });
+
+  test("a route that fails answers 500 in plain words, with no stack, and says one line on stderr", async () => {
+    const t = tempDir();
+    await config(t.path);
+    await Bun.write(join(t.path, ".loopstra"), "a file where the trace's folder should be"); // the trace cannot be opened
+    const hub = new Hub(t.path);
+    const server = serveConsole(t.path, 0, { hub });
+    const said = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.port}/api/spend`);
+      expect(r.status).toBe(500);
+      expect(r.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(await r.text()).toBe("Server error");
+      expect(said).toHaveBeenCalledTimes(1);
+      expect(String(said.mock.calls[0]![0])).not.toContain("\n");
+    } finally {
+      said.mockRestore();
+      server.stop(true);
+      await hub.whenStopped();
+      t.cleanup();
+    }
   });
 
   test("the live stream starts with a snapshot of every section", async () => {

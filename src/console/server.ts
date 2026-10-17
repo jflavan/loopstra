@@ -39,6 +39,11 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
       return (await read(root, hub, req, url, server)) ?? NOT_FOUND();
     },
+    // A route that fails says so in plain words; the stack stays on this machine's stderr, not on the page.
+    error(e) {
+      console.error(`loopstra ui: a request failed: ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ")}`);
+      return new Response("Server error", { status: 500, headers: PLAIN_TEXT });
+    },
   });
 }
 
