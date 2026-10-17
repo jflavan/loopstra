@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, rmSync, watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
@@ -153,29 +154,37 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       const failing = Date.now() - Date.parse(req.firstFailedAt!);
       if (req.tries < MAX_TRIES || failing < GIVE_UP_MS) { saveApplying(root, req); continue; }
       // Never say it failed while its write is still on disk: the scheduler would act on it anyway.
-      if (!(await putBack(root, cfg.main_branch, trace, req))) { saveApplying(root, req); continue; }
-      shapeTraced(trace, req, "failed", { tries: req.tries });
-      finishRequest(root, req, { ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
+      const kept = await putBack(root, cfg.main_branch, trace, req);
+      if (!kept) { saveApplying(root, req); continue; }
+      shapeTraced(trace, req, "failed", { tries: req.tries, ...(kept.length ? { kept, why: "intent.md was changed since the request wrote it, so it was left as it is" } : {}) });
+      finishRequest(root, req, { ok: false, status: null, text: kept.length ? CHANGED_SINCE : "The loop could not apply this request; an engineer can find the details in the trace." });
       applied++;
     }
   }
   return applied;
 }
 
+/** The result of a request given up on whose write a person changed since (see putBack). */
+const CHANGED_SINCE = "The loop could not apply this request, and intent.md was changed since, so it was left as it is. An engineer can find the details in the trace.";
+
 /**
  * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
- * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note. Under the
- * checkout lock, so it never meets a commit half way. False (traced) when that could not be done: the
- * request then stays claimed, and the next pass tries it again.
+ * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note. Only a file
+ * that still holds exactly what the request wrote: one changed since (a person's edit), or one whose
+ * write an older request did not record, is left as it is; the person's edit is what it says now.
+ * Under the checkout lock, so it never meets a commit half way. Gives the slugs it left as they are,
+ * or null (traced) when it could not be done: the request then stays claimed, and the next pass tries
+ * it again.
  */
-async function putBack(root: string, main: string, trace: Trace, req: Request): Promise<boolean> {
+async function putBack(root: string, main: string, trace: Trace, req: Request): Promise<string[] | null> {
   const slugs = (req.written ?? []).filter((s) => SLUG.test(s));
+  const kept = slugs.filter((s) => !stillOurs(root, req, s));
   try {
     await onCheckout(root, async () => {
       const git = new Git(root);
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      for (const slug of slugs) {
+      for (const slug of slugs.filter((s) => !kept.includes(s))) {
         const path = `intent/${slug}/intent.md`;
         if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
         else {
@@ -187,10 +196,11 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   } catch (e) {
     if (e instanceof StopRequested) throw e;
     trace.eventOnChange("_loop", "error", `"where":"request give-up","id":"${req.id}"`, { where: "request give-up", id: req.id, kind: req.kind, written: slugs, error: `what it wrote could not be put back, so it stays claimed: ${errorText(e)}` }, "error");
-    return false;
+    return null;
   }
+  // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
   if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
-  return true;
+  return kept;
 }
 
 const KINDS: ReadonlySet<string> = new Set(["accept", "new", "approve", "send-back", "retry", "close", "priority", "hold", "release", "undo"]);
@@ -239,10 +249,44 @@ function byWhom(req: Request): string {
   return `${oneLine(req.byName, 80)} from ${oneLine(req.via, 40)}`;
 }
 
-/** Records on the claimed request that the loop wrote this slug's intent.md, before committing it. */
-function markWritten(root: string, req: Request, slug: string): void {
+/** The sha256 (hex) of a change's intent.md as it is on disk, or null when it cannot be read. */
+function intentHash(root: string, slug: string): string | null {
+  try { return createHash("sha256").update(readFileSync(join(root, "intent", slug, "intent.md"))).digest("hex"); } catch { return null; }
+}
+
+/** True when this slug's intent.md still holds exactly what the request last wrote (unknown for an older request: false). */
+function stillOurs(root: string, req: Request, slug: string): boolean {
+  const want = req.writtenHash?.[slug];
+  return !!want && intentHash(root, slug) === want;
+}
+
+/**
+ * True when the request has written this slug's intent.md before (an earlier try whose commit
+ * failed) and someone changed it since. An older request, with no hash, is never known to be.
+ */
+function changedSince(root: string, req: Request, slug: string): boolean {
+  return (req.written ?? []).includes(slug) && !!req.writtenHash?.[slug] && !stillOurs(root, req, slug);
+}
+
+/**
+ * Records on the claimed request that the loop wrote this slug's intent.md, before committing it,
+ * with the hash of what is on disk now. `own` is false when the file held someone else's change
+ * before this write (see changedSince), or an older try's write with no hash: then no hash is kept,
+ * and a give-up leaves the file as it is (see putBack).
+ */
+function markWritten(root: string, req: Request, slug: string, own = true): void {
   req.written = [...new Set([...(req.written ?? []), slug])];
+  const hashes = { ...req.writtenHash };
+  const hash = own ? intentHash(root, slug) : null;
+  if (hash) hashes[slug] = hash;
+  else delete hashes[slug];
+  req.writtenHash = hashes;
   saveApplying(root, req);
+}
+
+/** True when a write now would replace only what this request wrote before, or is its first. */
+function ownBefore(root: string, req: Request, slug: string): boolean {
+  return !(req.written ?? []).includes(slug) || stillOurs(root, req, slug);
 }
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
@@ -281,17 +325,19 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const dir = join(root, "intent", i.slug);
     const path = join(dir, "intent.md");
-    // Written by an earlier try of this request whose commit failed: that is ours, not someone else's.
-    const ours = (req.written ?? []).includes(i.slug);
+    // Written by an earlier try of this request whose commit failed: that is ours, not someone else's
+    // (unless someone changed it since).
+    const ours = (req.written ?? []).includes(i.slug) && !changedSince(root, req, i.slug);
     if (existsSync(path) && !ours) {
       let status = "unreadable";
       try { status = parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { /* keep unreadable */ }
       if (!i.update || status !== "draft") { skipped.push(`${i.slug} (it already exists and is ${status})`); continue; }
     }
     await commitRecord(root, main, i.slug, `${i.update ? "update" : "open"} intent from chat`, async () => {
+      const own = ownBefore(root, req, i.slug);
       mkdirSync(dir, { recursive: true });
       await Bun.write(path, i.text);
-      markWritten(root, req, i.slug);
+      markWritten(root, req, i.slug, own);
     });
     trace.event(i.slug, "chat-request", { id: req.id, kind: "new", by: req.byName, update: i.update });
     added.push(i.slug);
@@ -338,6 +384,17 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
   }
 }
 
+/**
+ * A status request whose change moved on. A send back whose write landed before a failed commit
+ * kept its note in the run folder (see writeSentBack): that goes too, or it would steer the next
+ * session though the send back never happened.
+ */
+function movedOn(root: string, trace: Trace, req: StatusRequest, status: Status): Outcome {
+  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug);
+  traced(trace, req, "moved-on", { status });
+  return { ok: false, status, text: `${req.slug} moved on to ${status}; nothing changed.` };
+}
+
 /** The note a status request leaves on the change. */
 function noteFor(req: StatusRequest): string {
   switch (req.kind) {
@@ -359,7 +416,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Written by an earlier try of this request whose commit failed: commit it now.
   const ours = (req.written ?? []).includes(req.slug) && was === to;
-  if (!ours && was !== req.expect) { traced(trace, req, "moved-on", { status: was }); return { ok: false, status: was, text: `${req.slug} moved on to ${was}; nothing changed.` }; }
+  if (!ours && was !== req.expect) return movedOn(root, trace, req, was);
   const problem = ours ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
   const note = noteFor(req);
@@ -376,7 +433,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
     if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
   });
-  if (refused !== null) { traced(trace, req, "moved-on", { status: refused }); return { ok: false, status: refused, text: `${req.slug} moved on to ${refused}; nothing changed.` }; }
+  if (refused !== null) return movedOn(root, trace, req, refused);
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });
@@ -406,8 +463,10 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   const patch: Partial<Frontmatter> = req.kind === "priority" ? { priority: req.priority } : req.kind === "hold" ? { hold: holdLine(req) } : {};
   const remove: Array<keyof Frontmatter> = req.kind === "release" ? ["hold"] : [];
   await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async () => {
+    // A person's edit since an earlier try is kept in the file; a give-up then leaves it as it is.
+    const own = ownBefore(root, req, req.slug);
     await writeIntent(await readIntent(root, req.slug), patch, { remove });
-    markWritten(root, req, req.slug);
+    markWritten(root, req, req.slug, own);
   });
   if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, req.priority);
   traced(trace, req, "applied", { status: fm.status, what: doneWords(req) });

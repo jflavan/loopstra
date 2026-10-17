@@ -268,6 +268,73 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("a request given up on leaves a file a person changed since as it is, and says so", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
+      // A person edits the file the request wrote while its commit keeps failing.
+      const path = join(r.root, "intent", "a", "intent.md");
+      const edited = readFileSync(path, "utf8").replace("x", "x, and also y");
+      writeFileSync(path, edited);
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request, and intent.md was changed since, so it was left as it is. An engineer can find the details in the trace." });
+      // The person's text is kept (with the hold it was written over, which they can see).
+      expect(readFileSync(path, "utf8")).toContain("x, and also y");
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ result: "failed", kept: ["a"] });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a request given up on with no record of what it wrote (an older one) leaves the file as it is", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      const req = applyingRequests(r.root)[0]!;
+      delete req.writtenHash;
+      saveApplying(r.root, req);
+      const path = join(r.root, "intent", "a", "intent.md");
+      const before = readFileSync(path, "utf8");
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("was changed since") });
+      expect(readFileSync(path, "utf8")).toBe(before);
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a send back whose write landed and whose commit failed drops its kept note when the change moved on", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      const kept = join(r.root, ".loopstra", "runs", "a", "sent-back.md");
+      expect(existsSync(kept)).toBe(true);
+      // A person sets another status meanwhile.
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("status: spec-approved", "status: closed"));
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "a moved on to closed; nothing changed." });
+      expect(existsSync(kept)).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   for (const kind of ["hold", "release"] as const) {
     test(`a ${kind} whose commit failed is committed on the next pass, not refused as done already`, async () => {
       const start = kind === "release" ? INTENT("building", "x").replace("status: building", "status: building\nhold: legal") : INTENT("building", "x");
