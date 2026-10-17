@@ -9,7 +9,7 @@ export interface State {
 
 /** The most live events the page keeps. */
 export const ACTIVITY_MAX = 500;
-/** How long the stream may be silent (pings included) before the page says it is reconnecting. */
+/** How long the stream may be silent (pings included) before the page says it is reconnecting and opens a new one. */
 export const STALE_MS = 20_000;
 
 /** What one stream message does to the state. Sections it does not touch keep their identity. */
@@ -21,6 +21,8 @@ export function applyMessage(s: State, msg: StreamMessage): State {
       if (s.activity.some((a) => a.id === msg.item.id)) return s;
       return { ...s, activity: [...s.activity, msg.item].slice(-ACTIVITY_MAX) };
     case "gap": return { ...s, gaps: s.gaps + 1 };
+    // A newer server may send kinds this page does not know; they must not break it.
+    default: return s;
   }
 }
 
@@ -65,36 +67,61 @@ export async function getJson<T>(url: string): Promise<T> {
 }
 
 /**
- * Opens the live stream. EventSource reconnects by itself (sending the newest id it saw, so the
- * server can send the events it missed); when it gives up, this opens a new one, waiting 1, 2, 4,
- * then 8 seconds.
+ * Opens the live stream; gives back the function that closes it. EventSource reconnects by itself
+ * (sending the newest id it saw, so the server can send the events it missed). When it gives up, or
+ * the stream has been silent for STALE_MS (a connection can die without an error), this closes it
+ * and opens a new one, waiting 1, 2, 4, then 8 seconds. A new EventSource sends no Last-Event-ID,
+ * so the newest id the page has seen goes in ?after= instead.
  */
-export function connect(): void {
+export function connect(): () => void {
   let last = Date.now();
   let wait = 1000;
+  let newest = 0;
+  let source: EventSource | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const reopen = () => {
+    source?.close();
+    source = null;
+    if (retry) return;
+    retry = setTimeout(() => { retry = null; open(); }, wait);
+    wait = Math.min(wait * 2, 8000);
+  };
   const open = () => {
-    const source = new EventSource("/api/stream");
+    // The silence is counted from now, so a new stream gets its own STALE_MS to say something.
+    last = Date.now();
+    const s = new EventSource(newest > 0 ? `/api/stream?after=${newest}` : "/api/stream");
+    source = s;
     const alive = () => {
       last = Date.now();
       wait = 1000;
       connection.value = "live";
     };
-    source.onmessage = (ev) => {
+    s.onmessage = (ev) => {
       alive();
+      const id = Number(ev.lastEventId);
+      if (Number.isFinite(id) && id > newest) newest = id;
       try { state.value = applyMessage(state.value, JSON.parse(ev.data as string) as StreamMessage); } catch { /* a bad frame is skipped */ }
     };
-    source.addEventListener("ping", alive);
-    source.onerror = () => {
+    s.addEventListener("ping", alive);
+    s.onerror = () => {
+      if (s !== source) return;
       connection.value = "stale";
-      if (source.readyState === EventSource.CLOSED) {
-        setTimeout(open, wait);
-        wait = Math.min(wait * 2, 8000);
-      }
+      if (s.readyState === EventSource.CLOSED) reopen();
     };
   };
   open();
-  setInterval(() => {
+  const tick = setInterval(() => {
     now.value = Date.now();
-    if (connection.value === "live" && Date.now() - last > STALE_MS) connection.value = "stale";
+    if (source && Date.now() - last > STALE_MS) {
+      connection.value = "stale";
+      reopen();
+    }
   }, 1000);
+  return () => {
+    clearInterval(tick);
+    if (retry) clearTimeout(retry);
+    retry = null;
+    source?.close();
+    source = null;
+  };
 }

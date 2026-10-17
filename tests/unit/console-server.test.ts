@@ -117,6 +117,17 @@ describe("the console's server", () => {
     });
   });
 
+  test("a page opening a new stream names the newest event it saw in ?after=, and gets the ones it missed before its snapshot", async () => {
+    await withConsole(async (base) => {
+      const frames = await sseFrames(`${base}/api/stream?after=1`, 2);
+      expect(frames.map((f) => (f.data as { type: string }).type)).toEqual(["event", "snapshot"]);
+      expect((frames[0]!.data as { item: { text: string } }).item.text).toBe("Build passed ($0.10).");
+      // The browser's own Last-Event-ID, sent when it reconnects by itself, is newer than the address it was opened with.
+      const resumed = await sseFrames(`${base}/api/stream?after=1`, 1, { "last-event-id": frames[1]!.id! });
+      expect((resumed[0]!.data as { type: string }).type).toBe("snapshot");
+    });
+  });
+
   test("a change's page, its diff, activity and spend", async () => {
     await withConsole(async (base) => {
       expect(await (await fetch(`${base}/api/changes/one`)).json()).toMatchObject({ slug: "one", phases: [{ name: "build", status: "success" }] });

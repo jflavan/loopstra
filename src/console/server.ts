@@ -54,7 +54,9 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
 async function read(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
   const path = url.pathname;
   if (path === "/api/stream") {
-    const last = Number(req.headers.get("last-event-id") ?? 0);
+    // The browser sends Last-Event-ID only when it reconnects by itself; a page opening a new stream
+    // (after the browser gave up, or after a silence) names the newest event it saw in ?after= instead.
+    const last = Number(req.headers.get("last-event-id") ?? url.searchParams.get("after") ?? 0);
     return sse(server, req, async (send) => {
       const off = await hub.connect(send, Number.isFinite(last) && last > 0 ? last : 0);
       return () => void off();

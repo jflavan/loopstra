@@ -1,12 +1,12 @@
-import { describe, expect, test } from "bun:test";
-import type { ActivityItem, Sections } from "../../src/console/types";
+import { describe, expect, jest, test } from "bun:test";
+import type { ActivityItem, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { costSoFar, duration, pillText, shortModel, usd } from "../../src/ui/format";
 import { keyMatcher, keyName, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
-import { ACTIVITY_MAX, applyMessage, type State } from "../../src/ui/store";
+import { ACTIVITY_MAX, applyMessage, connect, connection, STALE_MS, type State } from "../../src/ui/store";
 import { addItems, EMPTY } from "../../src/ui/transcript";
 
 describe("formatting", () => {
@@ -180,5 +180,66 @@ describe("the page's state", () => {
     expect(s.gaps).toBe(2);
     expect(applyMessage(s, { type: "snapshot", meta: before.meta!, sections }).gaps).toBe(2); // a snapshot does not forget the holes
   });
+
+  test("a message of a kind the page does not know leaves the state as it was", () => {
+    const s: State = { meta: null, sections: {}, activity: [], gaps: 0 };
+    expect(applyMessage(s, { type: "from-a-newer-server" } as unknown as StreamMessage)).toBe(s);
+  });
 });
 
+
+describe("the page's live stream", () => {
+  /** Stands in for the browser's EventSource: records what was opened and lets a test speak for the server. */
+  class FakeSource {
+    static readonly CLOSED = 2;
+    static opened: FakeSource[] = [];
+    readyState = 1;
+    closed = false;
+    onmessage: ((ev: { data: string; lastEventId: string }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    private readonly listeners = new Map<string, () => void>();
+    constructor(readonly url: string) { FakeSource.opened.push(this); }
+    addEventListener(type: string, fn: () => void) { this.listeners.set(type, fn); }
+    close() { this.closed = true; this.readyState = FakeSource.CLOSED; }
+    ping() { this.listeners.get("ping")?.(); }
+  }
+
+  test("a silent stream is closed and opened again, and a new stream names the newest event the page saw", () => {
+    const real = (globalThis as { EventSource?: unknown }).EventSource;
+    (globalThis as { EventSource?: unknown }).EventSource = FakeSource;
+    FakeSource.opened = [];
+    jest.useFakeTimers();
+    const stop = connect();
+    try {
+      const first = FakeSource.opened[0]!;
+      expect(first.url).toBe("/api/stream");
+      first.onmessage!({ data: JSON.stringify({ type: "gap" }), lastEventId: "7" });
+      expect(connection.value).toBe("live");
+      jest.advanceTimersByTime(STALE_MS / 2);
+      first.ping(); // pings keep it alive
+      jest.advanceTimersByTime(STALE_MS - 1000);
+      expect(first.closed).toBe(false);
+      jest.advanceTimersByTime(2000);
+      expect(connection.value).toBe("stale");
+      expect(first.closed).toBe(true);
+      jest.advanceTimersByTime(1000);
+      expect(FakeSource.opened).toHaveLength(2);
+      const second = FakeSource.opened[1]!;
+      expect(second.url).toBe("/api/stream?after=7");
+
+      // The browser gives up on its own reconnecting: the page opens a new stream, still from event 7.
+      second.readyState = FakeSource.CLOSED;
+      second.onerror!();
+      jest.advanceTimersByTime(8000);
+      expect(FakeSource.opened).toHaveLength(3);
+      expect(FakeSource.opened[2]!.url).toBe("/api/stream?after=7");
+      FakeSource.opened[2]!.onmessage!({ data: JSON.stringify({ type: "gap" }), lastEventId: "9" });
+      expect(connection.value).toBe("live");
+    } finally {
+      stop();
+      jest.useRealTimers();
+      (globalThis as { EventSource?: unknown }).EventSource = real;
+    }
+    expect(FakeSource.opened.at(-1)!.closed).toBe(true);
+  });
+});
