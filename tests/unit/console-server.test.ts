@@ -257,6 +257,8 @@ describe("writes", () => {
       expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toEqual({ state: "pending" });
       // The loop applies it.
       await applyAll(root);
+      // Only GET reads a result: a HEAD would take it with no body to carry it.
+      expect((await fetch(`${base}/api/requests/${id}`, { method: "HEAD" })).status).toBe(405);
       expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toMatchObject({ state: "done", ok: true, status: "plan-approved" });
       expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
     });
@@ -311,6 +313,7 @@ describe("writes", () => {
       expect((await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" }, { origin: "http://evil.example" })).status).toBe(403);
       expect((await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" }, { origin: "" })).status).toBe(403);
       expect((await fetch(`${base}/api/requests`, { method: "POST", headers: { origin: base, "content-type": "text/plain" }, body: "{}" })).status).toBe(415);
+      expect((await fetch(`${base}/api/requests`, { method: "POST", headers: { origin: base, "content-type": "text/plain; charset=application/json" }, body: "{}" })).status).toBe(415);
       expect((await fetch(`${base}/api/loop`, { method: "POST", headers: { origin: base, "content-type": "application/json", host: "evil.example" }, body: '{"action":"pause"}' })).status).toBe(403);
       expect((await fetch(`${base}/api/requests/000000000000001-1-0000`, { method: "DELETE", headers: { origin: "http://evil.example" } })).status).toBe(403);
       expect(readLoopHold(root)).toBeNull();

@@ -67,7 +67,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);
   const totals = await safely("costs", () => totalsOf(trace.allPhases(), now), { todayUsd: 0, weekUsd: 0, allUsd: 0 });
-  const requests = await safely("waiting requests", () => pendingRequests(root).map(pendingView), [] as PendingRequest[]);
+  const requests = await safely("waiting requests", () => pendingRequests(root).flatMap(pendingView), [] as PendingRequest[]);
   for (const what of problems) inbox.push({ kind: "config", label: "Console", slug: null, title: "Part of the console could not be read", what });
   return {
     meta: { chat: opts.chat ?? false, usdPerMinute: USD_PER_MINUTE, pollSeconds },
@@ -97,12 +97,21 @@ export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: st
   };
 }
 
-/** A waiting request as the page shows it. */
-function pendingView(r: Request): PendingRequest {
-  const slug = "slug" in r ? r.slug : null;
-  // An accept has no `expect`, which requestLabel does not read for it.
-  const label = r.kind === "new" ? `Add ${r.intents.length} written intent${r.intents.length === 1 ? "" : "s"}` : requestLabel(r as Parameters<typeof requestLabel>[0]);
-  return { id: r.id, kind: r.kind, slug, label, byName: r.byName, via: r.via, at: r.at };
+/**
+ * A waiting request as the page shows it, as a list of one, or none when the file is not one the
+ * page can show (a request file can say anything): one bad file never hides the others.
+ */
+function pendingView(r: Request): PendingRequest[] {
+  try {
+    const slug = "slug" in r && typeof r.slug === "string" ? r.slug : null;
+    if (r.kind === "new" && !Array.isArray(r.intents)) return [];
+    const count = r.kind === "new" ? r.intents.length : 0;
+    // An accept has no `expect`, which requestLabel does not read for it.
+    const label = r.kind === "new" ? `Add ${count} written intent${count === 1 ? "" : "s"}` : requestLabel(r as Parameters<typeof requestLabel>[0]);
+    return typeof label === "string" ? [{ id: r.id, kind: r.kind, slug, label, byName: r.byName, via: r.via, at: r.at }] : [];
+  } catch {
+    return [];
+  }
 }
 
 /** What phases cost; a running one's budget hold is not spending. */

@@ -5,7 +5,7 @@ import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
 import type { Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
-import { agentPhase, alongsideFirst, phasePrompt, withNote, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, alongsideFirst, withNote, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
@@ -18,6 +18,9 @@ import { artifacts, bullets, humanNote, runHookCommands, type Artifacts } from "
  */
 type Writer = "design" | "plan";
 type Judge = "spec-check" | "plan-challenge";
+
+/** The prompt variable that carries a writer's findings, and with them a person's sent-back note (see write). */
+const NOTE_VAR: Record<Writer, string> = { design: "findings", plan: "concerns" };
 
 /**
  * Work run alongside a judge (see ArtifactStage.ahead). `what` names it in the trace; `when` says
@@ -109,7 +112,7 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   const phase = writerPhase(ctx, s, await artifacts(ctx), all);
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent.
   // The note reaches the session even through an older prompt file without {{findings}}.
-  const prompt = withNote(await phasePrompt(ctx, phase), sentBack, sentBack);
+  const prompt = await withNote(ctx, phase, NOTE_VAR[s.stage], sentBack, sentBack);
   const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
   if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, s.artifact, s.text(r.envelope));

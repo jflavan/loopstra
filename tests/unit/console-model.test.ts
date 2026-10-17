@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildModel, nowLine, stripOf } from "../../src/console/model";
 import { scanRepo } from "../../src/intents";
 import { holdLoop, pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
-import { CONSOLE, submitRequest } from "../../src/requests";
+import { CONSOLE, requestsDir, submitRequest } from "../../src/requests";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
@@ -400,6 +400,23 @@ describe("controls", () => {
       const m2 = await model(t.path);
       expect(m2.sections.requests).toEqual([expect.objectContaining({ kind: "approve", slug: "a", label: "Approve the plan", byName: "John", via: "the dashboard" })]);
       expect(m2.sections.loop.held).toMatchObject({ by: "John" });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a request file the page cannot show is skipped; the others are still listed", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "gates:\n  plan: { human: status }\n");
+      await intent(t.path, "a", "status: plan-review");
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      const bad = (id: string, body: Record<string, unknown>) => writeFileSync(join(requestsDir(t.path), `${id}.json`), JSON.stringify({ id, ...body }));
+      bad("000000000000001-1-0000", { kind: "new", byName: "Bo", via: "chat", at: "x" });
+      bad("000000000000002-1-0000", { kind: "explode", slug: "a" });
+      submitRequest(t.path, { by: "u", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "approve", slug: "a", expect: "plan-review" });
+      const m = await model(t.path);
+      expect(m.sections.requests.map((r) => r.label)).toEqual(["Approve the plan"]);
     } finally {
       t.cleanup();
     }

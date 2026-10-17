@@ -57,6 +57,19 @@ describe("request files", () => {
     }
   });
 
+  test("the console reads only its own results by id: chat's are left for chat", () => {
+    const t = tempDir();
+    try {
+      const c = submitRequest(t.path, { by: "u", byName: "Bo", via: "Slack", transport: "slack", thread: "T1", kind: "accept", slug: "c" });
+      claimRequest(t.path, c.id);
+      finishRequest(t.path, applyingRequests(t.path)[0]!, { ok: true, text: "done", status: "accepted" });
+      expect(requestState(t.path, c.id)).toBeNull();
+      expect(takeResults(t.path, new Set(["slack"])).map((r) => r.id)).toEqual([c.id]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("ids that are not request ids are refused, not looked up as paths", () => {
     const t = tempDir();
     try {

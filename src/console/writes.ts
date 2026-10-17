@@ -30,7 +30,9 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
   const path = url.pathname;
   const one = path.match(/^\/api\/requests\/([^/]+)$/);
   if (path !== "/api/requests" && path !== "/api/loop" && !one) return null;
-  if (one && (req.method === "GET" || req.method === "HEAD")) {
+  // Only GET reads a result, which reading removes: a HEAD would take it with no body to carry it.
+  if (one && req.method === "HEAD") return new Response("Method not allowed", { status: 405 });
+  if (one && req.method === "GET") {
     const s = requestState(root, decode(one[1]!));
     return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
   }
@@ -41,7 +43,7 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
     return json({ cancelled }, cancelled ? 200 : 409);
   }
   if (req.method !== "POST" || one) return new Response("Method not allowed", { status: 405 });
-  if (!(req.headers.get("content-type") ?? "").includes("application/json")) return new Response("Expected JSON", { status: 415 });
+  if (!isJson(req.headers.get("content-type"))) return new Response("Expected JSON", { status: 415 });
   let body: unknown;
   try { body = await req.json(); } catch { return refuse("The request was not JSON.", 400); }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse("The request was not an object.", 400);
@@ -49,6 +51,11 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
   const answer = path === "/api/loop" ? loop(root, fields) : await action(root, fields);
   hub.poke();
   return answer;
+}
+
+/** True when a content type's MIME essence (before any parameters) is JSON. */
+function isJson(ct: string | null): boolean {
+  return ((ct ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
 }
 
 /** A path part as text; one that cannot be decoded is no request id (requestState and cancelRequest say so). */

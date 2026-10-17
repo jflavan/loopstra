@@ -132,15 +132,16 @@ export function cancelRequest(root: string, id: string): boolean {
 }
 
 /**
- * Where a request is: still waiting or being applied, done (its result, which this removes, so it
- * is read once), or null (unknown, cancelled, or its result was already read).
+ * Where a request is, for the console page that asked: still waiting or being applied, done (its
+ * result, which this removes, so it is read once), or null (unknown, cancelled, its result already
+ * read, or a result for another transport, which is left for chat to take: see takeResults).
  */
 export function requestState(root: string, id: string): ({ state: "pending" } | ({ state: "done" } & RequestResult)) | null {
   if (!ID.test(id)) return null;
   if (existsSync(join(requestsDir(root), `${id}.json`)) || existsSync(join(applyingDir(root), `${id}.json`))) return { state: "pending" };
   const path = join(resultsDir(root), `${id}.json`);
   const r = readJson<RequestResult>(path);
-  if (!r) return null;
+  if (!r || r.transport !== CONSOLE) return null;
   rmSync(path, { force: true });
   return { state: "done", ...r };
 }

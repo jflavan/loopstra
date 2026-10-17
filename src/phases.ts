@@ -157,20 +157,29 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
 /** The prompt a phase would be sent, or null when its prompt file is missing. */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
-  const promptPath = join(ctx.root, "loopstra", "prompts", `${spec.name}.md`);
+  const promptPath = promptFile(ctx, spec.name);
   if (!existsSync(promptPath)) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
   const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
   return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
 }
 
+/** The repository's prompt file for a phase. */
+function promptFile(ctx: StepContext, name: string): string {
+  return join(ctx.root, "loopstra", "prompts", `${name}.md`);
+}
+
 /**
- * A rendered prompt with `text` added at its end when it does not hold `note` already: a repository's
- * own prompt file may be older than the variable that carries the note (init never upgrades one).
+ * The phase's rendered prompt (see phasePrompt), with `text` added at its end when there is a `note`
+ * and the prompt file has no `{{variable}}` to carry it: a repository's own prompt file may be older
+ * than that variable (init never upgrades one).
  */
-export function withNote(prompt: string | null, note: string, text: string): string | null {
-  if (prompt === null || !note || prompt.includes(note)) return prompt;
-  return `${prompt}\n\n${text}\n`;
+export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable: string, note: string, text: string): Promise<string | null> {
+  const prompt = await phasePrompt(ctx, spec);
+  if (prompt === null || !note) return prompt;
+  let template = "";
+  try { template = await Bun.file(promptFile(ctx, spec.name)).text(); } catch { /* gone since: add the note */ }
+  return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
 }
 
 /** Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it. */

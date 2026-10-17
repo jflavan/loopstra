@@ -96,6 +96,23 @@ describe("build stage", () => {
     }
   });
 
+  test("an older build.md gives the session the note even when the plan holds the same words", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), PLAN.replace("1. x", "1. Use zod."));
+      await new Git(repo.path).commitAll("plan says it");
+      await ctx.reload();
+      const path = join(repo.path, "loopstra", "prompts", "build.md");
+      await Bun.write(path, (await Bun.file(path).text()).replace(/A person's notes on an earlier build[^\n]*\r?\n\r?\n\{\{feedback\}\}\r?\n\r?\n/, ""));
+      writeSentBack(repo.path, "add-numbers", "Use zod.");
+      await runBuildStep(ctx);
+      expect(await promptOf(ctx.runDir, trace, "build")).toContain("A person's notes on an earlier build of this change; address each one:\n\nUse zod.\n");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("with speed.parallel_checks, test, lint and build start together inside one test phase", async () => {
     const m = meeting({ test: 0, lint: 0 });
     const { repo, ctx, trace } = await planned({ test: m.test, lint: m.lint, build: "echo built" }, "speed:\n  parallel_checks: true\n");
