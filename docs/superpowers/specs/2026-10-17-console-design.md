@@ -107,8 +107,10 @@ bundles and minifies the TSX once at start-up and caches it. No build step, noth
 committed. The app routes (`/`, `/inbox`, `/changes`, `/c/*`, `/s/*`, `/activity`, `/spend`) all
 serve the page, so links and the back button work.
 
-**Every request** must name a local host (`127.0.0.1`, `localhost`, or `[::1]` with the port);
-anything else gets 403. This closes the review finding that only `/api/chat` checked it. Writes
+**Every data route** must name a local host (`127.0.0.1`, `localhost`, or `[::1]` with the port);
+anything else gets 403. This closes the review finding that only `/api/chat` checked it. The page
+and its bundled chunks are static, the same for everyone, and Bun serves them from `routes` before
+the router runs, so they carry no Host check and nothing private. Writes
 (parts 2 and 3, and chat) also need POST, `content-type: application/json`, and an `Origin` equal to
 the page's own.
 
@@ -253,6 +255,12 @@ moved on to building; nothing changed."
 
 **Attribution.** The commit reads `loopstra(<slug>): plan approved by John from the dashboard` (or
 "from Slack"). Each applied request is traced as a `request` event, which Activity shows.
+
+**Safety of writes.** Protection against the page being framed by another site (`frame-ancestors`,
+or `X-Frame-Options`) needs a response header, and the static page route Bun serves cannot set one
+(a `<meta>` policy ignores `frame-ancestors`). So clicks cannot be kept from a framed page by the
+page itself: every write must keep requiring POST with `content-type: application/json` and an
+`Origin` equal to the page's own, which a framing site's requests cannot send.
 
 ## The actions
 
@@ -444,7 +452,7 @@ which it can propose as an `action`. Its read-only limits stay as they are.
   `Last-Event-ID`, a keep-alive, a dropped client removed.
 - Transcripts: `raw.jsonl` fixtures taken from real sessions turn into the right items; unknown
   events are skipped; `from` resumes mid-file; `end` after the phase ends.
-- Every route refuses a non-local Host; writes refuse a foreign Origin and non-JSON.
+- Every data route refuses a non-local Host; writes refuse a foreign Origin and non-JSON.
 - The diff is cut at its limits with a note; documents and run files resolve as today.
 - The bundle builds, the page serves on every app route, and the JS is under 80 KB gzipped.
 - The store, router, keys and palette as pure functions.
