@@ -39,6 +39,22 @@ export class SessionStopped extends Error {
   }
 }
 
+/**
+ * An agent asked a person a question (see src/questions.ts). The question is recorded and the change
+ * waits for the answer; the step ends here without blocking or advancing.
+ */
+export class QuestionAsked extends Error {
+  constructor(public readonly phase: string, public readonly text: string) {
+    super(`the ${phase} session asked: ${text}`);
+    this.name = "QuestionAsked";
+  }
+}
+
+/** A stopped session or a question: the step ends quietly, the change keeps its status. Passed through like a stop request. */
+export function endsStepQuietly(e: unknown): e is SessionStopped | QuestionAsked {
+  return e instanceof SessionStopped || e instanceof QuestionAsked;
+}
+
 /** Throws Cancelled when `signal` was aborted. Call before starting a process. */
 export function throwIfCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Cancelled();

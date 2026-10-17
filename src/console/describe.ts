@@ -29,7 +29,7 @@ function firstLine(v: unknown, n = 160): string {
   return line.length > n ? `${line.slice(0, n - 1)}…` : line;
 }
 
-const ENDED: Record<string, string> = { success: "passed", fail: "failed", interrupted: "was interrupted" };
+const ENDED: Record<string, string> = { success: "passed", fail: "failed", interrupted: "was interrupted", asked: "asked a question" };
 const HEALTH: Record<string, string> = { pass: "pass", fail: "fail", error: "could not be checked", waiting: "are waiting" };
 const GATE: Record<string, string> = { pass: "passed", fail: "failed", waiting: "waiting" };
 
@@ -76,7 +76,7 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "phase_start": return `Started ${str(p.name)}.`;
     case "phase_end": {
       const name = e.phase_seq !== null ? phaseName(e.slug, e.phase_seq) : undefined;
-      const why = p.status === "fail" && p.error ? `: ${firstLine(p.error)}` : "";
+      const why = p.status === "fail" && p.error ? `: ${firstLine(p.error)}` : p.status === "asked" && p.question ? `: ${firstLine(p.question)}` : "";
       return sentence(`${capital(name ?? "a step")} ${ENDED[str(p.status)] ?? str(p.status)}${money(p.cost_usd)}${why}`);
     }
     case "gate_check": return `${capital(str(p.gate))} gate, ${str(p.check)}: ${GATE[str(p.result)] ?? str(p.result)}.`;
@@ -85,7 +85,7 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "signal":
       if (p.name === "main_health") return `The tests on main ${HEALTH[str(p.result)] ?? str(p.result)}.`;
       return p.output ? firstLine(p.output) : `${str(p.name)}: ${str(p.result)}.`;
-    case "stop": return "The loop is stopping.";
+    case "stop": return p.by ? `${str(p.by)} stopped the session; the change keeps its status.` : "The loop is stopping.";
     case "pause": {
       const why = firstLine(first(p.reason, p.note));
       return why ? sentence(`Paused: ${why}`) : "Paused.";

@@ -76,8 +76,12 @@ export class StepContext {
  * `waiting`: the step only looked at a pull request (the watcher's steps) and nothing changed; it
  * looks again later. `personChanged`: a person set the status while the step ran, so
  * the step ended without writing anything over it; the next tick picks up their status.
+ * `stoppedBy`: a person stopped the step's session (who), so the step ended and the change kept its
+ * status. `asked`: an agent asked a person a question, so the change waits for the answer.
  */
-export type StepResult = { ok: true; waiting?: boolean; personChanged?: boolean } | { ok: false; note: string };
+export type StepResult =
+  | { ok: true; waiting?: boolean; personChanged?: boolean; stoppedBy?: string; asked?: boolean }
+  | { ok: false; note: string };
 
 /**
  * A person changed the status in intent.md while the step ran. The step ends without blocking or

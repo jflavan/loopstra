@@ -6,6 +6,23 @@ import { judgeNote, Trace, useJournal, type NewJudgeRow } from "../../src/trace"
 import { tempDir } from "../helpers";
 
 describe("Trace", () => {
+  test("a phase whose session asked a question is marked asked once it has ended, keeping its cost", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const seq = trace.phaseStart("a-b", "design", "agent");
+      trace.phaseEnd("a-b", seq, { status: "success", costUsd: 0.3, sessionId: "sid-1" });
+      trace.phaseAsked("a-b", seq, "Round half up or to even?");
+      const row = trace.phases("a-b")[0]!;
+      expect(row).toMatchObject({ status: "asked", error: "Round half up or to even?", session_id: "sid-1" });
+      expect(row.cost_usd).toBeCloseTo(0.3);
+      expect(row.ended).not.toBeNull();
+      const last = trace.events("a-b").at(-1)!;
+      expect(last.type).toBe("phase_end");
+      expect(JSON.parse(last.payload)).toEqual({ status: "asked", question: "Round half up or to even?" });
+    } finally { trace.close(); t.cleanup(); }
+  });
+
   test("writes events to jsonl and sqlite, and reports intent summaries", () => {
     const t = tempDir();
     const trace = Trace.open(t.path);

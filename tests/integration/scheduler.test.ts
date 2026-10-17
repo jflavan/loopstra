@@ -1,13 +1,14 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { configPath } from "../../src/config";
-import { Git, removeStaleLocks } from "../../src/git";
+import type { StepContext } from "../../src/context";
+import { Git, passOn, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
 import { holdLoop, readPause, releaseLoop } from "../../src/heartbeat";
-import { claudeOverrideProblem, missingTools, preflight, sleepBetweenTicks, start, tick } from "../../src/scheduler";
-import { requestStop, resetStop } from "../../src/stop";
+import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
+import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
 import { FAKE_CLAUDE, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { touchWake, wakeStamp } from "../../src/wake";
@@ -514,5 +515,52 @@ describe("sleeping between ticks", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+describe("steps that end quietly", () => {
+  // The step's first session asks for its snapshot of main: throwing there ends the step from inside a stage.
+  const throwAtFirstSession = (ctx: StepContext, e: Error) => spyOn(ctx, "snapshot").mockImplementation(async () => { throw e; });
+
+  test("a session a person stopped ends the step without blocking; the change keeps its status, and the trace says who", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      throwAtFirstSession(ctx, new SessionStopped("John"));
+      const r = await runStepGuarded(ctx);
+      expect(r).toEqual({ ok: true, stoppedBy: "John" });
+      const i = await readIntent(repo.path, SLUG);
+      // The design step had moved it on before its first session; nothing was written after.
+      expect(i.file.frontmatter.status).toBe("designing");
+      expect(i.file.frontmatter.note ?? "").toBe("");
+      const stop = trace.events(SLUG).find((e) => e.type === "stop");
+      expect(JSON.parse(stop!.payload)).toMatchObject({ by: "John" });
+      expect(trace.events(SLUG).some((e) => e.type === "error")).toBe(false);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a question asked ends the step without blocking or advancing", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      throwAtFirstSession(ctx, new QuestionAsked("design", "Which rounding?"));
+      const r = await runStepGuarded(ctx);
+      expect(r).toEqual({ ok: true, asked: true });
+      const i = await readIntent(repo.path, SLUG);
+      expect(i.file.frontmatter.status).toBe("designing");
+      expect(i.file.frontmatter.note ?? "").toBe("");
+      expect(trace.events(SLUG).some((e) => e.type === "error")).toBe(false);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("passOn lets a stopped session and a question through, like a stop request", () => {
+    expect(() => passOn(new SessionStopped("John"))).toThrow(SessionStopped);
+    expect(() => passOn(new QuestionAsked("build", "Keep the old API?"))).toThrow(QuestionAsked);
+    expect(() => passOn(new Error("the step's own"))).not.toThrow();
+    expect(endsStepQuietly(new SessionStopped("John"))).toBe(true);
+    expect(endsStepQuietly(new QuestionAsked("plan", "?"))).toBe(true);
+    expect(endsStepQuietly(new StopRequested())).toBe(false);
   });
 });

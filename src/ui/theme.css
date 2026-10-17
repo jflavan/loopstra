@@ -123,7 +123,7 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .status { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--bg-hover); white-space: nowrap; }
 .status.success, .status.pass, .status.done, .status.merged { background: var(--ok-bg); color: var(--ok); }
 .status.fail, .status.blocked { background: var(--bad-bg); color: var(--bad); }
-.status.running, .status.waiting, .status.interrupted { background: var(--warn-bg); color: var(--warn); }
+.status.running, .status.waiting, .status.interrupted, .status.asked { background: var(--warn-bg); color: var(--warn); }
 
 /* Live */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 14px; }
@@ -208,7 +208,7 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .tl-bar.success { background: var(--ok); }
 .tl-bar.fail { background: var(--bad); }
 .tl-bar.running { background: var(--accent); animation: pulse 1.6s infinite; }
-.tl-bar.interrupted { background: var(--warn); }
+.tl-bar.interrupted, .tl-bar.asked { background: var(--warn); }
 .tl-meta { color: var(--fg-3); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 /* On a phone the name sits over the bar and the facts under it, as the feed does. */
 @media (max-width: 600px) { .tl-row { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 6px; } .tl-meta { text-align: left; } }

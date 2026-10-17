@@ -22,7 +22,7 @@ import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
 import { uncommittedSetup } from "./init";
-import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
 
@@ -587,12 +587,18 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
 
 /**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
- * plain note (the detail goes to the trace); only a stop request passes through.
+ * plain note (the detail goes to the trace); only a stop request passes through. A session a person
+ * stopped, or a question an agent asked, ends the step quietly: the change keeps its status.
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     return await runStep(ctx);
   } catch (e) {
+    if (e instanceof SessionStopped) {
+      ctx.trace.event(ctx.slug, "stop", { by: e.by, note: `the session was stopped by ${e.by}; the change keeps its status` });
+      return { ok: true, stoppedBy: e.by };
+    }
+    if (e instanceof QuestionAsked) return { ok: true, asked: true };
     if (notTheStepsFault(e)) throw e;
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
@@ -800,6 +806,8 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
 /** What a step gave, for the console line. */
 function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
+  if (r.stoppedBy) return `stopped by ${r.stoppedBy}`;
+  if (r.asked) return "asked a person a question";
   return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
 }
 

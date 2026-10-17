@@ -6,7 +6,7 @@ import { errorText } from "./shell";
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
   | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
-  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge";
+  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge" | "steer";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -253,10 +253,16 @@ export class Trace {
   }
 
   /** Ends a phase. `denied`: commands the session was not allowed to run, kept on the phase_end event. */
-  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail" | "interrupted"; costUsd?: number; sessionId?: string; error?: string; denied?: string[] }): void {
+  phaseEnd(slug: string, seq: number, r: { status: "success" | "fail" | "interrupted" | "asked"; costUsd?: number; sessionId?: string; error?: string; denied?: string[] }): void {
     this.db.run("UPDATE phases SET status = ?, ended = ?, cost_usd = ?, session_id = COALESCE(?, session_id), error = ? WHERE slug = ? AND seq = ?",
       [r.status, now(), r.costUsd ?? 0, r.sessionId ?? null, r.error ?? null, slug, seq]);
     this.event(slug, "phase_end", { status: r.status, cost_usd: r.costUsd ?? 0, error: r.error ?? null, ...(r.denied?.length ? { denied: r.denied } : {}) }, seq);
+  }
+
+  /** Marks an ended phase as one whose session asked a person a question (see src/questions.ts). */
+  phaseAsked(slug: string, seq: number, question: string): void {
+    this.db.run("UPDATE phases SET status = 'asked', error = ? WHERE slug = ? AND seq = ?", [question, slug, seq]);
+    this.event(slug, "phase_end", { status: "asked", question }, seq);
   }
 
   /** The commands each phase of a change was not allowed to run, by phase seq (phases with none are absent). */

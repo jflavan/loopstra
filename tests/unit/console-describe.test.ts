@@ -16,6 +16,10 @@ describe("events in plain words", () => {
     expect(describeEvent(row("phase_end", { status: "fail", cost_usd: 0, error: "agent-fail: tests failed\nmore" }, { phase_seq: 3 }), () => "fix-1"))
       .toBe("Fix-1 failed: agent-fail: tests failed.");
     expect(describeEvent(row("phase_end", { status: "interrupted", cost_usd: 0 }))).toBe("A step was interrupted.");
+    expect(describeEvent(row("phase_end", { status: "asked", question: "Round half up or to even?\nmore" }, { phase_seq: 2 }), () => "design"))
+      .toBe("Design asked a question: Round half up or to even?");
+    expect(describeEvent(row("stop", { by: "John", note: "the session was stopped by John; the change keeps its status" }))).toBe("John stopped the session; the change keeps its status.");
+    expect(describeEvent(row("stop", { note: "stopped by request" }))).toBe("The loop is stopping.");
     expect(describeEvent(row("gate_check", { gate: "spec", check: "headings", result: "pass", evidence: "" }))).toBe("Spec gate, headings: passed.");
     expect(describeEvent(row("command", { command: "bun test", code: 0 }))).toBe("Ran bun test.");
     expect(describeEvent(row("command", { command: "bun test", code: 1, lastLine: "x" }))).toBe("Ran bun test: exit code 1.");

@@ -36,6 +36,7 @@ describe("formatting", () => {
     expect(stepWord("success")).toBe("passed");
     expect(stepWord("fail")).toBe("failed");
     expect(stepWord("running")).toBe("running");
+    expect(stepWord("asked")).toBe("asked a question");
     expect(pillText({ state: "running", text: "Running — working on a and b, last check 3s ago", working: [{ slug: "a" }, { slug: "b" }] })).toBe("Running · 2 agents");
     expect(pillText({ state: "running", text: "Running — last check 3s ago", working: [] })).toBe("Running");
     expect(pillText({ state: "running", text: "Stopping — last check 3s ago", working: [{ slug: "a" }] })).toBe("Stopping");
