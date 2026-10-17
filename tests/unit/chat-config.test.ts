@@ -62,8 +62,24 @@ describe("the chat prompts", () => {
     try {
       expect(await chatTemplate(t.path, "orchestrator")).toContain("You are the orchestrator of Loopstra");
       mkdirSync(join(t.path, "loopstra", "prompts"), { recursive: true });
-      await Bun.write(join(t.path, "loopstra", "prompts", "orchestrator.md"), "tuned");
-      expect(await chatTemplate(t.path, "orchestrator")).toBe("tuned");
+      await Bun.write(join(t.path, "loopstra", "prompts", "orchestrator.md"), "tuned\n\n## Acting on a change\n\nOur own words.\n");
+      expect(await chatTemplate(t.path, "orchestrator")).toBe("tuned\n\n## Acting on a change\n\nOur own words.\n");
+    } finally { t.cleanup(); }
+  });
+
+  test("an orchestrator prompt copied before actions existed gets the shipped section on them", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "loopstra", "prompts"), { recursive: true });
+      await Bun.write(join(t.path, "loopstra", "prompts", "orchestrator.md"), "Old words on {{main_branch}}.\n\n## How to answer\n\nPlainly.\n");
+      const shipped = await Bun.file(join(PROMPTS, "orchestrator.md")).text();
+      const section = shipped.slice(shipped.indexOf("## Acting on a change"), shipped.indexOf("\n## How to answer")).trim();
+      const rendered = renderChatPrompt(await chatTemplate(t.path, "orchestrator"), { main_branch: "main" });
+      expect(rendered).toBe(`Old words on main.\n\n## How to answer\n\nPlainly.\n\n${section}\n`);
+      expect(rendered).toContain("Set `action` to one of these");
+      // Not the writer's prompt: only the orchestrator acts.
+      await Bun.write(join(t.path, "loopstra", "prompts", "write-intent.md"), "tuned");
+      expect(await chatTemplate(t.path, "write-intent")).toBe("tuned");
     } finally { t.cleanup(); }
   });
 

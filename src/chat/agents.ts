@@ -18,13 +18,30 @@ export type ChatPromptVars = Partial<Record<(typeof CHAT_PROMPT_VARS)[number], s
 
 const BUNDLED = join(import.meta.dir, "..", "..", "templates", "prompts");
 
+/** The orchestrator's section on actions, written after init had copied the prompt into repositories. */
+const ACTING = "## Acting on a change";
+
 /**
  * The prompt template for a chat phase: the repository's own copy in loopstra/prompts/ (an engineer
  * may tune it), else the one shipped with Loopstra, so a repository set up before chat existed works.
+ * init copies the prompt once and never updates it, so an orchestrator prompt copied before actions
+ * existed gets the shipped "Acting on a change" section added: without it chat never offers one.
  */
 export async function chatTemplate(root: string, name: ChatPhase): Promise<string> {
   const own = join(root, "loopstra", "prompts", `${name}.md`);
-  return Bun.file(existsSync(own) ? own : join(BUNDLED, `${name}.md`)).text();
+  const shipped = join(BUNDLED, `${name}.md`);
+  if (!existsSync(own)) return Bun.file(shipped).text();
+  const text = await Bun.file(own).text();
+  if (name !== "orchestrator" || text.split(/\r?\n/).some((l) => l.trim() === ACTING)) return text;
+  return `${text.trimEnd()}\n\n${sectionOf(await Bun.file(shipped).text(), ACTING)}\n`;
+}
+
+/** A markdown section: from its heading up to the next "## " heading, or the end. */
+function sectionOf(text: string, heading: string): string {
+  const start = text.indexOf(heading);
+  if (start < 0) return "";
+  const next = text.indexOf("\n## ", start + heading.length);
+  return text.slice(start, next < 0 ? undefined : next).trim();
 }
 
 export function renderChatPrompt(template: string, vars: ChatPromptVars): string {
