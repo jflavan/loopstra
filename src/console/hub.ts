@@ -1,7 +1,7 @@
-import { readdirSync, statSync, watch, type FSWatcher } from "node:fs";
+import { readdirSync, statSync, watch, type Dirent, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { heartbeatPath } from "../heartbeat";
-import { intentRoot } from "../intents";
+import { intentRoot, scanRepo, type Scan } from "../intents";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
 import { activityItem, phaseNamer } from "./describe";
@@ -26,13 +26,16 @@ export interface HubOptions {
   /** The least time between a watched file changing and the rebuild it causes (ms). */
   minRebuildMs?: number;
   pingMs?: number;
+  /** Reads the intent folder (what the hub keeps until a file there changes); tests count its calls. */
+  scan?: (root: string) => Promise<Scan>;
 }
 
 /** The most events read for one look, or for a page catching up. */
 const CATCH_UP = 500;
 
-function mtime(path: string): string {
-  try { return String(statSync(path).mtimeMs); } catch { return "-"; }
+/** When a file was last written and how big it is; "-" when it is missing. */
+function stamp(path: string): string {
+  try { const s = statSync(path); return `${s.mtimeMs}:${s.size}`; } catch { return "-"; }
 }
 
 /**
@@ -51,6 +54,8 @@ export class Hub {
   private model: Model | null = null;
   private readonly sent = new Map<SectionName, string>();
   private signature = "";
+  /** The intent folder as last read, with the fingerprint of the files it was read from. */
+  private scanned: { key: string; scan: Scan } | null = null;
   private lastEventId = 0;
   private lastBuild = 0;
   private running: Promise<void> | null = null;
@@ -125,6 +130,7 @@ export class Hub {
     this.model = null;
     this.sent.clear();
     this.signature = "";
+    this.scanned = null;
     // A look still running uses the trace; it is closed once that look ends.
     this.stopping = (this.running ?? Promise.resolve()).finally(() => trace?.close());
     return this.stopping;
@@ -148,11 +154,12 @@ export class Hub {
     // and would clear the mark before it is set.
     this.running = (async () => {
       try {
-        const signature = this.signatureOf(trace);
+        const key = this.intentsKey();
+        const signature = this.signatureOf(trace, key);
         if (!force && this.model && signature === this.signature) return;
         this.signature = signature;
         this.lastBuild = Date.now();
-        const model = await buildModel(this.root, trace, new Date(), { chat: this.opts.chat });
+        const model = await buildModel(this.root, trace, new Date(), { chat: this.opts.chat, scan: await this.intents(key) });
         if (this.trace !== trace) return;
         this.model = model;
         for (const name of SECTION_NAMES) {
@@ -171,16 +178,44 @@ export class Hub {
 
   /**
    * A cheap fingerprint of what the model reads: the newest event, the heartbeat, the pause, the
-   * config and every intent's file. The ten-second bucket keeps "last check 20s ago" and the ages fresh.
+   * config and the intent files (`key`). The ten-second bucket keeps "last check 20s ago" and the ages fresh.
    */
-  private signatureOf(trace: Trace): string {
+  private signatureOf(trace: Trace, key: string): string {
     const parts = [String(trace.lastEventId()), String(Math.floor(Date.now() / 10_000))];
-    for (const p of [heartbeatPath(this.root), join(this.root, ".loopstra", "paused.json"), join(this.root, "loopstra", "config.yaml")]) parts.push(mtime(p));
-    const dir = intentRoot(this.root);
-    let names: string[] = [];
-    try { names = readdirSync(dir); } catch { /* no intent folder yet */ }
-    for (const n of names.sort()) parts.push(n, mtime(join(dir, n)), mtime(join(dir, n, "intent.md")));
+    for (const p of [heartbeatPath(this.root), join(this.root, ".loopstra", "paused.json"), join(this.root, "loopstra", "config.yaml")]) parts.push(stamp(p));
+    parts.push(key);
     return parts.join("|");
+  }
+
+  /**
+   * A fingerprint of everything reading the intent folder looks at (see scanRepo): what is in intent/,
+   * which files each change folder holds (the documents present) and when its intent.md was written.
+   */
+  private intentsKey(): string {
+    const dir = intentRoot(this.root);
+    const parts: string[] = [];
+    let entries: Dirent[] = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { /* no intent folder yet */ }
+    for (const e of entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
+      if (e.isFile()) { parts.push(e.name); continue; }
+      let files = "";
+      try { files = readdirSync(join(dir, e.name)).sort().join(","); } catch { /* not a folder */ }
+      parts.push(`${e.name}[${files}]${stamp(join(dir, e.name, "intent.md"))}`);
+    }
+    return parts.join("|");
+  }
+
+  /** The intent folder, read again only when `key` is not the one it was last read at. Undefined when it cannot be read: the model then reads it itself and says why. */
+  private async intents(key: string): Promise<Scan | undefined> {
+    if (this.scanned?.key !== key) {
+      try {
+        this.scanned = { key, scan: await (this.opts.scan ?? scanRepo)(this.root) };
+      } catch {
+        this.scanned = null;
+        return undefined;
+      }
+    }
+    return this.scanned.scan;
   }
 
   /** The plain-words events after `afterId`; with `advance`, the hub's own mark moves past every event read. */

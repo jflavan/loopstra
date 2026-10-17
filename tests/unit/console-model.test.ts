@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { buildModel, nowLine, stripOf } from "../../src/console/model";
+import { scanRepo } from "../../src/intents";
 import { pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
@@ -187,6 +188,21 @@ describe("the loop and running steps", () => {
       expect(m.sections.inbox).toEqual([{ kind: "config", label: "Console", slug: null, title: "Part of the console could not be read", what: "costs: disk on fire" }]);
     } finally {
       trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("a scan handed in is used instead of reading the intent folder again", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "one", "status: accepted");
+      const scan = await scanRepo(t.path);
+      rmSync(join(t.path, "intent"), { recursive: true });
+      const m = await model(t.path, new Date(), { scan });
+      expect(m.sections.changes.map((c) => c.slug)).toEqual(["one"]);
+      expect(m.sections.inbox).toEqual([]);
+    } finally {
       t.cleanup();
     }
   });

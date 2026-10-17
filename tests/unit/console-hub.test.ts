@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Hub, PING } from "../../src/console/hub";
+import { writeHeartbeat } from "../../src/heartbeat";
+import { scanRepo } from "../../src/intents";
+import { join } from "node:path";
 import type { StreamMessage } from "../../src/console/types";
 import { Trace } from "../../src/trace";
-import { config, intent, parseFrames, until } from "../console-helpers";
+import { config, intent, parseFrames, until, withTrace } from "../console-helpers";
 import { tempDir } from "../helpers";
 
 /** A page: collects what the hub sends it, until it is closed. */
@@ -47,6 +50,37 @@ describe("the console's live stream", () => {
       expect(p.messages().some((m) => m.msg.type === "section" && m.msg.name === "totals")).toBe(false);
     } finally {
       await off();
+      t.cleanup();
+    }
+  });
+
+  test("a rebuild caused only by a new event or the heartbeat does not read the intent folder again; a new file under intent/ does", async () => {
+    const t = tempDir();
+    let scans = 0;
+    const hub = new Hub(t.path, { ...FAST, scan: (root) => { scans++; return scanRepo(root); } });
+    let off = async () => {};
+    try {
+      await config(t.path);
+      await intent(t.path, "one", "status: accepted");
+      const p = page();
+      off = await hub.connect(p.send);
+      expect(scans).toBe(1);
+
+      withTrace(t.path, (trace) => trace.statusChange("one", "accepted", "designing"));
+      await until(() => p.messages().some((m) => m.msg.type === "event"));
+      const now = new Date().toISOString();
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: now, lastTickAt: now, lastBeatAt: now, current: null, stopping: false, stopped: false });
+      await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "loop"));
+      expect(scans).toBe(1);
+
+      await Bun.write(join(t.path, "intent", "one", "spec.md"), "# Spec\n");
+      await until(() => scans === 2);
+      await intent(t.path, "two", "status: accepted");
+      await until(() => scans === 3);
+      await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "changes"));
+    } finally {
+      await off();
+      await hub.whenStopped();
       t.cleanup();
     }
   });

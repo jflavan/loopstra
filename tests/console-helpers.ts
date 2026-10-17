@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { configPath } from "../src/config";
+import type { Scan } from "../src/intents";
 import { buildModel, type Model } from "../src/console/model";
 import { Trace } from "../src/trace";
 
@@ -37,7 +38,7 @@ export function withTrace<T>(root: string, fn: (trace: Trace) => T): T {
 }
 
 /** The console's model of a repository, with a trace opened and closed around it. */
-export async function model(root: string, now: Date = new Date(), opts: { chat?: boolean } = {}): Promise<Model> {
+export async function model(root: string, now: Date = new Date(), opts: { chat?: boolean; scan?: Scan } = {}): Promise<Model> {
   const trace = Trace.open(root);
   try { return await buildModel(root, trace, now, opts); } finally { trace.close(); }
 }

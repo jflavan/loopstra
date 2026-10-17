@@ -31,10 +31,11 @@ interface Summary { type?: string; subtype?: string; items?: string[]; targets?:
 
 /**
  * Everything the console shows on every screen, from the intent files, the trace and the heartbeat.
+ * `opts.scan` is the intent folder already read (the hub keeps one until a file there changes).
  * Each part is built on its own: one that fails becomes a problem in the inbox, and the rest still
  * go out.
  */
-export async function buildModel(root: string, trace: Trace, now: Date = new Date(), opts: { chat?: boolean } = {}): Promise<Model> {
+export async function buildModel(root: string, trace: Trace, now: Date = new Date(), opts: { chat?: boolean; scan?: Scan } = {}): Promise<Model> {
   let config: Config | { problem: string };
   try { config = await loadConfig(root); } catch (e) { config = { problem: errorText(e) }; }
   const cfg = "problem" in config ? null : config;
@@ -45,7 +46,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
 
   // Read once and shared with the inbox: it is the costliest part of a rebuild.
-  const scan = await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
+  const scan = opts.scan ?? await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
   const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
   const beat = readHeartbeat(root);
