@@ -70,10 +70,10 @@ speed:
 signals:
   main_health: { every_minutes: 30 }
 
-# Chat: `loopstra chat` (terminal, plus any bots) and the panel in `loopstra ui`. The orchestrator
+# Chat: `loopstra chat` (terminal, plus any bots) and the drawer in `loopstra ui` (the console). The orchestrator
 # answers questions and works out new changes with you; agreed ones are written up as draft intents
 # (through a pull request when there is a remote). It is read-only, except that someone on a bot's
-# acceptors list (or at the terminal or dashboard) can ask it to start a draft.
+# acceptors list (or at the terminal or the console) can ask it to start a draft.
 # `loopstra setup chat` adds Slack or Discord bots under transports, for example:
 #   transports:
 #     slack:                     # Socket Mode; tokens are read from these environment variables

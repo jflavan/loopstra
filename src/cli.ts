@@ -18,7 +18,7 @@ const HELP = `loopstra <command>
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
   judges    how often the cheaper judges agreed with the strong ones
-  ui        local dashboard with a chat panel (--port <n>, default 4646; --no-chat)
+  ui        the console: live agents, inbox, changes and chat (--port <n>, default 4646; --no-chat)
   chat      talk to the orchestrator: updates, and new changes written up
             as intents (--no-terminal to run only the Slack/Discord bots)
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
@@ -84,21 +84,11 @@ async function main(): Promise<number> {
     }
     case "ui": {
       if (!setUp()) return 1;
-      const { serveUi } = await import("./commands/ui");
       const flag = rest.indexOf("--port");
       const port = flag >= 0 ? Number(rest[flag + 1]) : 4646;
       if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("Usage: loopstra ui [--port <number>]"); return 1; }
-      let dashboard: import("./chat/transports/dashboard").DashboardTransport | undefined;
-      if (!rest.includes("--no-chat")) {
-        const { DashboardTransport } = await import("./chat/transports/dashboard");
-        const { ChatService } = await import("./chat/service");
-        dashboard = new DashboardTransport(root);
-        await new ChatService(root, [dashboard]).start();
-      }
-      const server = serveUi(root, port, { chat: dashboard });
-      console.log(`Loopstra dashboard: http://127.0.0.1:${server.port}  (Ctrl-C to stop)`);
-      await new Promise(() => {});
-      return 0;
+      const { ui } = await import("./commands/ui");
+      return ui(root, port, !rest.includes("--no-chat"));
     }
     case "chat": {
       if (!setUp()) return 1;
