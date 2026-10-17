@@ -8,9 +8,24 @@ export const OUTPUT_MAX = 256 * 1024;
 const WRITE_LINES = 400;
 /** The most of a raw file one read takes. */
 const READ_MAX = 4 * 1024 * 1024;
+/** How far into a raw file the session's init event is looked for; its line lists every tool, so it can be long. */
+const INIT_MAX = 16 * 1024 * 1024;
 
 type Raw = Record<string, unknown>;
-type Block = { type?: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean };
+/** A content block as the CLI writes it; the fields are checked before use, since a line may hold anything. */
+type Block = { type?: unknown; text?: unknown; id?: unknown; name?: unknown; input?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+
+const isObject = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** One line of a raw file as an event, or null when it is not one (a cut-off line, a bare value). */
+function rawEvent(line: string): Raw | null {
+  try {
+    const v = JSON.parse(line) as unknown;
+    return isObject(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 function cut(text: string): string {
   return text.length > OUTPUT_MAX ? `${text.slice(0, OUTPUT_MAX)}\n… (cut)` : text;
@@ -20,7 +35,7 @@ function cut(text: string): string {
 function outputText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return (content as Block[]).map((c) => (c?.type === "text" ? c.text ?? "" : c?.type === "image" ? "[image]" : "")).filter(Boolean).join("\n");
+    return (content as unknown[]).filter(isObject).map((c) => (c.type === "text" && typeof c.text === "string" ? c.text : c.type === "image" ? "[image]" : "")).filter(Boolean).join("\n");
   }
   return content == null ? "" : JSON.stringify(content);
 }
@@ -35,7 +50,7 @@ function editDiff(tool: string, path: string, input: Raw): string {
     const more = all.length > WRITE_LINES ? [`\\ ${all.length - WRITE_LINES} more lines`] : [];
     return [...head, "@@ new file @@", ...all.slice(0, WRITE_LINES).map((l) => `+${l}`), ...more].join("\n");
   }
-  const edits = tool === "MultiEdit" && Array.isArray(input.edits) ? (input.edits as Raw[]) : [input];
+  const edits = tool === "MultiEdit" && Array.isArray(input.edits) ? (input.edits as unknown[]).filter(isObject) : [input];
   return [...head, ...edits.flatMap((e) => ["@@ edit @@", ...signed(String(e.old_string ?? ""), "-"), ...signed(String(e.new_string ?? ""), "+")])].join("\n");
 }
 
@@ -52,20 +67,20 @@ export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
     const content = (e.message as { content?: unknown } | undefined)?.content;
     if (!Array.isArray(content)) return [];
     const out: TranscriptItem[] = [];
-    for (const b of content as Block[]) {
-      if (e.type === "assistant" && b.type === "text" && b.text?.trim()) {
+    for (const b of (content as unknown[]).filter(isObject) as Block[]) {
+      if (e.type === "assistant" && b.type === "text" && typeof b.text === "string" && b.text.trim()) {
         out.push({ kind: "text", text: b.text });
-      } else if (e.type === "assistant" && b.type === "tool_use" && b.name && b.id && !HIDDEN.has(b.name)) {
-        const input = (b.input && typeof b.input === "object" ? b.input : {}) as Raw;
+      } else if (e.type === "assistant" && b.type === "tool_use" && typeof b.name === "string" && b.name && typeof b.id === "string" && b.id && !HIDDEN.has(b.name)) {
+        const input = isObject(b.input) ? b.input : {};
         if (b.name === "TodoWrite" && Array.isArray(input.todos)) {
-          out.push({ kind: "todos", items: (input.todos as Raw[]).map((t) => ({ text: String(t.content ?? ""), state: String(t.status ?? "") })) });
+          out.push({ kind: "todos", items: (input.todos as unknown[]).filter(isObject).map((t) => ({ text: String(t.content ?? ""), state: String(t.status ?? "") })) });
         } else if (EDITS.has(b.name)) {
           const path = relativePath(String(input.file_path ?? ""), cwd);
           out.push({ kind: "edit", id: b.id, tool: b.name, path, diff: editDiff(b.name, path, input) });
         } else {
           out.push({ kind: "tool", id: b.id, tool: b.name, target: toolTarget(b.name, input, cwd), input });
         }
-      } else if (e.type === "user" && b.type === "tool_result" && b.tool_use_id) {
+      } else if (e.type === "user" && b.type === "tool_result" && typeof b.tool_use_id === "string" && b.tool_use_id) {
         out.push({ kind: "tool-result", id: b.tool_use_id, ok: b.is_error !== true, output: cut(outputText(b.content)) });
       }
     }
@@ -75,26 +90,40 @@ export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
     return [{ kind: "tool-result", id: e.tool_use_id, ok: false, output: `Not allowed: ${String(e.message ?? e.decision_reason ?? "")}` }];
   }
   if (e.type === "result") {
-    const answer = e.structured_output as { summary?: unknown } | undefined;
+    const answer = isObject(e.structured_output) ? e.structured_output : undefined;
     const summary = typeof answer?.summary === "string" ? answer.summary : typeof e.result === "string" ? e.result : "";
     return [{ kind: "result", ok: e.subtype === "success" && e.is_error !== true, summary, costUsd: typeof e.total_cost_usd === "number" ? e.total_cost_usd : null }];
   }
   return [];
 }
 
-/** The folder a session's init event names, read from the start of its raw file. */
+/**
+ * The folder a session's init event names, read from the start of its raw file line by line up to
+ * that event (hook events may come before it), so a long init line is still read whole.
+ */
 function initCwd(path: string): string | undefined {
   const fd = openSync(path, "r");
   try {
-    const buf = Buffer.alloc(64 * 1024);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
-      try {
-        const e = JSON.parse(line) as Raw;
-        if (e.type === "system" && e.subtype === "init") return typeof e.cwd === "string" ? e.cwd : undefined;
-      } catch { /* a cut-off line */ }
+    let buf = Buffer.alloc(64 * 1024);
+    let filled = 0;
+    let start = 0;
+    for (;;) {
+      if (filled === buf.length) {
+        if (buf.length >= INIT_MAX) return undefined;
+        const bigger = Buffer.alloc(Math.min(buf.length * 2, INIT_MAX));
+        buf.copy(bigger, 0, 0, filled);
+        buf = bigger;
+      }
+      const n = readSync(fd, buf, filled, buf.length - filled, filled);
+      if (n === 0) return undefined;
+      const got = buf.subarray(0, filled + n);
+      for (let nl = got.indexOf(10, filled); nl >= 0; nl = got.indexOf(10, nl + 1)) {
+        const e = rawEvent(got.subarray(start, nl).toString("utf8"));
+        start = nl + 1;
+        if (e?.type === "system" && e.subtype === "init") return typeof e.cwd === "string" ? e.cwd : undefined;
+      }
+      filled += n;
     }
-    return undefined;
   } finally {
     closeSync(fd);
   }
@@ -134,10 +163,13 @@ export class TranscriptReader {
     for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10, start)) {
       const line = buf.subarray(start, nl).toString("utf8");
       start = nl + 1;
-      let e: Raw;
-      try { e = JSON.parse(line) as Raw; } catch { continue; }
+      const e = rawEvent(line);
+      if (!e) continue;
       if (e.type === "system" && e.subtype === "init" && typeof e.cwd === "string") this.cwd = e.cwd;
-      for (const item of toItems(e, this.cwd)) out.push({ item, offset: this.offset + nl + 1 });
+      // An event in a shape nothing here expected is passed over, so the lines after it still come.
+      let items: TranscriptItem[];
+      try { items = toItems(e, this.cwd); } catch { continue; }
+      for (const item of items) out.push({ item, offset: this.offset + nl + 1 });
     }
     // A line longer than one whole read is skipped, so one huge event cannot stall the stream.
     if (start === 0 && buf.length === maxBytes) start = buf.length;

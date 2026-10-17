@@ -83,4 +83,77 @@ describe("session transcripts", () => {
       t.cleanup();
     }
   });
+
+  test("a line that is not an event, or has odd fields, is skipped and the lines after it still come", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "raw.jsonl");
+      const odd = [
+        "null", "42", "[1,2]", '"text"',
+        JSON.stringify({ type: "assistant", message: { content: [null, { type: "text", text: 5 }, { type: "tool_use", id: 7, name: "Bash", input: {} }] } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "m", name: "MultiEdit", input: { file_path: `${CWD}\\a.ts`, edits: [null, { old_string: "x", new_string: "y" }] } }] } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "td", name: "TodoWrite", input: { todos: [null, { content: "Ship", status: "pending" }] } }] } }),
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r", content: [null, { type: "text", text: 3 }, { type: "text", text: "ok" }] }] } }),
+        JSON.stringify({ type: "user", message: null }),
+        JSON.stringify({ type: "result", subtype: "success", structured_output: null, result: "Done." }),
+      ];
+      writeFileSync(path, `${JSON.stringify(RAW[0])}\n${odd.join("\n")}\n${jsonl(RAW.slice(2, 4))}`);
+      const reader = new TranscriptReader(path);
+      expect(reader.read().map((r) => r.item)).toEqual([
+        { kind: "edit", id: "m", tool: "MultiEdit", path: "a.ts", diff: "--- a.ts\n+++ a.ts\n@@ edit @@\n-x\n+y" },
+        { kind: "todos", items: [{ text: "Ship", state: "pending" }] },
+        { kind: "tool-result", id: "r", ok: true, output: "ok" },
+        { kind: "result", ok: true, summary: "Done.", costUsd: null },
+        ...EXPECTED.slice(0, 3),
+      ]);
+      expect(reader.atEnd()).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("Windows line endings, a character split across two reads, and a line longer than one read", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "raw.jsonl");
+      writeFileSync(path, RAW.slice(0, 4).map((e) => `${JSON.stringify(e)}\r\n`).join(""));
+      expect(new TranscriptReader(path).read().map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
+
+      // "é" is two bytes. The first read ends between them; the line is read whole by the next one.
+      const said = { type: "assistant", message: { content: [{ type: "text", text: "Café, résumé, naïve." }] } };
+      const line = JSON.stringify(said);
+      const max = Buffer.byteLength(line) + 1;
+      const filler = "x".repeat(max - 2 - Buffer.from(line).indexOf(Buffer.from("é")));
+      writeFileSync(path, `${filler}\n${line}\n`);
+      expect(Buffer.from(`${filler}\n${line}`).subarray(max - 1, max + 1).toString()).toBe("é");
+      const small = new TranscriptReader(path);
+      const items: TranscriptItem[] = [];
+      for (let k = 0; k < 10 && !small.atEnd(); k++) items.push(...small.read(max).map((r) => r.item));
+      expect(items).toEqual([{ kind: "text", text: "Café, résumé, naïve." }]);
+      expect(small.offset).toBe(Buffer.byteLength(`${filler}\n${line}\n`));
+
+      // A line longer than a whole read is passed over, so the stream goes on after it.
+      writeFileSync(path, `${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "y".repeat(500) }] } })}\n${line}\n`);
+      const long = new TranscriptReader(path);
+      const after: TranscriptItem[] = [];
+      for (let k = 0; k < 20 && !long.atEnd(); k++) after.push(...long.read(200).map((r) => r.item));
+      expect(after).toEqual([{ kind: "text", text: "Café, résumé, naïve." }]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a reader started part way finds the session's folder past a long first line", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "raw.jsonl");
+      const init = { ...RAW[0], tools: "t".repeat(200 * 1024) };
+      writeFileSync(path, `${JSON.stringify({ type: "system", subtype: "hook_started" })}\n${JSON.stringify(init)}\n`);
+      const offset = Bun.file(path).size;
+      appendFileSync(path, jsonl(RAW.slice(2, 3)));
+      expect(new TranscriptReader(path, offset).read().map((r) => r.item)).toEqual(EXPECTED.slice(0, 2));
+    } finally {
+      t.cleanup();
+    }
+  });
 });
