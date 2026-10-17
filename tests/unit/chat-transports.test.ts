@@ -176,8 +176,8 @@ describe("Slack", () => {
       const ps = r.prompts();
       expect(ps.length).toBe(2);
       expect(ps[0]!.prompt).toContain("<message from=\"ana\">\nhello\n</message>");
-      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts");
-      expect(ps[1]!.prompt).toContain("From: Someone, who may not start drafts (<@U1> may)");
+      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts and to act on changes");
+      expect(ps[1]!.prompt).toContain("From: Someone, who may not start drafts or act on changes (<@U1> may)");
       expect(service.orchestrator.store.get("slack", "C1:1.0").messages.length).toBe(4);
       await slack.announce("Blocked: x.");
       expect(stub.calls.at(-1)!.body).toEqual({ channel: "C9", text: "Blocked: x." });
@@ -256,8 +256,8 @@ describe("Discord", () => {
       ]);
       expect(stub.calls[0]!.auth).toBe("Bot t-1");
       const ps = r.prompts();
-      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts");
-      expect(ps[1]!.prompt).toContain("From: Bo, who may not start drafts (<@7> may)");
+      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts and to act on changes");
+      expect(ps[1]!.prompt).toContain("From: Bo, who may not start drafts or act on changes (<@7> may)");
       // Only the bot's own mention is taken out; someone else's is part of what was asked.
       expect(ps[1]!.prompt).toContain("with dates please, and tell <@7>\n</message>");
       // The thread is remembered, so a restarted bot carries on in it.
