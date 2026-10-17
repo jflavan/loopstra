@@ -1,3 +1,5 @@
+import { ANY_SLUG } from "../console/types";
+
 export type Tab = "overview" | "documents" | "timeline" | "code" | "gates";
 export const TABS: readonly Tab[] = ["overview", "documents", "timeline", "code", "gates"];
 
@@ -6,9 +8,6 @@ export type Route =
   | { name: "change"; slug: string; tab: Tab }
   | { name: "session"; slug: string; seq: number }
   | { name: "missing"; path: string };
-
-/** A change's name, or one of the trace's own (`_chat`). The server's page routes match these paths. */
-const SLUG = /^_?[a-z0-9][a-z0-9-]*$/;
 
 function decode(part: string): string | null {
   try { return decodeURIComponent(part); } catch { return null; }
@@ -21,11 +20,11 @@ export function parseRoute(path: string): Route {
   const [a, b, c] = parts as string[];
   if (!a) return { name: "live" };
   if (parts.length === 1 && (a === "inbox" || a === "changes" || a === "activity" || a === "spend")) return { name: a };
-  if (a === "c" && b && SLUG.test(b) && !b.startsWith("_") && parts.length <= 3) {
+  if (a === "c" && b && ANY_SLUG.test(b) && !b.startsWith("_") && parts.length <= 3) {
     if (!c) return { name: "change", slug: b, tab: "overview" };
     if ((TABS as readonly string[]).includes(c)) return { name: "change", slug: b, tab: c as Tab };
   }
-  if (a === "s" && b && SLUG.test(b) && c && /^\d+$/.test(c) && parts.length === 3) return { name: "session", slug: b, seq: Number(c) };
+  if (a === "s" && b && ANY_SLUG.test(b) && c && /^\d+$/.test(c) && parts.length === 3) return { name: "session", slug: b, seq: Number(c) };
   return missing;
 }
 

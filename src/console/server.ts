@@ -9,11 +9,10 @@ import { changeDiff } from "./diff";
 import { resolveDocument, resolveRunFile } from "./files";
 import { Hub, type Send } from "./hub";
 import { streamSession } from "./session";
+import { ANY_SLUG } from "./types";
 
 /** Host names the console answers to: a page on another name that resolves here (DNS rebinding) gets nothing. */
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-/** A change's name, or one of the trace's own (_chat, _loop, _signals). */
-const ANY_SLUG = /^_?[a-z0-9][a-z0-9-]*$/;
 const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" };
 const NOT_FOUND = () => new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
 

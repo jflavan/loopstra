@@ -53,6 +53,13 @@ export interface Sections {
   running: { now: RunningPhase[]; recent: FinishedPhase[] };
   totals: Totals;
 }
+
+/**
+ * A change's name, or one of the trace's own (_chat, _loop, _signals): what the server's session and
+ * activity routes accept and the page's router matches, so a path one takes the other takes too.
+ */
+export const ANY_SLUG = /^_?[a-z0-9][a-z0-9-]*$/;
+
 export type SectionName = keyof Sections;
 export const SECTION_NAMES: readonly SectionName[] = ["loop", "inbox", "changes", "running", "totals"];
 
