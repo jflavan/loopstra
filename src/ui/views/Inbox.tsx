@@ -3,7 +3,7 @@ import type { AttentionItem } from "../../attention";
 import { navigate } from "../nav";
 import { Actions } from "../parts/Actions";
 import { Link } from "../parts/Link";
-import { act, bodyFor } from "../requests";
+import { act, beforeOf, bodyFor } from "../requests";
 import { screenKeys } from "../shortcuts";
 import { changes, inbox, openDrawer } from "../store";
 
@@ -29,7 +29,7 @@ export function Inbox() {
       const it = inbox.value?.[atRef.current];
       const c = it?.slug ? changes.value?.find((x) => x.slug === it.slug) : undefined;
       const o = c?.offers.find((x) => x.kind === "approve");
-      if (c && o) void act(bodyFor(c, o), { note: c.note, priority: c.priority }, `${o.label}, ${c.slug}`);
+      if (c && o) void act(bodyFor(c, o), beforeOf(c), `${o.label}, ${c.slug}`);
     });
     return () => { for (const k of ["j", "k", "o", "a"]) screenKeys.delete(k); };
   }, []);

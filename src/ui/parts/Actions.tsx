@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { PRIORITY_NAMES, type ChangeSummary, type Offer } from "../../console/types";
-import { act, bodyFor, unsentText } from "../requests";
+import { act, beforeOf, bodyFor, unsentText } from "../requests";
 import { requests, toast } from "../store";
 
 /** Actions that open a small form first: a note, a reason, or a confirmation. */
@@ -53,7 +53,7 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
     setBusy(true);
     const label = `${o.label}, ${c.slug}`;
     try {
-      return await act(bodyFor(c, o, input), { note: c.note, priority: c.statedPriority }, label);
+      return await act(bodyFor(c, o, input), beforeOf(c), label);
     } catch (e) {
       console.error(`${label}: it could not be sent`, e);
       toast(unsentText(label), "bad");

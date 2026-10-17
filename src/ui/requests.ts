@@ -12,6 +12,11 @@ export interface ActionBody { kind: string; slug: string; expect?: string; to?: 
 /** What the change was before an action, so an undo can put it back. `priority`: the priority line as written, or null when there was none. */
 export interface Before { note: string; priority: string | null }
 
+/** A change's Before as the page shows it: its stated priority, not the one it reads as (normal when none is stated). */
+export function beforeOf(c: ChangeSummary): Before {
+  return { note: c.note, priority: c.statedPriority };
+}
+
 /** The request for an offer on a change: the change, the status the person saw, and what the action needs. */
 export function bodyFor(c: ChangeSummary, offer: Offer, input: { note?: string; priority?: string; reason?: string } = {}): ActionBody {
   const b: ActionBody = { kind: offer.kind, slug: c.slug, expect: c.status };

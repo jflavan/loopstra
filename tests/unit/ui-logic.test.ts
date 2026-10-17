@@ -12,7 +12,7 @@ import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { act, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
+import { act, beforeOf, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -408,6 +408,11 @@ describe("requests from the page", () => {
     expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
     expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
     expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
+  });
+
+  test("what an undo puts back is the stated priority: none when the change only reads as normal", () => {
+    expect(beforeOf({ ...change, statedPriority: null })).toEqual({ note: "Read plan.md.", priority: null });
+    expect(beforeOf({ ...change, priority: "high", statedPriority: "high" })).toEqual({ note: "Read plan.md.", priority: "high" });
   });
 
   test("undo puts back what the action changed, from where it left the change", () => {
