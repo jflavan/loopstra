@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { askText, offers, retryOptions, type RequestShape } from "../actions";
 import { limitOf } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
-import { parseIntentFile, SLUG } from "../intents";
+import { humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
 import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
@@ -13,8 +14,8 @@ import { Trace } from "../trace";
 import { AnnouncementLog } from "./announcer";
 import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
-import { submitRequest } from "../requests";
-import { OrchestratorTurn, type Handoff } from "./schemas";
+import { submitRequest, type RequestBody } from "../requests";
+import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
 import { ThreadStore, threadKey, type ThreadState } from "./threads";
 
 /** A message from a person, as a transport delivers it. */
@@ -107,11 +108,14 @@ export class Orchestrator {
           const expired = Date.now() - Date.parse(pending.at) > PENDING_TTL_MS;
           if (isYes(m.text) && !expired) {
             if (pending.kind === "handoff") await this.doHandoff(cfg, trace, t, m, pending.handoff, say);
+            else if (pending.kind === "action") await this.doAction(cfg, m, pending.request, say);
             else await this.doAccept(cfg, m, pending.slug, say);
             return;
           }
           const why = expired ? "the person's answer came over a day later, so it was not acted on" : "the person did not say yes";
-          declined = pending.kind === "handoff" ? `You proposed handing off "${pending.handoff.title}"; ${why}, so nothing was written. Propose it again if it still stands.` : `You proposed starting ${pending.slug}; ${why}, so it was not started. Propose it again if it still stands.`;
+          declined = pending.kind === "handoff" ? `You proposed handing off "${pending.handoff.title}"; ${why}, so nothing was written. Propose it again if it still stands.`
+            : pending.kind === "action" ? `You proposed: "${pending.ask}"; ${why}, so nothing was done. Propose it again if it still stands.`
+            : `You proposed starting ${pending.slug}; ${why}, so it was not started. Propose it again if it still stands.`;
         }
         await this.turn(cfg, trace, t, m, say, declined);
       } catch (e) {
@@ -174,6 +178,7 @@ export class Orchestrator {
     if (turn.reply.trim()) await say(turn.reply.trim());
     if (turn.handoff) await this.proposeHandoff(t, m, turn.handoff, say);
     else if (turn.accept) await this.proposeAccept(t, m, turn.accept.slug.trim(), say);
+    else if (turn.action) await this.proposeAction(cfg, trace, t, m, turn.action, say);
   }
 
   /** The context Loopstra vouches for, then the person's own words, delimited. */
@@ -188,7 +193,7 @@ export class Orchestrator {
     const name = m.authorName.replace(/[\s<>"]+/g, " ").trim() || "someone";
     const history = await this.recentHistory(cfg);
     const lines = [
-      `From: ${name}, ${m.canAccept ? "who may ask you to start drafts" : `who may not start drafts (${m.acceptors} may)`}`,
+      `From: ${name}, ${m.canAccept ? "who may ask you to start drafts and to act on changes" : `who may not start drafts or act on changes (${m.acceptors} may)`}`,
       `Where: ${m.via}`,
       `Today: ${localDate()}`,
       `Main branch: ${cfg.main_branch}; ${remote ? "intents are added through a pull request" : "no GitHub remote, so intents are added to the queue directly"}`,
@@ -277,6 +282,52 @@ export class Orchestrator {
     if (st !== "draft") { await say(`${slug} is ${st ?? "not in the main code"} now, not a draft, so I have not started it.`); return; }
     submitRequest(this.root, { kind: "accept", slug, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
     await say(`Asked the loop to start ${slug}. ${this.loopWhen(cfg, "starts it")}`);
+  }
+
+  /**
+   * Checks an action against the change as it is now (what it offers a person; see offers), words
+   * the question, and waits for the person's yes. The request names the status the change has now,
+   * so the loop refuses it if the change moves on before the yes.
+   */
+  private async proposeAction(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, a: ProposedAction, say: Send): Promise<void> {
+    const slug = a.slug.trim();
+    if (!m.canAccept) {
+      await say(`You cannot change work from here; ${m.acceptors} can. They can ask me, or edit intent/${slug}/intent.md.`);
+      return;
+    }
+    if (!SLUG.test(slug) || !existsSync(join(this.root, "intent", slug, "intent.md"))) { await say(`There is no change called ${slug} in the main code.`); return; }
+    let fm: Frontmatter;
+    try { fm = (await readIntent(this.root, slug)).file.frontmatter; } catch { await say(`${slug}'s intent.md cannot be read, so I cannot do that.`); return; }
+    const offered = offers(fm, humanGates(cfg), fm.status === "blocked" ? retryOptions(trace, slug, fm.note) : []).filter((o) => o.kind === a.kind);
+    if (!offered.length) { await say(`${slug} is ${plainStatus(fm.status)} now, so that is not something I can do to it.`); return; }
+    const note = a.note.trim();
+    const expect = fm.status;
+    let request: RequestBody & RequestShape;
+    switch (a.kind) {
+      case "send-back":
+        if (!note) { await say("Tell me what should change, and I will send it back with that note."); return; }
+        request = { kind: "send-back", slug, expect, note };
+        break;
+      // The status named in the note when the block offers it, else the first the block names (see retryOptions).
+      case "retry": request = { kind: "retry", slug, expect: "blocked", to: (offered.find((o) => o.to === note) ?? offered[0]!).to as Status }; break;
+      case "priority":
+        if (!a.priority) { await say("Which priority: urgent, high, normal or low?"); return; }
+        request = { kind: "priority", slug, expect, priority: a.priority };
+        break;
+      case "hold": request = { kind: "hold", slug, expect, reason: note }; break;
+      case "approve": request = { kind: "approve", slug, expect }; break;
+      case "close": request = { kind: "close", slug, expect }; break;
+      case "release": request = { kind: "release", slug, expect }; break;
+    }
+    const ask = askText(request, slug);
+    t.pending = { kind: "action", request, ask, by: m.authorId, at: new Date().toISOString() };
+    await say(`${ask} Reply yes to go ahead.`);
+  }
+
+  private async doAction(cfg: Config, m: IncomingMessage, request: RequestBody, say: Send): Promise<void> {
+    if (!m.canAccept) { await say(`Only ${m.acceptors} can do that, so I have not.`); return; }
+    submitRequest(this.root, { ...request, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
+    await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);
   }
 
   /** When the loop will act on a request, in words: on its next check, once it is resumed, or when it is started. */

@@ -8,6 +8,9 @@ import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
 
+/** A person on the plan gate, so approving or sending back a plan is theirs to give. */
+const PLAN_PERSON = "gates:\n  plan: { human: status }\n";
+
 describe("isYes", () => {
   test("a plain yes, and nothing more", () => {
     for (const y of ["yes", "Yes!", " y ", "ok", "go ahead", "Do it.", "sure"]) expect({ y, yes: isYes(y) }).toEqual({ y, yes: true });
@@ -110,6 +113,68 @@ describe("the orchestrator", () => {
       expect(out.sent.at(-1)).toBe("started is planning, not a draft, so there is nothing to start.");
       // Writer phases never ran; only three turns did.
       expect(r.prompts().length).toBe(3);
+    } finally { r.cleanup(); }
+  });
+
+  test("an action: only someone who may is asked, only a yes leaves a request, and it names the status seen", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("plan-review") }, config: PLAN_PERSON });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "approve", slug: "csv-export", note: "", priority: null } }));
+      await r.answer("orchestrator", 2, turn("Sure.", { action: { kind: "approve", slug: "csv-export", note: "", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("approve it", { canAccept: false, acceptors: "<@U1>", thread: "x" }), out.send);
+      expect(out.sent.at(-1)).toBe("You cannot change work from here; <@U1> can. They can ask me, or edit intent/csv-export/intent.md.");
+      await o.handle(message("approve the plan"), out.send);
+      expect(out.sent.at(-1)).toBe("Approve the plan of csv-export? Reply yes to go ahead.");
+      expect(pendingRequests(r.root)).toEqual([]);
+      await o.handle(message("yes"), out.send);
+      expect(pendingRequests(r.root).map((q) => [q.kind, "slug" in q ? q.slug : "", "expect" in q ? q.expect : "", q.byName, q.via, q.transport, q.thread])).toEqual([["approve", "csv-export", "plan-review", "Ana", "the terminal", "terminal", "local"]]);
+      expect(out.sent.at(-1)).toStartWith("Asked the loop to do it.");
+    } finally { r.cleanup(); }
+  });
+
+  test("an action the change does not offer now is explained, not asked", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("building") } });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "approve", slug: "csv-export", note: "", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("approve it"), out.send);
+      expect(out.sent.at(-1)).toBe("csv-export is building and testing now, so that is not something I can do to it.");
+      expect(o.store.get("terminal", "local").pending).toBeNull();
+    } finally { r.cleanup(); }
+  });
+
+  test("a retry starts from the status the block names, or the one asked for when it names more", async () => {
+    const note = "The spec did not pass its automatic check. Set status to spec-approved to accept the spec as it is, or to accepted to write it again.";
+    const blocked = INTENT("blocked").replace("status: blocked", `status: blocked\nnote: ${JSON.stringify(note)}`);
+    const r = await chatRepo({ intents: { "csv-export": blocked } });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "retry", slug: "csv-export", note: "", priority: null } }));
+      await r.answer("orchestrator", 2, turn("Sure.", { action: { kind: "retry", slug: "csv-export", note: "accepted", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("retry it"), out.send);
+      expect(out.sent.at(-1)).toBe("Retry csv-export from spec-approved? Reply yes to go ahead.");
+      await o.handle(message("no, write the spec again"), out.send);
+      expect(out.sent.at(-1)).toBe("Retry csv-export from accepted? Reply yes to go ahead.");
+      await o.handle(message("yes"), out.send);
+      expect(pendingRequests(r.root).map((q) => [q.kind, "to" in q ? q.to : ""])).toEqual([["retry", "accepted"]]);
+      // The declined proposal was in the second turn's context.
+      expect(r.prompts()[1]!.prompt).toContain('You proposed: "Retry csv-export from spec-approved?"; the person did not say yes, so nothing was done.');
+    } finally { r.cleanup(); }
+  });
+
+  test("send back needs a note", async () => {
+    const r = await chatRepo({ intents: { "csv-export": INTENT("plan-review") }, config: PLAN_PERSON });
+    try {
+      await r.answer("orchestrator", 1, turn("Sure.", { action: { kind: "send-back", slug: "csv-export", note: " ", priority: null } }));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("send it back"), out.send);
+      expect(out.sent.at(-1)).toBe("Tell me what should change, and I will send it back with that note.");
+      expect(o.store.get("terminal", "local").pending).toBeNull();
     } finally { r.cleanup(); }
   });
 

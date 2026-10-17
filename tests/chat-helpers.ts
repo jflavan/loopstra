@@ -17,7 +17,7 @@ export function fixture(output: unknown, opts: { session?: string; cost?: number
   ].map((l) => JSON.stringify(l)).join("\n") + "\n";
 }
 
-export const turn = (reply: string, extra: { handoff?: unknown; accept?: unknown } = {}) => ({ reply, handoff: extra.handoff ?? null, accept: extra.accept ?? null });
+export const turn = (reply: string, extra: { handoff?: unknown; accept?: unknown; action?: unknown } = {}) => ({ reply, handoff: extra.handoff ?? null, accept: extra.accept ?? null, action: extra.action ?? null });
 
 export const draft = (slug: string, more: Record<string, unknown> = {}) => ({
   slug, title: `Do ${slug}`, priority: null, depends_on: [],

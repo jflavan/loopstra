@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
+import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
@@ -12,7 +13,9 @@ export function chatDir(root: string): string {
 /** A proposal waiting for a person's yes. */
 export type Pending =
   | { kind: "handoff"; handoff: Handoff; by: string; at: string }
-  | { kind: "accept"; slug: string; by: string; at: string };
+  | { kind: "accept"; slug: string; by: string; at: string }
+  /** An action on a change, as it will be submitted; `ask` is the question the person was asked. */
+  | { kind: "action"; request: RequestBody; ask: string; by: string; at: string };
 
 /** One hand-off made from a thread, and what became of it. */
 export interface HandoffRecord {
