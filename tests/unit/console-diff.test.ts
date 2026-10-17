@@ -52,7 +52,10 @@ describe("a change's diff", () => {
       expect(await changeDiff(repo.path, "--output=out.txt", "csv")).toEqual(none);
       expect(await changeDiff(repo.path, "main..x", "csv")).toEqual(none);
       expect(await changeDiff(repo.path, "trunk", "csv")).toEqual(none);
-      expect(await changeDiff(repo.path, "main", "csv", { timeoutMs: 1 })).toEqual(none);
+      // Where 1 ms runs out (finding the branches, or the diff) depends on the machine; either way it is no error.
+      const late = await changeDiff(repo.path, "main", "csv", { timeoutMs: 1 });
+      expect(late.problem).toBeUndefined();
+      expect(late).toMatchObject({ stat: "", patch: "" });
       expect(await changeDiff(repo.path, "main", "csv")).toEqual({ exists: true, stat: "", patch: "", cut: false });
     } finally {
       repo.cleanup();
