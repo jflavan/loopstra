@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { doneWords, isOpen, personReviews, resultText, retryOptions, targetOf, undoMatches } from "./actions";
+import { APPROVE_TO, doneWords, isOpen, personReviews, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { Git } from "./git";
@@ -437,7 +437,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     if (!ours) {
       const fresh = await readIntent(root, req.slug);
       const own = await ownBefore(root, req, req.slug);
-      if (!(await writeIntent(fresh, statusPatch(req.expect, to, note), { expectStatus: req.expect }))) {
+      if (!(await writeIntent(fresh, patchFor(req, to, note), { expectStatus: req.expect }))) {
         refused = fresh.file.frontmatter.status;
         return false;
       }
@@ -452,6 +452,19 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });
   if (req.kind === "undo") dropSentBack(root, req.slug);
   return { ok: true, status: to, text: resultText(req, req.slug, to) };
+}
+
+/**
+ * The frontmatter a status request writes (see statusPatch). An undo of an approve also takes
+ * resume_from back, to the approved status before the review (where a send back goes): left at the
+ * approval, a later block would offer to retry from the approval the person took back. From done back
+ * to verifying it stays as it was (merged).
+ */
+function patchFor(req: StatusRequest, to: Status, note: string): Partial<Frontmatter> {
+  const patch = statusPatch(req.expect, to, note);
+  const before = SEND_BACK_TO[to];
+  if (req.kind === "undo" && APPROVE_TO[to] === req.expect && before) patch.resume_from = before;
+  return patch;
 }
 
 /** The hold line for a hold request: the reason, then who and where. */

@@ -87,6 +87,24 @@ describe("applying requests", () => {
     }
   });
 
+  test("undo of an approve takes resume_from back to the approved status before the review", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x"), m: INTENT("merge-review", "y") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      submitRequest(r.root, { ...by, kind: "approve", slug: "m", expect: "merge-review" });
+      await apply(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.resume_from).toBe("plan-approved");
+      submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "" });
+      submitRequest(r.root, { ...by, kind: "undo", slug: "m", expect: "merge-approved", to: "merge-review", note: "" });
+      await apply(r.root);
+      // A later block offers to retry from here, not from the approval taken back.
+      expect((await readIntent(r.root, "a")).file.frontmatter).toMatchObject({ status: "plan-review", resume_from: "spec-approved" });
+      expect((await readIntent(r.root, "m")).file.frontmatter).toMatchObject({ status: "merge-review", resume_from: "plan-approved" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("retry only to a status the block names; close from any open status", async () => {
     const r = await chatRepo({ intents: { a: withNote("blocked", "The build broke. When that is sorted out, set status to plan-approved to try again."), b: INTENT("building", "y") } });
     try {
