@@ -1,10 +1,12 @@
 import { plainStatus, STATUSES, type Status } from "../intents";
+import { Cancelled } from "../stop";
 import type { EventRow, Trace } from "../trace";
 import type { ActivityItem } from "./types";
 
 type Payload = Record<string, unknown>;
 
-function parse(text: string): Payload {
+/** A trace event's payload as an object; anything else (a bare value, bad JSON) under `value`. */
+export function parsePayload(text: string): Payload {
   try {
     const v = JSON.parse(text) as unknown;
     return v && typeof v === "object" && !Array.isArray(v) ? (v as Payload) : { value: v };
@@ -17,11 +19,13 @@ const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" 
 const plain = (v: unknown): string => ((STATUSES as readonly string[]).includes(str(v)) ? plainStatus(str(v) as Status) : str(v));
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const money = (v: unknown): string => (typeof v === "number" && v >= 0.005 ? ` ($${v.toFixed(2)})` : "");
-const sentence = (s: string): string => (/[.!?]$/.test(s) ? s : `${s}.`);
+const sentence = (s: string): string => (/[.!?…]$/.test(s) ? s : `${s}.`);
+/** The first of `vs` with something in it, so an empty field does not hide a later one. */
+const first = (...vs: unknown[]): unknown => vs.find((v) => v != null && str(v).trim() !== "");
 
-/** The first non-blank line of `v`, cut to `n` characters. */
+/** The first non-blank line of `v`, trimmed and cut to `n` characters. */
 function firstLine(v: unknown, n = 160): string {
-  const line = str(v).split(/\r?\n/).find((l) => l.trim()) ?? "";
+  const line = str(v).split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
   return line.length > n ? `${line.slice(0, n - 1)}…` : line;
 }
 
@@ -29,14 +33,38 @@ const ENDED: Record<string, string> = { success: "passed", fail: "failed", inter
 const HEALTH: Record<string, string> = { pass: "pass", fail: "fail", error: "could not be checked", waiting: "are waiting" };
 const GATE: Record<string, string> = { pass: "passed", fail: "failed", waiting: "waiting" };
 
+/** The note a project command gets when work run alongside no longer needed its result (see projectCommand). */
+const CANCELLED = new Cancelled().message;
+/** The fields of that event; an informational one may carry the same note among others. */
+const CANCELLED_FIELDS = new Set(["command", "note", "where"]);
+
+/** A `command` event: a project command that ran or was stopped, or a step the loop took, with what came of it. */
+function commandText(p: Payload): string {
+  const what = firstLine(p.command, 80);
+  if (typeof p.code === "number") return p.code === 0 ? `Ran ${what}.` : `Ran ${what}: exit code ${p.code}.`;
+  if (p.note === CANCELLED && Object.keys(p).every((k) => CANCELLED_FIELDS.has(k))) return `Stopped ${what}.`;
+  if (first(p.note)) return sentence(`${capital(what)}: ${firstLine(p.note)}`);
+  if (first(p.waiting)) return `${capital(what)}: waiting.`;
+  return sentence(capital(what));
+}
+
+/** An `error` event: whichever field its call site used for what went wrong, and where. */
+function errorLine(p: Payload): string {
+  const where = p.where ? ` (${str(p.where)})` : "";
+  const what = firstLine(first(p.what, p.problem, p.error, p.note, p.reason, p.detail, p.value));
+  if (what) return sentence(`Problem${where}: ${what}`);
+  if (p.expected !== undefined && p.actual !== undefined) return `Problem${where}: expected ${str(p.expected)}, found ${str(p.actual)}.`;
+  return `Problem${where}.`;
+}
+
 /**
  * An event in plain words, for the console's Activity, or null when it only matters to an engineer
  * (ticks, raw session events). `phaseName` names the phase an event belongs to.
  */
 export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number) => string | undefined = () => undefined): string | null {
-  const p = parse(e.payload);
+  const p = parsePayload(e.payload);
   switch (e.type) {
-    case "status_change": return `${capital(plain(p.to))}.`;
+    case "status_change": return p.to ? `${capital(plain(p.to))}.` : null;
     case "phase_start": return `Started ${str(p.name)}.`;
     case "phase_end": {
       const name = e.phase_seq !== null ? phaseName(e.slug, e.phase_seq) : undefined;
@@ -44,15 +72,16 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
       return sentence(`${capital(name ?? "a step")} ${ENDED[str(p.status)] ?? str(p.status)}${money(p.cost_usd)}${why}`);
     }
     case "gate_check": return `${capital(str(p.gate))} gate, ${str(p.check)}: ${GATE[str(p.result)] ?? str(p.result)}.`;
-    case "command":
-      if (p.note) return `Stopped ${firstLine(p.command, 80)}.`;
-      return p.code === 0 ? `Ran ${firstLine(p.command, 80)}.` : `Ran ${firstLine(p.command, 80)}: exit code ${str(p.code)}.`;
-    case "error": return `Problem${p.where ? ` (${str(p.where)})` : ""}: ${firstLine(p.what ?? p.problem ?? p.error ?? p.value)}`;
+    case "command": return commandText(p);
+    case "error": return errorLine(p);
     case "signal":
       if (p.name === "main_health") return `The tests on main ${HEALTH[str(p.result)] ?? str(p.result)}.`;
       return p.output ? firstLine(p.output) : `${str(p.name)}: ${str(p.result)}.`;
     case "stop": return "The loop is stopping.";
-    case "pause": return `Paused: ${firstLine(p.reason)}`;
+    case "pause": {
+      const why = firstLine(first(p.reason, p.note));
+      return why ? sentence(`Paused: ${why}`) : "Paused.";
+    }
     case "person-changed-status": return `A person set the status to ${plain(p.to)} while a step ran, so the step wrote nothing.`;
     case "stale-lock-removed": return "Removed a lock a stopped process left behind.";
     case "chat-message": return `${str(p.from) || "Someone"} wrote in chat.`;
@@ -67,7 +96,7 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
 
 /** The event as one technical line: its type and its payload's fields, like `loopstra tail`. */
 export function technicalText(e: EventRow): string {
-  const fields = Object.entries(parse(e.payload))
+  const fields = Object.entries(parsePayload(e.payload))
     .filter(([k]) => k !== "stack")
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ").replace(/\s*\r?\n\s*/g, " ");

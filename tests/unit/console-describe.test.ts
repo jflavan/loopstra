@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { activityItem, describeEvent, eventsPage, phaseNamer, technicalText } from "../../src/console/describe";
+import { Cancelled } from "../../src/stop";
 import { Trace, type EventRow } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -18,13 +19,45 @@ describe("events in plain words", () => {
     expect(describeEvent(row("gate_check", { gate: "spec", check: "headings", result: "pass", evidence: "" }))).toBe("Spec gate, headings: passed.");
     expect(describeEvent(row("command", { command: "bun test", code: 0 }))).toBe("Ran bun test.");
     expect(describeEvent(row("command", { command: "bun test", code: 1, lastLine: "x" }))).toBe("Ran bun test: exit code 1.");
-    expect(describeEvent(row("command", { command: "bun test", note: "stopped" }))).toBe("Stopped bun test.");
+    expect(describeEvent(row("command", { command: "bun test", note: new Cancelled().message }))).toBe("Stopped bun test.");
     expect(describeEvent(row("signal", { name: "main_health", result: "fail", output: "" }, { slug: "_signals" }))).toBe("The tests on main fail.");
-    expect(describeEvent(row("error", { where: "scan", problem: "The status line is wrong" }))).toBe("Problem (scan): The status line is wrong");
+    expect(describeEvent(row("error", { where: "scan", problem: "The status line is wrong" }))).toBe("Problem (scan): The status line is wrong.");
     expect(describeEvent(row("pause", { reason: "The assistant is unavailable." }))).toBe("Paused: The assistant is unavailable.");
     expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", result: "accepted" }))).toBe("ana accepted it from chat.");
     expect(describeEvent(row("tick", {}))).toBeNull();
     expect(describeEvent(row("claude_event", { type: "assistant" }))).toBeNull();
+  });
+
+  test("every shape of command, error and pause the loop traces reads as a sentence", () => {
+    const cancelled = new Cancelled().message;
+    // A project command that ran, and one cancelled because its result was no longer needed.
+    expect(describeEvent(row("command", { command: "bun test", code: 0, lastLine: "ok", durationMs: 900, where: "verify" }))).toBe("Ran bun test.");
+    expect(describeEvent(row("command", { command: "bun test", note: cancelled }))).toBe("Stopped bun test.");
+    expect(describeEvent(row("command", { command: "bun test", note: cancelled, where: "verify" }))).toBe("Stopped bun test.");
+    // Informational ones: a note says what happened; a waiting one says it waits; others are named.
+    expect(describeEvent(row("command", { command: "plan ahead", note: "kept for the plan step" }))).toBe("Plan ahead: kept for the plan step.");
+    expect(describeEvent(row("command", { command: "early review", note: `not used: ${cancelled}`, extra: 1 }))).toBe(`Early review: not used: ${cancelled}.`);
+    expect(describeEvent(row("command", { command: "share main", pushed: 0, note: "the remote has newer commits; the next sync brings them in first", error: "x" })))
+      .toBe("Share main: the remote has newer commits; the next sync brings them in first.");
+    expect(describeEvent(row("command", { command: "drift", changed: ["a"], note: "first\nsecond" }))).toBe("Drift: first.");
+    expect(describeEvent(row("command", { command: "merge lock", waiting: "waits for two to finish merging first" }))).toBe("Merge lock: waiting.");
+    expect(describeEvent(row("command", { command: "sync main", pulled: 2 }))).toBe("Sync main.");
+    expect(describeEvent(row("command", { command: "clean up closed change", removed: "/wt", branchKept: "b" }))).toBe("Clean up closed change.");
+    // Errors name what went wrong, from whichever field the call site used.
+    expect(describeEvent(row("error", { where: "block", note: "The tests failed.", detail: "x" }))).toBe("Problem (block): The tests failed.");
+    expect(describeEvent(row("error", { where: "probe", phase: "build", detail: "the build phase failed 3 times" }))).toBe("Problem (probe): the build phase failed 3 times.");
+    expect(describeEvent(row("error", { where: "tick", expected: "main", actual: "feature" }))).toBe("Problem (tick): expected main, found feature.");
+    expect(describeEvent(row("error", { where: "tick", error: "boom\n  at x", stack: "..." }))).toBe("Problem (tick): boom.");
+    expect(describeEvent(row("error", { where: "sync", result: "fail" }))).toBe("Problem (sync).");
+    expect(describeEvent(row("error", {}))).toBe("Problem.");
+    // Pauses: a reason, or a note when the loop is still backing off.
+    expect(describeEvent(row("pause", { note: "the probe could not reach the assistant either; still backing off" })))
+      .toBe("Paused: the probe could not reach the assistant either; still backing off.");
+    expect(describeEvent(row("pause", { reason: "Waiting for midnight" }))).toBe("Paused: Waiting for midnight.");
+    expect(describeEvent(row("pause", {}))).toBe("Paused.");
+    // A line cut short ends with its ellipsis, not a full stop after it; padding is trimmed.
+    expect(describeEvent(row("error", { where: "x", error: `  ${"a".repeat(200)}` }))).toBe(`Problem (x): ${"a".repeat(159)}…`);
+    expect(describeEvent(row("status_change", { from: "draft" }))).toBeNull();
   });
 
   test("the technical line is the type and the payload's fields on one line", () => {
