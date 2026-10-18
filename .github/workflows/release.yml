@@ -1,8 +1,10 @@
 name: release
 
-# Publishes every green push to main that changes what the package ships (src/, templates/,
-# package.json) to npm, tags it v<version> and creates a GitHub Release. A manual run of this
-# workflow on main releases even without such a change; `bump` forces a patch or minor release.
+# Stages every green push to main that changes what the package ships (src/, templates/,
+# package.json) on npm, tags it v<version> and creates a GitHub Release. A staged version is not
+# installable until a maintainer approves it with 2FA (docs/publishing.md says how): the trusted
+# publisher on npm may stage but not publish. A manual run of this workflow on main releases even
+# without such a change; `bump` forces a patch or minor release.
 on:
   workflow_run:
     workflows: [ci]
@@ -44,8 +46,8 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@^11.5.1
+      # Trusted publishing needs npm 11.5.1 or later, and `npm stage` 11.15 or later.
+      - run: npm install -g npm@^11.21.0
       - run: bun install --frozen-lockfile
       - id: plan
         env:
@@ -60,7 +62,8 @@ jobs:
       - if: steps.plan.outputs.ship == 'true'
         run: bun scripts/shipped.ts shipped.json
       # Each of the last three steps tolerates having been done already, so a run that failed half way
-      # (or a first release published by hand) can be run again.
+      # (or a first release published by hand) can be run again. One exception: npm refuses to stage a
+      # version that is already staged and not yet approved. Approve or reject that one first.
       - if: steps.plan.outputs.ship == 'true'
         env:
           VERSION: ${{ steps.plan.outputs.version }}
@@ -68,7 +71,16 @@ jobs:
           if npm view "loopstra@$VERSION" version >/dev/null 2>&1; then
             echo "loopstra@$VERSION is already published."
           else
-            npm publish --provenance --access public
+            # Staged, not published: nobody can install it until a maintainer approves it.
+            npm stage publish --provenance --access public
+            {
+              echo "## loopstra@$VERSION is staged on npm"
+              echo
+              echo "It is not installable until a maintainer approves it with 2FA:"
+              echo "on npmjs.com (the loopstra package, its staged versions), or"
+              echo "\`npm stage list loopstra\`, then \`npm stage approve <stage-id> --auth-type=web\`."
+              echo "See docs/publishing.md."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: steps.plan.outputs.ship == 'true'
         env:

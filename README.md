@@ -1,5 +1,8 @@
 # Loopstra
 
+[![CI](https://github.com/jflavan/loopstra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jflavan/loopstra/actions/workflows/ci.yml?query=branch%3Amain)
+[![npm](https://img.shields.io/npm/v/loopstra)](https://www.npmjs.com/package/loopstra)
+
 An unattended development loop built on Claude Code. Code owns the loop; agents own bounded phases; people own the decisions they choose to keep.
 
 A product owner writes a plain-language `intent/<slug>/intent.md` and sets its status to `accepted`. Loopstra then designs, plans, builds, tests, reviews, merges and verifies the change, one step per change at a time, for up to `speed.max_parallel_changes` changes at once, with a gate at every stage boundary. Every artifact is a Markdown file in git, and every step is recorded in a trace you can read from a terminal or a local console. Instead of writing the intent by hand, you can also talk a change through with Loopstra's orchestrator in the terminal, the console, Slack or Discord; it writes the intent up for you as a draft (see Chat).
@@ -49,7 +52,7 @@ loopstra upgrade              # installs the latest Loopstra, then brings this r
 loopstra start
 ```
 
-`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too: the install is already done there, so it only brings that repository up to it. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
+`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too, with their loops stopped as well: the install is already done there, so it only brings that repository up to it. A loop left running in another repository would go on with its old code but the new prompts until it is restarted. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
 
 **Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start`, `chat` and `ui` refuse in such a repository until that is done.
 
@@ -347,7 +350,9 @@ It prints what happened to each file. Nothing is written until every check has p
 - a merge, cherry-pick or revert is in progress;
 - the repository is on a newer release than the one installed (a teammate upgraded it). It says which version to install instead of bringing older texts back.
 
-A newer release installed first stays installed; only the repository is left as it was. Loops in other repositories keep the code they loaded until they are restarted.
+A newer release installed first stays installed; only the repository is left as it was.
+
+There is one install per machine, so an upgrade reaches loops already running in your other repositories too. Such a loop keeps the code it loaded when it started, but reads its prompts and the test hook from the install each time a phase starts, so until it is restarted it runs the old code with the new prompts. Stop those loops, run `loopstra upgrade` in their repositories, and start them again.
 
 `--check` installs and writes nothing. It prints the installed and latest versions, what is new between them, and what would happen to each file. What would make a real upgrade refuse (the loop running, an operation in progress, uncommitted files) is listed as a note; a folder that is not set up, a checkout not on `main_branch`, or a stamp that cannot be read is still refused. When a newer release is out, the files are what the installed one would do (the newer one may do more).
 
@@ -378,20 +383,9 @@ To use the checkout as your global `loopstra`, run `bun link` in it (and `bun un
 
 Tests run the whole loop in a temporary git repo against a fake `claude` executable (and a fake `gh` with a bare repository as the remote), so they do not call Claude or GitHub. The fake `claude` can answer a phase differently on each call (`<phase>-<n>.jsonl` in `LOOPSTRA_FAKE_FIXTURE_DIR`), which the chat tests use for conversations. The Slack and Discord bots are tested against stub servers, through `LOOPSTRA_SLACK_API` and `LOOPSTRA_DISCORD_API`.
 
-**Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) releases when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), publishes to npm with provenance, tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A version already on npm is not published again; the run still adds the tag and the GitHub Release if they are missing. Run the workflow by hand on `main` to release without such a change; a manual run always releases, and `bump` (`patch` or `minor`) chooses the step. Neither kind of run releases a commit that is already part of a release (the latest `v*` tag, or older).
+**Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) releases when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), stages the version on npm with provenance (`npm stage publish`, through npm trusted publishing, so no token is stored), tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A staged version cannot be installed until a maintainer approves it with 2FA, on npmjs.com or with `npm stage approve`: the trusted publisher may stage but not publish, so nothing goes out without a person. A version already on npm is not staged again; the run still adds the tag and the GitHub Release if they are missing. Run the workflow by hand on `main` to release without such a change; a manual run always releases, and `bump` (`patch` or `minor`) chooses the step. Neither kind of run releases a commit that is already part of a release (the latest `v*` tag, or older).
 
-**One-time setup.** npm trusted publishing can only be set up for a package that exists, so the first release is published by hand, signed in to npm (`npm login`), from a clean checkout of `main`:
-
-```
-npm version 0.1.0 --no-git-tag-version
-bun scripts/shipped.ts shipped.json
-npm publish --access public
-git tag v0.1.0
-git push origin v0.1.0
-git checkout package.json && rm shipped.json
-```
-
-This publish has no provenance; the workflow's publishes have it. The tag tells the workflow that 0.1.0 is out, so its next run releases 0.1.1. Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, repository `jflavan/loopstra`, workflow `release.yml`. From then on the workflow publishes with no token stored.
+[`docs/publishing.md`](docs/publishing.md) has the whole procedure: the npm settings, approving a staged version, what an agent may and may not do, and what to do when a release goes wrong. The first version, 0.1.0, was published by hand, since npm only lets you add a trusted publisher to a package that exists.
 
 ## License
 
