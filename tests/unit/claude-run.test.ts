@@ -169,6 +169,10 @@ describe("runPhase", () => {
     const limitedOld = await runPhase({ ...base, prompt: "FIXTURE:usage-limit-old" });
     expect(limitedOld.reason).toBe("environment");
     expect(limitedOld.matched).toBe("Claude AI usage limit reached|1790000000");
+    // A limit on one model, with no API status: the words decide.
+    const modelLimit = await runPhase({ ...base, prompt: "FIXTURE:model-limit" });
+    expect(modelLimit.reason).toBe("environment");
+    expect(modelLimit.matched).toBe("You've reached your Fable limit. Switch to another model to continue.");
     // Text that matches nothing, but the result says the API call failed with 529: the status decides.
     const apiError = await runPhase({ ...base, prompt: "FIXTURE:api-error" });
     expect(apiError.reason).toBe("environment");
@@ -184,7 +188,8 @@ describe("runPhase", () => {
       "API Error: 429 rate_limit_error", "API Error: 529 Overloaded", "API Error: 503 Service Unavailable", "getaddrinfo ENOTFOUND api.anthropic.com",
       "Unable to connect to API (ECONNREFUSED)", "You've hit your session limit · resets 8:10pm (America/Chicago)", "You've hit your weekly limit",
       "You've hit your monthly spend limit", "You're out of usage credits", "Credit balance is too low", "OAuth token refresh failed",
-      "OAuth token revoked · Please run /login"]) expect(hit(s)).toBe(true);
+      "OAuth token revoked · Please run /login", "You've reached your Fable limit. Switch to another model to continue.",
+      "claude-opus-5-5 requires usage credits. Switch to another model to continue.", "You've hit your team's shared budget. /model to switch models."]) expect(hit(s)).toBe(true);
     for (const s of ["TypeError: x is undefined", "claude ended with error_during_execution", "tests failed"]) expect(hit(s)).toBe(false);
   });
 

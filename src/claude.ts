@@ -109,7 +109,7 @@ export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" 
  */
 export const ENVIRONMENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; catches: string }> = [
   { pattern: /invalid api key|please run \/login|not logged in|login required|oauth token (has )?(expired|revoked)|token refresh failed|authentication[_ ]error|API Error: 40[13]\b/i, catches: "signed out, or the sign-in expired" },
-  { pattern: /usage limit|hit your (\w+ )*limit|spend limit|out of (usage |extra usage )?credits|credit balance is too low|rate[_ ]limit|too many requests|API Error: 429\b/i, catches: "a usage, spend or rate limit was reached, or the credits ran out" },
+  { pattern: /usage limit|(hit|reached) your (\w+ )*limit|spend limit|shared budget|requires usage credits|out of (usage |extra usage )?credits|credit balance is too low|rate[_ ]limit|too many requests|API Error: 429\b/i, catches: "a usage, spend or rate limit was reached, or the credits ran out" },
   { pattern: /overloaded|service unavailable|API Error: 5\d\d\b/i, catches: "the service is overloaded or down" },
   { pattern: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|getaddrinfo|socket hang up|fetch failed|unable to connect|network error|connection error/i, catches: "the network is down or the service cannot be reached" },
 ];
