@@ -123,4 +123,12 @@ describe("mergeText", () => {
     expect(await mergeText("a\nb\nmine\n", "a\nb\n", "A\nb\n")).toEqual({ text: "A\nb\nmine\n", conflict: false });
     expect((await mergeText("a\nX\n", "a\nb\n", "a\nY\n")).conflict).toBe(true);
   });
+
+  test("git that cannot be started is an error, not a conflict", async () => {
+    const saved = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      await expect(mergeText("a\n", "b\n", "c\n")).rejects.toThrow("git merge-file could not be started");
+    } finally { process.env.PATH = saved; }
+  });
 });

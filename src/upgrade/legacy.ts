@@ -32,10 +32,14 @@ function withoutOldHook(settings: Record<string, unknown>): string | null {
   return Object.keys(settings).length ? `${JSON.stringify(settings, null, 2)}\n` : null;
 }
 
-/** The parsed settings when they hold the old hook's entry; null when they do not; "invalid" when they are not JSON. */
+/**
+ * The parsed settings when they hold the old hook's entry; null when they do not; "invalid" when
+ * they are not JSON but name the old hook (settings that never had it are left alone).
+ */
 function settingsWithOldHook(path: string): Record<string, unknown> | null | "invalid" {
+  const raw = readFileSync(path, "utf8");
   let settings: unknown;
-  try { settings = JSON.parse(readFileSync(path, "utf8")); } catch { return "invalid"; }
+  try { settings = JSON.parse(raw); } catch { return raw.includes(OLD_HOOK_MARK) ? "invalid" : null; }
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
   const hooks = (settings as Record<string, unknown>).hooks as Record<string, unknown> | undefined;
   const pre = hooks && typeof hooks === "object" ? hooks.PreToolUse : undefined;

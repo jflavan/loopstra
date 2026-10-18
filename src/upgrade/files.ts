@@ -39,6 +39,7 @@ export async function mergeText(theirs: string, base: string, next: string): Pro
       cmd: ["git", "merge-file", "-p", "-L", "yours", "-L", "base", "-L", "loopstra", a, o, b],
       cwd: dir, timeoutMs: MERGE_TIMEOUT_MS, onStop: "ignore",
     });
+    if (!r.started) throw new Error(`git merge-file could not be started: ${r.err}`);
     if (r.timedOut) throw new Error(`git merge-file did not finish within ${MERGE_TIMEOUT_MS / 1000}s`);
     if (r.code === null || r.code < 0 || r.code > 127) throw new Error(`git merge-file failed (${r.code}): ${r.err.trim()}`);
     return { text: r.out, conflict: r.code > 0 };

@@ -84,6 +84,17 @@ describe("adoptLegacy", () => {
     } finally { t.cleanup(); }
   });
 
+  test("settings that are not JSON and never had the old hook get no note", async () => {
+    const t = legacyRepo();
+    try {
+      writeFileSync(join(t.path, ".claude", "settings.json"), "{ not json, ours");
+      const r = await adoptLegacy(t.path, INDEX, fetchText, { write: true });
+      expect(readFileSync(join(t.path, ".claude", "settings.json"), "utf8")).toBe("{ not json, ours");
+      expect(r.changed).toEqual([]);
+      expect(r.notes.some((n) => n.includes("settings.json"))).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
   test("an edited REVIEW.md gets the closest shipped version as its base, and a note", async () => {
     const t = legacyRepo();
     try {
