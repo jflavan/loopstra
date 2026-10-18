@@ -12,7 +12,7 @@ import { closestBase, fetchShipped, loadShippedIndex, type FetchText, type Shipp
 import { managedFiles, readStamp, STAMP_FILE, textSha, writeStamp, type Stamp } from "../stamp";
 import { upgradeFile, type FileResult } from "./files";
 import { adoptLegacy, OLD_HOOK_FILE, type Adopted } from "./legacy";
-import { migrateConfig } from "./migrations";
+import { migrateConfig, MIGRATIONS, type Migration } from "./migrations";
 
 /** What upgrade says when the loop is running in the repository. */
 export const LOOP_RUNNING = "The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.";
@@ -30,6 +30,8 @@ export interface RepoDeps {
   version: () => Promise<string>;
   /** Release notes between two versions, as Markdown lines; "" when there are none or they cannot be read. */
   notes: (from: string, to: string) => Promise<string>;
+  /** The config migrations; MIGRATIONS when not given (tests pass their own). */
+  migrations?: readonly Migration[];
 }
 
 /** The real dependencies: the installed package's index and version; release notes come with the tool step. */
@@ -51,7 +53,25 @@ export interface RepoResult {
   changed: string[];
   /** Sentences for the person: the base each of their own files is merged from, and what is left to them. */
   notes: string[];
+  /** With `check`: what a real upgrade would refuse for now (the loop running, uncommitted files). */
+  warnings: string[];
   committed: boolean;
+}
+
+/**
+ * The paths `git status --porcelain -z` lists: one NUL-ended entry per path ("XY path"), and a rename
+ * or copy followed by its original path as a further entry. Both paths of a rename are named.
+ */
+export function statusPaths(out: string): string[] {
+  const entries = out.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    if (e.length < 4) continue;
+    paths.push(e.slice(3));
+    if (/[RC]/.test(e.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]!);
+  }
+  return [...new Set(paths)];
 }
 
 /** The config's main branch and poll interval, read leniently: a config that only loads after a migration still names them. */
@@ -74,27 +94,39 @@ const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VER
  * config has uncommitted changes; then works out every file's outcome and the config migration, and
  * only when all of that succeeded writes them and the stamp and commits them as the runtime, in one
  * commit (files left with conflict markers stay out of it). `check`: say what would happen and write
- * nothing.
+ * nothing; a running loop or uncommitted files are then listed in `warnings` instead of refused.
  */
 export async function upgradeRepo(root: string, opts: { check: boolean }, deps: RepoDeps = REAL_DEPS): Promise<RepoResult> {
   const to = await deps.version();
   const stamp = readStamp(root);
-  const result: RepoResult = { ok: false, from: stamp?.loopstra ?? null, to, files: [], removed: [], changed: [], notes: [], committed: false };
+  const result: RepoResult = { ok: false, from: stamp?.loopstra ?? null, to, files: [], removed: [], changed: [], notes: [], warnings: [], committed: false };
   const refuse = (refusal: string): RepoResult => ({ ...result, ok: false, refusal });
 
-  // Checks: nothing is worked out or written unless they all pass.
+  // Checks: a real upgrade works out and writes nothing unless they all pass.
   if (!existsSync(configPath(root))) return refuse(NOT_SET_UP);
   const cfgText = readFileSync(configPath(root), "utf8");
   const { main, poll } = loopSettings(cfgText);
   const git = new Git(root);
   const branch = await git.currentBranch();
   if (branch !== main) return refuse(`The checkout is on ${branch || "no branch"}, not ${main}. Switch to ${main}, then run loopstra upgrade again.`);
+  // --check writes nothing, so what would stop a real upgrade is only reported.
+  const stop = (why: string): RepoResult | null => {
+    if (!opts.check) return refuse(why);
+    result.warnings.push(why);
+    return null;
+  };
   // A loop that is not responding but whose process is alive may still be running.
   const loop = heartbeatState(readHeartbeat(root), poll).state;
-  if (loop === "running" || loop === "paused" || loop === "not-responding") return refuse(LOOP_RUNNING);
+  if (loop === "running" || loop === "paused" || loop === "not-responding") {
+    const refused = stop(LOOP_RUNNING);
+    if (refused) return refused;
+  }
   const watched = [...new Set([CONFIG, STAMP_FILE, SETTINGS, OLD_HOOK_FILE, ...managedFiles(root, stamp).map((f) => f.path)])];
-  const dirty = (await git.run(["status", "--porcelain", "--", ...watched])).out.split(/\r?\n/).filter(Boolean).map((l) => l.slice(3));
-  if (dirty.length) return refuse(`These files have changes that are not committed: ${dirty.join(", ")}. Commit or undo them, then run loopstra upgrade again.`);
+  const dirty = statusPaths((await git.run(["status", "--porcelain", "-z", "--", ...watched])).out);
+  if (dirty.length) {
+    const refused = stop(`These files have changes that are not committed: ${dirty.join(", ")}. Commit or undo them, then run loopstra upgrade again.`);
+    if (refused) return refused;
+  }
 
   // Work everything out, writing nothing.
   const index = await deps.index();
@@ -113,14 +145,18 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
     }
     const removed = new Set(result.removed);
     // A managed file with no stamp entry (an override made by hand): its base is the shipped version
-    // it is, else the closest one, else today's text (nothing is merged into it until that changes).
+    // it is, else the closest one. With no shipped version known, today's text (nothing is merged into
+    // it until that changes). Versions known but none readable (offline): refused, as adoptLegacy does.
     for (const f of managedFiles(root, base)) {
       const path = join(root, f.path);
       if (base.files[f.path] || removed.has(f.path) || !existsSync(path)) continue;
       const text = readFileSync(path, "utf8");
       const sha = textSha(text);
-      const best = (index[f.template] ?? []).some((e) => e.sha === sha) ? { sha } : await closestBase(index, f.template, text, deps.fetchText);
-      base.files[f.path] = { base: best ? best.sha : textSha(readFileSync(f.shipped, "utf8")) };
+      const versions = index[f.template] ?? [];
+      if (!versions.length) { base.files[f.path] = { base: textSha(readFileSync(f.shipped, "utf8")) }; continue; }
+      const best = versions.some((e) => e.sha === sha) ? { sha } : await closestBase(index, f.template, text, deps.fetchText);
+      if (!best) throw new Error(`Loopstra's shipped versions of ${f.path} could not be read to merge from; check the connection and run loopstra upgrade again.`);
+      base.files[f.path] = { base: best.sha };
     }
     const baseFor = (template: string) => async (sha: string) => {
       const entry = (index[template] ?? []).find((e) => e.sha === sha);
@@ -134,7 +170,8 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
     return refuse(errorText(e));
   }
   try {
-    migrated = migrateConfig(cfgText, undefined, (t) => { validateConfig(parse(t) ?? {}); });
+    // Checked only when a migration changed it: a config left as it is is the loop's to report on (its preflight does).
+    migrated = migrateConfig(cfgText, deps.migrations ?? MIGRATIONS, (t) => { if (t !== cfgText) validateConfig(parse(t) ?? {}); });
   } catch (e) {
     return refuse(`The config could not be brought up to date, so nothing was changed: ${errorText(e)}`);
   }

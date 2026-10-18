@@ -5,7 +5,8 @@ import { init } from "../../src/init";
 import { writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { readStamp, textSha, writeStamp } from "../../src/stamp";
 import { templatePath } from "../../src/package";
-import { LOOP_RUNNING, upgradeRepo, type RepoDeps } from "../../src/upgrade/repo";
+import type { Migration } from "../../src/upgrade/migrations";
+import { LOOP_RUNNING, statusPaths, upgradeRepo, type RepoDeps } from "../../src/upgrade/repo";
 import type { ShippedIndex } from "../../src/shipped";
 import { run, tempGitRepo } from "../helpers";
 
@@ -156,6 +157,36 @@ describe("upgradeRepo", () => {
       await run(["git", "checkout", "-q", "-b", "other"], repo.path);
       r = await upgradeRepo(repo.path, { check: false }, deps());
       expect(r.refusal).toBe("The checkout is on other, not main. Switch to main, then run loopstra upgrade again.");
+      // Off main, --check refuses too.
+      expect((await upgradeRepo(repo.path, { check: true }, deps())).refusal).toBe(r.refusal!);
+    } finally { repo.cleanup(); }
+  });
+
+  test("--check goes on with the loop running and uncommitted files, and says a real upgrade would refuse", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      writeFileSync(join(repo.path, "REVIEW.md"), "edited, not committed\n");
+      writeHeartbeat(repo.path, beat());
+      const r = await upgradeRepo(repo.path, { check: true }, deps());
+      expect(r.ok).toBe(true);
+      expect(r.refusal).toBeUndefined();
+      expect(r.warnings).toEqual([LOOP_RUNNING, "These files have changes that are not committed: REVIEW.md. Commit or undo them, then run loopstra upgrade again."]);
+      expect(r.files.find((f) => f.path === SKILL)!.outcome).toBe("replaced");
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      expect(await status(repo.path)).toBe("M REVIEW.md");
+      expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(LOOP_RUNNING);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a renamed managed file is named by both its paths", async () => {
+    const repo = await setUpRepo();
+    try {
+      // REVIEW.md moved to a new prompt override: git reports one rename, "R  <new>\0<old>\0".
+      mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
+      await run(["git", "mv", "REVIEW.md", "loopstra/prompts/review.md"], repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.refusal).toBe("These files have changes that are not committed: loopstra/prompts/review.md, REVIEW.md. Commit or undo them, then run loopstra upgrade again.");
     } finally { repo.cleanup(); }
   });
 
@@ -166,21 +197,78 @@ describe("upgradeRepo", () => {
     } finally { repo.cleanup(); }
   });
 
-  test("a config that would not load is refused, and nothing is written", async () => {
+  test("a config no migration changes is left as it is, even one the loop would not load", async () => {
     const repo = await setUpRepo();
     try {
       await olderSkill(repo.path);
       const cfg = join(repo.path, "loopstra", "config.yaml");
       writeFileSync(cfg, readFileSync(cfg, "utf8").replace('test: "bun test"', 'test: ""'));
       await run(["git", "commit", "-qam", "no test command"], repo.path);
-      const at = await head(repo.path);
+      const before = readFileSync(cfg, "utf8");
       const r = await upgradeRepo(repo.path, { check: false }, deps());
-      expect(r.ok).toBe(false);
-      expect(r.refusal).toStartWith("The config could not be brought up to date, so nothing was changed: ");
-      expect(r.refusal).toContain("commands.test");
-      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      expect(r.ok).toBe(true);
+      expect(r.committed).toBe(true);
+      expect(r.changed).not.toContain("loopstra/config.yaml");
+      expect(readFileSync(cfg, "utf8")).toBe(before);
       expect(await status(repo.path)).toBe("");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a migration whose result would not load, or that throws, is refused, and nothing is written", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      const at = await head(repo.path);
+      const cfg = readFileSync(join(repo.path, "loopstra", "config.yaml"), "utf8");
+      const cases: Array<{ migrations: Migration[]; says: string }> = [
+        { migrations: [{ from: 1, run: (doc) => { doc.set("no_such_setting", 1); } }], says: "no_such_setting" },
+        { migrations: [{ from: 1, run: () => { throw new Error("cannot rename it"); } }], says: "cannot rename it" },
+      ];
+      for (const c of cases) {
+        const r = await upgradeRepo(repo.path, { check: false }, { ...deps(), migrations: c.migrations });
+        expect(r.ok).toBe(false);
+        expect(r.refusal).toStartWith("The config could not be brought up to date, so nothing was changed: ");
+        expect(r.refusal).toContain(c.says);
+        expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+        expect(readFileSync(join(repo.path, "loopstra", "config.yaml"), "utf8")).toBe(cfg);
+        expect(await status(repo.path)).toBe("");
+        expect(await head(repo.path)).toBe(at);
+      }
+    } finally { repo.cleanup(); }
+  });
+
+  test("offline: a hand-made override with known shipped versions, none readable, is refused and nothing is written", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
+      writeFileSync(join(repo.path, "loopstra", "prompts", "review.md"), "my own review prompt\n");
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-qm", "an override made by hand"], repo.path);
+      const at = await head(repo.path);
+      const stamp = readFileSync(join(repo.path, "loopstra", "stamp.json"), "utf8");
+      const index: ShippedIndex = { "templates/prompts/review.md": [{ sha: "abc", commit: "c" }] };
+      const r = await upgradeRepo(repo.path, { check: false }, deps(index));
+      expect(r.ok).toBe(false);
+      expect(r.refusal).toBe("Loopstra's shipped versions of loopstra/prompts/review.md could not be read to merge from; check the connection and run loopstra upgrade again.");
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      expect(readFileSync(join(repo.path, "loopstra", "stamp.json"), "utf8")).toBe(stamp);
       expect(await head(repo.path)).toBe(at);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a hand-made override with no known shipped version takes today's text as its base", async () => {
+    const repo = await setUpRepo();
+    try {
+      mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
+      writeFileSync(join(repo.path, "loopstra", "prompts", "review.md"), "my own review prompt\n");
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-qm", "an override made by hand"], repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.ok).toBe(true);
+      expect(r.files.find((f) => f.path === "loopstra/prompts/review.md")!.outcome).toBe("unchanged");
+      expect(readStamp(repo.path)!.files["loopstra/prompts/review.md"]).toEqual({ base: textSha(readFileSync(templatePath("prompts", "review.md"), "utf8")) });
+      expect(readFileSync(join(repo.path, "loopstra", "prompts", "review.md"), "utf8")).toBe("my own review prompt\n");
     } finally { repo.cleanup(); }
   });
 
@@ -228,5 +316,14 @@ describe("upgradeRepo", () => {
       expect(await status(repo.path)).toBe("");
       expect(await head(repo.path)).toBe(at);
     } finally { repo.cleanup(); }
+  });
+});
+
+describe("statusPaths", () => {
+  test("reads NUL-separated entries: a path with spaces as it is, both paths of a rename", () => {
+    expect(statusPaths(" M REVIEW.md\0?? loopstra/prompts/my review.md\0R  intent/README.md\0REVIEW.md\0")).toEqual([
+      "REVIEW.md", "loopstra/prompts/my review.md", "intent/README.md",
+    ]);
+    expect(statusPaths("")).toEqual([]);
   });
 });
