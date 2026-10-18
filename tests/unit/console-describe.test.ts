@@ -21,6 +21,15 @@ describe("events in plain words", () => {
       .toBe("Design asked: Round half up or to even?");
     expect(describeEvent(row("stop", { by: "John", note: "the session was stopped by John; the change keeps its status" }))).toBe("John stopped the session; the change keeps its status.");
     expect(describeEvent(row("stop", { note: "stopped by request" }))).toBe("The loop is stopping.");
+    // A person steering a running session, named by its seq in the payload.
+    const named = (slug: string, seq: number) => (slug === "csv-export" && seq === 4 ? "design" : undefined);
+    expect(describeEvent(row("steer", { kind: "message", by: "flava", via: "the dashboard", seq: 4, text: "Cover\nnegatives" }), named))
+      .toBe("flava sent the design session a message: Cover negatives.");
+    expect(describeEvent(row("steer", { kind: "redirect", by: "flava", via: "the dashboard", seq: 4, text: "Use two steps." }), named))
+      .toBe("flava redirected the design session: Use two steps.");
+    expect(describeEvent(row("steer", { kind: "stop", by: "flava", via: "the dashboard", seq: 4 }), named)).toBe("flava stopped the design session.");
+    expect(describeEvent(row("steer", { kind: "message", by: "flava", seq: 9, text: "x".repeat(200) }), named))
+      .toBe(`flava sent a session a message: ${"x".repeat(119)}…`);
     expect(describeEvent(row("gate_check", { gate: "spec", check: "headings", result: "pass", evidence: "" }))).toBe("Spec gate, headings: passed.");
     expect(describeEvent(row("command", { command: "bun test", code: 0 }))).toBe("Ran bun test.");
     expect(describeEvent(row("command", { command: "bun test", code: 1, lastLine: "x" }))).toBe("Ran bun test: exit code 1.");

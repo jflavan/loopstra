@@ -65,6 +65,19 @@ function errorLine(p: Payload): string {
   return `Problem${where}.`;
 }
 
+/** A `steer` event: a person's message, redirect or stop that reached a running session (see src/steering.ts). */
+function steerText(e: EventRow, p: Payload, phaseName: (slug: string, seq: number) => string | undefined): string {
+  const who = str(p.by) || "Someone";
+  const seq = typeof p.seq === "number" ? p.seq : e.phase_seq;
+  const name = seq !== null ? phaseName(e.slug, seq) : undefined;
+  const session = name ? `the ${name} session` : "a session";
+  const said = str(p.text).replace(/\s+/g, " ").trim();
+  const text = said.length > 120 ? `${said.slice(0, 119)}…` : said;
+  if (p.kind === "stop") return `${who} stopped ${session}.`;
+  if (p.kind === "redirect") return sentence(`${who} redirected ${session}${text ? `: ${text}` : ""}`);
+  return sentence(`${who} sent ${session} a message${text ? `: ${text}` : ""}`);
+}
+
 /**
  * An event in plain words, for the console's Activity, or null when it only matters to an engineer
  * (ticks, raw session events). `phaseName` names the phase an event belongs to.
@@ -89,7 +102,8 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "signal":
       if (p.name === "main_health") return `The tests on main ${HEALTH[str(p.result)] ?? str(p.result)}.`;
       return p.output ? firstLine(p.output) : `${str(p.name)}: ${str(p.result)}.`;
-    case "stop": return p.by ? `${str(p.by)} stopped the session; the change keeps its status.` : "The loop is stopping.";
+    case "steer": return steerText(e, p, phaseName);
+    case "stop": return p.by ?`${str(p.by)} stopped the session; the change keeps its status.` : "The loop is stopping.";
     case "pause": {
       const why = firstLine(first(p.reason, p.note));
       return why ? sentence(`Paused: ${why}`) : "Paused.";
