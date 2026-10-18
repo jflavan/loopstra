@@ -24,7 +24,7 @@ afterEach(() => resetStop());
  * only its own src/<slug>.ts, so changes never conflict. Its plan lists them. `planFiles`: the plan's
  * file list instead (null: a plan with no Files that change section).
  */
-interface Change { slug: string; status: string; dependsOn?: string[]; writes?: Record<string, string>; planFiles?: string[] | null }
+interface Change { slug: string; status: string; priority?: string; dependsOn?: string[]; writes?: Record<string, string>; planFiles?: string[] | null }
 
 /** The files a change's build writes. */
 const writesOf = (c: Change) => c.writes ?? { [`src/${c.slug}.ts`]: "export function add(a: number, b: number): number {\n  return a + b;\n}\n" };
@@ -44,7 +44,7 @@ function buildFixture(c: Change): string {
   return [lines[0], ...writes, lines.at(-1)].join("\n") + "\n";
 }
 
-/** Statuses at which a change already has its spec and plan. */
+/** Statuses at which a change already has its spec and plan (a spec-approved one has its spec). */
 const PLANNED = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
 
 /** Writes a change's intent (and spec and plan at the planned statuses), and its own build fixture. Not committed. */
@@ -52,11 +52,10 @@ async function writeChange(path: string, fixtures: string, c: Change): Promise<v
   const dir = join(path, "intent", c.slug);
   mkdirSync(dir, { recursive: true });
   const deps = c.dependsOn ? `depends_on: [${c.dependsOn.join(", ")}]\n` : "";
-  await Bun.write(join(dir, "intent.md"), `---\nstatus: ${c.status}\n${deps}---\n# Intent: ${c.slug}\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n`);
-  if (PLANNED.has(c.status)) {
-    await Bun.write(join(dir, "spec.md"), "# Spec\n\n## Summary\ns\n");
-    await Bun.write(join(dir, "plan.md"), planFor(c));
-  }
+  const priority = c.priority ? `priority: ${c.priority}\n` : "";
+  await Bun.write(join(dir, "intent.md"), `---\nstatus: ${c.status}\n${priority}${deps}---\n# Intent: ${c.slug}\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n`);
+  if (PLANNED.has(c.status) || c.status === "spec-approved") await Bun.write(join(dir, "spec.md"), "# Spec\n\n## Summary\ns\n");
+  if (PLANNED.has(c.status)) await Bun.write(join(dir, "plan.md"), planFor(c));
   mkdirSync(join(fixtures, c.slug), { recursive: true });
   writeFileSync(join(fixtures, c.slug, "build.jsonl"), buildFixture(c));
   writeFileSync(join(fixtures, c.slug, "plan.jsonl"), planFixture(c));
@@ -73,13 +72,14 @@ function planFixture(c: Change): string {
 
 /**
  * A repository with Loopstra set up, `max_parallel_changes: n`, these changes, and `files` committed
- * on main. Each change's build comes from its own fixture folder.
+ * on main. Each change's build comes from its own fixture folder. `thinkAhead`: speed.think_ahead,
+ * off by default so the lanes' own behaviour is what is tested.
  */
-async function lanesRepo(n: number, changes: Change[], config = "", files: Record<string, string> = {}) {
+async function lanesRepo(n: number, changes: Change[], config = "", files: Record<string, string> = {}, thinkAhead = false) {
   const repo = await tempGitRepo();
   mkdirSync(join(repo.path, "loopstra"), { recursive: true });
   cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
-  await Bun.write(configPath(repo.path), `version: 1\ncommands:\n  test: echo ok\nspeed:\n  max_parallel_changes: ${n}\n${config}`);
+  await Bun.write(configPath(repo.path), `version: 1\ncommands:\n  test: echo ok\nspeed:\n  max_parallel_changes: ${n}\n  think_ahead: ${thinkAhead}\n${config}`);
   for (const [path, content] of Object.entries(files)) await Bun.write(join(repo.path, path), content);
   const fixtures = tempDir("loopstra-fixtures-");
   for (const c of changes) await writeChange(repo.path, fixtures.path, c);
@@ -148,7 +148,7 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 120_000);
 
-  test("with the default of one, the second change is untouched after the tick", async () => {
+  test("with one at a time and think_ahead off, the second change is untouched after the tick", async () => {
     const r = await lanesRepo(1, [{ slug: "alpha", status: "accepted" }, { slug: "beta", status: "accepted" }]);
     await withEnv(r.env, async () => {
       const t = await tick(r.path);
@@ -178,6 +178,29 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       inTrace(r.path, (trace) => expect(trace.phases("beta")[0]!.name).toBe("branch"));
     });
     r.cleanup();
+  }, 120_000);
+
+  test("two builds running at once get different slots, so their commands can pick their own ports", async () => {
+    const out = tempDir("loopstra-slots-");
+    const script = join(out.path, "slot.ts").replaceAll("\\", "/");
+    const log = join(out.path, "slots.log").replaceAll("\\", "/");
+    writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2]!, process.env.LOOPSTRA_SLUG + " " + process.env.LOOPSTRA_SLOT + "\\n");\n`);
+    const r = await lanesRepo(2, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "plan-approved" }],
+      `stages:\n  build:\n    before:\n      - 'bun "${script}" "${log}"'\n`);
+    // alpha's step holds at its verifier until beta's build has started: the two run at once.
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await traceShows(r.path, (t) => t.phases("beta").some((p) => p.name === "build"));
+      releaseAlpha();
+      await ticking;
+      expect(await statusOf(r.path, "alpha")).toBe("reviewing");
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+    });
+    const slots = (await Bun.file(log).text()).trim().split("\n").map((l) => l.split(" ")[1]).sort();
+    expect(slots).toEqual(["0", "1"]);
+    r.cleanup();
+    out.cleanup();
   }, 120_000);
 
   test("a change that depends on another waits for it to merge, then builds on a branch with its code", async () => {
@@ -581,6 +604,116 @@ async function traceShows(repo: string, done: (t: Trace) => boolean): Promise<vo
   const until = Date.now() + 60_000;
   while (Date.now() < until && !inTrace(repo, done)) await Bun.sleep(100);
 }
+
+/** Waits until the change is at `status` (read afresh each time), or a minute has passed. */
+async function statusShows(repo: string, slug: string, status: string, also: () => boolean = () => true): Promise<void> {
+  const until = Date.now() + 60_000;
+  while (Date.now() < until && !((await statusOf(repo, slug).catch(() => "")) === status && also())) await Bun.sleep(100);
+}
+
+describe("design and plan steps beside the lanes (speed.think_ahead)", () => {
+  test("at one change at a time, a change accepted while another builds is designed and planned before the build ends", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "accepted" }], "", {}, true);
+    // alpha's build step holds at its verifier until beta has been planned.
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await statusShows(r.path, "beta", "plan-approved");
+      releaseAlpha();
+      const t = await ticking;
+      expect(t.picked).toBe("alpha");
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha", "beta", "beta"]);
+      expect(await statusOf(r.path, "alpha")).toBe("reviewing");
+      expect(await statusOf(r.path, "beta")).toBe("plan-approved");
+      expect(othersRunning("")).toBe(0);
+      inTrace(r.path, (trace) => {
+        const together = trace.events("_loop").filter((e) => e.type === "command" && e.payload.includes("\"changes worked on together\""));
+        expect(together.map((e) => payloadOf<{ steps: string[] }>(e).steps)).toEqual([["alpha", "beta", "beta"]]);
+      });
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("once the lane has ended it starts nothing more: a change it designed is planned on the next tick", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "accepted" }], "", {}, true);
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    const releaseBeta = holdSession(r, "beta", "design");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await traceShows(r.path, (t) => t.phases("beta").some((p) => p.name === "design"));
+      releaseAlpha();
+      // alpha's step has ended, and its lane with it: only beta is still running.
+      await statusShows(r.path, "alpha", "reviewing", () => othersRunning("beta") === 0);
+      releaseBeta();
+      const t = await ticking;
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha", "beta"]);
+      expect(await statusOf(r.path, "beta")).toBe("spec-approved");
+      inTrace(r.path, (trace) => expect(trace.phases("beta").map((p) => p.name)).not.toContain("plan"));
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("the lane takes the build before a more urgent change waiting to be planned, and that one is planned beside it", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "spec-approved", priority: "urgent" }, { slug: "beta", status: "plan-approved" }], "", {}, true);
+    const releaseBeta = holdSession(r, "beta", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await statusShows(r.path, "alpha", "plan-approved");
+      releaseBeta();
+      const t = await ticking;
+      expect(t.picked).toBe("beta");
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      expect(await statusOf(r.path, "alpha")).toBe("plan-approved");
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("a design stage with before commands is left to a lane", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "accepted" }], "stages:\n  design:\n    before:\n      - echo hi\n", {}, true);
+    await withEnv(r.env, async () => {
+      const t = await tick(r.path);
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha"]);
+      expect(await statusOf(r.path, "beta")).toBe("accepted");
+      inTrace(r.path, (trace) => expect(trace.phases("beta")).toEqual([]));
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("with a daily budget and no session limit, nothing runs beside the lane, which keeps the queue's order", async () => {
+    const changes = [{ slug: "alpha", status: "spec-approved", priority: "urgent" }, { slug: "beta", status: "plan-approved" }, { slug: "gamma", status: "accepted" }];
+    const r = await lanesRepo(1, changes, "claude:\n  max_budget_usd_per_day: 100\n", {}, true);
+    await withEnv(r.env, async () => {
+      const t = await tick(r.path);
+      // The urgent plan first, as without think_ahead: no thinker could take it.
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha"]);
+      expect(await statusOf(r.path, "alpha")).toBe("plan-approved");
+      expect(await statusOf(r.path, "beta")).toBe("plan-approved");
+      expect(await statusOf(r.path, "gamma")).toBe("accepted");
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("a change set to a status its folder does not match during the tick is left to the next tick's start, which blocks it", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }], "poll_seconds: 1\n", {}, true);
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await traceShows(r.path, (t) => t.phases("alpha").some((p) => p.name === "verify"));
+      // spec-approved with no spec.md, written while alpha is held at its verifier.
+      mkdirSync(join(r.path, "intent", "beta"), { recursive: true });
+      writeFileSync(join(r.path, "intent", "beta", "intent.md"), "---\nstatus: spec-approved\n---\n# Intent: beta\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
+      // Several of the thinker's looks (one a second).
+      await Bun.sleep(3000);
+      releaseAlpha();
+      const t = await ticking;
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha"]);
+      inTrace(r.path, (trace) => expect(trace.phases("beta")).toEqual([]));
+      await tick(r.path);
+      expect(await statusOf(r.path, "beta")).toBe("blocked");
+    });
+    r.cleanup();
+  }, 120_000);
+});
 
 describe("more than one change at a time, with a GitHub remote", () => {
   test("one change at a time: a change that changes the same files as an open pull request waits for it to merge, then builds on main with it", async () => {

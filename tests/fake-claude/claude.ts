@@ -107,6 +107,7 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
     LOOPSTRA_PHASE: phase || null,
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
     LOOPSTRA_BASE: process.env.LOOPSTRA_BASE ?? null,
+    LOOPSTRA_SLOT: process.env.LOOPSTRA_SLOT ?? null,
     LOOPSTRA_PROTECTED_LOG: process.env.LOOPSTRA_PROTECTED_LOG ?? null,
     GIT_OPTIONAL_LOCKS: process.env.GIT_OPTIONAL_LOCKS ?? null,
   } }));

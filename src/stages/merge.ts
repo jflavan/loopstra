@@ -3,7 +3,7 @@ import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, read
 import { evaluateGate, type Check } from "../gates";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { GitHub, recordGitHub, type PrInfo } from "../github";
-import { onCheckout, oneMerge, othersRunning } from "../lanes";
+import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain } from "../remote";
@@ -352,9 +352,9 @@ type Freshness = "up to date" | "taken" | "main ahead" | "not pushed" | "remote 
  * branch here was brought up to date but not pushed, bring it up to date outside the lock (the merge
  * checks again, then a push that keeps the pull request open) and wait for GitHub's checks again.
  * That runs tests and maybe sessions, so only while no more than speed.max_parallel_changes changes
- * run a step, counting this one; otherwise a later look does it. Commits a person added to the pull
- * request are kept: taken into the branch here, or, when the branch here changed too, the change is
- * blocked for an engineer.
+ * run a step that may run commands (a design or plan step runs none), counting this one; otherwise a
+ * later look does it. Commits a person added to the pull request are kept: taken into the branch
+ * here, or, when the branch here changed too, the change is blocked for an engineer.
  */
 async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
   const r = await oneMergeAtATime(ctx, async () => {
@@ -375,7 +375,7 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
   if (r === "both changed") return block(ctx, PR_BRANCH_MOVED_NOTE, { detail: `${ctx.branch} here and on GitHub each have commits the other lacks`, retryFrom: mergeRetry(ctx) });
   // A person's commits: the next look reads GitHub's checks of them.
   if (r === "taken") return { ok: true, waiting: true };
-  if (r === "unreachable" || othersRunning(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return { ok: true, waiting: true };
+  if (r === "unreachable" || othersRunningCommands(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return { ok: true, waiting: true };
   // Brought up to date and pushed: real work, so the watcher looks again only on the next tick, once
   // GitHub has started the checks of the new head.
   return checkAgain(ctx, async () => {
