@@ -172,6 +172,17 @@ describe("Git", () => {
     repo.cleanup();
   });
 
+  test("runtime commits are Loopstra's even with an author or committer named in the environment", async () => {
+    const repo = await tempGitRepo();
+    const restore = setEnv({ GIT_AUTHOR_NAME: "Person", GIT_AUTHOR_EMAIL: "person@example.com", GIT_COMMITTER_NAME: "Person", GIT_COMMITTER_EMAIL: "person@example.com" });
+    try {
+      const git = new Git(repo.path);
+      await Bun.write(join(repo.path, "a.md"), "a");
+      expect(await git.commitAll("a")).toBe(true);
+      expect((await git.run(["log", "-1", "--format=%an|%ae|%cn|%ce"])).out.trim()).toBe(`${RUNTIME_NAME}|${RUNTIME_EMAIL}|${RUNTIME_NAME}|${RUNTIME_EMAIL}`);
+    } finally { restore(); repo.cleanup(); }
+  });
+
   test("runtime commits never start git's automatic gc or maintenance (another change may be committing meanwhile)", async () => {
     const repo = await tempGitRepo();
     try {

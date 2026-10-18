@@ -117,12 +117,15 @@ function hasOwnSshCommand(cwd: string): boolean {
 /**
  * The environment of every git call: it never waits for a person to type a password or confirm a
  * key, and it speaks English (the C locale) whatever the machine's language, since some of its
- * messages are read (conflicts, a missing session, the last line of an error).
+ * messages are read (conflicts, a missing session, the last line of an error). An author or committer
+ * named in the environment is dropped: it would win over RUNTIME_COMMIT_CONFIG's identity, and every
+ * commit this git makes is the runtime's (a replayed commit keeps the author it recorded).
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" };
   delete env.SSH_ASKPASS;
   delete env.LANGUAGE;
+  for (const who of ["AUTHOR", "COMMITTER"]) { delete env[`GIT_${who}_NAME`]; delete env[`GIT_${who}_EMAIL`]; }
   if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !hasOwnSshCommand(cwd)) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
   return env;
 }
