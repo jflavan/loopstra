@@ -22,19 +22,39 @@ const HELP = `loopstra <command>
   chat      talk to the orchestrator: updates, and new changes written up
             as intents (--no-terminal to run only the Slack/Discord bots)
   apply-lessons <slug>  add a change's proposed lessons to CLAUDE.md
+  upgrade   install the latest Loopstra and bring this repo up to it, in one commit
+            (--check shows what would change; --repo skips the install)
+  customize [prompt]  copy a shipped prompt into loopstra/prompts/ to edit
+            (no name: list them)
+  --version print the installed version
 `;
 
-/** status, tail, judges, ui, and chat read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, judges, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
   return false;
 }
 
+/** Prints one line when a newer Loopstra is out or the repository's stamp names another version; never in the way. */
+async function notice(): Promise<void> {
+  try {
+    const { packageVersion } = await import("./package");
+    const { readStamp } = await import("./stamp");
+    const { updateNotice } = await import("./upgrade/tool");
+    const line = await updateNotice(root, { installed: packageVersion(), stamp: readStamp(root)?.loopstra ?? null });
+    if (line) console.log(line);
+  } catch { /* a convenience: never stops a command */ }
+}
+
 async function main(): Promise<number> {
   switch (command) {
     case "help": case "--help": case "-h":
       console.log(HELP); return 0;
+    case "--version": case "-v": case "version": {
+      const { packageVersion } = await import("./package");
+      console.log(packageVersion()); return 0;
+    }
     case "init": {
       const { init } = await import("./init");
       const r = await init(root);
@@ -60,11 +80,14 @@ async function main(): Promise<number> {
     }
     case "status":
       if (!setUp()) return 1;
-      process.stdout.write(await renderStatus(root)); return 0;
+      process.stdout.write(await renderStatus(root));
+      await notice();
+      return 0;
     case "start": {
       const { preflight, start } = await import("./scheduler");
       const refusal = await preflight(root);
       if (refusal) { console.error(refusal); return 1; }
+      await notice();
       await start(root, { once: rest.includes("--once") });
       return 0;
     }
@@ -103,6 +126,18 @@ async function main(): Promise<number> {
         console.log(r.added.length ? `Added to CLAUDE.md:\n${r.added.join("\n")}` : "Nothing new to add.");
         return 0;
       } catch (e) { console.error(errorText(e)); return 1; }
+    }
+    case "upgrade": {
+      if (!setUp()) return 1;
+      const { realIo, upgradeCommand } = await import("./commands/upgrade");
+      return upgradeCommand(root, rest, realIo(root));
+    }
+    case "customize": {
+      if (!setUp()) return 1;
+      const { customize } = await import("./commands/customize");
+      const r = await customize(root, rest[0]);
+      (r.ok ? console.log : console.error)(r.text);
+      return r.ok ? 0 : 1;
     }
     default:
       console.error(`Unknown command: ${command}`);

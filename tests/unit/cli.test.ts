@@ -9,10 +9,10 @@ const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
 const NOT_SET_UP = "This folder is not set up for Loopstra. Run loopstra init first.";
 
 describe("the command line outside a set-up repo", () => {
-  test("status, tail, ui, and judges say the folder is not set up, and create nothing", async () => {
+  test("status, tail, ui, judges, upgrade, and customize say the folder is not set up, and create nothing", async () => {
     const t = tempDir();
     try {
-      for (const cmd of ["status", "tail", "ui", "judges"]) {
+      for (const cmd of ["status", "tail", "ui", "judges", "upgrade", "customize"]) {
         const r = await run([process.execPath, CLI, cmd], t.path);
         expect({ cmd, code: r.code, said: (r.out + r.err).trim() }).toEqual({ cmd, code: 1, said: NOT_SET_UP });
       }
@@ -29,6 +29,26 @@ describe("the command line outside a set-up repo", () => {
     } finally {
       t.cleanup();
     }
+  });
+
+  test("--version prints the package version, anywhere", async () => {
+    const t = tempDir();
+    try {
+      for (const flag of ["--version", "-v", "version"]) {
+        const r = await run([process.execPath, CLI, flag], t.path);
+        expect({ flag, code: r.code, out: r.out }).toEqual({ flag, code: 0, out: "0.0.0-dev\n" });
+      }
+      expect(readdirSync(t.path)).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("help lists upgrade, customize and --version", async () => {
+    const out = (await run([process.execPath, CLI, "help"], process.cwd())).out;
+    expect(out).toContain("\n  upgrade   ");
+    expect(out).toContain("\n  customize [prompt]  ");
+    expect(out).toContain("\n  --version ");
   });
 
   test("start refuses the same way, in its preflight", async () => {
