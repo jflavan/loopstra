@@ -75,6 +75,9 @@ export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<
 /** The roots whose loop has settled the main checkout this run (see armApplier). */
 const armed = new Set<string>();
 
+/** How long after a watch event that found nothing waiting the applier looks again (see startApplier). */
+const RENAME_SETTLE_MS = 200;
+
 /**
  * Lets the applier at `root` apply requests. The tick calls it once it has applied requests itself:
  * by then a move of main that a kill cut short has been put back, and the checkout is on main.
@@ -119,7 +122,10 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
       const w = watch(dir, () => {
         // A deleted folder's watcher fires without end (Bun on Windows): drop it, the timer watches again.
         if (!existsSync(dir)) return unwatch(w);
-        if (newRequestWaiting(root)) pass();
+        if (newRequestWaiting(root)) return pass();
+        // macOS may report only the temporary file's creation and fold the rename into it: look
+        // once more when the rename has had time to land.
+        setTimeout(() => { if (!stopped && newRequestWaiting(root)) pass(); }, RENAME_SETTLE_MS);
       });
       w.on("error", () => unwatch(w));
       watcher = w;

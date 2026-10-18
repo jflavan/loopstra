@@ -825,8 +825,10 @@ describe("the applier", () => {
     try {
       armApplier(r.root);
       writeFileSync(join(r.root, ".git", "index.lock"), "");
+      // macOS's file events start a moment after the watch does: one sooner may never be reported.
+      await Bun.sleep(500);
       submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
-      await until(() => (applyingRequests(r.root)[0]?.tries ?? 0) >= 1, 5_000);
+      await until(() => (applyingRequests(r.root)[0]?.tries ?? 0) >= 1, 10_000);
       // The failed pass rewrote applying/<id>.json; that must not start the next pass.
       await Bun.sleep(1_000);
       expect(applyingRequests(r.root)[0]!.tries).toBe(1);
