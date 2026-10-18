@@ -16,6 +16,7 @@ import { AnnouncementLog } from "./announcer";
 import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest, type RequestBody } from "../requests";
+import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
 import { oneLine, ThreadStore, threadKey, type ThreadState } from "./threads";
 
@@ -367,11 +368,15 @@ export class Orchestrator {
       case "approve": request = { kind: "approve", slug, expect }; break;
       case "close": request = { kind: "close", slug, expect }; break;
       case "release": request = { kind: "release", slug, expect }; break;
-      case "answer":
+      case "answer": {
         if (!note) { await say("Tell me the answer, and I will pass it on."); return; }
-        // `expect` and `note` word the question (see askText); the request itself is just the answer (see doAction).
-        request = { kind: "answer", slug, text: note, expect, note };
+        // The question waiting now: the yes is to answering that one, so the request names it (the loop refuses it once another waits).
+        const open = readQuestion(this.root, slug)?.open;
+        const asked = open && !open.answer && typeof open.at === "string" ? open : null;
+        // `expect`, `note` and `asked` word the question (see askText); the request itself is the answer and the question's time (see doAction).
+        request = { kind: "answer", slug, text: note, expect, note, ...(asked ? { question: asked.at, asked: String(asked.text ?? "") } : {}) };
         break;
+      }
     }
     const ask = askText(request, slug);
     t.pending = { kind: "action", request, ask, by: m.authorId, at: new Date().toISOString() };
@@ -381,8 +386,10 @@ export class Orchestrator {
 
   private async doAction(cfg: Config, t: ThreadState, m: IncomingMessage, request: RequestBody & RequestShape, say: Send): Promise<void> {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can do that, so I have not.`); return; }
-    // An answer is its text alone: it goes to whatever question waits when the loop applies it.
-    const body: RequestBody = request.kind === "answer" ? { kind: "answer", slug: request.slug, text: request.text } : request;
+    // An answer is its text and the question it answers (none from a proposal made before questions were named: then whichever waits).
+    const body: RequestBody = request.kind === "answer"
+      ? { kind: "answer", slug: request.slug, text: request.text, ...(request.question === undefined ? {} : { question: request.question }) }
+      : request;
     submitRequest(this.root, { ...body, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
     this.store.noteSince(t, `${plainName(m.authorName)} said yes: asked the loop to ${askedWords(request, request.slug)}.`);
     await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);

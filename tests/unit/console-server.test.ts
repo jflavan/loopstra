@@ -6,6 +6,7 @@ import { loadConfig } from "../../src/config";
 import { Hub, type HubOptions } from "../../src/console/hub";
 import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
+import { writeJson } from "../../src/chat/threads";
 import { localUser } from "../../src/chat/transports/shared";
 import { readLoopHold, writeHeartbeat } from "../../src/heartbeat";
 import { changeStoppedBy, inboxFor } from "../../src/inbox";
@@ -438,6 +439,15 @@ describe("steering", () => {
       expect((await post(base, "/api/requests", { kind: "answer", slug: "d", text: "Leave them out." })).status).toBe(409);
       expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: " " })).status).toBe(400);
       expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: "x".repeat(4001) })).status).toBe(400);
+      // One naming the question it answers: taken while that question waits, refused once another does.
+      const at = "2026-10-17T12:00:00.000Z";
+      writeJson(join(root, ".loopstra", "runs", "q", "question.json"), { status: "designing", count: 1, open: { phase: "design", traceName: "design", seq: 3, sessionId: "s", text: "Archived too?", why: "", options: [], at } });
+      expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: "Leave them out.", question: at })).status).toBe(202);
+      expect(pendingRequests(root).filter((x) => x.kind === "answer").at(-1)).toMatchObject({ question: at });
+      const changed = await post(base, "/api/requests", { kind: "answer", slug: "q", text: "Leave them out.", question: "2026-10-17T11:00:00.000Z" });
+      expect(changed.status).toBe(409);
+      expect((await changed.json() as { error: string }).error).toBe("q's question changed since; nothing changed. Read the new one.");
+      expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: "Leave them out.", question: 5 })).status).toBe(400);
     });
   }, 30_000);
 

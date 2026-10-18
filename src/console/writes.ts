@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { isStatus, offers, REQUEST_KINDS, retryOptions, undoMatches, type RequestKind } from "../actions";
+import { isStatus, offers, questionChangedText, REQUEST_KINDS, retryOptions, sameQuestion, undoMatches, type RequestKind } from "../actions";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig, type Config } from "../config";
 import { holdLoop, readLoopHold, releaseLoop } from "../heartbeat";
 import { humanGates, PRIORITIES, readIntent, SLUG, type Frontmatter, type Priority } from "../intents";
+import { readQuestion } from "../questions";
 import { cancelRequest, CONSOLE, requestState, submitRequest, type RequestBody } from "../requests";
 import { Trace } from "../trace";
 import { touchWake } from "../wake";
@@ -89,10 +90,13 @@ function parse(body: Record<string, unknown>): RequestBody | string {
   if (!slug || !SLUG.test(slug)) return "Unknown change.";
   const k = kind as Kind;
   if (k === "accept") return { kind: k, slug };
-  // An answer goes to the question open now, whatever the status: it names none.
+  // An answer names no status: it lands whatever the status. It names the question the person saw, when the page sent it.
   if (k === "answer") {
     const text = str(body.text)?.trim() ?? "";
-    return text && text.length <= MAX_NOTE ? { kind: k, slug, text } : `Say your answer (at most ${MAX_NOTE} characters).`;
+    if (!text || text.length > MAX_NOTE) return `Say your answer (at most ${MAX_NOTE} characters).`;
+    if (body.question === undefined) return { kind: k, slug, text };
+    const question = str(body.question);
+    return question ? { kind: k, slug, text, question } : "Say which question you answer.";
   }
   const expect = body.expect;
   if (!isStatus(expect)) return "Say which status the change was at.";
@@ -152,6 +156,8 @@ async function action(root: string, body: Record<string, unknown>): Promise<Resp
   const fieldOnly = r.kind === "priority" || r.kind === "hold" || r.kind === "release" || r.kind === "answer";
   if (!fieldOnly && status !== expect) return refuse(`${r.slug} is ${status} now, not ${expect}. The page shows it as it is now.`);
   if (!allowed(root, r, fm, cfg)) return refuse(r.kind === "undo" ? "That cannot be undone now." : `That is not something ${r.slug} can do now.`);
+  // An answer to a question that is no longer the one waiting (the loop checks again when it applies it).
+  if (r.kind === "answer" && !sameQuestion(r.question, readQuestion(root, r.slug)?.open?.at)) return refuse(questionChangedText(r.slug));
   const user = localUser();
   const sent = submitRequest(root, { ...r, by: user, byName: user, via: "the dashboard", transport: CONSOLE, thread: "" });
   return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? 60, new Date()).state.state }, 202);

@@ -179,7 +179,7 @@ describe("the loop and running steps", () => {
       }));
       const m = await model(t.path);
       const a = m.sections.changes.find((c) => c.slug === "a")!;
-      expect(a.question).toEqual({ text: "Archived too?", why: "The list hides them.", options: ["yes", "no"], phase: "plan" });
+      expect(a.question).toEqual({ text: "Archived too?", why: "The list hides them.", options: ["yes", "no"], phase: "plan", at: "2026-10-17T12:00:00.000Z" });
       expect(a.offers[0]).toEqual({ kind: "answer", label: "Answer" });
       const b = m.sections.changes.find((c) => c.slug === "b")!;
       expect(b.question).toBeNull();

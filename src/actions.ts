@@ -95,8 +95,21 @@ export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Off
   return out;
 }
 
-/** The parts of a request these rules read. An answer's text is its `note`. */
-export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null; note?: string; reason?: string }
+/** The parts of a request these rules read. An answer's text is its `note`, and `asked` the question it answers. */
+export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null; note?: string; reason?: string; asked?: string }
+
+/**
+ * True when an answer naming the question asked at `named` (undefined: an older request, naming none)
+ * may go to the question open now, asked at `open` (undefined: none open).
+ */
+export function sameQuestion(named: string | undefined, open: string | undefined): boolean {
+  return named === undefined || named === open;
+}
+
+/** Why an answer to a question that is no longer the one waiting is refused. */
+export function questionChangedText(slug: string): string {
+  return `${slug}'s question changed since; nothing changed. Read the new one.`;
+}
 
 /** The status a status-changing request leads to, from the request alone; null for one that sets no status, or that is not allowed from `expect`. */
 export function targetOf(r: RequestShape): Status | null {
@@ -181,7 +194,10 @@ export function askText(r: RequestShape, slug: string): string {
     case "priority": return `Set ${slug}'s priority to ${r.priority ?? "normal"}?`;
     case "hold": return reason ? `Hold ${slug}, so the loop starts no step for it, with this reason?\n\n${reason}` : `Hold ${slug}, so the loop starts no step for it?`;
     case "release": return `Release ${slug}, so the loop goes on with it?`;
-    case "answer": return `Send this answer to ${slug}'s waiting question?\n\n${note}`;
+    case "answer": {
+      const asked = (r.asked ?? "").replace(/\s+/g, " ").trim();
+      return asked ? `Send this answer to ${slug}'s question "${asked}"?\n\n${note}` : `Send this answer to ${slug}'s waiting question?\n\n${note}`;
+    }
     case "undo": return `Take ${slug} back to ${r.to}?`;
   }
 }

@@ -140,7 +140,8 @@ describe("the orchestrator", () => {
     const asking = INTENT("designing").replace("status: designing\n", "status: designing\nquestion: open\n");
     const r = await chatRepo({ intents: { "csv-export": asking, other: INTENT("designing") } });
     try {
-      writeJson(join(r.root, ".loopstra", "runs", "csv-export", "question.json"), { status: "designing", count: 1, open: { phase: "design", traceName: "design", seq: 3, sessionId: "s", text: "Archived too?", why: "", options: [], at: new Date().toISOString() } });
+      const at = new Date().toISOString();
+      writeJson(join(r.root, ".loopstra", "runs", "csv-export", "question.json"), { status: "designing", count: 1, open: { phase: "design", traceName: "design", seq: 3, sessionId: "s", text: "Archived\n too?", why: "", options: [], at } });
       const answer = (slug: string, note: string) => turn("I will pass it on.", { action: { kind: "answer", slug, note, priority: null } });
       await r.answer("orchestrator", 1, answer("csv-export", ""));
       await r.answer("orchestrator", 2, answer("other", "Leave them out."));
@@ -152,13 +153,14 @@ describe("the orchestrator", () => {
       await o.handle(message("tell other to leave them out"), out.send);
       expect(out.sent.at(-1)).toBe("other is designing now, so that is not something I can do to it.");
       await o.handle(message("tell csv-export to leave them out"), out.send);
-      expect(out.sent.at(-1)).toBe("Send this answer to csv-export's waiting question?\n\nLeave them out.\n\nReply yes to go ahead.");
+      // The yes is to answering this question: the confirmation quotes it, and the request names it.
+      expect(out.sent.at(-1)).toBe("Send this answer to csv-export's question \"Archived too?\"?\n\nLeave them out.\n\nReply yes to go ahead.");
       expect(pendingRequests(r.root)).toEqual([]);
       await o.handle(message("yes"), out.send);
       const reqs = pendingRequests(r.root);
-      expect(reqs).toEqual([expect.objectContaining({ kind: "answer", slug: "csv-export", text: "Leave them out.", byName: "Ana", via: "the terminal", transport: "terminal", thread: "local" })]);
-      // Just the answer: no status it expects, and no note beside its text.
-      expect("expect" in reqs[0]! || "note" in reqs[0]!).toBe(false);
+      expect(reqs).toEqual([expect.objectContaining({ kind: "answer", slug: "csv-export", text: "Leave them out.", question: at, byName: "Ana", via: "the terminal", transport: "terminal", thread: "local" })]);
+      // Just the answer and its question: no status it expects, no note beside its text, and not the question's words.
+      expect("expect" in reqs[0]! || "note" in reqs[0]! || "asked" in reqs[0]!).toBe(false);
       expect(out.sent.at(-1)).toStartWith("Asked the loop to do it.");
     } finally { r.cleanup(); }
   });

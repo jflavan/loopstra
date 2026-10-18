@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { askText, doneWords, offers, requestLabel, resultText, retryTargets, targetOf, undoAllowed, undoMatches } from "../../src/actions";
+import { askText, doneWords, offers, questionChangedText, requestLabel, resultText, retryTargets, sameQuestion, targetOf, undoAllowed, undoMatches } from "../../src/actions";
 import { humanGates, parseIntentFile, type Frontmatter } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -115,6 +115,13 @@ describe("words", () => {
     expect(doneWords({ kind: "answer", expect: "designing" })).toBe("question answered");
     expect(requestLabel({ kind: "answer", expect: "designing" })).toBe("Answer");
     expect(askText({ kind: "answer", expect: "designing", note: " Leave them out. " }, "csv-export")).toBe("Send this answer to csv-export's waiting question?\n\nLeave them out.");
+    expect(askText({ kind: "answer", expect: "designing", note: "Leave them out.", asked: " Archived\n too? " }, "csv-export")).toBe("Send this answer to csv-export's question \"Archived too?\"?\n\nLeave them out.");
+    // An answer names the question it answers; an older one, naming none, goes to whichever waits.
+    expect(sameQuestion("2026-10-17T12:00:00.000Z", "2026-10-17T12:00:00.000Z")).toBe(true);
+    expect(sameQuestion("2026-10-17T12:00:00.000Z", "2026-10-17T13:00:00.000Z")).toBe(false);
+    expect(sameQuestion("2026-10-17T12:00:00.000Z", undefined)).toBe(false);
+    expect(sameQuestion(undefined, "2026-10-17T13:00:00.000Z")).toBe(true);
+    expect(questionChangedText("csv-export")).toBe("csv-export's question changed since; nothing changed. Read the new one.");
     expect(resultText({ kind: "answer", expect: "designing" }, "csv-export", "designing")).toBe("csv-export has its answer; the loop goes on with it.");
   });
 });

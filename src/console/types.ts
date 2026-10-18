@@ -28,8 +28,8 @@ export interface ChangeSummary {
   statedPriority: string | null;
   /** What a person can do to it now (see src/actions.ts). */
   offers: Offer[];
-  /** The question an agent asked and a person has not answered yet (see src/questions.ts), or null. */
-  question: { text: string; why: string; options: string[]; phase: string } | null;
+  /** The question an agent asked and a person has not answered yet (see src/questions.ts), or null. `at`: when it was asked, which an answer to it names. */
+  question: { text: string; why: string; options: string[]; phase: string; at: string } | null;
 }
 
 export interface RunningPhase {

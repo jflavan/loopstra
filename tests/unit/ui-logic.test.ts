@@ -437,8 +437,10 @@ describe("requests from the page", () => {
     expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
     expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
     expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
-    // An answer goes to the question open now, whatever the status: it names none.
-    expect(bodyFor(change, { kind: "answer", label: "Answer" }, { note: "No." })).toEqual({ kind: "answer", slug: "a", text: "No." });
+    // An answer names no status, whatever the status; it names the question the person saw.
+    expect(bodyFor(change, { kind: "answer", label: "Answer" }, { note: "No." })).toStrictEqual({ kind: "answer", slug: "a", text: "No." });
+    const asking = { ...change, question: { text: "Archived too?", why: "", options: [], phase: "design", at: "2026-10-17T12:00:00.000Z" } };
+    expect(bodyFor(asking, { kind: "answer", label: "Answer" }, { note: "No." })).toStrictEqual({ kind: "answer", slug: "a", text: "No.", question: "2026-10-17T12:00:00.000Z" });
   });
 
   test("an answer has no Undo: the session carries on with it", () => {

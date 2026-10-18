@@ -560,6 +560,32 @@ describe("applying requests", () => {
     }
   });
 
+  test("an answer naming the question it answers lands while that one waits, and changes nothing once another does", async () => {
+    const r = await chatRepo({ intents: { a: ASKING, b: ASKING } });
+    try {
+      asked(r.root);
+      mkdirSync(join(r.root, ".loopstra", "runs", "b"), { recursive: true });
+      writeFileSync(join(r.root, ".loopstra", "runs", "b", "question.json"), readFileSync(join(r.root, ".loopstra", "runs", "a", "question.json")));
+      const seen = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out.", question: "2026-10-17T12:00:00.000Z" });
+      // b's session asked another question since the person read theirs.
+      const stale = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out.", question: "2026-10-17T11:00:00.000Z" });
+      const bad = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out.", question: 5 as unknown as string });
+      await apply(r.root);
+      expect(requestState(r.root, seen.id)).toMatchObject({ ok: true, text: "a has its answer; the loop goes on with it." });
+      expect(requestState(r.root, stale.id)).toMatchObject({ ok: false, status: "designing", text: "b's question changed since; nothing changed. Read the new one." });
+      expect(requestState(r.root, bad.id)).toMatchObject({ ok: false, text: "That request could not be read, so nothing changed." });
+      expect((await readIntent(r.root, "b")).file.frontmatter.question).toBe("open");
+      expect(existsSync(join(r.root, "intent", "b", "conversation.md"))).toBe(false);
+      expect(readQuestion(r.root, "b")!.open).not.toHaveProperty("answer");
+      const trace = Trace.open(r.root, () => {});
+      try {
+        expect(trace.events("b").filter((e) => e.type === "request").map((e) => JSON.parse(e.payload))).toContainEqual(expect.objectContaining({ id: stale.id, kind: "answer", result: "refused", why: "question changed" }));
+      } finally { trace.close(); }
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("an answer to a change with no question waiting, or a finished one, changes nothing; one that cannot be read is refused", async () => {
     const r = await chatRepo({ intents: { a: INTENT("designing", "x"), c: ASKING.replace("status: designing", "status: closed") } });
     try {

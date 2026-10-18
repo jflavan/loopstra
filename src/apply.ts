@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
+import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, questionChangedText, REQUEST_KINDS, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { conversationPath, readConversation, withEntry, type ConversationEntry } from "./conversation";
@@ -11,7 +11,7 @@ import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, fin
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
-import { answerQuestion, takeBackAnswer } from "./questions";
+import { answerQuestion, readQuestion, takeBackAnswer } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./chat/threads";
@@ -310,7 +310,10 @@ function badShape(req: Request): string | null {
   }
   if (typeof r.slug !== "string" || !SLUG.test(r.slug)) return "its slug is not a change name";
   if (r.kind === "accept") return null;
-  if (r.kind === "answer") return typeof r.text === "string" && r.text.trim() && r.text.length <= MAX_ANSWER ? null : `its answer is not text of at most ${MAX_ANSWER} characters`;
+  if (r.kind === "answer") {
+    if (r.question !== undefined && typeof r.question !== "string") return "the question it answers is not named by its time";
+    return typeof r.text === "string" && r.text.trim() && r.text.length <= MAX_ANSWER ? null : `its answer is not text of at most ${MAX_ANSWER} characters`;
+  }
   if (!isStatus(r.expect)) return "the status it saw is not a status";
   if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
   if (r.kind === "priority" && r.priority !== null && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
@@ -610,6 +613,8 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as answered already.
   const ours = (req.written ?? []).includes(req.slug);
   if (!ours && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
+  // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
+  if (!ours && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }
   const text = req.text.trim();
   const shape = { kind: "answer" as const, expect: fm.status, note: text };
   await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(shape)} by ${byWhom(req)}`, async () => {

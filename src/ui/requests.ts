@@ -9,9 +9,9 @@ import { dismiss, toast } from "./store";
 
 /**
  * What the page posts to /api/requests. A `priority` of null takes the priority line out (an undo to no
- * stated priority). `text`: an answer's words.
+ * stated priority). `text`: an answer's words; `question`: when the question it answers was asked.
  */
-export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string; text?: string }
+export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string; text?: string; question?: string }
 
 /** What the change was before an action, so an undo can put it back. `priority`: the priority line as written, or null when there was none. */
 export interface Before { note: string; priority: string | null }
@@ -23,10 +23,15 @@ export function beforeOf(c: ChangeSummary): Before {
 
 /**
  * The request for an offer on a change: the change, the status the person saw, and what the action needs.
- * An answer (its words in `note`) names no status: it goes to the question open now, whatever the status.
+ * An answer (its words in `note`) names no status, whatever the status; it names the question the person
+ * saw, so the loop refuses it when another one waits by then.
  */
 export function bodyFor(c: ChangeSummary, offer: Offer, input: { note?: string; priority?: string; reason?: string } = {}): ActionBody {
-  if (offer.kind === "answer") return { kind: "answer", slug: c.slug, text: input.note ?? "" };
+  if (offer.kind === "answer") {
+    const b: ActionBody = { kind: "answer", slug: c.slug, text: input.note ?? "" };
+    if (c.question?.at) b.question = c.question.at;
+    return b;
+  }
   const b: ActionBody = { kind: offer.kind, slug: c.slug, expect: c.status };
   if (offer.kind === "retry") b.to = offer.to;
   if (offer.kind === "send-back") b.note = input.note ?? "";

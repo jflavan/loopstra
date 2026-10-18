@@ -105,7 +105,7 @@ function openQuestion(root: string, i: Intent): ChangeSummary["question"] {
   if (!i.file.frontmatter.question.trim()) return null;
   const q = readQuestion(root, i.slug)?.open;
   if (!q || q.answer || typeof q.text !== "string") return null;
-  return { text: q.text, why: typeof q.why === "string" ? q.why : "", options: Array.isArray(q.options) ? q.options.map(String) : [], phase: String(q.phase ?? "") };
+  return { text: q.text, why: typeof q.why === "string" ? q.why : "", options: Array.isArray(q.options) ? q.options.map(String) : [], phase: String(q.phase ?? ""), at: String(q.at ?? "") };
 }
 
 /**
