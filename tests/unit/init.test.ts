@@ -148,6 +148,22 @@ describe("init", () => {
     } finally { t.cleanup(); }
   });
 
+  test("only prompt files count: a .DS_Store, an editor's swap file or a subfolder in loopstra/prompts is not uncommitted setup", async () => {
+    const t = await tempGitRepo();
+    try {
+      await Bun.write(join(t.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
+      await init(t.path);
+      await Bun.write(join(t.path, "loopstra", "prompts", "old", "a.md"), "An old prompt.\n");
+      await run(["git", "add", "-A"], t.path);
+      await run(["git", "commit", "-q", "-m", "init"], t.path);
+      await Bun.write(join(t.path, "loopstra", "prompts", ".DS_Store"), "x");
+      await Bun.write(join(t.path, "loopstra", "prompts", ".build.md.swp"), "x");
+      expect(await uncommittedSetup(t.path, "main")).toEqual([]);
+      await Bun.write(join(t.path, "loopstra", "prompts", "extra.md"), "More.\n");
+      expect(await uncommittedSetup(t.path, "main")).toEqual(["loopstra/prompts/"]);
+    } finally { t.cleanup(); }
+  });
+
   test("in a folder that is not a git repository, warns and writes nothing", async () => {
     const t = tempDir();
     try {

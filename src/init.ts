@@ -208,10 +208,15 @@ async function ensureClaudeMd(root: string, d: Detected, report: InitReport): Pr
 /**
  * Loopstra's own files that must be committed on `main` for the loop's checkouts (worktrees) to see
  * them: the config, the prompts, and, when init wired the test-protection hook, the settings and the
- * hook. Returns the ones that are missing from main, the prompts folder as one entry.
+ * hook. Returns the ones that are missing from main, the prompts folder as one entry. Only the
+ * prompts are looked at (`<name>.md`, the only files read there): a .DS_Store, an editor's swap file
+ * or a subfolder is not setup.
  */
 export async function uncommittedSetup(root: string, main: string): Promise<string[]> {
-  const prompts = existsSync(join(root, "loopstra", "prompts")) ? readdirSync(join(root, "loopstra", "prompts")).map((n) => `loopstra/prompts/${n}`) : [];
+  const dir = join(root, "loopstra", "prompts");
+  const prompts = existsSync(dir)
+    ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith(".md") && !e.name.startsWith(".")).map((e) => `loopstra/prompts/${e.name}`)
+    : [];
   const settings = join(root, ".claude", "settings.json");
   const hooked = existsSync(settings) && (await Bun.file(settings).text()).includes(HOOK_MARK);
   const wanted = ["loopstra/config.yaml", ...prompts, ...(hooked ? [".claude/settings.json", HOOK_FILE] : [])];
