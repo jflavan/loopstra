@@ -537,4 +537,27 @@ describe("worktree administration", () => {
       repo.cleanup();
     }
   });
+
+  test.if(process.platform === "win32")("a teardown Windows refuses never hides the work's result (Windows)", async () => {
+    const repo = await tempGitRepo();
+    let child = null as ReturnType<typeof Bun.spawn<"pipe", "ignore", "ignore">> | null;
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "verify", "x");
+      // A process the work left running in the copy (a test runner, a server): Windows will not delete the folder it runs in.
+      const r = await withDetachedWorktree(git, dir, "main", async (cwd) => {
+        child = Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.stdin.text()"], cwd, stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+        await Bun.sleep(300);
+        return "passed";
+      });
+      expect(r).toBe("passed");
+      child!.stdin.end();
+      await child!.exited;
+      // What was left is removed by the next add at that path.
+      expect(await withDetachedWorktree(git, dir, "main", async (cwd) => existsSync(join(cwd, "README.md")))).toBe(true);
+    } finally {
+      child?.kill();
+      repo.cleanup();
+    }
+  });
 });
