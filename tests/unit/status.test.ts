@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { attention } from "../../src/attention";
 import { renderStatus } from "../../src/commands/status";
 import { configPath, loadConfig } from "../../src/config";
+import { recordGitHub } from "../../src/github";
 import { holdLoop, pauseAfterUnavailable } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
@@ -175,6 +176,29 @@ describe("attention", () => {
         });
         const paused = items.filter((i) => i.kind === "paused");
         expect(paused.map((i) => i.title)).toEqual(["Paused by John", "Loopstra is paused"]);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("GitHub not answering is in the list only while a change watches its pull request", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "a", "status: merged");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        recordGitHub(trace, "HTTP 401: Bad credentials");
+        const github = async () => (await attention(t.path, await loadConfig(t.path), trace, new Date(Date.now() + 20 * 60_000))).filter((i) => i.label === "GitHub");
+        // The last look failed, then the change left merge-review: nothing asks GitHub any more.
+        expect(await github()).toEqual([]);
+        await intent(t.path, "a", "status: merge-review");
+        expect((await github()).length).toBe(1);
+        await intent(t.path, "a", "status: merge-approved");
+        expect((await github()).length).toBe(1);
       } finally {
         trace.close();
       }

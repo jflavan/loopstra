@@ -2,7 +2,7 @@ import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
-import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
@@ -94,9 +94,11 @@ export async function attention(root: string, config: Config | { problem: string
   const sync = trace.lastSignal(SYNC_SIGNAL);
   if (sync && (sync.result === "fail" || sync.result === "waiting")) add("sync", null, "Main and GitHub", sync.output);
   // GitHub not answering about pull requests (gh signed out, a token it no longer takes): a passing
-  // hiccup needs nobody, so only once it has lasted. The words stay the same while it lasts.
+  // hiccup needs nobody, so only once it has lasted. The words stay the same while it lasts. Only
+  // while a change watches its pull request: with none, nothing asks GitHub and the last look's
+  // failure is no news (the loop stopped after it, or the change moved on).
   const since = trace.failingSince(GITHUB_SIGNAL);
-  if (since && now.getTime() - Date.parse(since) >= GITHUB_SILENT_MS) {
+  if (since && now.getTime() - Date.parse(since) >= GITHUB_SILENT_MS && intents.some((i) => WATCHING_PR.has(i.file.frontmatter.status))) {
     add("sync", null, "GitHub", `GitHub hasn't answered for 15 minutes: ${trace.lastSignal(GITHUB_SIGNAL)!.output}`);
   }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);

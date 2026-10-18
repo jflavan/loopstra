@@ -11,7 +11,7 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -208,9 +208,6 @@ export async function tick(root: string): Promise<TickResult> {
     trace.close();
   }
 }
-
-/** Statuses whose merge step only watches the pull request (with a remote): the watcher's, never a lane's. */
-const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approved"]);
 
 /**
  * One lane: it takes the first of the tick's runnable changes no lane has taken, and runs its step.

@@ -399,6 +399,9 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
 /** Statuses whose code is in main (the change's worktree and branch are no longer needed). */
 export const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
 
+/** Statuses whose merge step only watches the pull request (with a remote): the watcher's, never a lane's. */
+export const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approved"]);
+
 /**
  * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
  * (for example at verify; `resume_from` then still says merged).
