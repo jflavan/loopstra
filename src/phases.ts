@@ -12,7 +12,7 @@ import { promptPath, renderPrompt, type PromptVars } from "./prompts";
 import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { assertNoCheckoutLock, assertNoLock } from "./lanes";
+import { assertNoCheckoutLock, assertNoLock, slotEnv } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
@@ -28,6 +28,9 @@ import { toolTarget } from "./tools";
  * `claude.allowed_tools` plus every configured project command, install included.
  */
 export type ToolSet = "read" | "read+git" | "read+commands" | "build";
+
+/** The tool sets whose sessions may run the project's commands. */
+const RUNS_COMMANDS: ReadonlySet<ToolSet> = new Set(["read+commands", "build"]);
 
 export interface AgentPhaseSpec {
   name: PhaseName;
@@ -455,7 +458,11 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: capUsd,
       resume: spec.resume,
-      env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
+      // A session that may run the project's commands gets the change's slot, as its commands do.
+      env: {
+        LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog,
+        ...(RUNS_COMMANDS.has(spec.tools) ? slotEnv(ctx.slug) : {}), ...(spec.env ?? {}),
+      },
       signal,
       // Live: what people send this session while it runs reaches it (see src/steering.ts).
       live: { attach: (ctl) => deliverInbox(ctx, seq, spec.name, ctl) },
@@ -584,7 +591,7 @@ export async function projectCommand(
   const where = opts.where ? { where: opts.where } : {};
   let r: CommandResult;
   try {
-    r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug }, timeoutMs: commandTimeoutMs(on.cfg), signal: opts.signal ?? cancelSignal() });
+    r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug, ...slotEnv(on.slug) }, timeoutMs: commandTimeoutMs(on.cfg), signal: opts.signal ?? cancelSignal() });
   } catch (e) {
     if (e instanceof Cancelled) on.trace.event(on.slug, "command", { command, note: e.message, ...where }, opts.seq);
     throw e;

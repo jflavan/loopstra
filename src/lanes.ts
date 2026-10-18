@@ -149,7 +149,7 @@ export function assertNoCheckoutLock(where: string): void {
   if ([...heldLocks().keys()].some((n) => n.startsWith("checkout:"))) throw new Error(`${where} ran while holding a checkout lock, a programming error.`);
 }
 
-/** The changes running a step now (a lane's, or the pull request watcher's). */
+/** The changes running a step now (a lane's, the thinker's, or the pull request watcher's). */
 const claimed = new Set<string>();
 
 /** Claims a change for one step: false when it is claimed already. */
@@ -159,12 +159,47 @@ export function claim(slug: string): boolean {
   return true;
 }
 
+/** The claimed changes whose step runs none of the project's commands (a design or plan step). */
+const noCommands = new Set<string>();
+
+/** Marks a claimed change's step as one that runs none of the project's commands, until it is released. */
+export function runsNoCommands(slug: string): void {
+  if (claimed.has(slug)) noCommands.add(slug);
+}
+
+/** The slot of each claimed change that has asked for one (see slotEnv). */
+const slots = new Map<string, number>();
+
+/**
+ * LOOPSTRA_SLOT for a claimed change's commands and sessions that run them: the lowest number (from 0)
+ * no other claimed change holds, the same for the rest of its step. A project picks its ports,
+ * database and Docker project names from it, so changes running at the same time never share them.
+ * Empty for a change that is not claimed (main's health check runs alone, at a tick's start).
+ */
+export function slotEnv(slug: string): { LOOPSTRA_SLOT?: string } {
+  if (!claimed.has(slug)) return {};
+  let slot = slots.get(slug);
+  if (slot === undefined) {
+    const held = new Set(slots.values());
+    for (slot = 0; held.has(slot); slot++);
+    slots.set(slug, slot);
+  }
+  return { LOOPSTRA_SLOT: String(slot) };
+}
+
 /** Releases a change's claim once its step has ended. */
 export function release(slug: string): void {
   claimed.delete(slug);
+  noCommands.delete(slug);
+  slots.delete(slug);
 }
 
 /** How many claimed changes there are besides this one. */
 export function othersRunning(slug: string): number {
   return claimed.size - (claimed.has(slug) ? 1 : 0);
+}
+
+/** How many claimed changes besides this one may run the project's commands (see runsNoCommands). */
+export function othersRunningCommands(slug: string): number {
+  return [...claimed].filter((s) => s !== slug && !noCommands.has(s)).length;
 }

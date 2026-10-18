@@ -27,7 +27,7 @@ describe("loadConfig", () => {
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     // Judges overlap by default; project commands share folders in some projects, so they do not.
     // One change at a time unless the owner says the project's commands can run side by side.
-    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off", max_parallel_changes: 1 });
+    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off", think_ahead: true, max_parallel_changes: 1 });
     t.cleanup();
   });
 
