@@ -7,7 +7,7 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release, runsNoCommands } from "./lanes";
-import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, loopAlreadyRunning, loopHoldText, pauseAfterUnavailable, pidAlive, readHeartbeat, readLoopHold, startHeartbeat, takeLoopLock, type LoopBeat } from "./heartbeat";
+import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopAlreadyRunning, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, runningLoopPid, startHeartbeat, takeLoopLock, type LoopBeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
@@ -883,11 +883,9 @@ export async function preflight(root: string, env: Record<string, string | undef
   const older = olderSetupRefusal(root, "run loopstra start again");
   if (older) return older;
   const cfg = await loadConfig(root).catch(() => null);
-  // Its heartbeat also shows a loop started from another machine sharing the folder (WSL, say),
-  // whose process is not here. Not responding, with its process alive, it may still be running.
-  const hb = readHeartbeat(root);
-  const loop = heartbeatState(hb, cfg?.poll_seconds ?? 60).state;
-  if (hb && (loop === "running" || loop === "paused" || loop === "not-responding")) return loopAlreadyRunning(hb.pid);
+  // By its heartbeat, which also shows a loop started from another machine sharing the folder (WSL, say).
+  const running = runningLoopPid(root, cfg?.poll_seconds ?? 60);
+  if (running !== null) return loopAlreadyRunning(running);
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;
   if (!cfg) return null;
@@ -954,11 +952,11 @@ export function log(line: string): void {
 /**
  * The loop. It never dies: each tick is guarded, a problem is traced, and the next tick comes.
  * Ctrl-C asks for a stop (the running step is interrupted and resumes on the next start); a
- * second Ctrl-C exits at once. It holds the loop's lock while it runs, so a second start in the
- * repository returns the refusal instead of running; null when it ran.
+ * second Ctrl-C exits at once. It holds the loop's lock while it runs (see takeLoopLock). Returns
+ * the refusal when another loop holds the lock, or null once the loop has run.
  */
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
-  const refused = takeLoopLock(root);
+  const refused = await takeLoopLock(root, await loadConfig(root).then((c) => c.poll_seconds, () => 60));
   if (refused) return refused;
   let beat: LoopBeat | null = null;
   // A second Ctrl-C exits at once, past every finally: the lock goes and the heartbeat says stopped on the way out.

@@ -6,7 +6,7 @@ import type { StepContext } from "../../src/context";
 import { Git, passOn, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
-import { holdLoop, loopAlreadyRunning, readPause, releaseLoop, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
+import { holdLoop, loopAlreadyRunning, readPause, releaseLoop, thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
@@ -449,7 +449,7 @@ describe("scheduler resilience", () => {
       ({ pid: process.pid, startedAt: at(600_000), lastTickAt: at(20_000), lastBeatAt: at(1_000), current: null, stopping: false, stopped: false, ...over });
     try {
       const refused = loopAlreadyRunning(process.pid);
-      expect(refused).toBe(`A loop is already running in this repository (process ${process.pid}). Stop it (Ctrl-C in its terminal) before starting another.`);
+      expect(refused).toBe(`A loop is already running in this repository (process ${process.pid}). Stop it (Ctrl-C in its terminal) before starting another. If no loop is running here, delete .loopstra/loop.lock and .loopstra/heartbeat.json, then start again.`);
       expect(await preflight(repo.path)).toBeNull();
       writeHeartbeat(repo.path, beat());
       expect(await preflight(repo.path)).toBe(refused);
@@ -464,6 +464,12 @@ describe("scheduler resilience", () => {
       expect(await preflight(repo.path)).toBeNull();
       writeHeartbeat(repo.path, beat({ pid: dead.pid, lastBeatAt: at(3_600_000) }));
       expect(await preflight(repo.path)).toBeNull();
+      // Fresh, but written on this machine by a process that is gone (its window closed, say): it may start at once.
+      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: thisHost() }));
+      expect(await preflight(repo.path)).toBeNull();
+      // Fresh from another machine sharing the folder: its process id says nothing here.
+      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: "elsewhere" }));
+      expect(await preflight(repo.path)).toBe(loopAlreadyRunning(dead.pid));
     } finally {
       trace.close(); repo.cleanup();
     }

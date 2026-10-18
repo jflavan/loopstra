@@ -1,4 +1,5 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
@@ -14,6 +15,8 @@ import { andList } from "./text";
  */
 export interface Heartbeat {
   pid: number;
+  /** The machine it was written on (see thisHost); missing in older heartbeats. */
+  host?: string;
   startedAt: string;
   /** The start or end of the newest tick; null before the first one. Shown as "last check". */
   lastTickAt: string | null;
@@ -137,68 +140,121 @@ export async function loopStatusLine(root: string): Promise<string> {
 
 /** What start says when a loop is already running in the repository; `pid` is its process, when known. */
 export function loopAlreadyRunning(pid: number | null): string {
-  return `A loop is already running in this repository${pid === null ? "" : ` (process ${pid})`}. Stop it (Ctrl-C in its terminal) before starting another.`;
+  return `A loop is already running in this repository${pid === null ? "" : ` (process ${pid})`}. Stop it (Ctrl-C in its terminal) before starting another. If no loop is running here, delete .loopstra/loop.lock and .loopstra/heartbeat.json, then start again.`;
 }
 
 /**
- * The loop's lock, `.loopstra/loop.lock` (`{ pid, startedAt }`): one loop per repository. The
- * heartbeat says a loop is running, but two starts can both read it before either writes one; the
- * lock is made with an exclusive create, so only one of them gets it.
+ * This machine, as the heartbeat and the loop's lock record it, so a process id is only checked
+ * where it means something. The platform is part of it: WSL takes the Windows machine's name, and
+ * a folder both share would otherwise look like one machine. On Linux the machine id tells WSL
+ * distributions (and containers) on one machine apart.
+ */
+export function thisHost(): string {
+  let id = "";
+  if (process.platform === "linux") {
+    try { id = readFileSync("/etc/machine-id", "utf8").trim().slice(0, 12); } catch { /* none: the name alone */ }
+  }
+  return [process.platform, hostname(), id].filter(Boolean).join("/");
+}
+
+/**
+ * The process of the loop running in this repository, by its heartbeat, or null when none is:
+ * running, paused, or not responding. A heartbeat written on this machine whose process is gone is
+ * a loop that ended (closed window, killed, crashed) at once; one from another machine sharing the
+ * folder, or an older one without its machine, counts as running until it goes stale.
+ */
+export function runningLoopPid(root: string, pollSeconds: number): number | null {
+  const hb = readHeartbeat(root);
+  if (!hb || (hb.host === thisHost() && !pidAlive(hb.pid))) return null;
+  return heartbeatState(hb, pollSeconds).state === "stopped" ? null : hb.pid;
+}
+
+/**
+ * The loop's lock, `.loopstra/loop.lock` (`{ pid, host, startedAt }`): one loop per repository. Two
+ * starts can both pass the heartbeat check before either writes a heartbeat; the lock is linked into
+ * place whole and only when no file is there, so only one of them gets it.
  */
 export function loopLockPath(root: string): string {
   return join(root, ".loopstra", "loop.lock");
 }
 
-/** Makes the lock for this process; false when the file is already there. */
+interface LoopLock { pid: number; host?: string; startedAt?: string }
+
+/**
+ * Makes the lock for this process: written to a temp file, then hard-linked into place, which fails
+ * when the lock is there. A reader never sees it half-written. False when it was already there.
+ */
 function createLoopLock(path: string): boolean {
-  let fd: number;
+  const tmp = `${path}.${process.pid}.tmp`;
   try {
-    fd = openSync(path, "wx");
+    writeFileSync(tmp, JSON.stringify({ pid: process.pid, host: thisHost(), startedAt: new Date().toISOString() }));
+    linkSync(tmp, path);
+    return true;
   } catch (e) {
     if ((e as { code?: string })?.code === "EEXIST") return false;
     throw e;
-  }
-  try {
-    writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   } finally {
-    closeSync(fd);
+    rmSync(tmp, { force: true });
   }
-  return true;
 }
 
-/** The pid in the lock file, or null when there is none or it cannot be read. */
-function loopLockPid(path: string): number | null {
+/** The lock file's text, or null when there is none. */
+function lockText(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
+}
+
+/** The lock in `text`, or null when it cannot be read (a damaged file). */
+function parseLock(text: string | null): LoopLock | null {
   try {
-    const pid = (JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown })?.pid;
-    return typeof pid === "number" ? pid : null;
+    const lock = JSON.parse(text ?? "") as LoopLock;
+    return typeof lock?.pid === "number" ? lock : null;
   } catch {
     return null;
   }
 }
 
+/** How long a start that took over a lock waits before reading it back. */
+const TAKEOVER_SETTLE_MS = 50;
+
 /**
- * Takes the loop's lock for this process. Returns null when it has it, or the refusal when a live
- * process holds it. A lock whose process is gone (a crashed loop), or that cannot be read, is
- * removed and taken once more.
+ * Takes the loop's lock for this process. Returns null when it has it, or the refusal. A live
+ * process on this machine holding it refuses. A lock left behind is taken over: its process is
+ * gone (on this machine), it cannot be read, or it is from another machine whose loop the heartbeat
+ * says is not running (`pollSeconds` judges that). Two starts taking over the same lock can each
+ * remove it and link their own, so a takeover reads the lock back after a moment and keeps it only
+ * when it still names this process. A problem making the file refuses in plain words.
  */
-export function takeLoopLock(root: string): string | null {
+export async function takeLoopLock(root: string, pollSeconds = 60): Promise<string | null> {
   const path = loopLockPath(root);
-  mkdirSync(join(root, ".loopstra"), { recursive: true });
-  if (createLoopLock(path)) return null;
-  const pid = loopLockPid(path);
-  if (pid !== null && pidAlive(pid)) return loopAlreadyRunning(pid);
-  rmSync(path, { force: true });
-  if (createLoopLock(path)) return null;
-  // Another start took it in between.
-  return loopAlreadyRunning(loopLockPid(path));
+  try {
+    mkdirSync(join(root, ".loopstra"), { recursive: true });
+    if (createLoopLock(path)) return null;
+    const seen = lockText(path);
+    const lock = parseLock(seen);
+    if (lock) {
+      const here = (lock.host ?? thisHost()) === thisHost();
+      if (here ? pidAlive(lock.pid) : runningLoopPid(root, pollSeconds) !== null) return loopAlreadyRunning(lock.pid);
+    }
+    // Another start may have taken it over since it was read.
+    if (lockText(path) !== seen) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
+    rmSync(path, { force: true });
+    if (!createLoopLock(path)) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
+    await Bun.sleep(TAKEOVER_SETTLE_MS);
+    const mine = parseLock(lockText(path));
+    if (mine?.pid === process.pid && mine.host === thisHost()) return null;
+    return loopAlreadyRunning(mine?.pid ?? null);
+  } catch (e) {
+    return `Could not make the loop's lock, .loopstra/loop.lock (${(e as Error)?.message ?? String(e)}). Check that the folder can be written, then start again.`;
+  }
 }
 
 /** Lets go of the loop's lock, when this process holds it. Never throws. */
 export function dropLoopLock(root: string): void {
   const path = loopLockPath(root);
   try {
-    if (loopLockPid(path) === process.pid) rmSync(path, { force: true });
-  } catch { /* the next start finds this process gone and takes it over */ }
+    const lock = parseLock(lockText(path));
+    if (lock?.pid === process.pid && lock.host === thisHost()) rmSync(path, { force: true });
+  } catch { /* the next start on this machine finds this process gone and takes it over */ }
 }
 
 /**
@@ -395,7 +451,7 @@ export function heartbeatDayPause(root: string, p: DayPause | null): void {
  */
 export function startHeartbeat(root: string, beatMs = BEAT_MS): LoopBeat {
   const at = () => new Date().toISOString();
-  const hb: Heartbeat = { pid: process.pid, startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, working: [], stopping: false, stopped: false };
+  const hb: Heartbeat = { pid: process.pid, host: thisHost(), startedAt: at(), lastTickAt: null, lastBeatAt: at(), current: null, working: [], stopping: false, stopped: false };
   let day: DayPause | null = null;
   const setWorking = (slugs: string[]) => {
     hb.working = slugs;
