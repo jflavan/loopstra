@@ -32,7 +32,12 @@ export function nextTheme(current: Theme, systemDark: boolean): Theme {
 export function cycleTheme(): void {
   const systemDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
   const next = nextTheme(theme.value, systemDark);
-  theme.value = next;
-  applyTheme(next);
+  const swap = () => {
+    theme.value = next;
+    applyTheme(next);
+  };
+  // The page cross-fades into the new theme, where the browser can, instead of flashing from dark to light.
+  if (typeof document.startViewTransition === "function") document.startViewTransition(swap);
+  else swap();
   try { localStorage.setItem(KEY, next); } catch { /* kept for this visit only */ }
 }
