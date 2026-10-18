@@ -10,10 +10,21 @@ export const GITHUB_SIGNAL = "github";
 /** How long GitHub may go unanswered before a person is told (see attention). */
 export const GITHUB_SILENT_MS = 15 * 60_000;
 
+/** Ids that change on every call: a request id (hex groups joined by colons or dashes), a long hex or number. */
+const CALL_IDS = /\b(?=[0-9a-f:-]*\d)[0-9a-f]+(?:[:-][0-9a-f]+){2,}\b|\b(?=[0-9a-f]*\d)[0-9a-f]{6,}\b/gi;
+
+/**
+ * gh's error the same from one look to the next, as a person reads it: its first line, with the ids
+ * that change on every call (a request id, say) put as "…".
+ */
+export function ghProblem(error: string): string {
+  return (error.trim().split(/\r?\n/)[0] ?? "").replace(CALL_IDS, "…");
+}
+
 /**
  * Records a look at GitHub (`error`: gh's error, or null when it answered) as the `github` signal,
- * only when that differs from the last one: a lasting problem (a token GitHub no longer takes) is
- * one line in the trace, not one per look.
+ * only when that differs from the last one (gh's words, not the ids that change on every call; see
+ * ghProblem): a lasting problem (a token GitHub no longer takes) is one line in the trace, not one per look.
  */
 export function recordGitHub(trace: Trace, error: string | null): void {
   const last = trace.lastSignal(GITHUB_SIGNAL);
@@ -21,7 +32,7 @@ export function recordGitHub(trace: Trace, error: string | null): void {
     if (last?.result === "fail") trace.signal(GITHUB_SIGNAL, "pass", "GitHub answers again.");
     return;
   }
-  if (last?.result === "fail" && last.output === error) return;
+  if (last?.result === "fail" && ghProblem(last.output) === ghProblem(error)) return;
   trace.signal(GITHUB_SIGNAL, "fail", error);
 }
 

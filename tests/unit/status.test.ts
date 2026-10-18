@@ -197,6 +197,12 @@ describe("attention", () => {
         expect(await github()).toEqual([]);
         await intent(t.path, "a", "status: merge-review");
         expect((await github()).length).toBe(1);
+        // gh's words without the request id that changes every call, and a title that does not repeat the label.
+        recordGitHub(trace, "GraphQL: Something went wrong. Please include `C8F2:3A9B:1D2E3F:4A5B6C:6713F0A2` when reporting this issue.");
+        expect(await github()).toEqual([{
+          kind: "sync", label: "GitHub", slug: null, title: "Not answering",
+          what: "GitHub hasn't answered for 15 minutes: GraphQL: Something went wrong. Please include `…` when reporting this issue.",
+        }]);
         await intent(t.path, "a", "status: merge-approved");
         expect((await github()).length).toBe(1);
       } finally {

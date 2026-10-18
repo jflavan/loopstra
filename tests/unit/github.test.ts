@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checksFromRows, GitHub } from "../../src/github";
+import { checksFromRows, ghProblem, GitHub, GITHUB_SIGNAL, recordGitHub } from "../../src/github";
+import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
 const FAKE = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -147,4 +148,30 @@ describe("GitHub", () => {
     await expect(gh.comment(1, "x")).rejects.toThrow();
     t.cleanup();
   }, 30_000);
+
+  test("gh's error reads the same from one look to the next: its first line, without the ids that change every call", () => {
+    expect(ghProblem("HTTP 401: Bad credentials (https://api.github.com/graphql)")).toBe("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+    expect(ghProblem("GraphQL: Something went wrong while executing your query. Please include `C8F2:3A9B:1D2E3F:4A5B6C:6713F0A2` when reporting this issue.\nmore"))
+      .toBe("GraphQL: Something went wrong while executing your query. Please include `…` when reporting this issue.");
+    expect(ghProblem("HTTP 502: Bad Gateway (request 4f9c2a17-03be-4d0e-9a21-5c7e8f0b1d22)")).toBe("HTTP 502: Bad Gateway (request …)");
+    expect(ghProblem("HTTP 500: server error, trace 98213377 at 3f2a91cbe0")).toBe("HTTP 500: server error, trace … at …");
+  });
+
+  test("a look's failure is a new github row only when its words change, not its request id", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path, () => {});
+    try {
+      const rows = () => trace.signals(50).filter((s) => s.name === GITHUB_SIGNAL).map((s) => s.result);
+      recordGitHub(trace, "GraphQL: Something went wrong. Please include `C8F2:3A9B:1D2E3F:4A5B6C:6713F0A2` when reporting this issue.");
+      recordGitHub(trace, "GraphQL: Something went wrong. Please include `0D11:7E2C:9F3A4B:1C2D3E:6713F0B9` when reporting this issue.");
+      expect(rows()).toEqual(["fail"]);
+      recordGitHub(trace, "HTTP 401: Bad credentials");
+      expect(rows()).toEqual(["fail", "fail"]);
+      recordGitHub(trace, null);
+      expect(rows()).toEqual(["pass", "fail", "fail"]);
+    } finally {
+      trace.close();
+      t.cleanup();
+    }
+  });
 });

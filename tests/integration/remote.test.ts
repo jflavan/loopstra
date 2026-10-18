@@ -557,13 +557,13 @@ describe("the loop with a GitHub remote", () => {
       expect((await intentOf(s.repo)).status).toBe("merge-review");
       expect(github().map((x) => [x.result, x.output])).toEqual([["fail", AUTH]]);
       expect(inTrace(s.repo, (t) => t.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("Bad credentials")))).toEqual([]);
-      expect((await needs(0)).filter((i) => i.title === "GitHub")).toEqual([]);
-      expect((await needs(20)).filter((i) => i.title === "GitHub")).toEqual([
-        { kind: "sync", label: "GitHub", slug: null, title: "GitHub", what: `GitHub hasn't answered for 15 minutes: ${AUTH}` },
+      expect((await needs(0)).filter((i) => i.title === "Not answering")).toEqual([]);
+      expect((await needs(20)).filter((i) => i.title === "Not answering")).toEqual([
+        { kind: "sync", label: "GitHub", slug: null, title: "Not answering", what: `GitHub hasn't answered for 15 minutes: ${AUTH}` },
       ]);
       await tick(s.repo);
       expect(github().map((x) => x.result)).toEqual(["pass", "fail"]);
-      expect((await needs(20)).filter((i) => i.title === "GitHub")).toEqual([]);
+      expect((await needs(20)).filter((i) => i.title === "Not answering")).toEqual([]);
     });
     s.cleanup();
   }, 180_000);

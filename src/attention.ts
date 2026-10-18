@@ -1,6 +1,6 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
-import { GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
+import { ghProblem, GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
 import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
 import { readQuestion, type Asked } from "./questions";
@@ -99,7 +99,7 @@ export async function attention(root: string, config: Config | { problem: string
   // failure is no news (the loop stopped after it, or the change moved on).
   const since = trace.failingSince(GITHUB_SIGNAL);
   if (since && now.getTime() - Date.parse(since) >= GITHUB_SILENT_MS && intents.some((i) => WATCHING_PR.has(i.file.frontmatter.status))) {
-    add("sync", null, "GitHub", `GitHub hasn't answered for 15 minutes: ${trace.lastSignal(GITHUB_SIGNAL)!.output}`);
+    add("sync", null, "Not answering", `GitHub hasn't answered for 15 minutes: ${ghProblem(trace.lastSignal(GITHUB_SIGNAL)!.output)}`);
   }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);
 
