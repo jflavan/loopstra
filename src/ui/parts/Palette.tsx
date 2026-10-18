@@ -15,6 +15,7 @@ function commands(): Command[] {
     { id: "inbox", title: "Go to Inbox", hint: "g i", run: () => navigate("/inbox") },
     { id: "changes", title: "Go to Changes", hint: "g c", run: () => navigate("/changes") },
     { id: "activity", title: "Go to Activity", hint: "g a", run: () => navigate("/activity") },
+    { id: "agents", title: "Go to Agents", hint: "g w", run: () => navigate("/agents") },
     { id: "spend", title: "Go to Spend", hint: "g s", run: () => navigate("/spend") },
     { id: "ask", title: "Ask the orchestrator", hint: keyLabel("mod+j", onMac), run: () => openDrawer() },
     { id: "theme", title: "Change the theme", run: cycleTheme },

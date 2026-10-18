@@ -4,6 +4,8 @@ const PATHS: Record<string, string> = {
   inbox: "M4 13l2-8h12l2 8M4 13v6h16v-6M4 13h5l1 2h4l1-2h5",
   changes: "M4 5h4v14H4zM10 5h4v9h-4zM16 5h4v6h-4z",
   activity: "M5 6h14M5 12h14M5 18h9",
+  agents: "M4 5h7v6H4zM13 5h7v6h-7zM4 13h7v6H4zM13 13h7v6h-7z",
+  open: "M14 4h6v6M20 4l-9 9M18 14v5H5V6h5",
   spend: "M12 3v18M16.5 7.5c0-1.7-2-3-4.5-3s-4.5 1.3-4.5 3 2 2.6 4.5 3 4.5 1.3 4.5 3-2 3-4.5 3-4.5-1.3-4.5-3",
   ask: "M4 5h16v11H9l-5 4z",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",

@@ -54,13 +54,14 @@ describe("routes", () => {
   test("paths become screens and back", () => {
     expect(parseRoute("/")).toEqual({ name: "live" });
     expect(parseRoute("/inbox")).toEqual({ name: "inbox" });
+    expect(parseRoute("/agents")).toEqual({ name: "agents" });
     expect(parseRoute("/c/csv-export")).toEqual({ name: "change", slug: "csv-export", tab: "overview" });
     expect(parseRoute("/c/csv-export/code")).toEqual({ name: "change", slug: "csv-export", tab: "code" });
     expect(parseRoute("/s/csv-export/12")).toEqual({ name: "session", slug: "csv-export", seq: 12 });
     expect(parseRoute("/s/_chat/3")).toEqual({ name: "session", slug: "_chat", seq: 3 });
     for (const bad of ["/c/Bad", "/c/one/nope", "/s/one/x", "/nope", "/c/one/code/more", "/c/%E0%A4%A"]) expect(parseRoute(bad)).toEqual({ name: "missing", path: bad });
     const all: Route[] = [
-      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "spend" },
+      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "agents" }, { name: "spend" },
       { name: "change", slug: "a", tab: "overview" }, { name: "change", slug: "a", tab: "gates" }, { name: "session", slug: "a", seq: 4 },
     ];
     for (const r of all) expect(parseRoute(routePath(r))).toEqual(r);

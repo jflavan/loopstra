@@ -13,6 +13,7 @@ import { installKeys } from "./shortcuts";
 import { connect, connection } from "./store";
 import { applyTheme, theme } from "./theme";
 import { Activity } from "./views/Activity";
+import { Agents } from "./views/Agents";
 import { Change } from "./views/Change";
 import { Changes } from "./views/Changes";
 import { Inbox } from "./views/Inbox";
@@ -29,6 +30,7 @@ function Screen() {
     case "change": return <Change key={r.slug} slug={r.slug} tab={r.tab} />;
     case "session": return <Session key={`${r.slug}/${r.seq}`} slug={r.slug} seq={r.seq} />;
     case "activity": return <Activity />;
+    case "agents": return <Agents />;
     case "spend": return <Spend />;
     case "missing":
       return (

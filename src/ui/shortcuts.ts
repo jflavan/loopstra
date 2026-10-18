@@ -9,6 +9,7 @@ export const SHORTCUTS: Array<Binding & { label: string }> = [
   { keys: "g i", action: "go:/inbox", label: "Go to Inbox" },
   { keys: "g c", action: "go:/changes", label: "Go to Changes" },
   { keys: "g a", action: "go:/activity", label: "Go to Activity" },
+  { keys: "g w", action: "go:/agents", label: "Go to Agents" },
   { keys: "g s", action: "go:/spend", label: "Go to Spend" },
   { keys: "?", action: "help", label: "Show these keys" },
   { keys: "escape", action: "escape", label: "Close what is open" },

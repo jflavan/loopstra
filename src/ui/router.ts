@@ -4,7 +4,7 @@ export type Tab = "overview" | "documents" | "timeline" | "code" | "gates";
 export const TABS: readonly Tab[] = ["overview", "documents", "timeline", "code", "gates"];
 
 export type Route =
-  | { name: "live" } | { name: "inbox" } | { name: "changes" } | { name: "activity" } | { name: "spend" }
+  | { name: "live" } | { name: "inbox" } | { name: "changes" } | { name: "activity" } | { name: "agents" } | { name: "spend" }
   | { name: "change"; slug: string; tab: Tab }
   | { name: "session"; slug: string; seq: number }
   | { name: "missing"; path: string };
@@ -19,7 +19,7 @@ export function parseRoute(path: string): Route {
   if (parts.some((p) => p === null)) return missing;
   const [a, b, c] = parts as string[];
   if (!a) return { name: "live" };
-  if (parts.length === 1 && (a === "inbox" || a === "changes" || a === "activity" || a === "spend")) return { name: a };
+  if (parts.length === 1 && (a === "inbox" || a === "changes" || a === "activity" || a === "agents" || a === "spend")) return { name: a };
   if (a === "c" && b && ANY_SLUG.test(b) && !b.startsWith("_") && parts.length <= 3) {
     if (!c) return { name: "change", slug: b, tab: "overview" };
     if ((TABS as readonly string[]).includes(c)) return { name: "change", slug: b, tab: c as Tab };
