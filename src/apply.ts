@@ -75,6 +75,9 @@ export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<
 /** The roots whose loop has settled the main checkout this run (see armApplier). */
 const armed = new Set<string>();
 
+/** How long after a watch event that found nothing waiting the applier looks again (see startApplier). */
+const RENAME_SETTLE_MS = 200;
+
 /**
  * Lets the applier at `root` apply requests. The tick calls it once it has applied requests itself:
  * by then a move of main that a kill cut short has been put back, and the checkout is on main.
@@ -119,7 +122,10 @@ export function startApplier(root: string, opts: { everyMs?: number } = {}): { s
       const w = watch(dir, () => {
         // A deleted folder's watcher fires without end (Bun on Windows): drop it, the timer watches again.
         if (!existsSync(dir)) return unwatch(w);
-        if (newRequestWaiting(root)) pass();
+        if (newRequestWaiting(root)) return pass();
+        // macOS may report only the temporary file's creation and fold the rename into it: look
+        // once more when the rename has had time to land.
+        setTimeout(() => { if (!stopped && newRequestWaiting(root)) pass(); }, RENAME_SETTLE_MS);
       });
       w.on("error", () => unwatch(w));
       watcher = w;
@@ -211,20 +217,24 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
  * answer's only when its intent.md is put back too, as for its stored answer). Only an intent.md that still holds exactly what the request wrote: one
  * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
  * ownBefore), or one whose write an older request did not record, is left as it is; the person's
- * edit is what it says now.
+ * edit is what it says now. One as HEAD has it holds nothing to put back or keep: a failed commit
+ * puts its write back at once (see commitRecord), so only a loop killed between a write and its
+ * commit leaves one on disk.
  * Under the checkout lock, so it never meets a commit half way. Gives the slugs it left as they are,
  * or null (traced) when it could not be done: the request then stays claimed, and the next pass tries
  * it again.
  */
 async function putBack(root: string, main: string, trace: Trace, req: Request): Promise<string[] | null> {
   const slugs = (req.written ?? []).filter((s) => SLUG.test(s));
-  const kept = slugs.filter((s) => !stillOurs(root, req, s));
+  const ours = slugs.filter((s) => stillOurs(root, req, s));
+  const kept: string[] = [];
+  for (const s of slugs) if (!ours.includes(s) && !(await matchesHead(root, `intent/${s}/intent.md`))) kept.push(s);
   try {
     await onCheckout(root, async () => {
       const git = new Git(root);
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
+      for (const slug of ours) await asAtHead(git, root, `intent/${slug}/intent.md`);
       // An answer's record goes only with its intent.md: one kept (a person edited it) keeps its answer, and so the record of it.
       const recordGoes = writesRecord(req) && "slug" in req && slugs.includes(req.slug) && !(req.kind === "answer" && kept.includes(req.slug));
       if (recordGoes && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
@@ -354,8 +364,9 @@ function stillOurs(root: string, req: Request, slug: string): boolean {
 }
 
 /**
- * True when the request has written this slug's intent.md before (an earlier try whose commit
- * failed) and someone changed it since. An older request, with no hash, is never known to be.
+ * True when the request has written this slug's intent.md before (an earlier try the loop was
+ * killed in before its commit, or one whose failed commit put it back) and it changed since. An
+ * older request, with no hash, is never known to be.
  */
 function changedSince(root: string, req: Request, slug: string): boolean {
   return (req.written ?? []).includes(slug) && !!req.writtenHash?.[slug] && !stillOurs(root, req, slug);
@@ -378,13 +389,13 @@ function markWritten(root: string, req: Request, slug: string, own = true): void
 }
 
 /**
- * True when a write now would replace only what this request wrote before, or, on its first, only
- * what main has: a person's uncommitted edit would be under the write, and putting back HEAD's file
+ * True when a write now would replace only what this request wrote before (a try the loop was killed
+ * in before its commit), or only what main has (a first try, or one whose failed commit put the write
+ * back): otherwise a person's uncommitted edit would be under the write, and putting back HEAD's file
  * would lose it. Called inside commitRecord, under the checkout lock, before writing.
  */
 async function ownBefore(root: string, req: Request, slug: string): Promise<boolean> {
-  if ((req.written ?? []).includes(slug)) return stillOurs(root, req, slug);
-  return matchesHead(root, `intent/${slug}/intent.md`);
+  return stillOurs(root, req, slug) || matchesHead(root, `intent/${slug}/intent.md`);
 }
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
@@ -399,8 +410,8 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async () => {
     const intent = await readIntent(root, req.slug);
     const was = intent.file.frontmatter.status;
-    // Written by an earlier try of this request whose commit failed: commit it now.
-    const ours = was === "accepted" && (req.written ?? []).includes(req.slug);
+    // Written by an earlier try of this request the loop was killed in before its commit: commit it now.
+    const ours = stillOurs(root, req, req.slug);
     // Looked at even when an earlier try wrote it: a person may have edited it since (see ownBefore).
     const own = await ownBefore(root, req, req.slug);
     if (!ours && !(await writeIntent(intent, { status: "accepted", note: "" }, { expectStatus: "draft" }))) {
@@ -425,7 +436,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const dir = join(root, "intent", i.slug);
     const path = join(dir, "intent.md");
-    // Written by an earlier try of this request whose commit failed: that is ours, not someone else's
+    // Written by an earlier try of this request the loop was killed in before its commit: that is ours, not someone else's
     // (unless someone changed it since).
     const ours = (req.written ?? []).includes(i.slug) && !changedSince(root, req, i.slug);
     if (existsSync(path) && !ours) {
@@ -485,13 +496,14 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
 }
 
 /**
- * A status request whose change moved on. A send back whose write landed before a failed commit
- * kept its note in the run folder (see writeSentBack) and wrote its conversation.md entry: both go
- * too, or they would steer the next session though the send back never happened. An undo of a send
- * back takes its entry back likewise.
+ * A status request whose change moved on. A send back that wrote and never committed (the loop was
+ * killed before its commit, or its failed commit put intent.md back) kept its note in the run folder
+ * (see writeSentBack) and maybe its conversation.md entry: both go too, each only while it is still
+ * this request's, or they would steer the next session though the send back never happened. An undo
+ * of a send back takes its entry back likewise.
  */
 async function movedOn(root: string, main: string, trace: Trace, req: StatusRequest, status: Status): Promise<Outcome> {
-  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug);
+  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug, req.note.trim());
   if (writesRecord(req) && (req.written ?? []).includes(req.slug)) await putBackConversation(root, main, trace, req);
   traced(trace, req, "moved-on", { status });
   return { ok: false, status, text: `${req.slug} moved on to ${status}; nothing changed.` };
@@ -516,8 +528,9 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const was = found.intent.file.frontmatter.status;
   const to = targetOf(req);
-  // Written by an earlier try of this request whose commit failed: commit it now.
-  const ours = (req.written ?? []).includes(req.slug) && was === to;
+  // Written by an earlier try of this request the loop was killed in before its commit: commit it now. Not when the
+  // file holds another write: a failed commit put this one back, and another request's may have landed since.
+  const ours = stillOurs(root, req, req.slug);
   if (!ours && was !== req.expect) return movedOn(root, cfg.main_branch, trace, req, was);
   const problem = ours ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
@@ -582,8 +595,8 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
-  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as done.
-  const ours = (req.written ?? []).includes(req.slug);
+  // Written by an earlier try of this request the loop was killed in before its commit: write it and commit it now, not refuse it as done.
+  const ours = stillOurs(root, req, req.slug);
   if (!ours && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!ours && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
   // A priority of null takes the line out: the change had no stated priority.
@@ -610,8 +623,10 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
-  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as answered already.
-  const ours = (req.written ?? []).includes(req.slug);
+  // Written by an earlier try of this request that the loop was killed in before its commit: commit it now, not refuse it as
+  // answered already. Told by its conversation.md entry, which says who answered: every answer's intent.md is the same. A try
+  // whose failed commit put the write back left the question line (it is answered again); another answer since left its own entry.
+  const ours = !fm.question.trim() && recordStillOurs(root, req, req.slug);
   if (!ours && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
   // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
   if (!ours && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }

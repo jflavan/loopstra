@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
 import { tempDir } from "../helpers";
 
@@ -85,6 +85,29 @@ describe("removing a line", () => {
       expect(await writeIntent(i, {}, { expectStatus: "building", remove: ["hold"] })).toBe(true);
       expect(await Bun.file(join(t.path, "intent", "a", "intent.md")).text()).toBe("---\nstatus: building\n---\n# Intent: a\n");
       expect(i.file.frontmatter.hold).toBe("");
+      // A deleted change is not written back.
+      rmSync(join(t.path, "intent", "a"), { recursive: true });
+      expect(await writeIntent(i, { status: "closed" })).toBe(false);
+      expect(existsSync(join(t.path, "intent", "a"))).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("writeIntent replaces intent.md whole, never rewrites it in place, and leaves no temp file in the change's folder", async () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "intent", "a", "intent.md");
+      const before = "---\nstatus: building\n---\n# Intent: a\n";
+      mkdirSync(dirname(path), { recursive: true });
+      await Bun.write(path, before);
+      const i = await readIntent(t.path, "a");
+      const id = statSync(path, { bigint: true }).ino;
+      expect(await writeIntent(i, { status: "reviewing" })).toBe(true);
+      // Another file was renamed over it: a reader (the console, chat, a person's editor) never sees it emptied and half written.
+      expect(statSync(path, { bigint: true }).ino).not.toBe(id);
+      expect(await Bun.file(path).text()).toBe("---\nstatus: reviewing\n---\n# Intent: a\n");
+      expect(readdirSync(dirname(path))).toEqual(["intent.md"]);
     } finally {
       t.cleanup();
     }

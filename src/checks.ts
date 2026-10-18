@@ -24,7 +24,8 @@ const FILES_HEADING = /^##\s+files that change\b/i;
 
 /**
  * Reads the bullets under "## Files that change" (any case, with or without a trailing colon
- * or description). Each bullet's first token is the path; `**`, backticks, `./`, a trailing
+ * or description). Each bullet's first token is the path, or the whole of a back-quoted path (in
+ * one back-quote or more, as Markdown allows); a pair of `**` or `__` around it, `./`, a trailing
  * `:` or `,` and a description after it are ignored; `(new)` anywhere on the line marks it new.
  * Notes are skipped: a bullet that starts with a bare word followed by more words (prose), or
  * whose first token is a `file:line` or `file:a-b` reference.
@@ -40,8 +41,14 @@ export function parsePlanFiles(plan: string): PlanFile[] | null {
     const m = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
     if (!m?.[1]) continue;
     if (/^[A-Za-z][\w-]*\s+(?![`*_]*\(new\))[\w`*]/i.test(m[1])) continue; // prose: a bare word, then more words
-    const token = m[1].replace(/\(new\)/gi, " ").replace(/\*\*|__|`/g, " ").trim().split(/\s+/)[0] ?? "";
-    const bare = token.replace(/[:,;]+$/, "");
+    const rest = m[1].replace(/\(new\)/gi, " ").trim();
+    // A back-quoted path is taken whole, spaces and all (a ``code span`` too, and one holding a
+    // back-quoted path). Emphasis is taken off only as a pair around the path, so its own
+    // underscores (`__init__.py`, `tests/__snapshots__`) stay.
+    const quoted = /^(?:\*{1,2}|_{1,2})?(`+) ?(.+?) ?\1(?!`)/.exec(rest);
+    const token = quoted ? quoted[2]!.replace(/^`+|`+$/g, "") : (rest.split(/\s+/)[0] ?? "");
+    const trimmed = token.replace(/[:,;]+$/, "");
+    const bare = (/^(\*\*|__)(.+)\1$/.exec(trimmed)?.[2] ?? trimmed).replace(/[:,;]+$/, "");
     const path = normalizePath(bare);
     if (!path || /:\d+(?:-\d+)?$/.test(bare)) continue; // a file:line reference
     out.push({ path, new: /\(new\)/i.test(line) });

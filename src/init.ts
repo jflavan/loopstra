@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { Git } from "./git";
+import { Git, samePath } from "./git";
 import { stampVersion, templatePath } from "./package";
 import { managedFiles, STAMP_FILE, textSha, writeStamp, type Stamp } from "./stamp";
 import { OLD_HOOK_FILE } from "./upgrade/legacy";
@@ -25,10 +25,15 @@ export async function detectCommands(root: string): Promise<Detected> {
     try {
       s = (JSON.parse(await Bun.file(pkgPath).text()) as { scripts?: Record<string, string> }).scripts ?? {};
     } catch { /* an unreadable package.json means nothing is detected */ }
-    const bun = existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb")) || /\bbun\b/.test(Object.values(s).join(" "));
-    const runner = bun ? "bun run" : "npm run";
-    const d: Detected = { install: bun ? "bun install" : "npm install" };
-    if (s.test) d.test = bun ? (s.test === "bun test" ? "bun test" : `${runner} test`) : "npm test";
+    // The package manager by its lock file; scripts that call bun mean bun too.
+    const locked = (name: string) => existsSync(join(root, name));
+    const pm = locked("bun.lock") || locked("bun.lockb") ? "bun"
+      : locked("pnpm-lock.yaml") ? "pnpm"
+      : locked("yarn.lock") ? "yarn"
+      : /\bbun\b/.test(Object.values(s).join(" ")) ? "bun" : "npm";
+    const runner = `${pm} run`;
+    const d: Detected = { install: `${pm} install` };
+    if (s.test) d.test = pm === "bun" ? (s.test === "bun test" ? "bun test" : `${runner} test`) : `${pm} test`;
     if (s.lint) d.lint = `${runner} lint`;
     if (s.build) d.build = `${runner} build`;
     if (s.start) d.run = `${runner} start`;
@@ -42,7 +47,11 @@ export async function detectCommands(root: string): Promise<Detected> {
     const has = (t: string) => new RegExp(`^${t}:`, "m").test(mk);
     return { test: has("test") ? "make test" : undefined, lint: has("lint") ? "make lint" : undefined, build: has("build") ? "make build" : undefined, run: has("run") ? "make run" : undefined };
   }
-  if (existsSync(join(root, "pyproject.toml"))) return { test: "pytest", install: existsSync(join(root, "uv.lock")) ? "uv sync" : undefined };
+  if (existsSync(join(root, "pyproject.toml"))) {
+    // A uv project's pytest is in its own environment, not on PATH.
+    const uv = existsSync(join(root, "uv.lock"));
+    return { test: uv ? "uv run pytest" : "pytest", install: uv ? "uv sync" : undefined };
+  }
   if (existsSync(join(root, "Cargo.toml"))) return { test: "cargo test", build: "cargo build" };
   if (existsSync(join(root, "go.mod"))) return { test: "go test ./...", build: "go build ./..." };
   return {};
@@ -108,6 +117,17 @@ function commandLines(d: Detected): string {
   ].join("\n");
 }
 
+/**
+ * The top folder of the git repository `root` is in, when `root` is a folder below it; null at the
+ * top or outside a repository. The loop works on a whole repository: its checkouts, sessions and
+ * commands start at the top, and Claude Code reads the settings and hook there.
+ */
+export async function repositoryTop(root: string): Promise<string | null> {
+  const top = await new Git(root).run(["rev-parse", "--show-toplevel"], true);
+  if (top.code !== 0 || samePath(top.out.trim(), root)) return null;
+  return top.out.trim();
+}
+
 export async function init(root: string): Promise<InitReport> {
   const report: InitReport = { written: [], kept: [], warnings: [], next: [] };
   // The loop lives in git (branches, worktrees, commits on main): without a repository, write nothing.
@@ -115,6 +135,13 @@ export async function init(root: string): Promise<InitReport> {
     return { ...report, stopped: true, warnings: ["This folder is not a git repository; run git init first."] };
   }
   const d = await detectCommands(root);
+  const top = await repositoryTop(root);
+  if (top) {
+    const here = (await new Git(root).run(["rev-parse", "--show-prefix"])).out.trim().replace(/\/$/, "");
+    // A folder name with a space is quoted, or the shell reads it as two words.
+    const example = `cd ${/\s/.test(here) ? `"${here}"` : here} && ${d.test ?? "<your test command>"}`;
+    return { ...report, stopped: true, warnings: [`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run loopstra init in ${top}, and set its commands to run in this folder (for example ${example}).`] };
+  }
 
   const branch = await defaultBranch(root);
   const cfg = (await template("config.yaml"))
@@ -188,14 +215,18 @@ async function ensureClaudeMd(root: string, d: Detected, report: InitReport): Pr
 /**
  * Loopstra's own files that must be committed on `main` for the loop's checkouts (worktrees) to see
  * them: the config, the stamp, and any prompt override. Returns the ones missing from main, the
- * prompts folder as one entry.
+ * prompts folder as one entry. Only overrides are looked at (`<name>.md`, the only files read
+ * there): a .DS_Store, an editor's swap file or a subfolder is not setup.
  */
 export async function uncommittedSetup(root: string, main: string): Promise<string[]> {
   const dir = join(root, "loopstra", "prompts");
-  const overrides = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".md")).map((n) => `loopstra/prompts/${n}`) : [];
+  const overrides = existsSync(dir)
+    ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith(".md") && !e.name.startsWith(".")).map((e) => `loopstra/prompts/${e.name}`)
+    : [];
   const wanted = ["loopstra/config.yaml", STAMP_FILE, ...overrides];
-  const r = await new Git(root).run(["ls-tree", "-r", "--name-only", main, "--", ...wanted], true);
-  const onMain = new Set(r.code === 0 ? r.out.split(/\r?\n/).map((l) => l.trim()) : []);
+  // -z: git quotes a name that is not ASCII otherwise, and the quoted name would match nothing here.
+  const r = await new Git(root).run(["ls-tree", "-r", "-z", "--name-only", main, "--", ...wanted], true);
+  const onMain = new Set(r.code === 0 ? r.out.split("\0") : []);
   const missing = wanted.filter((p) => !onMain.has(p) && existsSync(join(root, p)));
   return [...new Set(missing.map((p) => (p.startsWith("loopstra/prompts/") ? "loopstra/prompts/" : p)))];
 }

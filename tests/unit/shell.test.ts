@@ -42,6 +42,20 @@ describe("runCommand", () => {
     t.cleanup();
   });
 
+  test("a timeout longer than a timer can hold (35,792 minutes and up) waits that long at least, not 1 ms", async () => {
+    const t = tempDir();
+    const r = await runCommand(`bun -e "await Bun.sleep(300)"`, t.path, { timeoutMs: 40_000 * 60_000 });
+    expect(r.timedOut).toBe(false);
+    expect(r.code).toBe(0);
+    let settle: (v: string) => void = () => {};
+    const slow = new Promise<string>((resolve) => { settle = resolve; });
+    const waited = within(slow, 35_792 * 60_000, "late");
+    expect(await Promise.race([waited, Bun.sleep(100).then(() => "still waiting")])).toBe("still waiting");
+    settle("done"); // so within clears its timer
+    expect(await waited).toBe("done");
+    t.cleanup();
+  });
+
   test("a cancelled command is killed at once and throws Cancelled; once cancelled, none starts", async () => {
     const t = tempDir();
     const cancel = new AbortController();

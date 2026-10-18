@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readdirSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { lanesFor, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
@@ -7,11 +7,11 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, readLoopHold, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
-import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { errorText, timerMs } from "./shell";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -21,14 +21,16 @@ import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
+import { RECONCILED_PLAN } from "./stages/shared";
 import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
-import { uncommittedSetup } from "./init";
+import { repositoryTop, uncommittedSetup } from "./init";
 import { olderSetupRefusal } from "./stamp";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
+import { chatDir } from "./chat/threads";
 
 export interface TickResult {
   /**
@@ -131,8 +133,8 @@ export async function tick(root: string): Promise<TickResult> {
     }
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
-    // With more than one change at a time, a change that would build into another's files waits.
-    const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+    // A change that would build into another's files waits (see sameFileHolds).
+    const holds = await sameFileHolds(ordered);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
@@ -207,9 +209,6 @@ export async function tick(root: string): Promise<TickResult> {
     trace.close();
   }
 }
-
-/** Statuses whose merge step only watches the pull request (with a remote): the watcher's, never a lane's. */
-const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approved"]);
 
 /**
  * One lane: it takes the first of the tick's runnable changes no lane has taken, and runs its step.
@@ -380,15 +379,23 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
 
 /**
  * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
- * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
- * counts as one with no file list.
+ * At every speed.max_parallel_changes, one included: with a remote the watcher looks after a pull
+ * request beside the one lane, and without one a change can wait for a person's merge approval, so
+ * the lane would otherwise build another change on the same files, and the two would clash at merge.
+ * A plan that cannot be read counts as one with no file list. A change past plan-approved also holds
+ * the files its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved
+ * change's is an earlier build's, which its next build drops).
  */
-export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
-  if (lanes <= 1) return new Map();
+export async function sameFileHolds(ordered: Intent[]): Promise<Map<string, string>> {
   const files = new Map<string, string[] | null>();
+  const paths = (plan: string | null) => (plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
     const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
-    files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
+    // i.dir is <root>/intent/<slug>.
+    const reconciled = i.file.frontmatter.status === "plan-approved" ? null
+      : await Bun.file(join(i.dir, "..", "..", ".loopstra", "runs", i.slug, RECONCILED_PLAN)).text().catch(() => null);
+    const listed = paths(plan), added = paths(reconciled);
+    files.set(i.slug, listed === null && added === null ? null : [...new Set([...(listed ?? []), ...(added ?? [])])]);
   }
   return fileHolds(ordered, files);
 }
@@ -454,7 +461,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
     if (out.steps?.length) {
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+      const holds = await sameFileHolds(ordered);
       await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     }
     if (share) await shareMain(root, cfg, trace);
@@ -489,15 +496,15 @@ export const PROBE_AFTER = 3;
  * probe does not → the loop keeps backing off. `slug` is the change whose step met it (null outside a step).
  */
 async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, slug: string | null, e: AssistantUnavailable): Promise<TickResult> {
-  const cause = slug && e.phase ? { slug, phase: e.phase, line: e.line } : null;
+  const cause = slug && e.phase ? { slug, phase: e.phase, line: e.line, model: e.model } : null;
   const p = pauseAfterUnavailable(root, new Date(), cause);
-  trace.event(slug ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
+  trace.event(slug ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, model: p.model, detail: e.detail });
   out.paused = p.reason;
   if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
   // The probe is a session too: with the loop's day used up, keep backing off instead.
   if (loopDayUsedUp(cfg, trace)) return out;
   try {
-    const probe = await probeAssistant(root, cfg, trace, cause.slug);
+    const probe = await probeAssistant(root, cfg, trace, cause.slug, cause.model ?? undefined);
     if (!probe.reached) {
       trace.event(cause.slug, "pause", { note: "the probe could not reach the assistant either; still backing off", probe: probe.detail });
       return out;
@@ -672,11 +679,17 @@ async function writeQueue(root: string, trace: Trace, text: string): Promise<voi
   }
 }
 
+/** How long a chat hand-off's copy whose process is not alive here is left before it is removed. */
+const HANDOFF_LEFT_MS = 60 * 60_000;
+
 /**
  * A merged change's worktree and branch are removed right after the merge; if that failed, try
  * again here. A closed change's worktree is removed once it holds nothing uncommitted (its branch
  * is kept, so nothing is lost). Snapshots of main a killed loop left behind are removed (no step
- * runs yet). Best effort and traced; never blocks anything.
+ * runs yet), and so are a chat hand-off's throwaway checkouts once the process that made one is gone
+ * (its folder, handoff-<time>-<pid>, names it) and the folder is an hour old: a pid not alive here
+ * may be another machine's (WSL, say) sharing the repository, mid-push. Best effort and traced;
+ * never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
   if (existsSync(snapshotsDir(root))) {
@@ -686,6 +699,20 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
       } catch (e) {
         if (e instanceof StopRequested) throw e;
         trace.event(name, "error", { where: "cleanup", what: "snapshot of main left behind", error: errorText(e) });
+      }
+    }
+  }
+  const handoffs = join(chatDir(root), "worktrees");
+  if (existsSync(handoffs)) {
+    for (const name of readdirSync(handoffs)) {
+      const pid = Number(/^handoff-\d+-(\d+)$/.exec(name)?.[1]);
+      if (!pid || pidAlive(pid)) continue;
+      try {
+        if (Date.now() - statSync(join(handoffs, name)).mtimeMs < HANDOFF_LEFT_MS) continue;
+        await removeWorktree(new Git(root), join(handoffs, name));
+      } catch (e) {
+        if (e instanceof StopRequested) throw e;
+        trace.event("_loop", "error", { where: "cleanup", what: "chat hand-off copy left behind", dir: name, error: errorText(e) });
       }
     }
   }
@@ -777,6 +804,8 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
  * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const top = await repositoryTop(root);
+  if (top) return `This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run it in ${top}.`;
   if (!existsSync(configPath(root))) return NOT_SET_UP;
   // Its old prompt copies would be used as overrides, and old copies of some prompts are not safe.
   const older = olderSetupRefusal(root, "run loopstra start again");
@@ -805,7 +834,7 @@ async function sleepUnlessStopped(ms: number, until?: Promise<unknown>): Promise
   let timer: ReturnType<typeof setTimeout> | undefined;
   const ended = until ? [until.then(() => {}, () => {})] : [];
   try {
-    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); }), stopPromise(), ...ended]);
+    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, timerMs(ms)); }), stopPromise(), ...ended]);
   } finally {
     clearTimeout(timer);
   }
@@ -822,7 +851,7 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
   let check: ReturnType<typeof setInterval> | undefined;
   try {
     return await Promise.race([
-      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), ms); }),
+      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), timerMs(ms)); }),
       stopPromise().then(() => "stop" as const),
       new Promise<"woken">((resolve) => { check = setInterval(() => { if (wakeStamp(root) !== seen) resolve("woken"); }, checkMs); }),
     ]);

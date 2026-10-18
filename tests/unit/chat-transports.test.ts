@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
+import { join } from "node:path";
 import { ChatService } from "../../src/chat/service";
+import { chatDir, writeJson } from "../../src/chat/threads";
+import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
 import { chunkText } from "../../src/chat/transports/shared";
@@ -10,6 +13,17 @@ import { Hub } from "../../src/console/hub";
 import { serveConsole } from "../../src/console/server";
 import { chatRepo, turn } from "../chat-helpers";
 import { model, sseFrames } from "../console-helpers";
+
+/** A bot's section of loopstra/config.yaml, as YAML under chat.transports. */
+const SLACK = (allow: string[], acceptors: string[], more = "") =>
+  `chat:\n  transports:\n    slack:\n      token_env: APP\n      bot_token_env: BOT\n      channel: C1\n      allow: ${JSON.stringify(allow)}\n      acceptors: ${JSON.stringify(acceptors)}\n${more}`;
+const DISCORD = (allow: string[], acceptors: string[], more = "") =>
+  `chat:\n  transports:\n    discord:\n      token_env: TOKEN\n      channel: "500"\n      allow: ${JSON.stringify(allow)}\n      acceptors: ${JSON.stringify(acceptors)}\n${more}`;
+
+/** Rewrites a chat repository's config with `chat` after its commands (see chatRepo). */
+function setChat(root: string, chat: string): Promise<number> {
+  return Bun.write(configPath(root), `version: 1\ncommands:\n  test: echo ok\n${chat}`);
+}
 
 /** Waits until `check` holds (or fails after a few seconds). */
 async function until(check: () => boolean | Promise<boolean>, ms = 8_000): Promise<void> {
@@ -164,10 +178,10 @@ function slackStub() {
 
 describe("Slack", () => {
   test("acknowledges events, answers people in the channel in a thread, ignores everyone else, and announces", async () => {
-    const r = await chatRepo();
+    const r = await chatRepo({ config: SLACK(["U1", "U2"], ["U1"], "      announce_to: C9\n") });
     const stub = slackStub();
     const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
-    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1", "U2"], acceptors: ["U1"], announce_to: "C9" }, { env, log: () => {} });
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1", "U2"], acceptors: ["U1"], announce_to: "C9" }, { root: r.root, env, log: () => {} });
     const service = new ChatService(r.root, [slack], { announce: false, pollMs: 60_000 });
     try {
       await r.answer("orchestrator", 1, turn("Hi Ana."));
@@ -210,18 +224,61 @@ describe("Slack", () => {
     }
   });
 
+  test("allow and acceptors are read from the config for each message; a bot taken out of it ignores messages", async () => {
+    const r = await chatRepo({ config: SLACK(["U1"], []) });
+    try {
+      const logged: string[] = [];
+      const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_SLACK_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      const got: Array<[string, boolean]> = [];
+      (slack as unknown as { onMessage: unknown }).onMessage = async (m: { authorId: string; canAccept: boolean }) => { got.push([m.authorId, m.canAccept]); };
+      let ts = 0;
+      const say = (user: string) => slack.onEvent({ type: "message", user, channel: "C1", text: "hi", ts: String(++ts) });
+      await setChat(r.root, SLACK(["U2"], ["U2"]));
+      await say("U1");
+      await say("U2");
+      expect(got).toEqual([["U2", true]]);
+      await setChat(r.root, "");
+      await say("U2");
+      await say("U2");
+      expect(got).toEqual([["U2", true]]);
+      expect(logged).toEqual(["Slack: chat.transports.slack is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat."]);
+    } finally { r.cleanup(); }
+  });
+
+  test("the config is read only for a person's message in the bot's channel", async () => {
+    const r = await chatRepo({ config: SLACK([], []) });
+    try {
+      const logged: string[] = [];
+      const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env: { LOOPSTRA_SLACK_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      (slack as unknown as { onMessage: unknown }).onMessage = async () => {};
+      // Taken out of the config: a read of it says so in the log.
+      await setChat(r.root, "");
+      await slack.onEvent({ type: "message", user: "U1", channel: "C2", text: "elsewhere", ts: "1" });
+      await slack.onEvent({ type: "message", bot_id: "B1", user: "U9", channel: "C1", text: "a bot", ts: "2" });
+      await slack.onEvent({ type: "reaction_added", user: "U1", channel: "C1", ts: "3" });
+      expect(logged).toEqual([]);
+      await slack.onEvent({ type: "message", user: "U1", channel: "C1", text: "hi", ts: "4" });
+      expect(logged).toHaveLength(1);
+    } finally { r.cleanup(); }
+  });
+
   test("a missing token is a plain error at start", async () => {
-    const slack = new SlackTransport({ token_env: "NOPE_APP", bot_token_env: "NOPE_BOT", channel: "C1", allow: [], acceptors: [] }, { env: {} });
+    const slack = new SlackTransport({ token_env: "NOPE_APP", bot_token_env: "NOPE_BOT", channel: "C1", allow: [], acceptors: [] }, { root: ".", env: {} });
     await expect(slack.start(async () => {})).rejects.toThrow("Slack needs its app-level token in the environment variable NOPE_APP.");
   });
 });
 
-/** A stub Discord: the REST calls Loopstra makes, and a gateway that says hello and checks identify. */
-function discordStub() {
+/**
+ * A stub Discord: the REST calls Loopstra makes, and a gateway that says hello and checks identify.
+ * `closeOnIdentify`: the gateway closes with this code instead of answering READY.
+ */
+function discordStub(closeOnIdentify?: number) {
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | null; auth: string }> = [];
   const frames: Array<{ op: number; d: unknown }> = [];
-  let socket: { send: (s: string) => void } | null = null;
+  let socket: { send: (s: string) => void; close: (code?: number) => void } | null = null;
   let threadN = 100;
+  /** What GET /gateway/bot answers: 200, or 401 for a token Discord does not accept. */
+  let gatewayStatus = 200;
   const server: ReturnType<typeof Bun.serve> = Bun.serve({
     port: 0,
     async fetch(req, srv): Promise<Response | undefined> {
@@ -230,7 +287,7 @@ function discordStub() {
       const body = req.method === "POST" ? await req.json().catch(() => null) as Record<string, unknown> | null : null;
       const path = url.pathname.replace("/api", "");
       calls.push({ method: req.method, path, body, auth: req.headers.get("authorization") ?? "" });
-      if (path === "/gateway/bot") return Response.json({ url: `ws://127.0.0.1:${server.port}/gw` });
+      if (path === "/gateway/bot") return gatewayStatus === 200 ? Response.json({ url: `ws://127.0.0.1:${server.port}/gw` }) : Response.json({ message: "401: Unauthorized", code: 0 }, { status: gatewayStatus });
       if (/\/threads$/.test(path)) return Response.json({ id: String(threadN++) });
       return Response.json({ id: "m" });
     },
@@ -239,17 +296,34 @@ function discordStub() {
       message(ws, data) {
         const f = JSON.parse(String(data));
         frames.push(f);
-        if (f.op === 2) ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: { user: { id: "42" } } }));
+        if (f.op === 2 && closeOnIdentify) ws.close(closeOnIdentify, "closed by the stub");
+        else if (f.op === 2) ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: { user: { id: "42" } } }));
       },
     },
   });
   const message = (d: Record<string, unknown>) => socket!.send(JSON.stringify({ op: 0, s: 2, t: "MESSAGE_CREATE", d }));
-  return { server, calls, frames, message, ready: () => frames.some((f) => f.op === 2) };
+  return {
+    server, calls, frames, message, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length,
+    /** From now on the token is refused: GET /gateway/bot answers `status`. */
+    refuseToken: (status = 401) => { gatewayStatus = status; },
+    /** The gateway drops the connection, as it does now and then. */
+    drop: () => socket!.close(4000),
+    gatewayLooks: () => calls.filter((c) => c.path === "/gateway/bot").length,
+  };
+}
+
+/** A Discord transport on `stub`, started; its log lines are kept. */
+async function startDiscord(stub: ReturnType<typeof discordStub>, root: string) {
+  const logged: string[] = [];
+  const env = { LOOPSTRA_DISCORD_API: `http://127.0.0.1:${stub.server.port}/api`, TOKEN: "t-1" };
+  const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root, env, log: (l) => logged.push(l) });
+  await discord.start(async () => {});
+  return { discord, logged };
 }
 
 describe("Discord", () => {
   test("identifies with the message intents, gives each new request a thread, and carries on in it", async () => {
-    const r = await chatRepo();
+    const r = await chatRepo({ config: DISCORD([], ["7"], "      announce_to: \"501\"\n") });
     const stub = discordStub();
     const env = { LOOPSTRA_DISCORD_API: `http://127.0.0.1:${stub.server.port}/api`, TOKEN: "t-1" };
     const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: ["7"], announce_to: "501" }, { root: r.root, env, log: () => {} });
@@ -293,14 +367,118 @@ describe("Discord", () => {
     }
   });
 
-  test("the allow list is checked before anything is done", async () => {
+  test("a gateway that closes before READY is tried again less and less often", async () => {
     const r = await chatRepo();
+    const stub = discordStub(4000);
+    const { discord } = await startDiscord(stub, r.root);
+    try {
+      // Tries at 0, 1 and 3 seconds, not every second: the wait before the third is 2 seconds. Timed
+      // from the second try, not from the start, so a slow runner cannot make it look otherwise.
+      await until(() => stub.identifies() >= 2);
+      const second = Date.now();
+      await until(() => stub.identifies() >= 3);
+      expect(Date.now() - second).toBeGreaterThanOrEqual(1_500);
+    } finally {
+      await discord.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a refusal a retry cannot fix says what to do, once, and is tried again only every 5 minutes", async () => {
+    const r = await chatRepo();
+    const stub = discordStub(4014);
+    const { discord, logged } = await startDiscord(stub, r.root);
+    try {
+      await until(() => logged.length > 0);
+      await Bun.sleep(1_500);
+      expect(stub.identifies()).toBe(1);
+      expect(logged).toEqual(["Discord refused the bot (4014): the Message Content intent is off. Turn it on for the bot in the Discord Developer Portal (Bot, Privileged Gateway Intents). Trying again every 5 minutes."]);
+    } finally {
+      await discord.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a token Discord refuses at start is a plain error naming its variable", async () => {
+    const r = await chatRepo();
+    const stub = discordStub();
+    stub.refuseToken();
+    try {
+      await expect(startDiscord(stub, r.root)).rejects.toThrow(/^Discord refused the bot \(HTTP 401\): the bot token was not accepted\. Check the token in TOKEN\.$/);
+    } finally {
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a token revoked while the bot runs says what to fix, once, and is tried again only every 5 minutes", async () => {
+    const r = await chatRepo();
+    const stub = discordStub();
+    const { discord, logged } = await startDiscord(stub, r.root);
+    try {
+      await until(() => stub.ready());
+      await Bun.sleep(200);
+      stub.refuseToken(403);
+      stub.drop();
+      // The first try is a second after the drop; without the slow wait, more would follow at 3 seconds.
+      await Bun.sleep(3_500);
+      expect(stub.gatewayLooks()).toBe(2);
+      expect(logged).toEqual(["Discord refused the bot (HTTP 403): the bot token was not accepted. Check the token in TOKEN. Trying again every 5 minutes."]);
+    } finally {
+      await discord.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("the allow list is checked before anything is done", async () => {
+    const r = await chatRepo({ config: DISCORD(["1"], []) });
     try {
       const discord = new DiscordTransport({ token_env: "T", channel: "500", allow: ["1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: () => {} });
       let called = false;
       (discord as unknown as { onMessage: unknown }).onMessage = async () => { called = true; };
       await discord.onDiscordMessage({ id: "m", channel_id: "500", content: "hi", author: { id: "2" } });
       expect(called).toBe(false);
+    } finally { r.cleanup(); }
+  });
+
+  test("allow and acceptors are read from the config for each message; a bot taken out of it ignores messages", async () => {
+    const r = await chatRepo({ config: DISCORD(["1"], []) });
+    try {
+      const logged: string[] = [];
+      const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: ["1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      const got: Array<[string, boolean]> = [];
+      (discord as unknown as { onMessage: unknown }).onMessage = async (m: { authorId: string; canAccept: boolean }) => { got.push([m.authorId, m.canAccept]); };
+      writeJson(join(chatDir(r.root), "discord-threads.json"), ["100"]);
+      const say = (author: string) => discord.onDiscordMessage({ id: "m", channel_id: "100", content: "hi", author: { id: author } });
+      await setChat(r.root, DISCORD(["2"], ["2"]));
+      await say("1");
+      await say("2");
+      expect(got).toEqual([["2", true]]);
+      await setChat(r.root, "");
+      await say("2");
+      await say("2");
+      expect(got).toEqual([["2", true]]);
+      expect(logged).toEqual(["Discord: chat.transports.discord is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat."]);
+    } finally { r.cleanup(); }
+  });
+
+  test("the config is read only for a person's message in the bot's channel or threads", async () => {
+    const r = await chatRepo({ config: DISCORD([], []) });
+    try {
+      const logged: string[] = [];
+      const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      (discord as unknown as { onMessage: unknown }).onMessage = async () => {};
+      writeJson(join(chatDir(r.root), "discord-threads.json"), ["100"]);
+      // Taken out of the config: a read of it says so in the log.
+      await setChat(r.root, "");
+      await discord.onDiscordMessage({ id: "m1", channel_id: "999", content: "elsewhere", author: { id: "1" } });
+      await discord.onDiscordMessage({ id: "m2", channel_id: "500", content: "a bot", author: { id: "8", bot: true } });
+      expect(logged).toEqual([]);
+      await discord.onDiscordMessage({ id: "m3", channel_id: "100", content: "hi", author: { id: "1" } });
+      expect(logged).toHaveLength(1);
     } finally { r.cleanup(); }
   });
 });

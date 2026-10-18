@@ -25,6 +25,34 @@ describe("protect-tests hook", () => {
     expect(blocked.err).toContain("protected");
   });
 
+  test("knows the test names of other languages: Go, pytest, .NET, Java", async () => {
+    const fix = { LOOPSTRA_PHASE: "fix" };
+    for (const p of ["/repo/pkg/add_test.go", "/repo/app/calc_test.py", "/repo/src/App.Tests/CalcTests.cs", "/repo/Tests/X.cs",
+      "/repo/src/main/java/CalcTest.java", "/repo/test/calc.spec.js"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 2 });
+    }
+    for (const p of ["/repo/src/latest.ts", "/repo/src/Latest.java", "/repo/src/contest.py", "/repo/src/attestation.ts",
+      "/repo/docs/testing.md", "/repo/src/protest-utils.ts"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 0 });
+    }
+  });
+
+  test("knows .NET test projects, and leaves source files whose names only mention a test alone", async () => {
+    const fix = { LOOPSTRA_PHASE: "fix" };
+    for (const p of ["/repo/MyApp.UnitTests/Calc.cs", "/repo/MyApp.IntegrationTests/Api.cs", "/repo/MyApp.Tests.Unit/Calc.cs",
+      "/repo/lib/calc_test.rb", "/repo/spec/calc_spec.rb", "/repo/lib/calc_spec.rb", "/repo/test/calc_test.exs", "/repo/src/calc_test.cc",
+      "/repo/Tests/AppTests.swift", "/repo/src/AppTests.swift", "/repo/src/calc.spec.ts"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 2 });
+    }
+    // ABTest.java is not JUnit's CalcTest.java: the class name before Test must end in a small letter or a digit.
+    for (const p of ["/repo/src/features/ab-test.ts", "/repo/src/cli/self-test.ts", "/repo/api/openapi-spec.yaml",
+      "/repo/src/utils/load-test.ts", "/repo/src/smoke-test.ts", "/repo/src/api_spec.json", "/repo/docs/design-spec.md",
+      "/repo/specs/openapi.yaml", "/repo/scripts/run-tests.sh", "/repo/.github/workflows/unit-tests.yml", "/repo/src/ABTest.java",
+      "/repo/src/SpeedTest.swift", "/repo/src/v1.latest/a.ts"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 0 });
+    }
+  });
+
   test("judges the path inside the project: CLAUDE_PROJECT_DIR, or the working folder without it", async () => {
     const t = tempDir();
     try {

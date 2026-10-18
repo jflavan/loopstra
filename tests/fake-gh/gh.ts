@@ -3,8 +3,12 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending" | "none"; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
-type State = { prs: Record<string, Pr>; next: number };
+// `checksHead`: when set, `checks` are those of that head only; on any other head they still run (pending).
+// `latestReviews`: each reviewer's latest review, as gh prints them; the author is "loopstra-bot".
+type Review = { author?: { login: string }; authorAssociation?: string; state: string };
+type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED"; latestReviews?: Review[]; checks: "pass" | "fail" | "pending" | "none"; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
+// `old`: pull requests a newer one for the same branch replaced, still found by number.
+type State = { prs: Record<string, Pr>; next: number; old?: Pr[] };
 
 // Test knob: behave like a gh that never answers.
 if (process.env.LOOPSTRA_FAKE_GH_HANG === "1") await new Promise(() => setInterval(() => {}, 1_000));
@@ -37,6 +41,19 @@ const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? a
 const body = async () => flag("--body") ?? (flag("--body-file") === "-" ? await Bun.stdin.text() : undefined);
 
 const branchOf = (number: number) => Object.entries(state.prs).find(([, p]) => p.number === number)![0];
+// With a bare repository as the remote: the branch's head there, as GitHub's headRefOid ("" without one).
+const headOf = (branch: string | undefined) => {
+  const remote = process.env.LOOPSTRA_FAKE_GH_REMOTE;
+  if (!remote || !branch) return "";
+  const r = Bun.spawnSync({ cmd: ["git", "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], cwd: remote, stdout: "pipe", stderr: "pipe" });
+  return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+};
+// Test knobs LOOPSTRA_FAKE_GH_AFTER_CHECKS (once the checks are printed) and LOOPSTRA_FAKE_GH_BEFORE_MERGE (just
+// before GitHub merges): a bun script run at that moment, a person pushing to the branch just then, say.
+const runScript = (knob: string) => {
+  const script = process.env[knob];
+  if (script) Bun.spawnSync({ cmd: [process.execPath, script], stdout: "ignore", stderr: "inherit" });
+};
 
 const [group, cmd] = args;
 if (group === "--version") { console.log("gh version 2.93.0 (fake)"); process.exit(0); }
@@ -45,17 +62,22 @@ if (group === "auth" && cmd === "status") {
   if (process.env.LOOPSTRA_FAKE_GH_SIGNED_OUT === "1") { console.error("You are not logged into any GitHub hosts. To log in, run: gh auth login"); process.exit(1); }
   console.log("github.com: Logged in (fake)"); process.exit(0);
 }
+// Test knob: LOOPSTRA_FAKE_GH_FAIL=1 behaves like a gh whose token GitHub no longer takes.
+if (group === "pr" && process.env.LOOPSTRA_FAKE_GH_FAIL === "1") { console.error("HTTP 401: Bad credentials (https://api.github.com/graphql)"); process.exit(1); }
 if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); process.exit(1); }
 
 if (cmd === "view") {
   // Like gh: a pull request by number, or by its branch.
   const ref = args[2]!;
-  const pr = /^\d+$/.test(ref) ? Object.values(state.prs).find((p) => p.number === Number(ref)) : state.prs[ref];
+  const pr = /^\d+$/.test(ref) ? [...Object.values(state.prs), ...(state.old ?? [])].find((p) => p.number === Number(ref)) : state.prs[ref];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
-  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}` }));
+  const branch = /^\d+$/.test(ref) ? Object.entries(state.prs).find(([, p]) => p === pr)?.[0] : ref;
+  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, latestReviews: pr.latestReviews ?? [], author: { login: "loopstra-bot" }, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}`, headRefOid: headOf(branch) }));
 } else if (cmd === "create") {
   const branch = flag("--head")!;
   const pr: Pr = { number: state.next++, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, createdAt: new Date().toISOString(), title: flag("--title"), body: await body(), comments: [] };
+  // By branch, like gh, the newest pull request is the one found; an older one is still there by number.
+  if (state.prs[branch]) (state.old ??= []).push(state.prs[branch]);
   state.prs[branch] = pr;
   await save();
   console.log(`https://example.test/pr/${pr.number}`);
@@ -69,23 +91,29 @@ if (cmd === "view") {
   const pr = Object.values(state.prs).find((p) => p.number === number)!;
   // Like gh: "no checks reported" is an error; with --json it prints the rows and exits 0 whatever
   // their states (the exit codes 1 = failed and 8 = pending only come without --json).
-  if (pr.checks === "none") { console.error(`no checks reported on the '${branchOf(number)}' branch`); process.exit(1); }
-  const [st, bucket] = pr.checks === "pass" ? ["SUCCESS", "pass"] : pr.checks === "fail" ? ["FAILURE", "fail"] : ["IN_PROGRESS", "pending"];
+  const checks = pr.checksHead && pr.checksHead !== headOf(branchOf(number)) ? "pending" : pr.checks;
+  if (checks === "none") { console.error(`no checks reported on the '${branchOf(number)}' branch`); process.exit(1); }
+  const [st, bucket] = checks === "pass" ? ["SUCCESS", "pass"] : checks === "fail" ? ["FAILURE", "fail"] : ["IN_PROGRESS", "pending"];
   const row: Record<string, string> = { name: "ci", state: st, bucket, workflow: "ci" };
   const fields = flag("--json");
   if (fields !== undefined) {
     console.log(JSON.stringify([Object.fromEntries(fields.split(",").map((f) => [f, row[f] ?? ""]))]));
+    runScript("LOOPSTRA_FAKE_GH_AFTER_CHECKS");
     process.exit(0);
   }
   console.log(`ci\t${bucket}`);
-  process.exit(pr.checks === "pass" ? 0 : pr.checks === "fail" ? 1 : 8);
+  process.exit(checks === "pass" ? 0 : checks === "fail" ? 1 : 8);
 } else if (cmd === "merge") {
   // Test knob: behave like a base branch with a merge queue (gh queues the pull request and exits 0).
   if (process.env.LOOPSTRA_FAKE_GH_QUEUE === "1") process.exit(0);
   const number = Number(args[2]);
   const [branch, pr] = Object.entries(state.prs).find(([, p]) => p.number === number)!;
+  runScript("LOOPSTRA_FAKE_GH_BEFORE_MERGE");
   // Test knob: with a bare repository as the remote, merge on it for real, the way GitHub would.
   const remote = process.env.LOOPSTRA_FAKE_GH_REMOTE;
+  // Like GitHub: --match-head-commit refuses the merge once the branch has moved past that commit.
+  const match = flag("--match-head-commit");
+  if (remote && match && match !== headOf(branch)) { console.error("GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)"); process.exit(1); }
   if (remote) {
     const dir = mkdtempSync(join(tmpdir(), "fake-gh-merge-"));
     const git = (...a: string[]) => {

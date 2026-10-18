@@ -28,8 +28,9 @@ export async function changeDiff(root: string, mainBranch: string, slug: string,
     }
     found = true;
     // The prefixes are named because the page reads files from `diff --git a/x b/x`, and a repository
-    // may be set (diff.noprefix, diff.mnemonicPrefix) to write those lines differently.
-    const diff = (...extra: string[]) => git.run(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", ...extra, "--end-of-options", `${main}...${branch}`], true);
+    // may be set (diff.noprefix, diff.mnemonicPrefix) to write those lines differently. Names that are
+    // not ASCII are written as they are, not quoted with octal escapes.
+    const diff = (...extra: string[]) => git.run(["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", ...extra, "--end-of-options", `${main}...${branch}`], true);
     const statResult = await diff("--stat");
     const patchResult = statResult.code === 0 ? await diff() : statResult;
     // A diff git could not produce (an unreadable object, say) must not look like a branch with no changes.

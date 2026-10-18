@@ -10,7 +10,9 @@ import { writeJson } from "../../src/chat/threads";
 import { localUser } from "../../src/chat/transports/shared";
 import { readLoopHold, writeHeartbeat } from "../../src/heartbeat";
 import { changeStoppedBy, inboxFor } from "../../src/inbox";
+import { ui } from "../../src/commands/ui";
 import { pendingRequests } from "../../src/requests";
+import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { wakeStamp } from "../../src/wake";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -476,5 +478,40 @@ describe("steering", () => {
       expect(inboxFor(root, "d", design)).toEqual([]);
       expect(pendingRequests(root)).toEqual([]);
     });
+  }, 30_000);
+});
+
+describe("loopstra ui", () => {
+  test("ends on a stop request (Ctrl-C), with the console and its chat stopped", async () => {
+    const r = await chatRepo();
+    const said = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const done = ui(r.root, 0, true);
+      await until(() => said.mock.calls.length > 0);
+      const port = /127\.0\.0\.1:(\d+)/.exec(String(said.mock.calls[0]![0]))![1];
+      requestStop();
+      expect(await done).toBe(0);
+      await expect(fetch(`http://127.0.0.1:${port}/`)).rejects.toThrow();
+    } finally {
+      said.mockRestore();
+      resetStop();
+      r.cleanup();
+    }
+  }, 30_000);
+
+  test("the first Ctrl-C says the console is stopping, not the loop's step", async () => {
+    const r = await chatRepo();
+    const said = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const done = ui(r.root, 0, false);
+      await until(() => said.mock.calls.length > 0);
+      process.emit("SIGINT", "SIGINT");
+      expect(await done).toBe(0);
+      expect(said.mock.calls.map((c) => String(c[0])).slice(1)).toEqual(["\nStopping the console. Press Ctrl-C again to exit at once."]);
+    } finally {
+      said.mockRestore();
+      resetStop();
+      r.cleanup();
+    }
   }, 30_000);
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
@@ -114,6 +114,50 @@ describe("main_health", () => {
     expect(mainHealthDue(repo.path, cfg, trace)).toEqual({ due: false, afterSlugs: [] });
     const soon = { ...cfg, signals: { main_health: { every_minutes: 0 } } };
     expect(mainHealthDue(repo.path, soon, trace).due).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a check that errors keeps the merged changes pending, tries again after the interval, and a red check then names them", async () => {
+    const { repo, cfg, trace } = await setup("  test: echo ok\n");
+    await runMainHealth(repo.path, cfg, trace, []);
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: exit 1\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, mainHealthDue(repo.path, broken, trace).afterSlugs)).toBe("error");
+    // Not at once (an install that keeps failing would run every tick), and not forgotten.
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: false, afterSlugs: ["a"] });
+    const red = await recommit(repo.path, "  test: exit 1\n");
+    const later = { ...red, signals: { main_health: { every_minutes: 0 } } };
+    const due = mainHealthDue(repo.path, later, trace);
+    expect(due).toEqual({ due: true, afterSlugs: ["a"] });
+    expect(await runMainHealth(repo.path, later, trace, due.afterSlugs)).toBe("fail");
+    expect(intents(repo.path)).toEqual(["fix-tests-after-a"]);
+    expect(mainHealthDue(repo.path, red, trace)).toEqual({ due: false, afterSlugs: [] });
+    trace.close(); repo.cleanup();
+  });
+
+  test("a merge after a check that errored asks for a check at once", async () => {
+    const { repo, trace } = await setup("  test: echo ok\n");
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: echo ok\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, ["a"])).toBe("error");
+    expect(mainHealthDue(repo.path, broken, trace).due).toBe(false);
+    markHealthPending(repo.path, "b");
+    // A file time is coarser than the trace's clock and can read earlier than the error was recorded.
+    const early = new Date(Date.parse(trace.lastSignal("main_health")!.ts) - 5);
+    utimesSync(join(repo.path, ".loopstra", "health-pending"), early, early);
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: true, afterSlugs: ["a", "b"] });
+    trace.close(); repo.cleanup();
+  });
+
+  test("after a check that errored, a missing record of when a merge asked waits for the interval", async () => {
+    const { repo, trace } = await setup("  test: echo ok\n");
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: echo ok\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, ["a"])).toBe("error");
+    // An upgrade from before health-asked, or a kill between writing health-pending and it.
+    rmSync(join(repo.path, ".loopstra", "health-asked"));
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: false, afterSlugs: ["a"] });
+    expect(mainHealthDue(repo.path, { ...broken, signals: { main_health: { every_minutes: 0 } } }, trace)).toEqual({ due: true, afterSlugs: ["a"] });
     trace.close(); repo.cleanup();
   });
 });

@@ -14,11 +14,19 @@ export type HealthResult = "pass" | "fail" | "error";
 const SIGNAL = "main_health";
 
 /**
- * Written at merge; the next tick runs the check and removes it. Holds the changes merged since the
- * last check, one per line, in the order they merged.
+ * Written at merge; the next check that gives a result removes it (one that errors keeps it, see
+ * mainHealthDue). Holds the changes merged since the last check, one per line, in the order they merged.
  */
 function pendingPath(root: string): string {
   return join(root, ".loopstra", "health-pending");
+}
+
+/**
+ * Beside health-pending: when a merge last asked for a check, as Date.now(). It is compared with
+ * the trace's times, which come from the same clock; the file's mtime is coarser and can read earlier.
+ */
+function askedPath(root: string): string {
+  return join(root, ".loopstra", "health-asked");
 }
 
 /** The changes waiting for a main_health check (empty when none is asked for). */
@@ -36,17 +44,25 @@ export function markHealthPending(root: string, slug: string): void {
   const slugs = pendingSlugs(root);
   if (!slugs.includes(slug)) slugs.push(slug);
   writeFileSync(pendingPath(root), slugs.join("\n"));
+  writeFileSync(askedPath(root), String(Date.now()));
 }
 
 /**
  * Whether main_health should run now, from what is on disk and in the trace (no process state):
  * a merge asked for it, or the newest check is older than the interval, or there never was one.
+ * After a check that errored (an install that failed, say), the merged changes stay pending, but
+ * the next try waits for the interval, unless another merge asked since. With no record of when a
+ * merge asked (from before it was kept, or a stop between the two files), it waits for the interval.
  */
 export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: boolean; afterSlugs: string[] } {
-  if (existsSync(pendingPath(root))) return { due: true, afterSlugs: pendingSlugs(root) };
   const last = trace.lastSignal(SIGNAL);
-  const due = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
-  return { due, afterSlugs: [] };
+  const intervalPassed = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
+  if (existsSync(pendingPath(root))) {
+    const askedSince = (at: string) => { try { return Number(readFileSync(askedPath(root), "utf8")) >= Date.parse(at); } catch { return false; } };
+    const waiting = last?.result === "error" && !intervalPassed && !askedSince(last.ts);
+    return { due: !waiting, afterSlugs: pendingSlugs(root) };
+  }
+  return { due: intervalPassed, afterSlugs: [] };
 }
 
 /**
@@ -70,7 +86,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
       }
       const t = await projectCommand(on, cfg.commands.test, cwd, { env: {}, where: SIGNAL });
       return { result: t.code === 0 ? "pass" : "fail", output: t.output.slice(-4000) };
-    }));
+    }, (e) => trace.event("_loop", "error", { where: SIGNAL, what: "removing the copy of main", error: errorText(e) })));
   } catch (e) {
     if (e instanceof StopRequested) throw e;
     result = "error";
@@ -78,7 +94,11 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   }
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);
-  rmSync(pendingPath(root), { force: true });
+  // An error says nothing about the merged changes: they stay pending for the next try.
+  if (result !== "error") {
+    rmSync(pendingPath(root), { force: true });
+    rmSync(askedPath(root), { force: true });
+  }
   if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, cfg.main_branch, trace, afterSlugs, output);
   return result;
 }

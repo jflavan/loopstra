@@ -2,14 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configPath } from "../../src/config";
-import { Git } from "../../src/git";
+import { attention } from "../../src/attention";
+import { configPath, loadConfig } from "../../src/config";
+import { StepContext } from "../../src/context";
+import { Git, GitTimeout } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
-import { tick } from "../../src/scheduler";
+import { runStepGuarded, tick } from "../../src/scheduler";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
@@ -18,7 +20,7 @@ const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
+interface FakePr { number: number; state: string; reviewDecision: string; checks: string; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
 
 /**
  * A bare "GitHub" remote and a clone of it with Loopstra set up and one intent at plan-approved.
@@ -70,6 +72,43 @@ async function elsewhere(remote: string) {
 
 async function onRemoteMain(remote: string, path: string): Promise<boolean> {
   return (await run(["git", "cat-file", "-e", `main:${path}`], remote)).code === 0;
+}
+
+/** The change's branch head on the remote. */
+async function headOn(remote: string): Promise<string> {
+  return (await run(["git", "rev-parse", BRANCH], remote)).out.trim();
+}
+
+function inTrace<T>(repo: string, fn: (t: Trace) => T): T {
+  const t = Trace.open(repo);
+  try { return fn(t); } finally { t.close(); }
+}
+
+/**
+ * A bun script for the fake gh's knobs: a person pushes a commit adding src/person.ts to the change's
+ * branch on the remote, the first time it runs (`done` exists after).
+ */
+async function personPushesOnce(remote: string): Promise<{ script: string; done: string }> {
+  const done = join(remote, "person-pushed");
+  const script = join(remote, "person-pushes.ts");
+  await Bun.write(script, [
+    'import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";',
+    'import { tmpdir } from "node:os";',
+    'import { join } from "node:path";',
+    `if (!existsSync(${JSON.stringify(done)})) {`,
+    '  const dir = mkdtempSync(join(tmpdir(), "loopstra-person-"));',
+    '  const git = (...a: string[]) => Bun.spawnSync({ cmd: ["git", "-c", "user.name=Person", "-c", "user.email=person@example.com", ...a], cwd: dir });',
+    `  git("clone", "-q", "-b", ${JSON.stringify(BRANCH)}, ${JSON.stringify(remote)}, ".");`,
+    '  writeFileSync(join(dir, "src", "person.ts"), "export const person = 1;");',
+    '  git("add", "-A");',
+    '  git("commit", "-q", "-m", "person: a fix");',
+    `  git("push", "-q", "origin", ${JSON.stringify(BRANCH)});`,
+    '  rmSync(dir, { recursive: true, force: true });',
+    `  writeFileSync(${JSON.stringify(done)}, "");`,
+    "}",
+    "",
+  ].join("\n"));
+  return { script, done };
 }
 
 describe("the loop with a GitHub remote", () => {
@@ -183,7 +222,11 @@ describe("the loop with a GitHub remote", () => {
     mkdirSync(join(s.repo, "intent", "other"), { recursive: true });
     await Bun.write(join(s.repo, "intent", "other", "intent.md"), "---\nstatus: plan-approved\n---\n# Intent: other\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
     await Bun.write(join(s.repo, "intent", "other", "spec.md"), "# Spec\n\n## Summary\ns\n");
-    await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN);
+    // Other changes files of its own: one that changes add-numbers' files would wait for its pull request to merge.
+    await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN.replaceAll("add", "sub"));
+    const fixtures = tempDir("loopstra-fixtures-");
+    mkdirSync(join(fixtures.path, "other"));
+    writeFileSync(join(fixtures.path, "other", "build.jsonl"), fixture("build").replaceAll("add", "sub"));
     // The test command of the next build: GitHub's checks pass while it runs, and it keeps running
     // until the pull request has merged (or 30 seconds have passed).
     await Bun.write(join(s.repo, "flip-checks.ts"), [
@@ -197,7 +240,7 @@ describe("the loop with a GitHub remote", () => {
     ].join("\n"));
     await new Git(s.repo).commitAll("another change");
     await run(["git", "push", "-q", "origin", "main"], s.repo);
-    await withEnv(s.env, async () => {
+    await withEnv({ ...s.env, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
       await tick(s.repo); // build add-numbers
       await tick(s.repo); // review, pull request
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
@@ -205,6 +248,9 @@ describe("the loop with a GitHub remote", () => {
       await Bun.write(configPath(s.repo), "version: 1\ncommands:\n  test: bun flip-checks.ts\npoll_seconds: 1\n");
       await new Git(s.repo).commitAll("test command");
       await run(["git", "push", "-q", "origin", "main"], s.repo);
+      // The pull request already has that commit, as if checked with it; otherwise it is out of date and brought up to date first.
+      expect(await new Git(join(s.repo, ".loopstra", "worktrees", SLUG)).rebaseOnto("main")).toBe(true);
+      expect((await run(["git", "push", "-q", "--force", "origin", BRANCH], s.repo)).code).toBe(0);
       const r = await tick(s.repo); // other is built, its tests let the checks pass, and add-numbers merges meanwhile
       expect(r.picked).toBe("other");
       expect((await readIntent(s.repo, "other")).file.frontmatter.status).toBe("reviewing");
@@ -223,6 +269,7 @@ describe("the loop with a GitHub remote", () => {
       }
     });
     s.cleanup();
+    fixtures.cleanup();
   }, 180_000);
 
   test("merged through gh while main here cannot be brought up to date: waits, and finishes once main has the merged commit", async () => {
@@ -262,6 +309,81 @@ describe("the loop with a GitHub remote", () => {
       expect(await git.branchExists(BRANCH)).toBe(false);
       expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
       expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge")).toHaveLength(1);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("git timing out once the pull request merged waits, and the next look records the merge, not a rebuild", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass" });
+      // Every git command of the step times out once GitHub has merged the pull request.
+      const merged = () => JSON.parse(readFileSync(join(s.remote, "fake-gh.json"), "utf8")).prs[BRANCH].merged === true;
+      const git = new Git(s.repo);
+      git.run = async (args, opts) => {
+        if (merged()) throw new GitTimeout(args, 1);
+        return Git.prototype.run.call(git, args, opts);
+      };
+      const trace = Trace.open(s.repo);
+      try {
+        const ctx = new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG));
+        (ctx as { git: Git }).git = git;
+        expect(await runStepGuarded(ctx)).toEqual({ ok: true, waiting: true });
+        expect(merged()).toBe(true);
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        expect((await intentOf(s.repo)).note).not.toContain("plan-approved");
+        expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"finish merge\""))).toHaveLength(1);
+        expect(await runStepGuarded(new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG)))).toEqual({ ok: true });
+      } finally { trace.close(); }
+      expect((await intentOf(s.repo)).status).toBe("merged");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("recording a merged pull request that keeps failing is traced once, and after 30 minutes blocks with a look again; a pause of over 10 minutes starts the count again", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass" });
+      // The step's git commands after `git remote` fail the same way once GitHub has merged the pull request.
+      const merged = () => JSON.parse(readFileSync(join(s.remote, "fake-gh.json"), "utf8")).prs[BRANCH].merged === true;
+      const git = new Git(s.repo);
+      git.run = async (args, opts) => {
+        if (merged() && args[0] !== "remote") throw new Error("fatal: unable to read the repository");
+        return Git.prototype.run.call(git, args, opts);
+      };
+      const trace = Trace.open(s.repo);
+      const look = async () => {
+        const ctx = new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG));
+        (ctx as { git: Git }).git = git;
+        return runStepGuarded(ctx);
+      };
+      try {
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"finish merge\""))).toHaveLength(1);
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        const failing = join(s.repo, ".loopstra", "runs", SLUG, "finish-failing");
+        const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+        // The failures started 31 minutes ago, but the last was 11 minutes ago (the loop was off since): the count starts again.
+        writeFileSync(failing, `${ago(31)}\n${ago(11)}`);
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        // They started 31 minutes ago and went on since.
+        writeFileSync(failing, `${ago(31)}\n${ago(1)}`);
+        expect((await look()).ok).toBe(false);
+        const blocked = await intentOf(s.repo);
+        expect(blocked.status).toBe("blocked");
+        expect(blocked.note).toContain("The pull request merged on GitHub, but recording it here kept failing: fatal: unable to read the repository");
+        expect(blocked.note).toContain("set status to merge-review");
+        await writeIntent(await readIntent(s.repo, SLUG), { status: "merge-review", note: "" });
+        await new Git(s.repo).commitAll("person: look again");
+        expect(await runStepGuarded(new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG)))).toEqual({ ok: true });
+      } finally { trace.close(); }
+      expect((await intentOf(s.repo)).status).toBe("merged");
     });
     s.cleanup();
   }, 180_000);
@@ -426,6 +548,37 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("GitHub not answering is one signal, not a line per look; after 15 minutes it is in Needs attention, until GitHub answers", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      const cfg = await loadConfig(s.repo);
+      const github = () => inTrace(s.repo, (t) => t.signals(500).filter((x) => x.name === "github"));
+      const needs = async (minutes: number) => {
+        const t = Trace.open(s.repo);
+        try { return await attention(s.repo, cfg, t, new Date(Date.now() + minutes * 60_000)); } finally { t.close(); }
+      };
+      const AUTH = "HTTP 401: Bad credentials (https://api.github.com/graphql)";
+      await withEnv({ LOOPSTRA_FAKE_GH_FAIL: "1" }, async () => {
+        await tick(s.repo);
+        await tick(s.repo);
+      });
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect(github().map((x) => [x.result, x.output])).toEqual([["fail", AUTH]]);
+      expect(inTrace(s.repo, (t) => t.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("Bad credentials")))).toEqual([]);
+      expect((await needs(0)).filter((i) => i.title === "Not answering")).toEqual([]);
+      expect((await needs(20)).filter((i) => i.title === "Not answering")).toEqual([
+        { kind: "sync", label: "GitHub", slug: null, title: "Not answering", what: `GitHub hasn't answered for 15 minutes: ${AUTH}` },
+      ]);
+      await tick(s.repo);
+      expect(github().map((x) => x.result)).toEqual(["pass", "fail"]);
+      expect((await needs(20)).filter((i) => i.title === "Not answering")).toEqual([]);
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("failed checks and a closed pull request block in plain words; a pull request merged on GitHub is recorded once", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {
@@ -489,6 +642,161 @@ describe("the loop with a GitHub remote", () => {
       expect((await run(["git", "rev-parse", BRANCH], s.remote)).out.trim()).toBe((await run(["git", "rev-parse", BRANCH], s.repo)).out.trim());
       expect((await s.pr()).state).toBe("OPEN");
     });
+    s.cleanup();
+  }, 180_000);
+
+  test("commits a person pushes to the pull request as it merges are not merged until their own checks pass", async () => {
+    const s = await remoteSetup();
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote) });
+      // The push lands between the look at the checks and GitHub's merge.
+      await withEnv({ LOOPSTRA_FAKE_GH_BEFORE_MERGE: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      expect((await s.pr()).merged).toBe(false);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).some((e) => e.payload.includes("New commits arrived on the pull request"))).toBe(true));
+      // GitHub's checks of the person's commit still run.
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(false);
+      // They pass: the commit is taken into the branch here, and the pull request merges with it.
+      await s.setPr({ checksHead: await headOn(s.remote) });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/person.ts")).toBe(true);
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).filter((e) => e.payload.includes("\"take pull request commits\""))).toHaveLength(1));
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("commits a person pushed after the checks were read are taken, and wait for their own checks before it merges", async () => {
+    const s = await remoteSetup();
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote) });
+      // The push lands just after the checks were read, before the step fetches the branch.
+      await withEnv({ LOOPSTRA_FAKE_GH_AFTER_CHECKS: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      expect((await run(["git", "rev-parse", BRANCH], s.repo)).out.trim()).toBe(await headOn(s.remote));
+      await s.setPr({ checksHead: await headOn(s.remote) });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/person.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("commits a person pushed to an old pull request get the grace period for their checks to start, as Loopstra's own push does", async () => {
+    const s = await remoteSetup();
+    await Bun.write(join(s.repo, ".github", "workflows", "ci.yml"), "on: pull_request\njobs: {}\n");
+    await new Git(s.repo).commitAll("ci");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      // Opened and pushed long ago; its checks passed.
+      const old = new Date(Date.now() - 10 * 60_000).toISOString();
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote), createdAt: old });
+      await Bun.write(join(s.repo, ".loopstra", "runs", SLUG, "pr-pushed"), old);
+      await withEnv({ LOOPSTRA_FAKE_GH_AFTER_CHECKS: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).some((e) => e.payload.includes("\"take pull request commits\""))).toBe(true));
+      // GitHub has not registered the checks of the person's commit yet: the change waits for them.
+      await s.setPr({ checks: "none", checksHead: "" });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(false);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("an owner who closes the pull request while the change is reviewed again is not overridden by a new one", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      // The owner closes it while the change goes round the review once more (as anotherRound sends it).
+      await s.setPr({ state: "CLOSED" });
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "reviewing" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "blocked" });
+      expect((await intentOf(s.repo)).note).toContain("The pull request was closed without merging.");
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(1);
+      expect((await Bun.file(join(s.remote, "fake-gh.json")).json()).next).toBe(2);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a change built before Loopstra knew its pull request's number opens a new one when the branch's is closed, as it did then", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      await s.setPr({ state: "CLOSED" });
+      rmSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"));
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "reviewing" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(2);
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("2");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a rebuild after its pull request merged is not taken for merged by that old pull request", async () => {
+    const s = await remoteSetup();
+    // The rebuild changes the code again, so it has something of its own to merge.
+    const build = fixture("build").replace("  return a + b;", "  // checked again\\n  return a + b;");
+    const fixtures = fixtureDir({ "build-2": build });
+    await withEnv({ ...s.env, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("1");
+      // #1 merges on GitHub, and the loop records it.
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      const mergeCommit = (await run(["git", "rev-parse", "HEAD"], other.path)).out.trim();
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true, mergeCommit });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+
+      // A person asks for a rebuild. Its review passes while GitHub cannot be reached, so no pull request opens.
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "plan-approved", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: rebuild");
+      await tick(s.repo); // build again
+      expect((await intentOf(s.repo)).status).toBe("reviewing");
+      await run(["git", "remote", "set-url", "origin", join(s.remote, "gone")], s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("blocked");
+
+      // GitHub is back and the person retries the merge: #1 is not this build's, so a new pull request opens.
+      await run(["git", "remote", "set-url", "origin", s.remote], s.repo);
+      const j = await readIntent(s.repo, SLUG);
+      await writeIntent(j, { status: "merge-review", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(2);
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("2");
+      expect(await s.pr()).toMatchObject({ number: 2, state: "OPEN" });
+    });
+    fixtures.cleanup();
     s.cleanup();
   }, 180_000);
 

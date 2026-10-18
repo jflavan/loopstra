@@ -10,7 +10,7 @@ import { holdLoop, readPause, releaseLoop } from "../../src/heartbeat";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
-import { FAKE_CLAUDE, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { touchWake, wakeStamp } from "../../src/wake";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -197,6 +197,27 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   }, 60_000);
 
+  test("only the strong model is out: the cheap intake getting through keeps the pause, and the probe asks the strong model", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const dir = fixtureDir({ "design@opus": fixture("outage"), "probe@opus": fixture("outage") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        for (const n of [1, 2, 3]) {
+          const r = await tick(repo.path);
+          expect(r.paused).toMatch(/^The assistant is unavailable/);
+          expect(readPause(repo.path)).toMatchObject({ phase: "design", model: "opus", repeats: n, failures: n });
+          const p = readPause(repo.path)!;
+          await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+        }
+      });
+      // A probe on the cheap model would have got through and blocked the change.
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+      expect(trace.phases(SLUG).filter((p) => p.name === "probe").map((p) => p.status)).toEqual(["fail"]);
+    } finally {
+      dir.cleanup(); trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
   test("queue.md is written every tick but committed only along with another runtime commit", async () => {
     const { repo, trace } = await setupRepo("draft");
     const git = new Git(repo.path);
@@ -312,6 +333,28 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a chat hand-off's throwaway checkout left behind is removed once its process is gone and an hour has passed, not while it runs", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const git = new Git(repo.path);
+    const ended = Bun.spawn({ cmd: [process.execPath, "-e", "0"] });
+    await ended.exited;
+    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${ended.pid}`);
+    const running = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-2-${process.pid}`);
+    await git.run(["worktree", "add", "--detach", left, "main"]);
+    await git.run(["worktree", "add", "--detach", running, "main"]);
+    // A pid not alive here may be a hand-off on another machine sharing the repository, mid-push.
+    await tick(repo.path);
+    expect(existsSync(left)).toBe(true);
+    const old = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(left, old, old);
+    utimesSync(running, old, old);
+    await tick(repo.path);
+    expect(existsSync(left)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+    expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)).toHaveLength(2);
+    trace.close(); repo.cleanup();
+  });
+
   test("a move of main that a kill cut short is put back before the tick does anything else", async () => {
     const { repo, trace } = await setupRepo("accepted");
     const git = new Git(repo.path);
@@ -393,6 +436,16 @@ describe("scheduler resilience", () => {
     await withEnv({ LOOPSTRA_GH_EXECUTABLE: FAKE_GH }, async () => {
       expect(await preflight(repo.path)).toBeNull();
     });
+    trace.close(); repo.cleanup();
+  });
+
+  test("start refuses a folder below the repository's top, naming the top", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    const sub = join(repo.path, "packages", "app");
+    mkdirSync(join(sub, "loopstra"), { recursive: true });
+    await Bun.write(join(sub, "loopstra", "config.yaml"), await Bun.file(join(repo.path, "loopstra", "config.yaml")).text());
+    const top = (await new Git(repo.path).run(["rev-parse", "--show-toplevel"])).out.trim();
+    expect(await preflight(sub)).toBe(`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run it in ${top}.`);
     trace.close(); repo.cleanup();
   });
 
@@ -532,6 +585,10 @@ describe("sleeping between ticks", () => {
       expect(await sleepBetweenTicks(t.path, 60_000, now, 20)).toBe("woken");
       expect(Date.now() - t0).toBeLessThan(5_000);
       expect(await sleepBetweenTicks(t.path, 30, wakeStamp(t.path), 10)).toBe("timeout");
+      // A wait longer than a timer can hold (poll_seconds of 2,147,484 and up) is not cut to 1 ms.
+      const before = wakeStamp(t.path);
+      setTimeout(() => touchWake(t.path), 100);
+      expect(await sleepBetweenTicks(t.path, 2_147_484_000, before, 20)).toBe("woken");
     } finally {
       t.cleanup();
     }

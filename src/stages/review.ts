@@ -5,7 +5,7 @@ import { passes, runJudge } from "../judges";
 import { phasePrompt } from "../phases";
 import { testLoop } from "./build";
 import { reviewPhase, takeEarlyReview } from "./early-review";
-import { artifacts, bullets, buildSession, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
+import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
@@ -27,7 +27,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   }
   // Stopped part-way through a revision: keep those edits on the branch so the review sees them.
   if (await wt.isDirty()) {
-    const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
+    const kept = await saveWork(ctx, wt, KEEP_UNFINISHED);
     if (!kept.ok) return block(ctx, kept.note, kept);
     ctx.trace.event(ctx.slug, "command", { command: "keep unfinished changes", note: "the worktree had uncommitted edits at review start" });
   }

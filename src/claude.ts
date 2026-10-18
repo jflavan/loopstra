@@ -24,6 +24,8 @@ export interface Collected {
   isError: boolean;
   /** What the session tried and was not allowed (the result event's permission_denials), as allow-rule text, e.g. `Bash(git tag v1)`. */
   denied: string[];
+  /** The HTTP status of the API call that failed, when the result event says (CLI 2.x's api_error_status); else null. */
+  apiErrorStatus: number | null;
 }
 
 /** One permission denial as allow-rule text: the command for Bash, the path for file tools, else the tool name. */
@@ -61,7 +63,7 @@ export class StreamCollector {
   finish(): Collected {
     const r = this.result as (StreamEvent & {
       structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
-      permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>;
+      permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
     }) | null;
     return {
       sessionId: this.sessionId ?? r?.session_id ?? null,
@@ -74,6 +76,7 @@ export class StreamCollector {
       events: this.events,
       isError: r?.is_error ?? r === null,
       denied: Array.isArray(r?.permission_denials) ? r.permission_denials.map(deniedText) : [],
+      apiErrorStatus: typeof r?.api_error_status === "number" ? r.api_error_status : null,
     };
   }
 }
@@ -105,11 +108,19 @@ export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" 
  * what it catches.
  */
 export const ENVIRONMENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; catches: string }> = [
-  { pattern: /invalid api key|please run \/login|not logged in|login required|oauth token (has )?expired|authentication[_ ]error|API Error: 40[13]\b/i, catches: "signed out, or the sign-in expired" },
-  { pattern: /usage limit|rate[_ ]limit|too many requests|API Error: 429\b/i, catches: "a usage or rate limit was reached" },
+  { pattern: /invalid api key|please run \/login|not logged in|login required|oauth token (has )?(expired|revoked)|token refresh failed|authentication[_ ]error|API Error: 40[13]\b/i, catches: "signed out, or the sign-in expired" },
+  { pattern: /usage limit|(hit|reached) your (\w+ )*limit|spend limit|shared budget|requires usage credits|out of (usage |extra usage )?credits|credit balance is too low|rate[_ ]limit|too many requests|API Error: 429\b/i, catches: "a usage, spend or rate limit was reached, or the credits ran out" },
   { pattern: /overloaded|service unavailable|API Error: 5\d\d\b/i, catches: "the service is overloaded or down" },
   { pattern: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|getaddrinfo|socket hang up|fetch failed|unable to connect|network error|connection error/i, catches: "the network is down or the service cannot be reached" },
 ];
+
+/**
+ * Whether an error result's API status means the assistant could not be used: signed out (401, 403), a limit
+ * (429), or the service down (5xx, 529 overloaded). Read when the result carries one, so new wording is caught too.
+ */
+function environmentStatus(status: number | null): boolean {
+  return status === 401 || status === 403 || status === 429 || (status !== null && status >= 500);
+}
 
 /** The first line of `text` that an environment pattern matches, or null. */
 function environmentLine(text: string): string | null {
@@ -473,7 +484,8 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
-    const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr));
+    const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr))
+      ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus}` : null);
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
   }
   if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {

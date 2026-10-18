@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import type { Config } from "./config";
+import { writeFileAtomic } from "./fsutil";
 import { errorText } from "./shell";
 import { andList } from "./text";
 
@@ -296,20 +297,31 @@ function patched(text: string, patch: Record<string, string>, remove: readonly s
 }
 
 /**
+ * Writes a file of a change's folder whole (see writeFileAtomic), so the console, chat or a person's
+ * editor never reads half of it. The temp file goes in the root's .loopstra (gitignored), not the
+ * change's folder, where one a kill left behind would be committed with the next record.
+ */
+export function writeChangeFile(intent: Intent, name: string, text: string): void {
+  writeFileAtomic(join(intent.dir, name), text, join(intent.dir, "..", "..", ".loopstra"));
+}
+
+/**
  * Writes frontmatter keys into intent.md. The file is read from disk right before writing and only
  * the given keys change (see patchFrontmatter), so a person's edits made meanwhile are kept. With
  * `expectStatus`, nothing is written when the status on disk is a different one (a person changed
- * it); the return value says whether it wrote. With `remove`, those keys' lines are taken out.
+ * it), and nothing when intent.md is gone (a person deleted the change: it is not brought back);
+ * the return value says whether it wrote. With `remove`, those keys' lines are taken out.
  * `intent.file` is refreshed from what was written.
  */
 export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> } = {}): Promise<boolean> {
   const path = join(intent.dir, "intent.md");
-  const onDisk = existsSync(path) ? await Bun.file(path).text() : serializeIntentFile(intent.file);
+  if (!existsSync(path)) return false;
+  const onDisk = await Bun.file(path).text();
   if (opts.expectStatus !== undefined && parseIntentFile(onDisk).frontmatter.status !== opts.expectStatus) return false;
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries(patch)) if (v !== undefined) values[k] = String(v);
   const text = patchFrontmatter(onDisk, values, opts.remove ?? []);
-  await Bun.write(path, text);
+  writeChangeFile(intent, "intent.md", text);
   intent.file = parseIntentFile(text);
   return true;
 }
@@ -387,11 +399,14 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
 /** Statuses whose code is in main (the change's worktree and branch are no longer needed). */
 export const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done"]);
 
+/** Statuses whose merge step only watches the pull request (with a remote): the watcher's, never a lane's. */
+export const WATCHING_PR: ReadonlySet<string> = new Set(["merge-review", "merge-approved"]);
+
 /**
  * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
  * (for example at verify; `resume_from` then still says merged).
  */
-function inMain(fm: Frontmatter): boolean {
+export function inMain(fm: Frontmatter): boolean {
   if (MERGED.has(fm.status)) return true;
   return (fm.status === "blocked" || fm.status === "closed") && fm.resume_from !== undefined && MERGED.has(fm.resume_from);
 }
@@ -506,7 +521,7 @@ export function planFilesNeeded(status: Status): boolean {
 }
 
 /**
- * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
+ * Same-file waits, at every speed.max_parallel_changes: a change at plan-approved waits when its plan
  * lists a file that another change's plan lists, and that change is building, in review or waiting to
  * merge (held or not: its branch exists), or is at plan-approved earlier in the queue, not held and not
  * waiting on its own depends_on. Building both would end in a rebase conflict, which needs an engineer.

@@ -408,6 +408,13 @@ export class Trace {
     return this.db.query<{ ts: string; result: string; output: string }, typeof args>(`SELECT ts, result, output FROM signals WHERE ${where} ORDER BY id DESC LIMIT 1`).get(...args) ?? null;
   }
 
+  /** When one signal started failing: the first of its newest fails in a row (null when its newest result is no fail). */
+  failingSince(name: string): string | null {
+    return this.db.query<{ ts: string | null }, [string, string]>(
+      "SELECT MIN(ts) AS ts FROM signals WHERE name = ? AND result = 'fail' AND id > COALESCE((SELECT MAX(id) FROM signals WHERE name = ? AND result != 'fail'), 0)",
+    ).get(name, name)?.ts ?? null;
+  }
+
   signals(limit = 50): Array<{ name: string; ts: string; result: string; output: string }> {
     return this.db.query<{ name: string; ts: string; result: string; output: string }, [number]>(
       "SELECT name, ts, result, output FROM signals ORDER BY id DESC LIMIT ?").all(limit);

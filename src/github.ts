@@ -1,11 +1,46 @@
 import { lastLine, spawnBounded } from "./shell";
 import { StopRequested } from "./stop";
+import type { Trace } from "./trace";
 
 export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
-/** `mergeCommit`: the commit the merge made on the base branch (null until merged, or when gh does not say). */
-export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string }
+/** Whether GitHub answered the pull request watcher's last look: `fail` with gh's error, or `pass`. */
+export const GITHUB_SIGNAL = "github";
+/** How long GitHub may go unanswered before a person is told (see attention). */
+export const GITHUB_SILENT_MS = 15 * 60_000;
+
+/** Ids that change on every call: a request id (hex groups joined by colons or dashes), a long hex or number. */
+const CALL_IDS = /\b(?=[0-9a-f:-]*\d)[0-9a-f]+(?:[:-][0-9a-f]+){2,}\b|\b(?=[0-9a-f]*\d)[0-9a-f]{6,}\b/gi;
+
+/**
+ * gh's error the same from one look to the next, as a person reads it: its first line, with the ids
+ * that change on every call (a request id, say) put as "…".
+ */
+export function ghProblem(error: string): string {
+  return (error.trim().split(/\r?\n/)[0] ?? "").replace(CALL_IDS, "…");
+}
+
+/**
+ * Records a look at GitHub (`error`: gh's error, or null when it answered) as the `github` signal,
+ * only when that differs from the last one (gh's words, not the ids that change on every call; see
+ * ghProblem): a lasting problem (a token GitHub no longer takes) is one line in the trace, not one per look.
+ */
+export function recordGitHub(trace: Trace, error: string | null): void {
+  const last = trace.lastSignal(GITHUB_SIGNAL);
+  if (error === null) {
+    if (last?.result === "fail") trace.signal(GITHUB_SIGNAL, "pass", "GitHub answers again.");
+    return;
+  }
+  if (last?.result === "fail" && ghProblem(last.output) === ghProblem(error)) return;
+  trace.signal(GITHUB_SIGNAL, "fail", error);
+}
+
+/**
+ * `mergeCommit`: the commit the merge made on the base branch (null until merged, or when gh does not say).
+ * `head`: the commit at the tip of the pull request's branch on GitHub (null when gh does not say).
+ */
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null }
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
 export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
@@ -23,6 +58,30 @@ export function checksFromRows(rows: { state?: string; bucket?: string }[]): Che
   if (buckets.some((b) => b === "fail" || b === "cancel")) return "fail";
   if (buckets.includes("pending")) return "pending";
   return "pass";
+}
+
+type PrJson = {
+  reviewDecision?: string | null;
+  latestReviews?: { author?: { login?: string } | null; authorAssociation?: string; state?: string }[] | null;
+  author?: { login?: string } | null;
+};
+
+/**
+ * Who has a say in the repository; on a public one anybody else can leave a review too. Broader than
+ * GitHub's own rule (write access): a collaborator with read access counts.
+ */
+const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * GitHub's reviewDecision when it gives one. It gives none unless a branch rule requires reviews (one
+ * requiring 0 approvals too), and then the latest reviews of those with a say in the repository (when
+ * gh gives no authorAssociation, of anyone but the pull request's author) decide: one approves, and
+ * none asks for changes.
+ */
+function approved(j: PrJson): boolean {
+  if (j.reviewDecision) return j.reviewDecision === "APPROVED";
+  const reviews = (j.latestReviews ?? []).filter((r) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login);
+  return reviews.some((r) => r.state === "APPROVED") && !reviews.some((r) => r.state === "CHANGES_REQUESTED");
 }
 
 export class GitHub {
@@ -64,14 +123,14 @@ export class GitHub {
    * and `{ error }` when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
   async lookupPr(branchOrNumber: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,mergedAt,mergeCommit,url,createdAt"]);
+    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,latestReviews,author,mergedAt,mergeCommit,url,createdAt,headRefOid"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };
     }
     try {
-      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string };
-      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt } };
+      const j = JSON.parse(r.out) as PrJson & { number: number; state: PrInfo["state"]; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string };
+      return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null } };
     } catch { return { error: "gh pr view printed something that is not JSON" }; }
   }
 
@@ -109,9 +168,11 @@ export class GitHub {
    * Merges on GitHub. Without `--delete-branch`: gh would also delete the local branch, which fails
    * while the change's worktree has it checked out (after the merge went through). The caller
    * deletes the remote branch itself, and cleanup deletes the local one once main has its changes.
+   * With `head`, GitHub merges only while the branch is still at that commit (`--match-head-commit`):
+   * commits pushed after the checks were read are not merged with them.
    */
-  async merge(number: number, method: "squash" | "merge"): Promise<void> {
-    const r = await this.run(["pr", "merge", String(number), method === "squash" ? "--squash" : "--merge"]);
+  async merge(number: number, method: "squash" | "merge", head?: string | null): Promise<void> {
+    const r = await this.run(["pr", "merge", String(number), method === "squash" ? "--squash" : "--merge", ...(head ? ["--match-head-commit", head] : [])]);
     if (r.code !== 0) throw new Error(`gh pr merge failed: ${lastLine(r.err)}`);
   }
 }

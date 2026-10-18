@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readJson, writeJson } from "./chat/threads";
 import { phaseKind } from "./console/steerable";
-import { commitRecord, writeForStep, type StepContext } from "./context";
+import { commitForStep, writeForStep, type StepContext } from "./context";
 import { conversationPath, readConversation, withEntryOnce } from "./conversation";
 import { Git } from "./git";
 import { asAtHead, fileHash, matchesHead } from "./headfiles";
@@ -105,7 +105,7 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
   /** The hash of what was written, by file, for each that held nothing but HEAD's before the write. */
   const written = new Map<string, string>();
   try {
-    await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${a.phase} asks a question`, async () => {
+    await commitForStep(ctx, `${a.phase} asks a question`, async () => {
       const own = await Promise.all(files.map((f) => matchesHead(ctx.root, f)));
       // Never over a status a person set while the session ran (PersonChangedStatus instead).
       await writeForStep(ctx, { question: "open" });
@@ -124,9 +124,10 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
 }
 
 /**
- * Puts back, as HEAD has them, the files a question's failed commit wrote, so the next commit (a block,
- * say) never commits an open question with no question.json; only those that still hold exactly what
- * was written. A problem is traced: the files then stay as they are.
+ * Puts back, as HEAD has them, the files a question's failed write left (a failed commit puts its
+ * write back itself, see commitRecord), so the next commit (a block, say) never commits an open
+ * question with no question.json; only those that still hold exactly what was written. A problem is
+ * traced: the files then stay as they are.
  */
 async function putBack(ctx: StepContext, written: Map<string, string>): Promise<void> {
   try {

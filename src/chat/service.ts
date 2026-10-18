@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { loadConfig } from "../config";
 import { GitHub } from "../github";
-import { errorText } from "../shell";
+import { errorText, timerMs } from "../shell";
 import { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
@@ -62,6 +62,9 @@ export class ChatService {
     if (this.timer) clearTimeout(this.timer);
     await this.polling;
     for (const t of this.transports) { try { await t.stop(); } catch { /* stopping anyway */ } }
+    // Turns in progress end too (a stop request ends their sessions), so each is traced as ended
+    // and holds none of the day's chat budget after the process exits.
+    await this.orchestrator.idle();
   }
 
   private schedule(ms: number): void {
@@ -71,7 +74,7 @@ export class ChatService {
         this.polling = null;
         void loadConfig(this.root).then((c) => c.poll_seconds * 1000, () => 60_000).then((d) => this.schedule(this.opts.pollMs ?? d));
       });
-    }, ms);
+    }, timerMs(ms));
   }
 
   private cursorPath(name: string): string { return join(chatDir(this.root), `announced-${name}.json`); }

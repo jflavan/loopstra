@@ -54,6 +54,9 @@ export async function artifacts(ctx: StepContext): Promise<Artifacts> {
   };
 }
 
+/** The commit message for edits nobody reviewed, kept on the branch so the next review sees them. */
+export const KEEP_UNFINISHED = "chore: keep unfinished changes";
+
 /**
  * Commits everything in the worktree, but only after confirming it is on the intent branch:
  * a commit anywhere else could put unreviewed work on another branch.
@@ -181,6 +184,12 @@ export const PR_LEASE = "pr-lease";
  * becomes the lease (see adoptCutShortPush).
  */
 export const PR_PUSHING = "pr-pushing";
+
+/**
+ * Run-folder marker: the number of this build's pull request, or "" while it has none (each build
+ * starts with ""). An earlier build's pull request, closed or merged, is not this build's own.
+ */
+export const PR_NUMBER = "pr-number";
 
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {

@@ -401,7 +401,7 @@ first served, and lanes start in queue order, so merges follow priority. A chang
 `merge-review` for a person is rebased and tested again when its `merge-approved` step runs.
 That is existing behaviour.
 
-### Pull requests that went out of date (with a remote, N > 1 only)
+### Pull requests that went out of date (with a remote, N > 1 only; changed by the review fixes of 2026-10-18: at every N)
 
 After the first of two ready pull requests merges, the second one's base no longer has the
 first one's code. Its checks never saw the two together. In `runRemoteMerge`, once the checks
@@ -426,7 +426,9 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    (a person deleted it after the pull request was closed), the push leases on it still having
    none (`--force-with-lease=<branch>:`), never on a stale remote-tracking ref. If the branch here
    is part of that copy, it is
-   fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
+   fast-forwarded to it in the worktree (traced as "take pull request commits"; changed by the
+   review fixes of 2026-10-18: moved with `git reset --keep`, which also takes a copy GitHub
+   rewrote), and the marker
    moves to it, so the checks and the next push include the person's work. If the branch here
    changed too, the change is blocked with a plain note for an engineer, and nothing is
    overwritten. If the branch here did not change but the workspace cannot take the person's
@@ -469,7 +471,7 @@ At N=1 that changes one thing: a person's commits on the pull request's branch a
 overwritten by the next push (after a retry of failed checks, say); the push is refused and the
 change blocked instead.
 
-### Same files: a change waits instead of building into a conflict (N > 1 only)
+### Same files: a change waits instead of building into a conflict (N > 1 only; changed by the review fixes of 2026-10-18: at every N)
 
 A change at `plan-approved` waits when its plan's "Files that change" list
 (`parsePlanFiles`) shares a file with another change that:

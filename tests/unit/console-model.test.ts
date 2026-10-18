@@ -37,7 +37,7 @@ describe("changes", () => {
     }
   });
 
-  test("with changes worked on together, one whose plan lists a file another holds waits for it", async () => {
+  test("one whose plan lists a file another holds waits for it, with changes worked on together or one at a time", async () => {
     const t = tempDir();
     try {
       await config(t.path, "speed:\n  max_parallel_changes: 2\n");
@@ -51,9 +51,9 @@ describe("changes", () => {
       const by = Object.fromEntries((await model(t.path)).sections.changes.map((c) => [c.slug, c.waiting]));
       expect(by).toEqual({ alpha: null, beta: "Waits for alpha to be merged first, because both change the same files.", gamma: null });
 
-      // One change at a time: the loop never builds two at once, so nothing waits for files.
+      // One change at a time too: a pull request can wait to merge while the one lane builds.
       await config(t.path);
-      expect((await model(t.path)).sections.changes.every((c) => c.waiting === null)).toBe(true);
+      expect((await model(t.path)).sections.changes.find((c) => c.slug === "beta")?.waiting).toBe("Waits for alpha to be merged first, because both change the same files.");
     } finally {
       t.cleanup();
     }

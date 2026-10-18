@@ -34,16 +34,17 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
 /**
  * Read-only tools for both chat agents: look at the repository and the trace, and run `loopstra
  * status`. No git: `git show <rev>:<path>` and `git log -p` would read any file's content, past or
- * present, around the Read rules below; the runtime puts recent history in the context instead.
+ * present, around the Read rules below; the runtime puts recent history in the context instead. Claude
+ * Code allows read-only git by itself, so CHAT_DENIED also denies it.
  */
 export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
 /**
  * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools,
  * reading the usual places secrets are kept is denied (Read rules also cover Grep and Glob), and so
- * is git's own folder. This is a guard, not a sandbox: keep `allow` lists tight.
+ * are git's own folder and git itself (see CHAT_TOOLS). This is a guard, not a sandbox: keep `allow` lists tight.
  */
 export const CHAT_DENIED = [
-  "Edit", "Write", "NotebookEdit", "PowerShell",
+  "Edit", "Write", "NotebookEdit", "PowerShell", "Bash(git)", "Bash(git *)",
   ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.git/**", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
   // Other people's conversations (other threads, other platforms) and the chat sessions' own prompts.
   ...["**/.loopstra/chat/**", "**/.loopstra/runs/_chat/**"].map((p) => `Read(${p})`),
@@ -101,7 +102,9 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       timeoutMs: o.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: held.heldUsd,
       resume: o.resume ?? undefined,
-      env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
+      // It runs in the main checkout: should git run there anyway (git itself is denied, see CHAT_DENIED),
+      // it skips the index refresh `git status` writes, so it never holds the lock the loop commits records with.
+      env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG, GIT_OPTIONAL_LOCKS: "0" },
     },
     read: (output) => {
       const parsed = o.schema.safeParse(output);
