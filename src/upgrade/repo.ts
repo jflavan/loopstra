@@ -13,6 +13,7 @@ import { managedFiles, readStamp, STAMP_FILE, textSha, writeStamp, type Stamp } 
 import { upgradeFile, type FileResult } from "./files";
 import { adoptLegacy, type Adopted } from "./legacy";
 import { migrateConfig, MIGRATIONS, type Migration } from "./migrations";
+import { compareVersions, installHint } from "./tool";
 
 /** What upgrade says when the loop is running in the repository. */
 export const LOOP_RUNNING = "The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.";
@@ -61,6 +62,10 @@ export interface RepoResult {
   notes: string[];
   /** With `check`: what a real upgrade would refuse for now (the loop running, uncommitted files). */
   warnings: string[];
+  /** The branch the upgrade commits on (the config's main_branch). */
+  main: string;
+  /** The files were written (also when the commit then failed). */
+  written: boolean;
   committed: boolean;
 }
 
@@ -107,13 +112,18 @@ const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VER
 export async function upgradeRepo(root: string, opts: { check: boolean }, deps: RepoDeps = REAL_DEPS): Promise<RepoResult> {
   const to = await deps.version();
   const stamp = readStamp(root);
-  const result: RepoResult = { ok: false, from: stamp?.loopstra ?? null, to, files: [], removed: [], changed: [], notes: [], warnings: [], committed: false };
+  const result: RepoResult = { ok: false, from: stamp?.loopstra ?? null, to, files: [], removed: [], changed: [], notes: [], warnings: [], main: "main", written: false, committed: false };
   const refuse = (refusal: string): RepoResult => ({ ...result, ok: false, refusal });
+  // A teammate upgraded to a newer release: upgrading to this one would bring older texts back.
+  if (released(result.from) && released(to) && compareVersions(result.from, to) > 0) {
+    return refuse(`This repository is on Loopstra ${result.from}, newer than the installed ${to}. Install it with ${installHint(result.from)}, then run loopstra upgrade again.`);
+  }
 
   // Checks: a real upgrade works out and writes nothing unless they all pass.
   if (!existsSync(configPath(root))) return refuse(NOT_SET_UP);
   const cfgText = readFileSync(configPath(root), "utf8");
   const { main, poll } = loopSettings(cfgText);
+  result.main = main;
   const git = new Git(root);
   const branch = await git.currentBranch();
   if (branch !== main) return refuse(`The checkout is on ${branch || "no branch"}, not ${main}. Switch to ${main}, then run loopstra upgrade again.`);
@@ -215,6 +225,7 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
   for (const r of result.files) if (r.text !== undefined) writeFileAtomic(join(root, r.path), r.text);
   if (migrated.text !== cfgText) writeFileAtomic(configPath(root), migrated.text);
   writeStamp(root, next);
+  result.written = true;
 
   try {
     result.committed = await onCheckout(root, async () => {

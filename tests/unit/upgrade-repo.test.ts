@@ -400,8 +400,45 @@ describe("upgradeRepo", () => {
       expect(r.ok).toBe(false);
       expect(r.committed).toBe(false);
       expect(r.refusal).toBe("The files were brought up to date but could not be committed (git said: no commits today). Commit them by hand.");
+      expect(r.written).toBe(true);
+      expect(r.files.find((f) => f.path === SKILL)!.outcome).toBe("replaced");
       expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(readFileSync(templatePath("skill", "SKILL.md"), "utf8"));
       expect(await head(repo.path)).toBe(at);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a repository on a newer release than the installed one is refused, in both modes, and nothing is written", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      writeStamp(repo.path, { ...readStamp(repo.path)!, loopstra: "0.10.0" });
+      await run(["git", "commit", "-qam", "a teammate upgraded"], repo.path);
+      const at = await head(repo.path);
+      const says = "This repository is on Loopstra 0.10.0, newer than the installed 0.9.0. Install it with bun add -g loopstra@0.10.0, then run loopstra upgrade again.";
+      for (const check of [false, true]) {
+        const r = await upgradeRepo(repo.path, { check }, deps());
+        expect({ check, ok: r.ok, refusal: r.refusal, written: r.written }).toEqual({ check, ok: false, refusal: says, written: false });
+      }
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      expect(await head(repo.path)).toBe(at);
+      // A development checkout's stamp, or a development checkout running, is not compared.
+      writeStamp(repo.path, { ...readStamp(repo.path)!, loopstra: "0.0.0-dev+abc1234" });
+      await run(["git", "commit", "-qam", "stamped by a checkout"], repo.path);
+      expect((await upgradeRepo(repo.path, { check: true }, deps())).ok).toBe(true);
+      writeStamp(repo.path, { ...readStamp(repo.path)!, loopstra: "0.10.0" });
+      await run(["git", "commit", "-qam", "a teammate upgraded"], repo.path);
+      expect((await upgradeRepo(repo.path, { check: true }, deps({}, {}, "0.0.0-dev+def5678"))).ok).toBe(true);
+    } finally { repo.cleanup(); }
+  });
+
+  test("the result names the main branch, and whether files were written", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      const check = await upgradeRepo(repo.path, { check: true }, deps());
+      expect({ main: check.main, written: check.written }).toEqual({ main: "main", written: false });
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect({ main: r.main, written: r.written, committed: r.committed }).toEqual({ main: "main", written: true, committed: true });
     } finally { repo.cleanup(); }
   });
 

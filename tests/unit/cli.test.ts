@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { preflight } from "../../src/scheduler";
@@ -86,6 +86,25 @@ describe("the command line outside a set-up repo", () => {
       expect(readdirSync(t.path)).toEqual([]);
     } finally {
       t.cleanup();
+    }
+  });
+});
+
+describe("the update notice", () => {
+  test("status in a repository set up before the stamp says to upgrade, even from a development checkout; with a stamp it says nothing", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const { init } = await import("../../src/init");
+      await init(repo.path);
+      const quiet = await run([process.execPath, CLI, "status"], repo.path);
+      expect(quiet.code).toBe(0);
+      expect(quiet.out).not.toContain("loopstra upgrade");
+      rmSync(join(repo.path, "loopstra", "stamp.json"));
+      const r = await run([process.execPath, CLI, "status"], repo.path);
+      expect(r.code).toBe(0);
+      expect(r.out.trimEnd().split("\n").at(-1)).toBe("This repository was set up by an older Loopstra: run loopstra upgrade.");
+    } finally {
+      repo.cleanup();
     }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { report, upgradeCommand, type UpgradeIo } from "../../src/commands/upgrade";
+import { printResult, report, upgradeCommand, type UpgradeIo } from "../../src/commands/upgrade";
 import type { RepoResult } from "../../src/upgrade/repo";
 
 /** An io that records what it is asked to do. */
@@ -75,7 +75,7 @@ describe("upgradeCommand", () => {
 
 describe("report", () => {
   const result = (o: Partial<RepoResult> = {}): RepoResult => ({
-    ok: true, from: "0.8.0", to: "0.9.0", files: [], removed: [], changed: [], notes: [], warnings: [], committed: false, ...o,
+    ok: true, from: "0.8.0", to: "0.9.0", files: [], removed: [], changed: [], notes: [], warnings: [], main: "trunk", written: false, committed: false, ...o,
   });
 
   test("says what changed, file by file, and what was committed", () => {
@@ -84,6 +84,7 @@ describe("report", () => {
         { path: "REVIEW.md", outcome: "replaced", entry: { base: "x" } },
         { path: "intent/README.md", outcome: "unchanged", entry: { base: "x" } },
         { path: "loopstra/prompts/review.md", outcome: "conflict", entry: { base: "x" } },
+        { path: "intent/README.md", outcome: "deleted", entry: { base: "x", deleted: true } },
       ],
       removed: [".claude/hooks/loopstra-protect-tests.ts"],
       changed: ["loopstra/config.yaml"],
@@ -94,10 +95,11 @@ describe("report", () => {
       "Upgraded this repository to Loopstra 0.9.0 (from 0.8.0).",
       "  REVIEW.md: updated",
       "  loopstra/prompts/review.md: has conflict markers; resolve them and commit it",
+      "  intent/README.md: recorded as removed on purpose; upgrades leave it out",
       "  .claude/hooks/loopstra-protect-tests.ts: removed",
       "  loopstra/config.yaml: updated",
       "  loopstra/prompts/plan.md is merged from the version shipped in abc1234.",
-      "Committed on main; loopstra start shares it with the remote, or push it yourself.",
+      "Committed on trunk; loopstra start shares it with the remote, or push it yourself.",
     ]);
   });
 
@@ -119,5 +121,20 @@ describe("report", () => {
   test("nothing to do", () => {
     expect(report(result({ from: "0.9.0" }), false)).toEqual(["This repository is on Loopstra 0.9.0.", "  Nothing changed."]);
     expect(report(result({ from: "0.9.0" }), true)).toEqual(["This repository is on Loopstra 0.9.0.", "  Nothing would change."]);
+  });
+
+  test("printResult: a refusal goes to warn as it is; files written but not committed are reported first", () => {
+    const say: string[] = [];
+    const warn: string[] = [];
+    expect(printResult(result({ ok: false, refusal: "The checkout is on other, not main." }), false, (l) => say.push(l), (l) => warn.push(l))).toBe(1);
+    expect({ say, warn }).toEqual({ say: [], warn: ["The checkout is on other, not main."] });
+    say.length = 0; warn.length = 0;
+    const failed = result({ ok: false, written: true, refusal: "The files were brought up to date but could not be committed (git said: no). Commit them by hand.", files: [{ path: "REVIEW.md", outcome: "replaced", entry: { base: "x" } }] });
+    expect(printResult(failed, false, (l) => say.push(l), (l) => warn.push(l))).toBe(1);
+    expect(say).toEqual(["Upgraded this repository to Loopstra 0.9.0 (from 0.8.0).", "  REVIEW.md: updated"]);
+    expect(warn).toEqual([failed.refusal!]);
+    say.length = 0; warn.length = 0;
+    expect(printResult(result(), true, (l) => say.push(l), (l) => warn.push(l))).toBe(0);
+    expect(warn).toEqual([]);
   });
 });

@@ -13,7 +13,7 @@ describe("customize", () => {
     try {
       await init(repo.path);
       const r = await customize(repo.path, "review");
-      expect(r).toEqual({ ok: true, text: "Wrote loopstra/prompts/review.md. Edit it, commit it, and the loop uses it from then on." });
+      expect(r).toEqual({ ok: true, text: "Wrote loopstra/prompts/review.md and recorded it in loopstra/stamp.json. Edit it, commit both, and the loop uses it from then on." });
       const shipped = readFileSync(templatePath("prompts", "review.md"), "utf8");
       expect(readFileSync(join(repo.path, "loopstra", "prompts", "review.md"), "utf8")).toBe(shipped);
       expect(readStamp(repo.path)!.files["loopstra/prompts/review.md"]).toEqual({ base: textSha(shipped) });

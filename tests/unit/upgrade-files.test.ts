@@ -66,7 +66,7 @@ describe("upgradeFile", () => {
   test("deleted on purpose stays deleted; a new managed file is written; a just-deleted one is recorded", async () => {
     const { t, file } = setup(null);
     try {
-      expect((await upgradeFile(t.path, file, { base: "x", deleted: true }, async () => null, { write: true })).outcome).toBe("deleted");
+      expect(await upgradeFile(t.path, file, { base: "x", deleted: true }, async () => null, { write: true })).toEqual({ path: "REVIEW.md", outcome: "unchanged", entry: { base: "x", deleted: true } });
       expect(existsSync(join(t.path, "REVIEW.md"))).toBe(false);
       const fresh = await upgradeFile(t.path, file, undefined, async () => null, { write: true });
       expect(fresh).toEqual({ path: "REVIEW.md", outcome: "added", entry: { base: textSha(NEW) }, text: NEW });

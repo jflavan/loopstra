@@ -36,5 +36,5 @@ export async function customize(root: string, name: string | undefined): Promise
   writeFileSync(join(root, rel), text);
   stamp.files[rel] = { base: textSha(text) };
   writeStamp(root, stamp);
-  return { ok: true, text: `Wrote ${rel}. Edit it, commit it, and the loop uses it from then on.` };
+  return { ok: true, text: `Wrote ${rel} and recorded it in ${STAMP_FILE}. Edit it, commit both, and the loop uses it from then on.` };
 }

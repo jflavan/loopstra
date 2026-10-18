@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { writeFileAtomic } from "../fsutil";
 import { DEV_VERSION } from "../package";
 
@@ -59,14 +59,24 @@ export async function releaseNotes(from: string, to: string, api = githubApi()):
 
 const DAY_MS = 24 * 60 * 60_000;
 
+/** True for a published version, not a development checkout's. */
+const released = (v: string): boolean => !v.startsWith(DEV_VERSION);
+
 /**
- * One line for `start` and `status` when the repository's stamp names a different version from the
- * installed one, or a newer release is out; null otherwise. The registry is asked at most once a day
- * (the answer is kept in .loopstra/update-check.json) and never by a development checkout. Never throws.
+ * One line for `start` and `status` when the repository was set up before the stamp (`stamp` is ""),
+ * its stamp names a different version from the installed one, or a newer release is out; null
+ * otherwise. `stamp` null: not known, not compared. The registry is asked at most once a day (the
+ * answer is kept in .loopstra/update-check.json) and never by a development checkout. Never throws.
  */
 export async function updateNotice(root: string, o: { installed: string; registry?: string; stamp?: string | null; now?: number }): Promise<string | null> {
-  if (o.installed.startsWith(DEV_VERSION)) return null;
-  if (o.stamp && o.stamp !== o.installed) return `This repository is on Loopstra ${o.stamp} and ${o.installed} is installed: run loopstra upgrade.`;
+  // Not a question for the registry, so a development checkout says it too.
+  if (o.stamp === "") return "This repository was set up by an older Loopstra: run loopstra upgrade.";
+  if (!released(o.installed)) return null;
+  if (o.stamp && o.stamp !== o.installed) {
+    return released(o.stamp) && compareVersions(o.stamp, o.installed) > 0
+      ? `This repository is on Loopstra ${o.stamp}, newer than the installed ${o.installed}: install it with ${installHint(o.stamp)}.`
+      : `This repository is on Loopstra ${o.stamp} and ${o.installed} is installed: run loopstra upgrade.`;
+  }
   const now = o.now ?? Date.now();
   const cache = join(root, ".loopstra", "update-check.json");
   let latest: string | null;
@@ -83,15 +93,33 @@ export async function updateNotice(root: string, o: { installed: string; registr
 }
 
 /**
- * The command that installs a version globally: `bun add -g loopstra@<version>`. For tests only,
- * LOOPSTRA_INSTALL_COMMAND replaces it, as a JSON array of words (so a path may hold spaces) or as
- * words separated by spaces; `{version}` in it is filled in.
+ * The command that installs a version globally: `bun add -g loopstra@<version>`, run by the Bun
+ * running this (so it does not depend on PATH). For tests only, LOOPSTRA_INSTALL_COMMAND replaces
+ * it, as a JSON array of words (so a path may hold spaces) or as words separated by spaces;
+ * `{version}` in it is filled in.
  */
 export function installCommand(version: string): string[] {
   const custom = process.env.LOOPSTRA_INSTALL_COMMAND;
-  if (!custom) return ["bun", "add", "-g", `loopstra@${version}`];
+  if (!custom) return [process.execPath, "add", "-g", `loopstra@${version}`];
   const words = custom.trim().startsWith("[") ? (JSON.parse(custom) as string[]) : custom.trim().split(/\s+/);
   return words.map((w) => w.replaceAll("{version}", version));
+}
+
+/** The install command as a person would type it. */
+export function installHint(version: string): string {
+  return process.env.LOOPSTRA_INSTALL_COMMAND ? installCommand(version).join(" ") : `bun add -g loopstra@${version}`;
+}
+
+/**
+ * A line for when the `loopstra` that PATH runs (`onPath`) is not the one just installed (`bin`),
+ * for instance an older copy installed with npm; null when they are the same or PATH has none.
+ */
+export function pathWarning(bin: string, onPath: string | null): string | null {
+  if (!onPath) return null;
+  const same = (a: string, b: string) => (process.platform === "win32" ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
+  if (same(bin, onPath)) return null;
+  const dir = dirname(bin);
+  return `Your PATH runs loopstra from ${onPath}; the new version is in ${dir}. Remove the old one (npm rm -g loopstra) or put ${dir} first on PATH.`;
 }
 
 /**
@@ -103,7 +131,7 @@ export async function installedBin(): Promise<string | null> {
   if (process.env.LOOPSTRA_INSTALLED_BIN) return process.env.LOOPSTRA_INSTALLED_BIN;
   let dir = "";
   try {
-    const proc = Bun.spawn({ cmd: ["bun", "pm", "bin", "-g"], stdout: "pipe", stderr: "ignore" });
+    const proc = Bun.spawn({ cmd: [process.execPath, "pm", "bin", "-g"], stdout: "pipe", stderr: "ignore" });
     const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
     if (code === 0) dir = out.trim();
   } catch { /* Bun's own folder, below */ }

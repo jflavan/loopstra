@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { renderStatus } from "./commands/status";
 import { configPath, NOT_SET_UP } from "./config";
 import { errorText } from "./shell";
@@ -36,15 +37,29 @@ function setUp(): boolean {
   return false;
 }
 
-/** Prints one line when a newer Loopstra is out or the repository's stamp names another version; never in the way. */
-async function notice(): Promise<void> {
+/**
+ * The line to print when a newer Loopstra is out, the repository's stamp names another version, or
+ * the repository was set up before the stamp; null otherwise, and outside a set-up folder. Started
+ * before a command's own work and awaited after it, so it never delays the command. Never throws.
+ */
+async function notice(): Promise<string | null> {
   try {
+    if (!existsSync(configPath(root))) return null;
     const { packageVersion } = await import("./package");
-    const { readStamp } = await import("./stamp");
+    const { readStamp, STAMP_FILE } = await import("./stamp");
     const { updateNotice } = await import("./upgrade/tool");
-    const line = await updateNotice(root, { installed: packageVersion(), stamp: readStamp(root)?.loopstra ?? null });
-    if (line) console.log(line);
-  } catch { /* a convenience: never stops a command */ }
+    // "": set up, with no stamp (an older setup). null: a stamp that cannot be read, not compared.
+    const stamp = existsSync(join(root, STAMP_FILE)) ? (readStamp(root)?.loopstra ?? null) : "";
+    return await updateNotice(root, { installed: packageVersion(), stamp });
+  } catch {
+    return null; // a convenience: never stops a command
+  }
+}
+
+/** Prints the notice once it is ready. */
+async function printNotice(pending: Promise<string | null>): Promise<void> {
+  const line = await pending;
+  if (line) console.log(line);
 }
 
 async function main(): Promise<number> {
@@ -78,16 +93,19 @@ async function main(): Promise<number> {
       if (!args) { console.error(SETUP_USAGE); return 1; }
       return setup(root, args);
     }
-    case "status":
+    case "status": {
       if (!setUp()) return 1;
+      const pending = notice();
       process.stdout.write(await renderStatus(root));
-      await notice();
+      await printNotice(pending);
       return 0;
+    }
     case "start": {
       const { preflight, start } = await import("./scheduler");
+      const pending = notice();
       const refusal = await preflight(root);
       if (refusal) { console.error(refusal); return 1; }
-      await notice();
+      await printNotice(pending);
       await start(root, { once: rest.includes("--once") });
       return 0;
     }

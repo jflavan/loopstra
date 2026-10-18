@@ -67,6 +67,8 @@ export async function upgradeFile(root: string, file: ManagedFile, entry: StampE
   };
 
   if (!existsSync(target)) {
+    // Recorded as deleted once, when the removal is first seen; after that it is simply left out.
+    if (entry?.deleted) return done("unchanged", { base: entry.base, deleted: true });
     if (entry) return done("deleted", { base: entry.base, deleted: true });
     put(next);
     return done("added", { base: nextSha });

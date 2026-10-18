@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { compareVersions, installCommand, latestVersion, releaseNotes, updateNotice } from "../../src/upgrade/tool";
+import { compareVersions, installCommand, installHint, latestVersion, pathWarning, releaseNotes, updateNotice } from "../../src/upgrade/tool";
 import { tempDir } from "../helpers";
 
 function serve(routes: Record<string, unknown>) {
@@ -61,6 +61,19 @@ describe("versions", () => {
     } finally { s.stop(); t.cleanup(); }
   });
 
+  test("a stamp on a newer release says to install it; a set-up repository with no stamp says to upgrade, even in a checkout", async () => {
+    const t = tempDir();
+    try {
+      // No registry is asked for either: the address cannot be reached.
+      const registry = "http://localhost:1";
+      expect(await updateNotice(t.path, { installed: "0.5.0", registry, stamp: "0.6.0" })).toBe("This repository is on Loopstra 0.6.0, newer than the installed 0.5.0: install it with bun add -g loopstra@0.6.0.");
+      const older = "This repository was set up by an older Loopstra: run loopstra upgrade.";
+      expect(await updateNotice(t.path, { installed: "0.5.0", registry, stamp: "" })).toBe(older);
+      expect(await updateNotice(t.path, { installed: "0.0.0-dev", registry, stamp: "" })).toBe(older);
+      expect(await updateNotice(t.path, { installed: "0.0.0-dev", registry, stamp: "0.6.0" })).toBeNull();
+    } finally { t.cleanup(); }
+  });
+
   test("up to date: no notice", async () => {
     const t = tempDir();
     const s = serve({ "/loopstra/latest": { version: "0.9.0" } });
@@ -79,10 +92,22 @@ describe("installCommand", () => {
 
   test("bun add -g by default; the test override as words or as a JSON array", () => {
     delete process.env.LOOPSTRA_INSTALL_COMMAND;
-    expect(installCommand("0.5.0")).toEqual(["bun", "add", "-g", "loopstra@0.5.0"]);
+    expect(installCommand("0.5.0")).toEqual([process.execPath, "add", "-g", "loopstra@0.5.0"]);
+    expect(installHint("0.5.0")).toBe("bun add -g loopstra@0.5.0");
     process.env.LOOPSTRA_INSTALL_COMMAND = "bun add -g /tmp/loopstra-{version}.tgz";
     expect(installCommand("0.5.0")).toEqual(["bun", "add", "-g", "/tmp/loopstra-0.5.0.tgz"]);
+    expect(installHint("0.5.0")).toBe("bun add -g /tmp/loopstra-0.5.0.tgz");
     process.env.LOOPSTRA_INSTALL_COMMAND = JSON.stringify(["bun", "add", "-g", "C:/a folder/loopstra-{version}.tgz"]);
     expect(installCommand("0.5.0")).toEqual(["bun", "add", "-g", "C:/a folder/loopstra-0.5.0.tgz"]);
+  });
+});
+
+describe("pathWarning", () => {
+  test("says so when PATH runs another loopstra than the one just installed", () => {
+    const bin = join("/home/me/.bun/bin", "loopstra");
+    expect(pathWarning(bin, bin)).toBeNull();
+    expect(pathWarning(bin, null)).toBeNull();
+    const dir = join("/home/me/.bun/bin");
+    expect(pathWarning(bin, "/usr/local/bin/loopstra")).toBe(`Your PATH runs loopstra from /usr/local/bin/loopstra; the new version is in ${dir}. Remove the old one (npm rm -g loopstra) or put ${dir} first on PATH.`);
   });
 });

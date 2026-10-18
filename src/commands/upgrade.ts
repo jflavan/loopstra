@@ -1,7 +1,8 @@
 import { DEV_VERSION, packageVersion } from "../package";
+import { errorText } from "../shell";
 import type { FileOutcome } from "../upgrade/files";
 import { REAL_DEPS, upgradeRepo, type RepoResult } from "../upgrade/repo";
-import { compareVersions, installCommand, installedBin, latestVersion, releaseNotes } from "../upgrade/tool";
+import { compareVersions, installCommand, installedBin, installHint, latestVersion, pathWarning, releaseNotes } from "../upgrade/tool";
 
 /** The pieces of `loopstra upgrade`, injectable for tests. */
 export interface UpgradeIo {
@@ -20,11 +21,12 @@ export interface UpgradeIo {
   repoStep: (check: boolean) => Promise<number>;
 }
 
-/** Runs a command with this terminal; its exit code. */
-async function spawnInherit(cmd: string[], cwd: string): Promise<number> {
+/** Runs a command with this terminal; its exit code. `what` names it when it cannot be started. */
+async function spawnInherit(cmd: string[], cwd: string, what: string): Promise<number> {
   try {
     return await Bun.spawn({ cmd, cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
-  } catch {
+  } catch (e) {
+    console.error(`${what} could not be started: ${errorText(e)}`);
     return 1;
   }
 }
@@ -37,13 +39,18 @@ export function realIo(root: string): UpgradeIo {
     installed: packageVersion(),
     latest: () => latestVersion(),
     notes: (from, to) => releaseNotes(from, to),
-    install: async (v) => (await spawnInherit(installCommand(v), root)) === 0,
+    install: async (v) => (await spawnInherit(installCommand(v), root, "The install")) === 0,
     handOff: async (v, installed) => {
       const bin = installed ? await installedBin() : null;
-      if (bin) return spawnInherit([bin, "upgrade", "--repo"], root);
-      say(`${installed ? `The installed loopstra command could not be found` : "The install did not succeed"}; running Loopstra ${v} through bunx instead.`);
-      say(`To install it, run: ${installCommand(v).join(" ")}`);
-      return spawnInherit(["bunx", `loopstra@${v}`, "upgrade", "--repo"], root);
+      if (bin) {
+        const code = await spawnInherit([bin, "upgrade", "--repo"], root, `Loopstra ${v}`);
+        const warning = code === 0 ? pathWarning(bin, Bun.which("loopstra")) : null;
+        if (warning) say(warning);
+        return code;
+      }
+      if (installed) say(`The installed loopstra command was not found; running Loopstra ${v} through bun x instead.`);
+      else say(`The install did not succeed; running Loopstra ${v} through bun x instead. To install it, run: ${installHint(v)}`);
+      return spawnInherit([process.execPath, "x", `loopstra@${v}`, "upgrade", "--repo"], root, `Loopstra ${v} through bun x`);
     },
     repoStep: (check) => runRepoStep(root, check, say),
   };
@@ -85,12 +92,21 @@ export async function upgradeCommand(root: string, args: string[], io: UpgradeIo
   return io.handOff(latest, await io.install(latest));
 }
 
-/** Runs the repository step and prints its report; a refusal (or a commit that failed) goes to stderr as it is. */
+/** Runs the repository step and prints what it did. */
 export async function runRepoStep(root: string, check: boolean, say: (l: string) => void): Promise<number> {
   const r = await upgradeRepo(root, { check }, { ...REAL_DEPS, notes: (from, to) => releaseNotes(from, to) });
-  if (!r.ok) { console.error(r.refusal); return 1; }
-  for (const line of report(r, check)) say(line);
-  return 0;
+  return printResult(r, check, say, (l) => console.error(l));
+}
+
+/**
+ * Prints the repository step's result; its exit code. A refusal goes to `warn` as it is; when the
+ * files were written but not committed, what was written is reported first.
+ */
+export function printResult(r: RepoResult, check: boolean, say: (l: string) => void, warn: (l: string) => void): number {
+  if (r.ok || r.written) for (const line of report(r, check)) say(line);
+  if (r.ok) return 0;
+  warn(r.refusal ?? "The upgrade did not finish.");
+  return 1;
 }
 
 /** What happened to a file, and (with --check) what would. */
@@ -100,7 +116,7 @@ const DONE: Record<Exclude<FileOutcome, "unchanged">, string> = {
   conflict: "has conflict markers; resolve them and commit it",
   "no-base": "left as it is (the version it came from could not be read)",
   added: "added",
-  deleted: "stays deleted (it was removed on purpose)",
+  deleted: "recorded as removed on purpose; upgrades leave it out",
 };
 const WOULD: Record<Exclude<FileOutcome, "unchanged">, string> = {
   replaced: "would be updated",
@@ -108,7 +124,7 @@ const WOULD: Record<Exclude<FileOutcome, "unchanged">, string> = {
   conflict: "would conflict with your edits, and be left with conflict markers to resolve",
   "no-base": "would be left as it is (the version it came from could not be read)",
   added: "would be added",
-  deleted: "stays deleted (it was removed on purpose)",
+  deleted: "would be recorded as removed on purpose; upgrades leave it out",
 };
 
 /** The repository step's report: the version change, then one line per file that changed (or would). */
@@ -126,6 +142,6 @@ export function report(r: RepoResult, check: boolean): string[] {
   for (const n of r.notes) lines.push(`  ${n}`);
   for (const w of r.warnings) lines.push(`  Note: ${w}`);
   if (lines.length === 1) lines.push(check ? "  Nothing would change." : "  Nothing changed.");
-  if (!check && r.committed) lines.push("Committed on main; loopstra start shares it with the remote, or push it yourself.");
+  if (!check && r.committed) lines.push(`Committed on ${r.main}; loopstra start shares it with the remote, or push it yourself.`);
   return lines;
 }
