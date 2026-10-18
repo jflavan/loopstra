@@ -85,10 +85,12 @@ export function withEntryOnce(current: string, e: ConversationEntry): string {
 
 /**
  * Appends one entry and commits it ("loopstra(<slug>): conversation"). Under commitRecord's lock, so two
- * entries written at once (a message and an answer) both land.
+ * entries written at once (a message and an answer) both land. `once`: not added when the record already
+ * ends with it (an earlier try whose commit failed after writing it; see withEntryOnce).
  */
-export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry): Promise<void> {
+export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { once?: boolean } = {}): Promise<void> {
   await commitRecord(root, main, slug, "conversation", async () => {
-    await Bun.write(conversationPath(root, slug), withEntry(readConversation(root, slug), e));
+    const current = readConversation(root, slug);
+    await Bun.write(conversationPath(root, slug), opts.once ? withEntryOnce(current, e) : withEntry(current, e));
   });
 }

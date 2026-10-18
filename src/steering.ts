@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
+import { readJson, writeJson } from "./chat/threads";
 import type { SessionControl } from "./claude";
 import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL, steerable as isSteerable } from "./console/steerable";
 import { appendConversation, type ConversationEntry } from "./conversation";
@@ -26,11 +27,61 @@ function traceError(ctx: StepContext, more: Record<string, unknown>): void {
   try { ctx.trace.event(ctx.slug, "error", more); } catch { /* the trace closed meanwhile */ }
 }
 
-/** Records an entry without ever failing the session: a record that cannot be written is traced. Gives back its write. */
-function record(ctx: StepContext, e: ConversationEntry): Promise<void> {
-  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, e).catch((err: unknown) => {
-    traceError(ctx, { where: "conversation", error: errorText(err) });
+/**
+ * `inbox/unrecorded/<id>.json`: a message delivered to its session whose record failed (the loop started
+ * stopping, the main checkout moved, git failed), with the phase it went to and when. The next step's
+ * sweep records it (see sweepInbox).
+ */
+interface Unrecorded { message: InboxMessage; phase: string; at: string }
+
+function unrecordedDir(root: string, slug: string): string {
+  return join(inboxDir(root, slug), "unrecorded");
+}
+
+/**
+ * Records a delivered message (or redirect) without ever failing the session. A record that fails
+ * leaves a marker for the next step's sweep, so conversation.md never loses what a session was told.
+ * Gives back its write.
+ */
+function recordDelivered(ctx: StepContext, m: InboxMessage, phase: string): Promise<void> {
+  const at = new Date();
+  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(m, phase, at)).catch((err: unknown) => {
+    if (!(err instanceof StopRequested)) traceError(ctx, { where: "conversation", error: errorText(err) });
+    try {
+      const marker: Unrecorded = { message: m, phase, at: at.toISOString() };
+      writeJson(join(unrecordedDir(ctx.root, ctx.slug), `${m.id}.json`), marker);
+    } catch (e) {
+      traceError(ctx, { where: "conversation", id: m.id, error: `a delivered message could not be kept for its record: ${errorText(e)}` });
+    }
   });
+}
+
+/** A delivered message's entry: addressed to the phase whose session it went to. */
+function deliveredEntry(m: InboxMessage, phase: string, at: Date): ConversationEntry {
+  return { kind: m.kind === "redirect" ? "redirect" : "message", who: m.by, via: m.via, phase, text: m.text, at };
+}
+
+/**
+ * Records the delivered messages whose record failed (see recordDelivered); each marker goes once its
+ * record landed. An entry a failed commit left on disk is not written twice. Never throws.
+ */
+async function recordUnrecorded(ctx: StepContext): Promise<void> {
+  const dir = unrecordedDir(ctx.root, ctx.slug);
+  if (!existsSync(dir)) return;
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
+    const path = join(dir, name);
+    const u = readJson<Unrecorded>(path);
+    if (!u?.message || typeof u.message.text !== "string" || typeof u.phase !== "string") continue;
+    try {
+      const at = new Date(u.at);
+      await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { once: true });
+      rmSync(path, { force: true });
+    } catch (e) {
+      // A stopping loop records nothing: the marker waits for the next step's sweep.
+      if (e instanceof StopRequested) return;
+      traceError(ctx, { where: "conversation", id: u.message.id, error: errorText(e) });
+    }
+  }
 }
 
 /** A message's key across this process's changes and repositories. */
@@ -40,6 +91,8 @@ const keyOf = (ctx: StepContext, m: InboxMessage) => `${resolve(ctx.root)}|${ctx
 const recording = new Set<string>();
 /** The messages kept for the next session whose record landed, but whose move to delivered/ failed. */
 const recorded = new Set<string>();
+/** The messages given to their session and recorded as such, but whose move to delivered/ failed: a later look only moves them. */
+const deliveredUnmoved = new Set<string>();
 
 /**
  * A message that will not reach its session: kept in conversation.md for the next one. It is marked
@@ -49,6 +102,10 @@ const recorded = new Set<string>();
  */
 async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
   const key = keyOf(ctx, m);
+  if (deliveredUnmoved.has(key)) {
+    if (markDone(ctx.root, ctx.slug, m, "delivered") || !waiting(ctx, m)) deliveredUnmoved.delete(key);
+    return;
+  }
   if (recording.has(key)) return;
   recording.add(key);
   try {
@@ -106,7 +163,7 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
   const delivered = (m: InboxMessage) => {
     if (m.kind === "stop") return ctx.trace.event(ctx.slug, "steer", { kind: "stop", by: m.by, via: m.via, seq });
     ctx.trace.event(ctx.slug, "steer", { kind: m.kind, by: m.by, via: m.via, seq, text: m.text });
-    pending.push(record(ctx, { kind: m.kind, who: m.by, via: m.via, phase: name, text: m.text, at: new Date() }));
+    pending.push(recordDelivered(ctx, m, name));
   };
   const look = () => {
     for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
@@ -147,8 +204,15 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
     if (!stopRequested()) {
       try {
         for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
-          // Given to the session already, but not moved: one more try (else the next sweep keeps it for the next session).
-          if (sent.has(m.id)) { if (settle(m, "delivered")) delivered(m); }
+          // Given to the session already, but not moved: one more try. The session got it either way, so it is
+          // traced and recorded as delivered, and a later sweep only moves it (stops are not recorded).
+          if (sent.has(m.id)) {
+            if (settle(m, "delivered")) delivered(m);
+            else if (m.kind !== "stop") {
+              deliveredUnmoved.add(keyOf(ctx, m));
+              delivered(m);
+            }
+          }
           else if (m.kind === "message" || m.kind === "redirect") pending.push(keepForNext(ctx, m));
           else markDone(ctx.root, ctx.slug, m, "dropped");
         }
@@ -161,12 +225,14 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
 }
 
 /**
- * At a step's start, nothing of the change runs: what a stopped or killed loop left in its inbox goes
- * to conversation.md for the sessions to come (messages, redirects); stops are dropped. Resolves once
+ * At a step's start, nothing of the change runs: a delivered message whose record failed is recorded
+ * (see recordDelivered), and what a stopped or killed loop left in its inbox goes to conversation.md for
+ * the sessions to come (messages, redirects); stops are dropped. Resolves once
  * those records landed, so the step's first session reads them. Never fails the step: a problem is
  * traced, and what was not recorded stays for the next step's sweep.
  */
 export async function sweepInbox(ctx: StepContext): Promise<void> {
+  await recordUnrecorded(ctx);
   try {
     for (const m of waitingIn(ctx.root, ctx.slug)) {
       if (m.kind === "stop") markDone(ctx.root, ctx.slug, m, "dropped");

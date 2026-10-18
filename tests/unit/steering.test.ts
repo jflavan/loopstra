@@ -264,6 +264,61 @@ describe("steering a running session", () => {
     }
   }, 30_000);
 
+  test("a message delivered while the loop starts stopping is recorded, to its phase, by the next step's sweep", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const written: string[] = [];
+      const ctl = { message: (text: string) => { written.push(text); return true; }, stop: () => false, redirect: () => false };
+      requestStop();
+      const detach = deliverInbox(ctx, 5, "design", ctl);
+      const m = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      await until(() => howDone(repo.path, m) === "delivered");
+      await detach();
+      expect(written).toHaveLength(1);
+      expect(readConversation(repo.path, SLUG)).toBe("");
+      const marker = join(inboxDir(repo.path, SLUG), "unrecorded", `${m.id}.json`);
+      expect(existsSync(marker)).toBe(true);
+      // Still stopping: the sweep records nothing, and the marker stays.
+      await sweepInbox(ctx);
+      expect(existsSync(marker)).toBe(true);
+      resetStop();
+      await sweepInbox(ctx);
+      expect(existsSync(marker)).toBe(false);
+      const record = readConversation(repo.path, SLUG);
+      expect(record).toContain("· John (the dashboard) → design\ncover negatives");
+      expect(record).not.toContain("the next session");
+      expect(await lastCommit(repo.path)).toContain(`loopstra(${SLUG}): conversation`);
+    } finally {
+      resetStop(); trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a message the session got whose move to delivered/ still fails at the end is recorded to its phase, and traced", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const ctl = { message: () => true, stop: () => false, redirect: () => false };
+      const id = `${Date.now().toString().padStart(15, "0")}-1-0002`;
+      const blocker = join(inboxDir(repo.path, SLUG), "delivered", `${id}.json`);
+      mkdirSync(join(blocker, "x"), { recursive: true });
+      const m: InboxMessage = { id, seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard", at: new Date().toISOString() };
+      writeFileSync(join(inboxDir(repo.path, SLUG), `${id}.json`), JSON.stringify(m));
+      const detach = deliverInbox(ctx, 5, "design", ctl);
+      await until(() => trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes(id)));
+      await detach();
+      expect(steers(trace)).toEqual([expect.objectContaining({ kind: "message", by: "John", seq: 5, text: "cover negatives" })]);
+      expect(readConversation(repo.path, SLUG)).toContain("· John (the dashboard) → design\ncover negatives");
+      // The next sweep moves it at last, and keeps nothing for the next session.
+      rmSync(blocker, { recursive: true, force: true });
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m)).toBe("delivered");
+      const record = readConversation(repo.path, SLUG);
+      expect(record.match(/cover negatives/g)).toHaveLength(1);
+      expect(record).not.toContain("the next session");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
   test("a retry after a crash renders its prompt again, so it has what people told the crashed attempt", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     const t = tempDir();
