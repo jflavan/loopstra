@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { StepContext } from "../../src/context";
 import { readConversation } from "../../src/conversation";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside } from "../../src/phases";
-import { answerQuestion, readQuestion } from "../../src/questions";
+import { answerQuestion, readQuestion, recordQuestion } from "../../src/questions";
 import { runDesignStep } from "../../src/stages/design";
 import { QuestionAsked } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -146,6 +146,20 @@ describe("questions", () => {
       expect(trace.phases(SLUG).map((p) => [p.name, p.status])).toEqual([["intake", "asked"]]);
       expect(readQuestion(repo.path, SLUG)!.open).toMatchObject({ phase: "intake", text: "Which portal page should show the status?", why: "", options: [], sessionId: "q" });
       expect(readConversation(repo.path, SLUG)).toContain("· intake asks\nWhich portal page should show the status?\n");
+    } finally { trace.close(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a question whose commit fails leaves no open question.json behind", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    try {
+      // A lock on main's ref: the commit fails.
+      writeFileSync(join(repo.path, ".git", "refs", "heads", `${ctx.cfg.main_branch}.lock`), "");
+      const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(Error);
+      expect(existsSync(questionPath(repo.path))).toBe(false);
+      rmSync(join(repo.path, ".git", "refs", "heads", `${ctx.cfg.main_branch}.lock`));
+      await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS });
+      expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: { text: "Archived too?", sessionId: "s1" } });
     } finally { trace.close(); repo.cleanup(); }
   }, 90_000);
 

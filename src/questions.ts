@@ -67,20 +67,22 @@ export function questionIn(envelope: Record<string, unknown>): Question | null {
 }
 
 /**
- * Records a question a session asked: question.json, then `question: open` and the conversation.md entry
- * in one commit. The change then waits (the scheduler skips it). The session's row already ended asked,
- * with the question traced as an event of its own (see tracedSession).
+ * Records a question a session asked: `question: open` and the conversation.md entry in one commit,
+ * then question.json. Written only once the commit landed, so a failed commit never leaves an open
+ * question the change does not say it has. The change then waits (the scheduler skips it). The
+ * session's row already ended asked, with the question traced as an event of its own (see tracedSession).
  */
 export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "answer">): Promise<void> {
   const status = ctx.intent.file.frontmatter.status;
   const at = new Date();
-  writeState(ctx.root, ctx.slug, { status, count: askedAt(ctx.root, ctx.slug, status) + 1, open: { ...a, at: at.toISOString() } });
+  const count = askedAt(ctx.root, ctx.slug, status) + 1;
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${a.phase} asks a question`, async () => {
     const fresh = await readIntent(ctx.root, ctx.slug);
     await writeIntent(fresh, { question: "open" });
     ctx.intent.file = fresh.file;
     await Bun.write(conversationPath(ctx.root, ctx.slug), withEntry(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
   });
+  writeState(ctx.root, ctx.slug, { status, count, open: { ...a, at: at.toISOString() } });
 }
 
 /** The text of each open question, by change, for the changes whose intent.md says `question: open` (see renderQueue). */
