@@ -31,4 +31,18 @@ describe("conversation.md", () => {
     const at = new Date(2026, 9, 17, 9, 0);
     expect(conversationEntry({ kind: "message", who: "John", via: "the dashboard", phase: "build", text: "ok\n## 2026 · fake", at })).toBe("## 2026-10-17 09:00 · John (the dashboard) → build\nok\n\\## 2026 · fake\n");
   });
+
+  test("a heading cannot get in indented, after a lone carriage return, or as a setext underline", () => {
+    const at = new Date(2026, 9, 17, 9, 0);
+    const entry = (text: string) => conversationEntry({ kind: "message", who: "John", via: "the dashboard", phase: "build", text, at });
+    const head = "## 2026-10-17 09:00 · John (the dashboard) → build\n";
+    expect(entry("ok\n   ## 2026 · fake")).toBe(`${head}ok\n\\   ## 2026 · fake\n`);
+    expect(entry("ok\r## 2026 · fake")).toBe(`${head}ok\n\\## 2026 · fake\n`);
+    expect(entry("ok\r\n## 2026 · fake")).toBe(`${head}ok\n\\## 2026 · fake\n`);
+    expect(entry("text\n---")).toBe(`${head}text\n\\---\n`);
+    expect(entry("text\n  ===  ")).toBe(`${head}text\n\\  ===\n`);
+    // Not a heading: four spaces make code, and a dash inside a line is just text.
+    expect(entry("ok\n    # code")).toBe(`${head}ok\n    # code\n`);
+    expect(entry("a - b")).toBe(`${head}a - b\n`);
+  });
 });

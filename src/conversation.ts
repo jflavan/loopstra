@@ -35,8 +35,14 @@ function when(d: Date): string {
 /** One line of a header: no line breaks. */
 const one = (s: string) => s.replace(/\s+/g, " ").trim();
 
-/** A body: trimmed, and a line that would read as a heading is escaped, so a person's text never adds an entry. */
-const body = (s: string) => s.trim().split(/\r?\n/).map((l) => (/^#/.test(l) ? `\\${l}` : l)).join("\n");
+/** A line Markdown could read as a heading: an ATX one (up to 3 spaces, then #), or a setext underline. */
+const HEADING = /^\s{0,3}#|^\s{0,3}(=+|-+)\s*$/;
+
+/**
+ * A body: line breaks as \n (a lone \r ends a line too), trimmed, and a line that would read as a
+ * heading is escaped with a backslash at its start, so a person's text never adds an entry.
+ */
+const body = (s: string) => s.replace(/\r\n?/g, "\n").trim().split("\n").map((l) => (HEADING.test(l) ? `\\${l}` : l)).join("\n");
 
 /** One entry as Markdown, ending with a newline. */
 export function conversationEntry(e: ConversationEntry): string {
