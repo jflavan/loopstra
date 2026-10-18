@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { onMac } from "../keys";
+import { onMac, sendsMessage } from "../keys";
 import { steer, type steerOffer } from "../requests";
 
 type SteerOffer = NonNullable<ReturnType<typeof steerOffer>>;
@@ -64,7 +64,7 @@ export function Steer({ slug, seq, offer }: { slug: string; seq: number; offer: 
           placeholder="Tell the agent something. It reads it at its next step, and it is kept in conversation.md."
           aria-label="Tell the agent something"
           onInput={(e) => setText(e.currentTarget.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send("message"); } }}
+          onKeyDown={(e) => { if (sendsMessage(e)) { e.preventDefault(); void send("message"); } }}
         />
       )}
       <div class="steer-row">

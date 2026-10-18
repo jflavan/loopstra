@@ -35,6 +35,16 @@ export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; al
   return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
 }
 
+/**
+ * Whether a key press in a message box sends it: Ctrl or Cmd with Enter. Never while an input method
+ * (Japanese, Chinese, ...) is picking a character: there Enter confirms the character. Some browsers
+ * say so only with keyCode 229.
+ */
+export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }): boolean {
+  if (e.isComposing || e.keyCode === 229) return false;
+  return e.key === "Enter" && (e.ctrlKey || e.metaKey);
+}
+
 /** Whether a key press lands in something a person types into. */
 export function typingIn(target: EventTarget | null): boolean {
   const el = target as { tagName?: string; isContentEditable?: boolean } | null;

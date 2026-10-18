@@ -2,7 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
+import { keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
@@ -94,6 +94,18 @@ describe("keys", () => {
     expect(typingIn({ tagName: "DIV", isContentEditable: true } as unknown as EventTarget)).toBe(true);
     expect(typingIn({ tagName: "DIV" } as unknown as EventTarget)).toBe(false);
     expect(typingIn(null)).toBe(false);
+  });
+
+  test("Ctrl or Cmd with Enter sends a message, but not while an input method is picking a character", () => {
+    const enter = (mods: Partial<{ ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }> = {}) =>
+      ({ key: "Enter", ctrlKey: false, metaKey: false, isComposing: false, keyCode: 13, ...mods });
+    expect(sendsMessage(enter({ ctrlKey: true }))).toBe(true);
+    expect(sendsMessage(enter({ metaKey: true }))).toBe(true);
+    expect(sendsMessage(enter())).toBe(false);
+    expect(sendsMessage({ ...enter({ ctrlKey: true }), key: "a" })).toBe(false);
+    expect(sendsMessage(enter({ ctrlKey: true, isComposing: true }))).toBe(false);
+    // Some browsers report a key an input method takes as keyCode 229 without isComposing.
+    expect(sendsMessage(enter({ ctrlKey: true, keyCode: 229 }))).toBe(false);
   });
 });
 
