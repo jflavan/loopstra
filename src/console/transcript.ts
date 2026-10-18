@@ -62,7 +62,7 @@ const HIDDEN = new Set(["StructuredOutput"]);
 /**
  * A user message the session echoed as it took it up (see the live sessions in src/claude.ts): a
  * person's message or redirect, which the runner starts with MESSAGE_LEAD or REDIRECT_LEAD, is an item
- * with the person's words (the runner's closing words left out, else the first paragraph). Any other
+ * with the person's words (the runner's lead and closing words left out, else the first paragraph). Any other
  * echo (the prompt, a nudge, an answer to a question) shows nothing.
  */
 function replayed(content: unknown): TranscriptItem[] {
@@ -74,7 +74,7 @@ function replayed(content: unknown): TranscriptItem[] {
     if (!redirect && !text.startsWith(MESSAGE_LEAD)) continue;
     const tail = text.indexOf(`\n\n${redirect ? REDIRECT_TAIL : MESSAGE_TAIL}`);
     const words = tail >= 0 ? text.slice(0, tail) : text.split(/\n\s*\n/)[0]!;
-    out.push({ kind: "message", text: cut(words.trim()), redirect });
+    out.push({ kind: "message", text: cut(ownWords(words.trim())), redirect });
     if (redirect) out.push(...carried(text));
   }
   return out;
@@ -90,7 +90,17 @@ function carried(redirect: string): TranscriptItem[] {
   return redirect.slice(at + MEANWHILE_HEADING.length + 4).split(`\n\n${MESSAGE_TAIL}`)
     .map((m) => m.trim())
     .filter((m) => m.startsWith(MESSAGE_LEAD))
-    .map((m) => ({ kind: "message" as const, text: cut(m), redirect: false }));
+    .map((m) => ({ kind: "message" as const, text: cut(ownWords(m)), redirect: false }));
+}
+
+/**
+ * A message or redirect without the runner's lead ("A message from John, who is watching this work from
+ * the dashboard: "): up to and including the first ": " of its first line. The bubble's label says which it is.
+ */
+function ownWords(text: string): string {
+  const firstLine = text.split("\n", 1)[0]!;
+  const at = firstLine.indexOf(": ");
+  return at < 0 ? text : text.slice(at + 2);
 }
 
 /**

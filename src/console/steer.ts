@@ -16,7 +16,7 @@ const MAX_TEXT = 4_000;
 /** Where a person steers from, in words, for the inbox and the hold. */
 const VIA = "the dashboard";
 /** The hold a stop leaves, so the change does not start again at once. */
-const STOP_REASON = "Stopped from the dashboard";
+const STOP_REASON = "Stopped";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const refuse = (error: string, status = 409) => json({ error }, status);

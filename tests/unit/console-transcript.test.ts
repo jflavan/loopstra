@@ -45,20 +45,23 @@ describe("session transcripts", () => {
   test("a person's message and redirect echoed by the session are items; the prompt's echo is not", () => {
     const replay = (text: string) => ({ type: "user", isReplay: true, message: { role: "user", content: [{ type: "text", text }] } });
     const m = { id: "1", seq: 3, kind: "message" as const, text: "Cover negatives.\n\nAnd zero.", by: "John", via: "the dashboard", at: "" };
-    expect(toItems(replay(messageText(m)))).toEqual([{ kind: "message", text: "A message from John, who is watching this work from the dashboard: Cover negatives.\n\nAnd zero.", redirect: false }]);
-    expect(toItems(replay(redirectText({ ...m, kind: "redirect", text: "Use two steps." })))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
+    // The person's own words: the runner's lead (up to the first ": ") and closing words are left out.
+    expect(toItems(replay(messageText(m)))).toEqual([{ kind: "message", text: "Cover negatives.\n\nAnd zero.", redirect: false }]);
+    expect(toItems(replay(redirectText({ ...m, kind: "redirect", text: "Use two steps." })))).toEqual([{ kind: "message", text: "Use two steps.", redirect: true }]);
+    // Only the first ": " of the first line ends the lead.
+    expect(toItems(replay(messageText({ ...m, text: "Note: keep it small.\n\nWhy: speed." })))).toEqual([{ kind: "message", text: "Note: keep it small.\n\nWhy: speed.", redirect: false }]);
     // A redirect with what was sent meanwhile: the person's words only.
-    expect(toItems(replay(`${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\nMessages sent meanwhile:\n\nx`))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
+    expect(toItems(replay(`${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\nMessages sent meanwhile:\n\nx`))).toEqual([{ kind: "message", text: "Use two steps.", redirect: true }]);
     // The messages it carries (sent to the killed process, not taken up yet) show too, each after the redirect.
     const carried = `${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\n${MEANWHILE_HEADING}\n\n${messageText(m)}\n\n${messageText({ ...m, by: "Ana", text: "Keep it small." })}`;
     expect(toItems(replay(carried))).toEqual([
-      { kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true },
-      { kind: "message", text: "A message from John, who is watching this work from the dashboard: Cover negatives.\n\nAnd zero.", redirect: false },
-      { kind: "message", text: "A message from Ana, who is watching this work from the dashboard: Keep it small.", redirect: false },
+      { kind: "message", text: "Use two steps.", redirect: true },
+      { kind: "message", text: "Cover negatives.\n\nAnd zero.", redirect: false },
+      { kind: "message", text: "Keep it small.", redirect: false },
     ]);
     // Without the runner's closing words (an older runner), the first paragraph.
-    expect(toItems(replay("A message from Ana: keep it small\n\nmore"))).toEqual([{ kind: "message", text: "A message from Ana: keep it small", redirect: false }]);
-    expect(toItems({ type: "user", isReplay: true, message: { role: "user", content: "A message from Ana: as a string" } })).toEqual([{ kind: "message", text: "A message from Ana: as a string", redirect: false }]);
+    expect(toItems(replay("A message from Ana: keep it small\n\nmore"))).toEqual([{ kind: "message", text: "keep it small", redirect: false }]);
+    expect(toItems({ type: "user", isReplay: true, message: { role: "user", content: "A message from Ana: as a string" } })).toEqual([{ kind: "message", text: "as a string", redirect: false }]);
     // The prompt, the nudge, an answer: replayed, but nothing to show.
     expect(toItems(replay("You are the design phase. FIXTURE:design"))).toEqual([]);
     // Not a replay: a user's text block is not shown.

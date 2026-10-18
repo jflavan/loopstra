@@ -353,6 +353,7 @@ export class Orchestrator {
       // A hold on a held change, or a release of one not held: its status is not the reason.
       if (a.kind === "hold" && held) await say(`${slug} is held already.`);
       else if (a.kind === "release" && !held) await say(`${slug} is not held.`);
+      else if (a.kind === "answer") await say(`${slug} has no question waiting.`);
       else await say(`${slug} is ${plainStatus(fm.status)} now, so that is not something I can do to it.`);
       return;
     }

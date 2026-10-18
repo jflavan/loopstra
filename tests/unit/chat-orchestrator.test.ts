@@ -151,7 +151,7 @@ describe("the orchestrator", () => {
       await o.handle(message("answer it"), out.send);
       expect(out.sent.at(-1)).toBe("Tell me the answer, and I will pass it on.");
       await o.handle(message("tell other to leave them out"), out.send);
-      expect(out.sent.at(-1)).toBe("other is designing now, so that is not something I can do to it.");
+      expect(out.sent.at(-1)).toBe("other has no question waiting.");
       await o.handle(message("tell csv-export to leave them out"), out.send);
       // The yes is to answering this question: the confirmation quotes it, and the request names it.
       expect(out.sent.at(-1)).toBe("Send this answer to csv-export's question \"Archived too?\"?\n\nLeave them out.\n\nReply yes to go ahead.");

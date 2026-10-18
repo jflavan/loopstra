@@ -407,7 +407,7 @@ describe("steering", () => {
       const r = await post(base, `/api/sessions/d/${check}/message`, { kind: "stop" });
       expect(r.status).toBe(202);
       expect(inboxFor(root, "d", check)).toEqual([expect.objectContaining({ kind: "stop", text: "", by: localUser(), via: "the dashboard" })]);
-      expect(holds(root)).toEqual([expect.objectContaining({ kind: "hold", slug: "d", expect: "designing", reason: "Stopped from the dashboard", via: "the dashboard", transport: "console" })]);
+      expect(holds(root)).toEqual([expect.objectContaining({ kind: "hold", slug: "d", expect: "designing", reason: "Stopped", via: "the dashboard", transport: "console" })]);
       // The change's stop too, so a stop that crosses into the next phase still lands.
       expect(changeStoppedBy(root, "d")).toBe(localUser());
     });
