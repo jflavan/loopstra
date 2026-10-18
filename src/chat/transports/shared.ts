@@ -22,18 +22,30 @@ export function mentionList(people: string[], setting: string): string {
   return andList(people);
 }
 
-/** Reconnects a dropped connection, waiting 1, 2, 4 ... up to 30 seconds between tries. */
+/** How long a refusal a retry cannot fix waits between tries (see Reconnector.slowly). */
+const REFUSED_WAIT_MS = 5 * 60_000;
+
+/**
+ * Reconnects a dropped connection, waiting 1, 2, 4 ... up to 30 seconds between tries, until one
+ * succeeds: a connection that opens and is closed again backs off like one that does not open.
+ */
 export class Reconnector {
   private delay = 1_000;
+  private longest = 30_000;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private cancelled = false;
 
   constructor(private readonly connect: () => Promise<void>, private readonly onError: (e: string) => void) {}
 
-  succeeded(): void { this.delay = 1_000; }
+  succeeded(): void { this.delay = 1_000; this.longest = 30_000; }
+
+  /** Tries wait REFUSED_WAIT_MS until one succeeds: a person can fix the cause (a token, a setting) without a restart. */
+  slowly(): void { this.delay = this.longest = REFUSED_WAIT_MS; }
 
   schedule(): void {
     if (this.cancelled || this.timer) return;
+    const wait = this.delay;
+    this.delay = Math.min(this.longest, this.delay * 2);
     this.timer = setTimeout(async () => {
       this.timer = null;
       if (this.cancelled) return;
@@ -41,10 +53,9 @@ export class Reconnector {
         await this.connect();
       } catch (e) {
         this.onError(e instanceof Error ? e.message : String(e));
-        this.delay = Math.min(30_000, this.delay * 2);
         this.schedule();
       }
-    }, this.delay);
+    }, wait);
   }
 
   cancel(): void {

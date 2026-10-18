@@ -216,8 +216,11 @@ describe("Slack", () => {
   });
 });
 
-/** A stub Discord: the REST calls Loopstra makes, and a gateway that says hello and checks identify. */
-function discordStub() {
+/**
+ * A stub Discord: the REST calls Loopstra makes, and a gateway that says hello and checks identify.
+ * `closeOnIdentify`: the gateway closes with this code instead of answering READY.
+ */
+function discordStub(closeOnIdentify?: number) {
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | null; auth: string }> = [];
   const frames: Array<{ op: number; d: unknown }> = [];
   let socket: { send: (s: string) => void } | null = null;
@@ -239,12 +242,22 @@ function discordStub() {
       message(ws, data) {
         const f = JSON.parse(String(data));
         frames.push(f);
-        if (f.op === 2) ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: { user: { id: "42" } } }));
+        if (f.op === 2 && closeOnIdentify) ws.close(closeOnIdentify, "closed by the stub");
+        else if (f.op === 2) ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: { user: { id: "42" } } }));
       },
     },
   });
   const message = (d: Record<string, unknown>) => socket!.send(JSON.stringify({ op: 0, s: 2, t: "MESSAGE_CREATE", d }));
-  return { server, calls, frames, message, ready: () => frames.some((f) => f.op === 2) };
+  return { server, calls, frames, message, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length };
+}
+
+/** A Discord transport on `stub`, started; its log lines are kept. */
+async function startDiscord(stub: ReturnType<typeof discordStub>, root: string) {
+  const logged: string[] = [];
+  const env = { LOOPSTRA_DISCORD_API: `http://127.0.0.1:${stub.server.port}/api`, TOKEN: "t-1" };
+  const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root, env, log: (l) => logged.push(l) });
+  await discord.start(async () => {});
+  return { discord, logged };
 }
 
 describe("Discord", () => {
@@ -288,6 +301,37 @@ describe("Discord", () => {
       expect(stub.calls.at(-1)).toMatchObject({ path: "/channels/501/messages", body: { content: "Merged: x." } });
     } finally {
       await service.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a gateway that closes before READY is tried again less and less often", async () => {
+    const r = await chatRepo();
+    const stub = discordStub(4000);
+    const { discord } = await startDiscord(stub, r.root);
+    try {
+      // Tries at 0, 1 and 3 seconds, not every second.
+      await Bun.sleep(2_500);
+      expect(stub.identifies()).toBe(2);
+    } finally {
+      await discord.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a refusal a retry cannot fix says what to do, once, and is tried again only every 5 minutes", async () => {
+    const r = await chatRepo();
+    const stub = discordStub(4014);
+    const { discord, logged } = await startDiscord(stub, r.root);
+    try {
+      await until(() => logged.length > 0);
+      await Bun.sleep(1_500);
+      expect(stub.identifies()).toBe(1);
+      expect(logged).toEqual(["Discord refused the bot (4014): the Message Content intent is off. Turn it on for the bot in the Discord Developer Portal (Bot, Privileged Gateway Intents). Trying again every 5 minutes."]);
+    } finally {
+      await discord.stop();
       stub.server.stop(true);
       r.cleanup();
     }

@@ -10,6 +10,17 @@ const DISCORD_MAX = 1900;
 /** GUILD_MESSAGES and MESSAGE_CONTENT (privileged: turn it on for the bot in the developer portal). */
 export const DISCORD_INTENTS = (1 << 9) | (1 << 15);
 
+/**
+ * Gateway close codes a retry cannot fix, and what to do (4004: the token; 4010-4013: how the bot
+ * connects; 4014: a portal setting). The gateway closes with them after IDENTIFY.
+ */
+function refusal(code: number, tokenEnv: string): string | null {
+  if (code === 4004) return `the bot token was not accepted. Check the token in ${tokenEnv}`;
+  if (code === 4014) return "the Message Content intent is off. Turn it on for the bot in the Discord Developer Portal (Bot, Privileged Gateway Intents)";
+  if (code >= 4010 && code <= 4013) return "it did not accept how the bot connects. An engineer should look";
+  return null;
+}
+
 interface DiscordMessage { id: string; channel_id: string; content?: string; author?: { id: string; username?: string; global_name?: string | null; bot?: boolean } }
 interface GatewayFrame { op: number; d?: unknown; s?: number | null; t?: string | null }
 
@@ -32,6 +43,8 @@ export class DiscordTransport implements Transport {
   private onMessage: OnMessage | null = null;
   private readonly reconnect: Reconnector;
   private warnedEmpty = false;
+  /** The refusal last logged (a gateway close code), so a lasting one is one line. */
+  private refusedCode: number | null = null;
 
   constructor(private readonly cfg: DiscordTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void }) {
     this.api = (opts.env ?? process.env)[DISCORD_API_ENV] ?? "https://discord.com/api/v10";
@@ -83,12 +96,17 @@ export class DiscordTransport implements Transport {
       ws.addEventListener("error", () => reject(new Error("the gateway connection failed")), { once: true });
     });
     ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e) => this.log(`Discord message failed: ${e instanceof Error ? e.message : String(e)}`)); });
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (ev) => {
       if (this.ws !== ws) return;
       this.stopBeat();
+      const refused = refusal(ev.code, this.cfg.token_env);
+      if (refused) {
+        if (this.refusedCode !== ev.code) this.log(`Discord refused the bot (${ev.code}): ${refused}. Trying again every 5 minutes.`);
+        this.refusedCode = ev.code;
+        this.reconnect.slowly();
+      }
       if (this.onMessage) this.reconnect.schedule();
     });
-    this.reconnect.succeeded();
   }
 
   private stopBeat(): void {
@@ -111,7 +129,12 @@ export class DiscordTransport implements Transport {
       case 1: ws.send(JSON.stringify({ op: 1, d: this.seq })); return;
       case 7: case 9: ws.close(); return; // reconnect, or a session that is no longer valid: start over
       case 0:
-        if (f.t === "READY") this.botUser = String((f.d as { user?: { id?: string } })?.user?.id ?? "");
+        if (f.t === "READY") {
+          // Connected only now: the gateway refuses a bad token or a missing intent after the socket opens.
+          this.botUser = String((f.d as { user?: { id?: string } })?.user?.id ?? "");
+          this.reconnect.succeeded();
+          this.refusedCode = null;
+        }
         if (f.t === "MESSAGE_CREATE") await this.onDiscordMessage(f.d as DiscordMessage);
         return;
     }
