@@ -77,6 +77,8 @@ describe("the chat prompts", () => {
       const rendered = renderChatPrompt(await chatTemplate(t.path, "orchestrator"), { main_branch: "main" });
       expect(rendered).toBe(`Old words on main.\n\n## How to answer\n\nPlainly.\n\n${section}\n`);
       expect(rendered).toContain("Set `action` to one of these");
+      // Answering a waiting question comes with it.
+      expect(rendered).toContain("set `action` to `answer` with the answer in `note`");
       // Not the writer's prompt: only the orchestrator acts.
       await Bun.write(join(t.path, "loopstra", "prompts", "write-intent.md"), "tuned");
       expect(await chatTemplate(t.path, "write-intent")).toBe("tuned");

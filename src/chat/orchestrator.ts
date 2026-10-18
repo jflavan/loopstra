@@ -355,6 +355,7 @@ export class Orchestrator {
       case "release": request = { kind: "release", slug, expect }; break;
       case "answer":
         if (!note) { await say("Tell me the answer, and I will pass it on."); return; }
+        // `expect` and `note` word the question (see askText); the request itself is just the answer (see doAction).
         request = { kind: "answer", slug, text: note, expect, note };
         break;
     }
@@ -366,7 +367,9 @@ export class Orchestrator {
 
   private async doAction(cfg: Config, t: ThreadState, m: IncomingMessage, request: RequestBody & RequestShape, say: Send): Promise<void> {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can do that, so I have not.`); return; }
-    submitRequest(this.root, { ...request, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
+    // An answer is its text alone: it goes to whatever question waits when the loop applies it.
+    const body: RequestBody = request.kind === "answer" ? { kind: "answer", slug: request.slug, text: request.text } : request;
+    submitRequest(this.root, { ...body, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
     this.store.noteSince(t, `${plainName(m.authorName)} said yes: asked the loop to ${askedWords(request, request.slug)}.`);
     await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);
   }

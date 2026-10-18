@@ -6,6 +6,7 @@ import { pendingRequests } from "../../src/requests";
 import { holdLoop, releaseLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
+import { writeJson } from "../../src/chat/threads";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
 
 /** A person on the plan gate, so approving or sending back a plan is theirs to give. */
@@ -130,6 +131,33 @@ describe("the orchestrator", () => {
       expect(pendingRequests(r.root)).toEqual([]);
       await o.handle(message("yes"), out.send);
       expect(pendingRequests(r.root).map((q) => [q.kind, "slug" in q ? q.slug : "", "expect" in q ? q.expect : "", q.byName, q.via, q.transport, q.thread])).toEqual([["approve", "csv-export", "plan-review", "Ana", "the terminal", "terminal", "local"]]);
+      expect(out.sent.at(-1)).toStartWith("Asked the loop to do it.");
+    } finally { r.cleanup(); }
+  });
+
+  test("an answer to a waiting question is proposed, and a yes passes it on", async () => {
+    const asking = INTENT("designing").replace("status: designing\n", "status: designing\nquestion: open\n");
+    const r = await chatRepo({ intents: { "csv-export": asking, other: INTENT("designing") } });
+    try {
+      writeJson(join(r.root, ".loopstra", "runs", "csv-export", "question.json"), { status: "designing", count: 1, open: { phase: "design", traceName: "design", seq: 3, sessionId: "s", text: "Archived too?", why: "", options: [], at: new Date().toISOString() } });
+      const answer = (slug: string, note: string) => turn("I will pass it on.", { action: { kind: "answer", slug, note, priority: null } });
+      await r.answer("orchestrator", 1, answer("csv-export", ""));
+      await r.answer("orchestrator", 2, answer("other", "Leave them out."));
+      await r.answer("orchestrator", 3, answer("csv-export", "Leave them out."));
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("answer it"), out.send);
+      expect(out.sent.at(-1)).toBe("Tell me the answer, and I will pass it on.");
+      await o.handle(message("tell other to leave them out"), out.send);
+      expect(out.sent.at(-1)).toBe("other is designing now, so that is not something I can do to it.");
+      await o.handle(message("tell csv-export to leave them out"), out.send);
+      expect(out.sent.at(-1)).toBe("Send this answer to csv-export's waiting question?\n\nLeave them out.\n\nReply yes to go ahead.");
+      expect(pendingRequests(r.root)).toEqual([]);
+      await o.handle(message("yes"), out.send);
+      const reqs = pendingRequests(r.root);
+      expect(reqs).toEqual([expect.objectContaining({ kind: "answer", slug: "csv-export", text: "Leave them out.", byName: "Ana", via: "the terminal", transport: "terminal", thread: "local" })]);
+      // Just the answer: no status it expects, and no note beside its text.
+      expect("expect" in reqs[0]! || "note" in reqs[0]!).toBe(false);
       expect(out.sent.at(-1)).toStartWith("Asked the loop to do it.");
     } finally { r.cleanup(); }
   });
