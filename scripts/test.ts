@@ -4,28 +4,39 @@
 // reported, and tests that touch process.env or the stop state stay isolated.
 // Usage: bun run test [--workers N] [--part i/n] [extra bun test args]
 //   --workers N   processes at once (default 4; --shards N is the old spelling)
-//   --part i/n    only the i-th of n slices of the files (1-based), for splitting across CI jobs
+//   --part i/n    only the i-th of n parts of the files (1-based), for splitting across CI jobs
+//   --list        print the files this run would take, with their weights, and stop
 // Serial run: bun run test:serial.
 import { Glob } from "bun";
 
-// Rough seconds per file from a serial run; unknown files count as 2. Only the order matters: the
-// heaviest files start first so the end of the run is not one long file alone.
+// Rough seconds per file on a GitHub Windows runner (the slowest platform); unknown files count as
+// 5. Only the order and the split across parts depend on them: the heaviest files start first, so
+// the end of the run is not one long file alone.
 const WEIGHTS: Record<string, number> = {
-  "tests/integration/remote.test.ts": 34,
-  "tests/unit/stages-review-merge.test.ts": 29,
-  "tests/integration/lanes.test.ts": 36,
-  "tests/integration/scheduler.test.ts": 17,
-  "tests/integration/upgrade-e2e.test.ts": 15,
-  "tests/unit/remote.test.ts": 13,
-  "tests/unit/stages-build.test.ts": 12,
-  "tests/integration/loop.test.ts": 10,
-  "tests/unit/stages-design.test.ts": 8,
-  "tests/unit/stages-verify.test.ts": 7,
-  "tests/unit/stages-plan.test.ts": 7,
-  "tests/unit/git.test.ts": 6,
-  "tests/unit/phases.test.ts": 5,
-  "tests/unit/context.test.ts": 5,
-  "tests/unit/signals.test.ts": 3,
+  "tests/integration/remote.test.ts": 180,
+  "tests/integration/remote-checks.test.ts": 180,
+  "tests/integration/lanes.test.ts": 170,
+  "tests/integration/lanes-remote.test.ts": 140,
+  "tests/unit/stages-build.test.ts": 140,
+  "tests/unit/stages-design.test.ts": 115,
+  "tests/unit/stages-review-merge.test.ts": 100,
+  "tests/unit/stages-plan.test.ts": 95,
+  "tests/integration/scheduler.test.ts": 80,
+  "tests/unit/main-lock.test.ts": 60,
+  "tests/unit/stages-verify.test.ts": 60,
+  "tests/unit/remote.test.ts": 57,
+  "tests/unit/apply.test.ts": 57,
+  "tests/unit/git.test.ts": 40,
+  "tests/unit/questions.test.ts": 27,
+  "tests/integration/loop.test.ts": 26,
+  "tests/integration/chat.test.ts": 25,
+  "tests/unit/upgrade-repo.test.ts": 25,
+  "tests/unit/loop-budget.test.ts": 25,
+  "tests/unit/phases.test.ts": 24,
+  "tests/unit/judges-run.test.ts": 23,
+  "tests/unit/steering.test.ts": 22,
+  "tests/unit/chat-transports.test.ts": 14,
+  "tests/unit/signals.test.ts": 12,
 };
 
 const args = process.argv.slice(2);
@@ -33,6 +44,7 @@ function option(name: string): string | undefined {
   const i = args.indexOf(name);
   return i >= 0 ? args.splice(i, 2)[1] : undefined;
 }
+const list = args.includes("--list") && args.splice(args.indexOf("--list"), 1).length > 0;
 const workers = Math.max(1, Number(option("--workers") ?? option("--shards")) || 4);
 const [part, parts] = (option("--part") ?? "1/1").split("/").map(Number) as [number, number];
 if (!(part >= 1 && parts >= 1 && part <= parts)) {
@@ -45,10 +57,21 @@ if (!(part >= 1 && parts >= 1 && part <= parts)) {
 // timed-out test keeps running and disturbs the next one. (Bun ignores a timeout in bunfig.toml.)
 if (!args.some((a) => a.startsWith("--timeout"))) args.push("--timeout", "30000");
 
+const weight = (f: string) => WEIGHTS[f] ?? 5;
 const all = [...new Glob("tests/**/*.test.ts").scanSync(".")].map((f) => f.replaceAll("\\", "/")).sort();
-const byWeight = [...all].sort((a, b) => (WEIGHTS[b] ?? 2) - (WEIGHTS[a] ?? 2));
-// A slice takes every n-th file of the weight-sorted list, so each slice gets its share of heavy ones.
-const queue = byWeight.filter((_, i) => i % parts === part - 1);
+const byWeight = [...all].sort((a, b) => weight(b) - weight(a));
+// Each file goes to the lightest part so far (heaviest first), so the parts take about the same time.
+const partWeights = Array.from({ length: parts }, () => 0);
+const queue = byWeight.filter((f) => {
+  const lightest = partWeights.indexOf(Math.min(...partWeights));
+  partWeights[lightest]! += weight(f);
+  return lightest === part - 1;
+});
+if (list) {
+  for (const f of queue) console.log(`${String(weight(f)).padStart(4)}  ${f}`);
+  console.log(`${queue.length} files, weight ${queue.reduce((n, f) => n + weight(f), 0)} of ${all.reduce((n, f) => n + weight(f), 0)}`);
+  process.exit(0);
+}
 
 interface Result { file: string; code: number; seconds: number; text: string }
 const results: Result[] = [];
