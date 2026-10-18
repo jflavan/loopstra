@@ -120,7 +120,7 @@ function commandLines(d: Detected): string {
 /**
  * The top folder of the git repository `root` is in, when `root` is a folder below it; null at the
  * top or outside a repository. The loop works on a whole repository: its checkouts, sessions and
- * commands start at the top, and Claude Code reads the settings and hook there.
+ * commands start at the top, and Claude Code reads the skill and the settings there.
  */
 export async function repositoryTop(root: string): Promise<string | null> {
   const top = await new Git(root).run(["rev-parse", "--show-toplevel"], true);

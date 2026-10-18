@@ -11,7 +11,7 @@ const root = process.cwd();
 
 const HELP = `loopstra <command>
 
-  init      stamp Loopstra into this repo
+  init      set up this repo for Loopstra
   setup     walk through the settings (setup <section> for one: budgets, commands,
             gates, github, chat, models; --defaults takes every suggestion;
             --check only checks)
