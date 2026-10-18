@@ -517,3 +517,7 @@ What the reviews changed:
 - **Fix and reconcile never ask.** They carry on the build session, which can ask already. When one asked, the next step ran the whole build again before resuming it: a full build's cost, on code that had moved on. Their envelopes lost `question`, their prompts the asking paragraph, and `ASKERS` is intake, design, plan, build and revise.
 
 Checked against the real CLI (2.1.302, haiku, $0.10 cap) at the end: a live `runPhase` took a message written during its tool call, answered BANANA, and exited 0 after 9 s for $0.009.
+
+## Review fixes (2026-10-18)
+
+- **CLI 2.x limits are outages.** The 2.x CLI words a limit "You've hit your session limit · resets 8:10pm", "You're out of usage credits", "Credit balance is too low" or "OAuth token refresh failed", which no `ENVIRONMENT_PATTERNS` entry matched, so a limit blocked the change as a crash. The patterns now match those words, and an error result's `api_error_status` (read only when present) of 401, 403, 429 or 5xx counts as the environment's too, so a later rewording still pauses instead of blocking. The fixtures keep both the old and the 2.x wording.
