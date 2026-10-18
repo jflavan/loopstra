@@ -2,7 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
+import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
@@ -106,6 +106,16 @@ describe("keys", () => {
     expect(sendsMessage(enter({ ctrlKey: true, isComposing: true }))).toBe(false);
     // Some browsers report a key an input method takes as keyCode 229 without isComposing.
     expect(sendsMessage(enter({ ctrlKey: true, keyCode: 229 }))).toBe(false);
+  });
+
+  test("after a form closes the focus goes to its button, or to the box when the button is gone or disabled (a stopped session)", () => {
+    const focused: string[] = [];
+    const el = (name: string, disabled = false) => ({ disabled, focus: () => { focused.push(name); } });
+    focusOr(el("stop"), el("box"));
+    focusOr(el("stop", true), el("box"));
+    focusOr(null, el("box"));
+    focusOr(undefined, null);
+    expect(focused).toEqual(["stop", "box", "box"]);
   });
 });
 

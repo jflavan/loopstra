@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { onMac, sendsMessage } from "../keys";
+import { focusOr, onMac, sendsMessage } from "../keys";
 import { steer, type steerOffer } from "../requests";
 
 type SteerOffer = NonNullable<ReturnType<typeof steerOffer>>;
@@ -16,7 +16,9 @@ export function Steer({ slug, seq, offer }: { slug: string; seq: number; offer: 
   const [stopping, setStopping] = useState(false);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const stopButton = useRef<HTMLButtonElement>(null);
-  // Whether the confirm was open, so closing it (and only that) gives the Stop button its focus back.
+  const box = useRef<HTMLDivElement>(null);
+  // Whether the confirm was open, so closing it (and only that) gives the Stop button its focus back;
+  // once the session is stopping that button is disabled, so the box takes the focus instead.
   const wasConfirming = useRef(false);
   useEffect(() => {
     if (confirming) {
@@ -24,7 +26,7 @@ export function Steer({ slug, seq, offer }: { slug: string; seq: number; offer: 
       confirmButton.current?.focus();
     } else if (wasConfirming.current) {
       wasConfirming.current = false;
-      stopButton.current?.focus();
+      focusOr(stopButton.current, box.current);
     }
   }, [confirming]);
 
@@ -57,7 +59,7 @@ export function Steer({ slug, seq, offer }: { slug: string; seq: number; offer: 
     </button>
   );
   return (
-    <div class="panel steer" role="region" aria-label="Steer this session">
+    <div ref={box} class="panel steer" role="region" aria-label="Steer this session" tabIndex={-1}>
       {offer.message && (
         <textarea
           value={text} maxLength={4000} disabled={stopping}

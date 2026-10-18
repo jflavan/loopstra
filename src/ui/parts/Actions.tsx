@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { PRIORITY_NAMES, type ChangeSummary, type Offer } from "../../console/types";
+import { focusOr } from "../keys";
 import { act, beforeOf, bodyFor, stopChange, unsentText } from "../requests";
 import { requests, toast } from "../store";
 
@@ -44,8 +45,9 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
     }
     const k = opener.current;
     opener.current = null;
-    // The button is drawn again once the form closes; it is not there when the change no longer offers it.
-    if (k) box.current?.querySelector<HTMLElement>(`[data-kind="${k}"]`)?.focus();
+    // The button is drawn again once the form closes; it is not there when the change no longer offers it
+    // (Stop, once the change stopped running): the controls take the focus then, so it is not lost.
+    if (k) focusOr(box.current?.querySelector<HTMLButtonElement>(`[data-kind="${k}"]`), box.current);
   }, [form?.kind]);
   const waiting = (requests.value ?? []).filter((r) => r.slug === change.slug);
   const shown = change.offers.filter((o) => !compact || COMPACT.has(o.kind));
@@ -97,7 +99,7 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
   // A click here is not a click on the inbox item or card around it.
   const stop = (e: Event) => e.stopPropagation();
   return (
-    <div class="controls" ref={box} onClick={stop}>
+    <div class="controls" ref={box} tabIndex={-1} onClick={stop}>
       {waiting.length > 0 && <span class="badge warn">Waiting for the loop: {waiting.map((w) => w.label).join(", ")}</span>}
       {form === null && shown.map((o) => o.kind === "priority" ? (
         <label key="priority" class="prio-pick">

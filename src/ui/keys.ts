@@ -45,6 +45,18 @@ export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolea
   return e.key === "Enter" && (e.ctrlKey || e.metaKey);
 }
 
+/** Something that can take the keyboard's focus: a button, or a box with tabIndex -1. */
+export interface Focusable { focus(): void; disabled?: boolean }
+
+/**
+ * Gives the focus to `first` when it is there and can take it (not disabled), else to `fallback`: after
+ * a form closes, its button when it is still there, else the box around it, so the focus is never lost.
+ */
+export function focusOr(first: Focusable | null | undefined, fallback: Focusable | null | undefined): void {
+  if (first && !first.disabled) first.focus();
+  else fallback?.focus();
+}
+
 /** Whether a key press lands in something a person types into. */
 export function typingIn(target: EventTarget | null): boolean {
   const el = target as { tagName?: string; isContentEditable?: boolean } | null;
