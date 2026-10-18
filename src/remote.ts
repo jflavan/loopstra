@@ -231,7 +231,8 @@ export async function moveMain(git: Git, from: string, to: string): Promise<{ ok
  * Puts the main checkout back at `from` after a move to `to` that did not land. Of the files the
  * two commits differ in, each the move wrote (it has `to`'s content) or removed gets `from`'s again,
  * and each index entry the move wrote is put back too. Anything else is left as it is: a file that
- * is neither commit's is a person's (an untracked file git refused to overwrite, say). False when
+ * is neither commit's is a person's (an untracked file git refused to overwrite, say), and so is one
+ * that cannot be read (another program holds it open with no sharing), rather than failing every try. False when
  * main is not at `from` (it moved after all, or a person moved it).
  */
 async function putBack(git: Git, from: string, to: string): Promise<boolean> {
@@ -274,12 +275,25 @@ async function indexBlobs(git: Git, paths: string[]): Promise<Map<string, string
   return blobMap((await git.run(["ls-files", "-s", "-z", "--", ...paths])).out, 1);
 }
 
-/** The blob each existing file of `paths` would be, as git would store it (its filters applied). */
+/** Stands for a file that cannot be read (another program holds it open, on Windows): it is neither commit's blob, so putBack leaves the file alone. */
+const UNREADABLE = "unreadable";
+
+/** The blob each existing file of `paths` would be, as git would store it (its filters applied), or UNREADABLE. */
 async function fileBlobs(git: Git, paths: string[]): Promise<Map<string, string>> {
   const existing = paths.filter((p) => existsSync(join(git.cwd, p)));
   if (!existing.length) return new Map();
-  const hashes = (await git.run(["hash-object", "--", ...existing])).out.split(/\r?\n/).filter(Boolean);
-  return new Map(existing.map((p, i) => [p, hashes[i]!]));
+  const all = await git.run(["hash-object", "--", ...existing], true);
+  if (all.code === 0) {
+    const hashes = all.out.split(/\r?\n/).filter(Boolean);
+    return new Map(existing.map((p, i) => [p, hashes[i]!]));
+  }
+  // One file git cannot read fails the whole call: hash them one at a time.
+  const map = new Map<string, string>();
+  for (const p of existing) {
+    const one = await git.run(["hash-object", "--", p], true);
+    map.set(p, one.code === 0 ? one.out.trim() : UNREADABLE);
+  }
+  return map;
 }
 
 /** The note the tick pauses with while a move of main that a kill cut short cannot be put back yet. */
