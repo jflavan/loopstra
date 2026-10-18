@@ -76,7 +76,7 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
     await Bun.write(join(s.dir, "prompt.md"), s.run.prompt);
     const writer = Bun.file(join(s.dir, "raw.jsonl")).writer();
     raw = writer;
-    const r = await runPhase({ ...s.run, onEvent: (e) => { writer.write(JSON.stringify(e) + "\n"); s.onEvent?.(e); } });
+    const r = await runPhase({ ...s.run, onEvent: (e) => { void writer.write(JSON.stringify(e) + "\n"); s.onEvent?.(e); } });
     denied = r.denied;
     costUsd = sessionCost(r, r.durationMs, s.capUsd);
     if (!r.ok) {

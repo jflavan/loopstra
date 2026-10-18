@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { judgeNote, Trace, useJournal, type NewJudgeRow } from "../../src/trace";
+import { judgeNote, migrate, SCHEMA_VERSION, Trace, useJournal, type NewJudgeRow } from "../../src/trace";
 import { tempDir } from "../helpers";
 
 describe("Trace", () => {
@@ -54,7 +54,7 @@ describe("Trace", () => {
       // A trace.db from before the indexes: only the events table and its first index.
       mkdirSync(join(t.path, ".loopstra"), { recursive: true });
       const old = new Database(join(t.path, ".loopstra", "trace.db"));
-      old.exec("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL); CREATE INDEX events_slug ON events (slug, id);");
+      old.run("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL); CREATE INDEX events_slug ON events (slug, id);");
       old.close();
       const trace = Trace.open(t.path);
       trace.close();
@@ -156,7 +156,7 @@ describe("Trace", () => {
     const memory = new Database(":memory:");
     try {
       expect(useJournal(memory)).toContain("journal_mode=DELETE");
-      memory.exec("CREATE TABLE t (x INTEGER)");
+      memory.run("CREATE TABLE t (x INTEGER)");
     } finally { memory.close(); }
   });
 });
@@ -172,8 +172,8 @@ describe("the judges table", () => {
     const t = tempDir();
     mkdirSync(join(t.path, ".loopstra"), { recursive: true });
     const old = new Database(join(t.path, ".loopstra", "trace.db"));
-    old.exec("CREATE TABLE intents (slug TEXT PRIMARY KEY, status TEXT NOT NULL, priority TEXT NOT NULL, updated TEXT NOT NULL)");
-    old.exec("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
+    old.run("CREATE TABLE intents (slug TEXT PRIMARY KEY, status TEXT NOT NULL, priority TEXT NOT NULL, updated TEXT NOT NULL)");
+    old.run("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
     old.close();
     const trace = Trace.open(t.path);
     try {
@@ -222,5 +222,71 @@ describe("the judges table", () => {
       expect([summary.lastPhase, summary.lastPhaseStatus]).toEqual(["spec-check", "success"]);
       expect(summary.costUsd).toBeCloseTo(0.4);
     } finally { trace.close(); t.cleanup(); }
+  });
+});
+
+describe("the schema version", () => {
+  test("a fresh database is stamped with this version's schema version", () => {
+    const t = tempDir();
+    try {
+      Trace.open(t.path).close();
+      const db = new Database(join(t.path, ".loopstra", "trace.db"), { readonly: true });
+      try {
+        expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
+      } finally { db.close(); }
+    } finally { t.cleanup(); }
+  });
+
+  test("a database from a newer Loopstra is refused with a plain message", () => {
+    const db = new Database(":memory:");
+    try {
+      db.run(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+      expect(() => migrate(db)).toThrow("written by a newer Loopstra");
+    } finally { db.close(); }
+  });
+
+  test("an older database is brought up without losing its rows", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      const old = new Database(join(t.path, ".loopstra", "trace.db"));
+      old.run("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
+      old.run("INSERT INTO events (slug, type, ts, payload) VALUES ('a', 'tick', '2026-01-01T00:00:00.000Z', '{}')");
+      old.close();
+      const trace = Trace.open(t.path);
+      try {
+        expect(trace.events("a").map((e) => e.type)).toEqual(["tick"]);
+      } finally { trace.close(); }
+      const db = new Database(join(t.path, ".loopstra", "trace.db"), { readonly: true });
+      try {
+        expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
+      } finally { db.close(); }
+    } finally { t.cleanup(); }
+  });
+});
+
+describe("two connections at once", () => {
+  test("phase starts from two connections on one file get distinct seqs, and a write waits for a held transaction", async () => {
+    const t = tempDir();
+    try {
+      const a = Trace.open(t.path);
+      const b = Trace.open(t.path);
+      try {
+        const seqs = [a.phaseStart("x", "design", "agent"), b.phaseStart("x", "plan", "agent"), a.phaseStart("x", "build", "agent")];
+        expect(new Set(seqs).size).toBe(3);
+        // Another process holds the write lock for a moment; a's write waits (busy_timeout) rather than failing.
+        const path = join(t.path, ".loopstra", "trace.db");
+        const script = `const { Database } = require("bun:sqlite"); const db = new Database(process.argv[1]); db.run("PRAGMA busy_timeout = 5000;"); db.run("BEGIN IMMEDIATE"); console.log("held"); await Bun.sleep(400); db.run("COMMIT"); db.close();`;
+        const holder = Bun.spawn({ cmd: [process.execPath, "-e", script, path], stdout: "pipe", stderr: "pipe" });
+        const reader = holder.stdout.getReader();
+        const first = new TextDecoder().decode((await reader.read()).value);
+        expect(first).toContain("held");
+        const started = Date.now();
+        a.event("x", "tick", {});
+        expect(Date.now() - started).toBeGreaterThan(100);
+        await holder.exited;
+        expect(a.events("x").filter((e) => e.type === "tick")).toHaveLength(1);
+      } finally { a.close(); b.close(); }
+    } finally { t.cleanup(); }
   });
 });

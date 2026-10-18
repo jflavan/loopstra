@@ -52,3 +52,19 @@ describe("envelopes", () => {
     for (const name of ["build", "fix", "revise"] as const) expect(jsonSchemaFor(name).properties).not.toHaveProperty("changed_files");
   });
 });
+
+describe("jsonSchemaOf", () => {
+  test("optional fields are not required, and nested objects are closed too", () => {
+    // Design may ask a question; intake must say (its question is a string, empty for none).
+    const s = jsonSchemaFor("design");
+    expect(s.required).not.toContain("question");
+    expect(jsonSchemaFor("intake").required).toContain("question");
+    const walk = (node: unknown): void => {
+      if (typeof node !== "object" || node === null) return;
+      const o = node as Record<string, unknown>;
+      if (o.type === "object" && o.properties) expect(o.additionalProperties).toBe(false);
+      for (const v of Object.values(o)) walk(v);
+    };
+    walk(s);
+  });
+});

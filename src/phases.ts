@@ -262,7 +262,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     r = await tries(prompt, spec.resume, true);
   }
   if (!r.ok) return r;
-  const { asked, ...ok } = r as Asking<N>;
+  const { asked, ...ok } = r;
   // Recorded already, as its session ended (see attempt).
   if (asked) throw new QuestionAsked(spec.name, asked.text);
   return ok;
@@ -570,7 +570,7 @@ export function summarize(e: Record<string, unknown>, cwd?: string): Record<stri
     const content = (e as { message?: { content?: Array<{ type: string; name?: string; text?: string; input?: unknown }> } }).message?.content ?? [];
     return {
       type: "assistant",
-      items: content.map((c) => c.type === "tool_use" ? `tool:${c.name}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type),
+      items: content.map((c) => c.type === "tool_use" ? `tool:${c.name ?? "?"}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type),
       targets: content.map((c) => c.type === "tool_use" ? toolTarget(c.name ?? "", c.input, cwd) : ""),
     };
   }
@@ -625,7 +625,7 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     // A hung git command is reported the same way wherever it happens (see the scheduler).
     if (e instanceof GitTimeout) throw e;
     throwIfChangeStopped(ctx);
-    return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0]}` };
+    return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0] ?? msg}` };
   }
   ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
   throwIfChangeStopped(ctx);

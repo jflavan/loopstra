@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCommand, spawnBounded, withBunOnPath, within, type StdinWriter } from "../../src/shell";
+import { errorText, runCommand, spawnBounded, withBunOnPath, within, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
@@ -210,5 +210,14 @@ describe("spawnBounded's onLine", () => {
       await expect(spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 30_000, onStop: "kill", graceMs: 500, onLine: () => { throw new Error("handler bug"); } })).rejects.toThrow("handler bug");
       expect(Date.now() - started).toBeLessThan(20_000);
     } finally { t.cleanup(); }
+  });
+});
+
+describe("errorText", () => {
+  test("an Error gives its message; anything else is shown as text, never [object Object]", () => {
+    expect(errorText(new Error("boom"))).toBe("boom");
+    expect(errorText("plain")).toBe("plain");
+    expect(errorText(null)).not.toContain("[object");
+    expect(errorText({ code: "ENOENT" })).not.toBe("[object Object]");
   });
 });

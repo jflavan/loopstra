@@ -10,7 +10,7 @@ async function runHook(input: object, env: Record<string, string>, cwd?: string)
   const base: Record<string, string | undefined> = { ...process.env };
   delete base.CLAUDE_PROJECT_DIR;
   const proc = Bun.spawn({ cmd: [process.execPath, HOOK], cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...base, ...env } });
-  proc.stdin.write(JSON.stringify(input)); proc.stdin.end();
+  void proc.stdin.write(JSON.stringify(input)); void proc.stdin.end();
   const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
   return { code, err };
 }

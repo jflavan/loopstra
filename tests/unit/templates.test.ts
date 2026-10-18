@@ -19,7 +19,7 @@ describe("prompt templates", () => {
       for (const line of CONTRACT_LINES) expect({ name, repeats: text.includes(line) }).toEqual({ name, repeats: false });
       const rendered = withContract(renderPrompt(text, {}));
       expect(rendered.trimEnd().endsWith(CONTRACT_LINES.join("\n\n"))).toBe(true);
-      expect(rendered.split(CONTRACT_LINES[1]!).length - 1).toBe(1);
+      expect(rendered.split(CONTRACT_LINES[1] ?? "").length - 1).toBe(1);
     }
   });
 

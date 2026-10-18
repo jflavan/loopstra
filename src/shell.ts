@@ -16,9 +16,11 @@ export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Prom
   try { return await Promise.race([p, late]); } finally { clearTimeout(timer); }
 }
 
-/** An error's message, or the thrown value as text. */
+/** An error's message, or the thrown value as text: a plain object as JSON, never "[object Object]". */
 export function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null) { try { return JSON.stringify(e); } catch { return Object.prototype.toString.call(e); } }
+  return String(e);
 }
 
 /** The last non-blank line of `s`, trimmed ("" when there is none). Lines matching `skip` do not count. */
@@ -49,6 +51,8 @@ async function descendants(pid: number): Promise<number[]> {
   try {
     const ps = Bun.spawn({ cmd: ["ps", "-A", "-o", "pid=,ppid="], stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const text = await within(new Response(ps.stdout).text(), 2_000, "");
+    // A ps that has not answered in time is not left running with its pipe open.
+    if (!text) { try { ps.kill(); } catch { /* already gone */ } }
     const children = new Map<number, number[]>();
     for (const line of text.split("\n")) {
       const [c, p] = line.trim().split(/\s+/).map(Number);
@@ -230,7 +234,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
     const write = (text: string): boolean => {
       if (!open) return false;
       try {
-        sink.write(text);
+        void sink.write(text);
         void Promise.resolve(sink.flush()).catch(() => {});
         return true;
       } catch { open = false; return false; } // the process already exited; its result says so
@@ -297,7 +301,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   o.signal?.removeEventListener("abort", cancel);
   // Output pipes may be held by a leftover grandchild; take what arrived.
   if (!stopped && !cancelled) await within(Promise.all([outDone, errDone]), timedOut || o.onLine ? 250 : 2_000, undefined);
-  if (handlerError !== undefined) throw handlerError;
+  if (handlerError !== undefined) throw handlerError instanceof Error ? handlerError : new Error(errorText(handlerError));
   return { code, out, err, started: true, timedOut, stopped, cancelled };
 }
 

@@ -107,7 +107,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /** "14 Oct": a row's day, in local time. */
 export function shortDay(ts: string): string {
   const d = new Date(ts);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return `${d.getDate()} ${MONTHS[d.getMonth()] ?? ""}`;
 }
 
 /** Why a judge that has not earned first still runs as shadow, in words. */

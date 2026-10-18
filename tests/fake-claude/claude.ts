@@ -60,7 +60,7 @@ function userText(e: { message?: { content?: unknown } }): string {
   const c = e.message?.content;
   if (typeof c === "string") return c;
   if (!Array.isArray(c)) return "";
-  return c.filter((p: { type?: string }) => p?.type === "text").map((p: { text?: unknown }) => String(p.text ?? "")).join("");
+  return c.filter((p: { type?: string }) => p?.type === "text").map((p: { text?: unknown }) => (typeof p.text === "string" ? p.text : "")).join("");
 }
 
 /** Reads stdin line by line as it comes; each user message is taken by the running turn, or queued. */

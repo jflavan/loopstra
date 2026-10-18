@@ -119,7 +119,7 @@ describe("stream-json input", () => {
       }
     })();
     return {
-      send: (t: string) => { p.stdin.write(user(t)); void p.stdin.flush(); },
+      send: (t: string) => { void p.stdin.write(user(t)); void p.stdin.flush(); },
       close: () => { void p.stdin.end(); },
       kill: () => p.kill(),
       lines,

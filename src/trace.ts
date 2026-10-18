@@ -86,6 +86,32 @@ CREATE INDEX IF NOT EXISTS gates_check ON gates (slug, gate, "check", id);
 CREATE INDEX IF NOT EXISTS phases_started ON phases (started);
 `;
 
+/**
+ * Changes to tables the schema above created in an older version, in order: the first entry brings
+ * a database at user_version 0 to 1, and so on. CREATE ... IF NOT EXISTS adds a new table or index
+ * by itself; a new column, a renamed one or a changed index goes here, as SQL run in one transaction.
+ */
+const MIGRATIONS: readonly string[] = [];
+
+/** The schema version this version writes (`PRAGMA user_version`): how many migrations a database has had. */
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * Brings an older database up to this version's schema, one migration at a time, each in its own
+ * transaction with the version bump, so a kill part way leaves the version true. A database from a
+ * newer Loopstra is refused, plainly: its tables may have columns this version does not know.
+ */
+export function migrate(db: Database): void {
+  const at = (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
+  if (at > SCHEMA_VERSION) throw new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${SCHEMA_VERSION}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
+  for (let v = at; v < SCHEMA_VERSION; v++) {
+    db.transaction(() => {
+      db.run(MIGRATIONS[v]!);
+      db.run(`PRAGMA user_version = ${v + 1}`);
+    })();
+  }
+}
+
 const JUDGE_COLUMNS = ["slug", "judge", "trace_name", "ts", "mode", "how", "cheap_model", "strong_model", "template_sha", "prompt_sha",
   "cheap", "strong", "cheap_usd", "strong_usd", "cheap_ms", "strong_ms"] as const;
 
@@ -130,7 +156,7 @@ export function useJournal(db: Database): string | null {
     got = errorText(e);
   }
   if (got.toLowerCase() === "wal") return null;
-  try { db.exec("PRAGMA journal_mode = DELETE"); } catch { /* keep the mode it has */ }
+  try { db.run("PRAGMA journal_mode = DELETE"); } catch { /* keep the mode it has */ }
   return `the trace database could not use WAL journal mode (${got || "no answer"}), so it uses journal_mode=DELETE`;
 }
 
@@ -141,10 +167,11 @@ let journalNoted = false;
 function connect(path: string): { db: Database; note: string | null } {
   const db = new Database(path);
   try {
-    db.exec("PRAGMA busy_timeout = 5000;");
+    db.run("PRAGMA busy_timeout = 5000;");
     const note = useJournal(db);
-    db.exec("PRAGMA synchronous = NORMAL;");
-    db.exec(SCHEMA);
+    db.run("PRAGMA synchronous = NORMAL;");
+    db.run(SCHEMA);
+    migrate(db);
     // A read, to meet a damaged file now rather than at the first query. One row, not a count: the console opens a trace per request.
     db.query("SELECT 1 FROM events LIMIT 1").get();
     return { db, note };
