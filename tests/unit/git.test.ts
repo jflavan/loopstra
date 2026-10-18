@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
@@ -461,6 +461,33 @@ describe("Git and the locks", () => {
       await git.run(["worktree", "lock", dir]);
       await removeWorktree(git, dir);
       expect(existsSync(dir)).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
+  test("ensureWorktree replaces a worktree whose add was cut short, so no file is committed as deleted", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      for (let i = 0; i < 6; i++) await Bun.write(join(repo.path, `f${i}.txt`), `${i}\n`);
+      await git.commitAll("files");
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.ensureWorktree(wt, "intent/x");
+      // What a `worktree add` killed part way leaves: its "initializing" lock, no index, half the files.
+      const admin = join(repo.path, ".git", "worktrees", "x");
+      rmSync(join(admin, "index"));
+      for (let i = 3; i < 6; i++) rmSync(join(wt, `f${i}.txt`));
+      writeFileSync(join(admin, "locked"), "initializing");
+
+      await git.ensureWorktree(wt, "intent/x");
+      for (let i = 0; i < 6; i++) expect(existsSync(join(wt, `f${i}.txt`))).toBe(true);
+      expect(existsSync(join(admin, "locked"))).toBe(false);
+      const wtGit = new Git(wt);
+      expect(await wtGit.isDirty()).toBe(false);
+      await Bun.write(join(wt, "new.txt"), "n\n");
+      await wtGit.commitAll("save");
+      expect((await wtGit.run(["show", "--name-status", "--format=", "HEAD"])).out.trim()).toBe("A\tnew.txt");
+      await removeWorktree(git, wt);
     } finally { repo.cleanup(); }
   });
 });

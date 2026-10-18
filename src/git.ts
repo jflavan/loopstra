@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded } from "./shell";
@@ -209,6 +209,13 @@ export class Git {
     const top = await this.run(["rev-parse", "--show-toplevel"], true);
     return top.code === 0 && samePath(top.out.trim(), this.cwd);
   }
+  /** False when this worktree's `git worktree add` never finished: git's "initializing" lock is still on it, or it has no index yet. */
+  async addFinished(): Promise<boolean> {
+    const gitPath = async (name: string) => resolve(this.cwd, (await this.run(["rev-parse", "--git-path", name])).out.trim());
+    const lock = await gitPath("locked");
+    if (existsSync(lock) && readFileSync(lock, "utf8").trim() === "initializing") return false;
+    return existsSync(await gitPath("index"));
+  }
   async headSha(): Promise<string> { return (await this.run(["rev-parse", "HEAD"])).out.trim(); }
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
@@ -226,13 +233,14 @@ export class Git {
   /**
    * Makes `dir` a worktree of this repository checked out on `branch`. An existing directory is
    * reused only if it is itself a worktree root (not just a folder inside the main checkout) on
-   * `branch`; anything else is removed and the worktree is added again. No lock: git keeps another
-   * change's prune off a worktree it is still adding (it marks it "initializing").
+   * `branch` whose add finished (a killed add leaves files missing, and the next save would commit
+   * them as deleted); anything else is removed and the worktree is added again. No lock: git keeps
+   * another change's prune off a worktree it is still adding (it marks it "initializing").
    */
   async ensureWorktree(dir: string, branch: string): Promise<void> {
     if (existsSync(dir)) {
       const there = new Git(dir);
-      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
+      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch && (await there.addFinished())) return;
       await removeWorktree(this, dir);
     }
     await this.worktreeAdd(dir, branch);
