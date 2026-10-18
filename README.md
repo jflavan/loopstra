@@ -51,7 +51,7 @@ loopstra start
 
 `upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too: the install is already done there, so it only brings that repository up to it. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
 
-**Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start` refuses in such a repository until that is done.
+**Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start`, `chat` and `ui` refuse in such a repository until that is done.
 
 ## Install
 
@@ -62,7 +62,7 @@ bun add -g loopstra
 loopstra --version
 ```
 
-`bun add -g` puts a `loopstra` command on your PATH (in `~/.bun/bin`; make sure that folder is on PATH). `npm i -g loopstra` works too, as long as `bun` is on PATH: Loopstra runs on Bun either way. `loopstra help` lists the commands.
+`bun add -g` puts a `loopstra` command on your PATH (in `~/.bun/bin`; make sure that folder is on PATH). `npm i -g loopstra` works too, as long as `bun` is on PATH: Loopstra runs on Bun either way. `loopstra upgrade` always installs with `bun add -g`, and says so when another `loopstra` (an npm install, say) comes first on PATH. `loopstra help` lists the commands.
 
 The runtime, the prompts and the test-protection hook stay in the installed package; a repository only gets its config, a few files it keeps (see Set up a repo) and any prompt it customizes. To move to a newer release, run `loopstra upgrade` in a project repository (see Upgrade). To work on Loopstra itself, see Develop Loopstra.
 
@@ -82,7 +82,7 @@ loopstra init
 - `.claude/skills/loopstra/` (an operator skill for drafting intents, reading status and unblocking)
 - `.loopstra/` in `.gitignore`
 
-It writes no prompts, no hook and no `.claude/settings.json`: the prompts and the test-protection hook come with Loopstra (see Prompts). In a repository set up by an older Loopstra (a config but no stamp), `init` writes no stamp and says to run `loopstra upgrade`, which brings the repository to this layout.
+It writes no prompts, no hook and no `.claude/settings.json`: the prompts and the test-protection hook come with Loopstra (see Prompts). In a repository set up by an older Loopstra (a config, prompt copies or the old hook, but no stamp), `init` writes no stamp and says to run `loopstra upgrade`, which brings the repository to this layout.
 
 `main_branch` in the config is the branch the repository is on when you run `init` (for a detached checkout, git's `init.defaultBranch`, else `main`).
 
@@ -138,7 +138,7 @@ loopstra start          # the loop; one step per tick for each change it runs, s
 loopstra start --once   # one tick, then exit (for cron or a scheduler)
 ```
 
-`start` checks that the folder is a repository's top and is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail`, `ui` and `chat` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
+`start` checks that the folder is a repository's top and is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. In a folder below the top it names the top to run in. In a repository set up by an older Loopstra it says to run `loopstra upgrade` first, and so do `chat` and `ui` (see Upgrade). `status`, `tail`, `judges`, `ui`, `chat`, `setup`, `upgrade` and `customize` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time, or, with `speed.max_parallel_changes` above 1, up to that many changes at once, each still one step at a time (see How it works).
 
@@ -350,7 +350,7 @@ A newer release installed first stays installed; only the repository is left as 
 
 `--check` installs and writes nothing. It prints the installed and latest versions, what is new between them, and what would happen to each file. What would make a real upgrade refuse (the loop running, an operation in progress, uncommitted files) is listed as a note; a folder that is not set up, a checkout not on `main_branch`, or a stamp that cannot be read is still refused. When a newer release is out, the files are what the installed one would do (the newer one may do more).
 
-`loopstra start` and `loopstra status` print one line when a newer release is out ("Loopstra 0.6.0 is out (you have 0.4.2): run loopstra upgrade."), when the repository's stamp names a different version from the installed one, or when the repository was set up by an older Loopstra. npm is asked at most once a day (the answer is kept in `.loopstra/update-check.json`), and the check never holds up the loop. The loop never upgrades itself.
+`loopstra start` and `loopstra status` print one line when a newer release is out ("Loopstra 0.6.0 is out (you have 0.4.2): run loopstra upgrade."), when the repository's stamp names a different version from the installed one, or (`status` only, since `start` refuses there) when the repository was set up by an older Loopstra. npm is asked at most once a day (the answer is kept in `.loopstra/update-check.json`), and the check never holds up the loop. The loop never upgrades itself.
 
 ## Platforms
 
