@@ -25,6 +25,7 @@ import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
 import { uncommittedSetup } from "./init";
+import { olderSetupRefusal } from "./stamp";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
@@ -770,12 +771,16 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
 
 /**
  * What `start` checks before the loop begins, as a plain message, or null when it may start: the
- * folder is set up (it has loopstra/config.yaml), the tools are installed, the checkout is on
+ * folder is set up (it has loopstra/config.yaml) by a Loopstra with the stamp (an older setup is
+ * upgraded first), the tools are installed, the checkout is on
  * main_branch, Loopstra's own files are committed there, and a repository with a remote has gh,
  * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
   if (!existsSync(configPath(root))) return NOT_SET_UP;
+  // Its old prompt copies would be used as overrides, and old copies of some prompts are not safe.
+  const older = olderSetupRefusal(root, "start again");
+  if (older) return older;
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;
   let cfg: Config;

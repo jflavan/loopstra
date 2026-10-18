@@ -129,9 +129,9 @@ describe("upgradeRepo", () => {
       expect(r.ok).toBe(true);
       expect(r.files.find((f) => f.path === "REVIEW.md")!.outcome).toBe("conflict");
       expect(readFileSync(review, "utf8")).toContain("<<<<<<<");
-      // The stamp (with the new version and REVIEW.md's old base) is committed; REVIEW.md is not.
+      // The stamp (with the new version and REVIEW.md's new base) is committed; REVIEW.md is not.
       expect(r.committed).toBe(true);
-      expect(readStamp(repo.path)!.files["REVIEW.md"]).toEqual({ base: textSha(base) });
+      expect(readStamp(repo.path)!.files["REVIEW.md"]).toEqual({ base: textSha(shipped) });
       expect(await status(repo.path)).toBe("M REVIEW.md");
     } finally { repo.cleanup(); }
   });
@@ -452,6 +452,59 @@ describe("upgradeRepo", () => {
       const ok = await upgradeRepo(repo.path, { check: false }, { ...deps(), notes: async () => { throw new Error("offline"); } });
       expect(ok.committed).toBe(true);
       expect((await run(["git", "log", "-1", "--format=%B"], repo.path)).out.trim()).toBe("loopstra: upgrade to 0.9.0 (from 0.8.0)");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a stamp that cannot be read is refused, also with --check, and nothing is adopted", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      const stampFile = join(repo.path, "loopstra", "stamp.json");
+      writeFileSync(stampFile, `<<<<<<< ours\n${readFileSync(stampFile, "utf8")}=======\n{}\n>>>>>>> theirs\n`);
+      await run(["git", "commit", "-qam", "a bad merge"], repo.path);
+      const at = await head(repo.path);
+      const refusal = "loopstra/stamp.json cannot be read (for example, it has merge conflict markers). Fix it, commit it, then run loopstra upgrade again.";
+      for (const check of [false, true]) expect((await upgradeRepo(repo.path, { check }, deps())).refusal).toBe(refusal);
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      expect(await status(repo.path)).toBe("");
+      expect(await head(repo.path)).toBe(at);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a deleted prompt override leaves the stamp, and customize can make it again", async () => {
+    const repo = await setUpRepo();
+    try {
+      const { customize } = await import("../../src/commands/customize");
+      expect((await customize(repo.path, "review")).ok).toBe(true);
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-qm", "our review prompt"], repo.path);
+      await run(["git", "rm", "-q", "loopstra/prompts/review.md"], repo.path);
+      await run(["git", "commit", "-qm", "back to the shipped review prompt"], repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.files.find((f) => f.path === "loopstra/prompts/review.md")!.outcome).toBe("dropped");
+      expect(readStamp(repo.path)!.files["loopstra/prompts/review.md"]).toBeUndefined();
+      expect(r.committed).toBe(true);
+      expect(await status(repo.path)).toBe("");
+      // The next upgrade no longer knows of it.
+      expect((await upgradeRepo(repo.path, { check: true }, deps())).files.map((f) => f.path)).not.toContain("loopstra/prompts/review.md");
+      expect((await customize(repo.path, "review")).ok).toBe(true);
+      expect(existsSync(join(repo.path, "loopstra", "prompts", "review.md"))).toBe(true);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a staging that fails after the writes is reported, not taken for a commit", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      writeFileSync(join(repo.path, ".git", "index.lock"), "");
+      const at = await head(repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.ok).toBe(false);
+      expect(r.written).toBe(true);
+      expect(r.committed).toBe(false);
+      expect(r.refusal).toStartWith("The files were brought up to date but could not be committed (git said: ");
+      expect(r.refusal).toContain("lock file");
+      expect(await head(repo.path)).toBe(at);
     } finally { repo.cleanup(); }
   });
 });

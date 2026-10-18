@@ -124,10 +124,11 @@ export function printResult(r: RepoResult, check: boolean, say: (l: string) => v
 const DONE: Record<Exclude<FileOutcome, "unchanged">, string> = {
   replaced: "updated",
   merged: "merged with your edits",
-  conflict: "has conflict markers; resolve them and commit it",
+  conflict: "has conflict markers: resolve them and commit it (if you undo the file instead, these shipped changes are not brought in again)",
   "no-base": "left as it is (the version it came from could not be read)",
   added: "added",
   deleted: "recorded as removed on purpose; upgrades leave it out",
+  dropped: "removed: the shipped prompt is used",
 };
 const WOULD: Record<Exclude<FileOutcome, "unchanged">, string> = {
   replaced: "would be updated",
@@ -136,6 +137,7 @@ const WOULD: Record<Exclude<FileOutcome, "unchanged">, string> = {
   "no-base": "would be left as it is (the version it came from could not be read)",
   added: "would be added",
   deleted: "would be recorded as removed on purpose; upgrades leave it out",
+  dropped: "removed: the shipped prompt would be used",
 };
 
 /** The repository step's report: the version change, then one line per file that changed (or would). */

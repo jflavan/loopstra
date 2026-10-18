@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "./git";
 import { isDev, PACKAGE_ROOT } from "./package";
-import { textSha } from "./stamp";
+import { textSha, type ManagedFile } from "./stamp";
 
 /** Every text each template has had: its textSha and the first commit that had it, oldest first. Keyed by `templates/...` path. */
 export type ShippedIndex = Record<string, Array<{ sha: string; commit: string }>>;
@@ -120,16 +120,37 @@ function differingLines(a: string, b: string): number {
   return extra + [...count.values()].reduce((s, n) => s + n, 0);
 }
 
-/** The shipped version closest to `text` (fewest differing lines), with its text; null when none can be fetched. Ties go to the newer version. */
+/**
+ * The shipped version closest to `text` (fewest differing lines), with its text. Ties go to the newer
+ * version. Null when there is none, or when any version cannot be fetched: the closest one may be
+ * the one that could not be read, so a choice among the rest could be the wrong base.
+ */
 export async function closestBase(index: ShippedIndex, template: string, text: string, fetchText: FetchText = fetchShipped): Promise<{ sha: string; commit: string; text: string } | null> {
   const entries = index[template] ?? [];
   const fetched = await Promise.all(entries.map((e) => fetchText(template, e.commit)));
+  if (fetched.some((t) => t === null || t === undefined)) return null;
   let best: { sha: string; commit: string; text: string; d: number } | null = null;
   for (const [i, e] of entries.entries()) {
-    const t = fetched[i];
-    if (t === null || t === undefined) continue;
+    const t = fetched[i]!;
     const d = differingLines(text, t);
     if (!best || d <= best.d) best = { ...e, text: t, d };
   }
   return best ? { sha: best.sha, commit: best.commit, text: best.text } : null;
+}
+
+/**
+ * The base a managed file with no stamp entry starts from (adopting an older setup, or an override
+ * made by hand): the shipped version it is; else, with no shipped version known, today's shipped text
+ * (nothing is merged into it until that changes); else the closest shipped version. `note` tells the
+ * person which, for a file of their own. Throws when versions are known but cannot all be read
+ * (offline): taking today's text then would mean never merging what changed since its real base.
+ */
+export async function baseOf(index: ShippedIndex, file: ManagedFile, text: string, fetchText: FetchText = fetchShipped): Promise<{ sha: string; note?: string }> {
+  if (wasShipped(index, file.template, text)) return { sha: textSha(text) };
+  if (!(index[file.template] ?? []).length) {
+    return { sha: textSha(readFileSync(file.shipped, "utf8")), note: `${file.path} is your own; Loopstra knows no earlier version of it, so it is left as it is.` };
+  }
+  const best = await closestBase(index, file.template, text, fetchText);
+  if (!best) throw new Error(`Loopstra's shipped versions of ${file.path} could not be read to merge from; check the connection and run loopstra upgrade again.`);
+  return { sha: best.sha, note: `${file.path} is your own; it is merged from the shipped version of commit ${best.commit.slice(0, 7)}.` };
 }

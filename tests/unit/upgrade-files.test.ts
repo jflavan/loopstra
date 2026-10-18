@@ -44,13 +44,30 @@ describe("upgradeFile", () => {
     } finally { t.cleanup(); }
   });
 
-  test("a conflict leaves markers and keeps the old base", async () => {
+  test("a conflict leaves markers and moves the base on to the new text", async () => {
     const { t, file } = setup("# Title\n\nline a\nline b mine\nline c\n");
     try {
       const r = await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => BASE, { write: true });
       expect(r.outcome).toBe("conflict");
-      expect(r.entry).toEqual({ base: textSha(BASE) });
+      // Once the person resolves and commits it, the shipped changes are in: the next upgrade must not merge them again.
+      expect(r.entry).toEqual({ base: textSha(NEW) });
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toContain("<<<<<<<");
+      writeFileSync(join(t.path, "REVIEW.md"), "# Title\n\nline a\nline b mine and changed\nline c\n");
+      expect((await upgradeFile(t.path, file, r.entry, async () => BASE, { write: true })).outcome).toBe("unchanged");
+    } finally { t.cleanup(); }
+  });
+
+  test("a deleted prompt override leaves the stamp: the shipped prompt is used", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "pkg"), { recursive: true });
+      writeFileSync(join(t.path, "pkg", "review.md"), NEW);
+      const file: ManagedFile = { path: "loopstra/prompts/review.md", template: "templates/prompts/review.md", shipped: join(t.path, "pkg", "review.md") };
+      for (const entry of [{ base: textSha(BASE) }, { base: textSha(BASE), deleted: true as const }]) {
+        const r = await upgradeFile(t.path, file, entry, async () => BASE, { write: true });
+        expect(r).toEqual({ path: "loopstra/prompts/review.md", outcome: "dropped" });
+        expect(existsSync(join(t.path, "loopstra", "prompts", "review.md"))).toBe(false);
+      }
     } finally { t.cleanup(); }
   });
 

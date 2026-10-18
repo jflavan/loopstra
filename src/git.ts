@@ -301,15 +301,32 @@ export class Git {
    * request does not stop it (see GitRunOptions.cleanup).
    */
   async commitPaths(paths: string[], message: string, opts: { finish?: boolean } = {}): Promise<boolean> {
-    // Skip paths that don't exist: `git add -- <missing pathspec>` errors instead of no-op-ing,
-    // and callers (e.g. commitRecord) pass paths, like intent/queue.md, that may not exist yet.
-    const existing = paths.filter((p) => existsSync(join(this.cwd, p)));
-    if (!existing.length) return false;
     const o = { cleanup: opts.finish === true };
-    await this.run(["add", "-A", "--", ...existing], o);
-    const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...existing], o)).out.trim();
+    // A path missing on disk is kept when git tracks it (its removal is committed); one git has never
+    // seen is skipped: `git add -- <pathspec>` errors on it, and callers (e.g. commitRecord) pass
+    // paths, like intent/queue.md, that may not exist yet.
+    const missing = paths.filter((p) => !existsSync(join(this.cwd, p)));
+    let inHead: (p: string) => boolean = () => false;
+    let inIndex: (p: string) => boolean = () => false;
+    if (missing.length) {
+      const names = (out: string) => out.split("\0").filter(Boolean);
+      const covers = (list: string[]) => (p: string) => list.some((l) => l === p || l.startsWith(`${p.replace(/\/$/, "")}/`));
+      // No HEAD yet (no commit): nothing is in it.
+      const head = await this.run(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...missing], { ...o, allowFail: true });
+      inHead = covers(head.code === 0 ? names(head.out) : []);
+      inIndex = covers(names((await this.run(["ls-files", "-z", "--", ...missing], o)).out));
+    }
+    const there = (p: string) => !missing.includes(p);
+    const toAdd = paths.filter((p) => there(p) || inHead(p) || inIndex(p));
+    if (!toAdd.length) return false;
+    await this.run(["add", "-A", "--", ...toAdd], o);
+    const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...toAdd], o)).out.trim();
     if (!staged) return false;
-    await this.runtime("commit", ["-q", "-m", message, "--", ...existing], o);
+    // A path only in the index (staged, never committed) is gone from the index now: naming it would match nothing.
+    const toCommit = paths.filter((p) => there(p) || inHead(p));
+    // Never a commit without paths: that would take everything staged.
+    if (!toCommit.length) return false;
+    await this.runtime("commit", ["-q", "-m", message, "--", ...toCommit], o);
     return true;
   }
 

@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, readFileSync, rmSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
-import { closestBase, wasShipped, type FetchText, type ShippedIndex } from "../shipped";
-import { managedFiles, textSha, type Stamp } from "../stamp";
+import { baseOf, wasShipped, type FetchText, type ShippedIndex } from "../shipped";
+import { isPromptOverride, managedFiles, type Stamp } from "../stamp";
 
 /** The hook file init used to write into a repository. */
 export const OLD_HOOK_FILE = ".claude/hooks/loopstra-protect-tests.ts";
@@ -70,30 +70,19 @@ export async function adoptLegacy(root: string, index: ShippedIndex, fetchText: 
     const path = join(root, file.path);
     if (!existsSync(path)) continue;
     const text = readFileSync(path, "utf8");
-    if (wasShipped(index, file.template, text)) {
-      if (file.path.startsWith("loopstra/prompts/")) {
-        writes.push(() => {
-          rmSync(path);
-          // No overrides left: the folder goes too (customize makes it again).
-          const dir = join(root, "loopstra", "prompts");
-          if (readdirSync(dir).length === 0) rmdirSync(dir);
-        });
-        out.removed.push(file.path);
-      } else {
-        out.stamp.files[file.path] = { base: textSha(text) };
-      }
+    if (isPromptOverride(file.path) && wasShipped(index, file.template, text)) {
+      writes.push(() => {
+        rmSync(path);
+        // No overrides left: the folder goes too (customize makes it again).
+        const dir = join(root, "loopstra", "prompts");
+        if (readdirSync(dir).length === 0) rmdirSync(dir);
+      });
+      out.removed.push(file.path);
       continue;
     }
-    if (!(index[file.template] ?? []).length) {
-      // No shipped version to go by: the file is treated as written from today's text, so nothing is merged into it.
-      out.stamp.files[file.path] = { base: textSha(readFileSync(file.shipped, "utf8")) };
-      out.notes.push(`${file.path} is your own; Loopstra knows no earlier version of it, so it is left as it is.`);
-      continue;
-    }
-    const best = await closestBase(index, file.template, text, fetchText);
-    if (!best) throw new Error(`Loopstra's shipped versions of ${file.path} could not be read to merge from; check the connection and run loopstra upgrade again.`);
-    out.stamp.files[file.path] = { base: best.sha };
-    out.notes.push(`${file.path} is your own; it is merged from the shipped version of commit ${best.commit.slice(0, 7)}.`);
+    const base = await baseOf(index, file, text, fetchText);
+    out.stamp.files[file.path] = { base: base.sha };
+    if (base.note) out.notes.push(base.note);
   }
 
   const hook = join(root, OLD_HOOK_FILE);

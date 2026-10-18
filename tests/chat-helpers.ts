@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { configPath } from "../src/config";
 import { Git } from "../src/git";
 import type { IncomingMessage } from "../src/chat/orchestrator";
-import { FAKE_CLAUDE, run, setEnv, tempDir, tempGitRepo } from "./helpers";
+import { FAKE_CLAUDE, run, setEnv, tempDir, tempGitRepo, writeTestStamp } from "./helpers";
 
 export const FAKE_GH = fileURLToPath(new URL("./fake-gh/gh.ts", import.meta.url));
 
@@ -38,6 +38,7 @@ export async function chatRepo(opts: { remote?: boolean; config?: string; intent
   const remote = opts.remote ? tempDir("loopstra-remote-") : null;
   mkdirSync(join(repo.path, "loopstra"), { recursive: true });
   await Bun.write(configPath(repo.path), `version: 1\ncommands:\n  test: echo ok\n${opts.config ?? ""}`);
+  writeTestStamp(repo.path);
   for (const [slug, text] of Object.entries(opts.intents ?? {})) {
     mkdirSync(join(repo.path, "intent", slug), { recursive: true });
     await Bun.write(join(repo.path, "intent", slug, "intent.md"), text);

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { baseText, buildShippedIndex, closestBase, wasShipped, type ShippedIndex } from "../../src/shipped";
+import { baseOf, baseText, buildShippedIndex, closestBase, wasShipped, type ShippedIndex } from "../../src/shipped";
 import { textSha } from "../../src/stamp";
-import { run, tempGitRepo } from "../helpers";
+import { run, tempDir, tempGitRepo } from "../helpers";
 
 async function commitFile(dir: string, rel: string, text: string): Promise<string> {
   mkdirSync(dirname(join(dir, rel)), { recursive: true });
@@ -50,11 +50,27 @@ describe("shipped index", () => {
     expect(await closestBase(index, "templates/REVIEW.md", "x\n", async () => null)).toBeNull();
   });
 
-  test("closestBase: a tie goes to the newer version, and a version that cannot be read is passed over", async () => {
+  test("closestBase: a tie goes to the newer version; any version that cannot be read gives null", async () => {
     const texts: Record<string, string> = { a: "l1\nA\n", b: "l1\nB\n", c: "l1\nC\n" };
     const index: ShippedIndex = { "templates/REVIEW.md": ["a", "b", "c"].map((c) => ({ sha: textSha(texts[c]!), commit: c })) };
-    const best = await closestBase(index, "templates/REVIEW.md", "l1\nX\n", async (_t, commit) => (commit === "c" ? null : texts[commit]!));
-    expect(best?.commit).toBe("b");
+    expect((await closestBase(index, "templates/REVIEW.md", "l1\nX\n", async (_t, commit) => texts[commit]!))?.commit).toBe("c");
+    // The one that cannot be read may be the closest: no choice among the rest.
+    expect(await closestBase(index, "templates/REVIEW.md", "l1\nX\n", async (_t, commit) => (commit === "c" ? null : texts[commit]!))).toBeNull();
+  });
+
+  test("baseOf: the shipped version a file is, today's text with no versions known, else the closest; offline throws", async () => {
+    const t = tempDir();
+    try {
+      writeFileSync(join(t.path, "REVIEW.md"), "today\n");
+      const file = { path: "REVIEW.md", template: "templates/REVIEW.md", shipped: join(t.path, "REVIEW.md") };
+      const texts: Record<string, string> = { a: "l1\nl2\n", b: "l1\nl2\nl3\n" };
+      const index: ShippedIndex = { "templates/REVIEW.md": ["a", "b"].map((c) => ({ sha: textSha(texts[c]!), commit: c })) };
+      const fetch = async (_t: string, commit: string) => texts[commit] ?? null;
+      expect(await baseOf(index, file, texts.a!, async () => null)).toEqual({ sha: textSha(texts.a!) });
+      expect(await baseOf({}, file, "mine\n", fetch)).toEqual({ sha: textSha("today\n"), note: "REVIEW.md is your own; Loopstra knows no earlier version of it, so it is left as it is." });
+      expect(await baseOf(index, file, "l1\nl2\nl3\nmine\n", fetch)).toEqual({ sha: textSha(texts.b!), note: "REVIEW.md is your own; it is merged from the shipped version of commit b." });
+      await expect(baseOf(index, file, "mine\n", async () => null)).rejects.toThrow("Loopstra's shipped versions of REVIEW.md could not be read to merge from; check the connection and run loopstra upgrade again.");
+    } finally { t.cleanup(); }
   });
 
   test("baseText finds the text for a sha through the index", async () => {

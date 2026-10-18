@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { templatePath } from "../package";
-import { readStamp, STAMP_FILE, textSha, writeStamp } from "../stamp";
+import { readStamp, STAMP_FILE, stampUnreadable, textSha, unreadableStampText, writeStamp } from "../stamp";
 
 /**
  * `loopstra customize [prompt]`: copies a shipped prompt into loopstra/prompts/ as the repository's
@@ -27,6 +27,7 @@ export async function customize(root: string, name: string | undefined): Promise
   if (!names.includes(n)) return { ok: false, text: `No shipped prompt is called ${n}. Run loopstra customize to list them.` };
   const rel = `loopstra/prompts/${n}.md`;
   if (own(n)) return { ok: false, text: `${rel} is already yours.` };
+  if (stampUnreadable(root)) return { ok: false, text: unreadableStampText(`loopstra customize ${n}`) };
   // Without a stamp the repository was set up by an older Loopstra; writing one here would stop
   // upgrade from adopting it (removing its old prompt copies and the old hook).
   const stamp = readStamp(root);

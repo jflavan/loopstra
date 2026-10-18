@@ -3,17 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
 import { spawnBounded } from "../shell";
-import { textSha, type ManagedFile, type StampEntry } from "../stamp";
+import { isPromptOverride, textSha, type ManagedFile, type StampEntry } from "../stamp";
 
-/** What upgrade did, or would do, to one managed file. */
-export type FileOutcome = "unchanged" | "replaced" | "merged" | "conflict" | "no-base" | "added" | "deleted";
+/**
+ * What upgrade did, or would do, to one managed file. "dropped": a prompt override was deleted, so
+ * its stamp entry goes and the shipped prompt is used.
+ */
+export type FileOutcome = "unchanged" | "replaced" | "merged" | "conflict" | "no-base" | "added" | "deleted" | "dropped";
 
 /** One managed file's outcome and its stamp entry afterwards. */
 export interface FileResult {
   path: string;
   outcome: FileOutcome;
-  /** The file's stamp entry afterwards. */
-  entry: StampEntry;
+  /** The file's stamp entry afterwards; absent when the file leaves the stamp (a deleted override). */
+  entry?: StampEntry;
   /** The text written to the file (or, with `write` false, that would be); absent when it is left as it is. */
   text?: string;
 }
@@ -60,14 +63,18 @@ export async function upgradeFile(root: string, file: ManagedFile, entry: StampE
   const next = readFileSync(file.shipped, "utf8");
   const nextSha = textSha(next);
   let written: string | undefined;
-  const done = (outcome: FileOutcome, e: StampEntry): FileResult => ({ path: file.path, outcome, entry: e, ...(written === undefined ? {} : { text: written }) });
+  const done = (outcome: FileOutcome, e: StampEntry | undefined): FileResult => ({
+    path: file.path, outcome, ...(e === undefined ? {} : { entry: e }), ...(written === undefined ? {} : { text: written }),
+  });
   const put = (text: string) => {
     written = text;
     if (opts.write) writeFileAtomic(target, text);
   };
 
   if (!existsSync(target)) {
-    // Recorded as deleted once, when the removal is first seen; after that it is simply left out.
+    // A deleted override means going back to the shipped prompt: its entry goes, nothing is written.
+    if (isPromptOverride(file.path)) return done(entry ? "dropped" : "unchanged", undefined);
+    // A fixed managed file is recorded as deleted once, when the removal is first seen; after that it is simply left out.
     if (entry?.deleted) return done("unchanged", { base: entry.base, deleted: true });
     if (entry) return done("deleted", { base: entry.base, deleted: true });
     put(next);
@@ -86,5 +93,7 @@ export async function upgradeFile(root: string, file: ManagedFile, entry: StampE
   if (base === null) return done("no-base", entry ?? { base: nextSha });
   const merged = await mergeText(theirs, base, next);
   put(isCrlf(theirs) ? merged.text.replace(/\n/g, "\r\n") : merged.text);
-  return merged.conflict ? done("conflict", entry!) : done("merged", { base: nextSha });
+  // A conflict also moves the base on: once the person resolves and commits the file, the shipped
+  // changes are in it, and the next upgrade must not merge (and conflict over) them again.
+  return done(merged.conflict ? "conflict" : "merged", { base: nextSha });
 }

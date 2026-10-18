@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { customize } from "../../src/commands/customize";
 import { init } from "../../src/init";
@@ -37,6 +37,18 @@ describe("customize", () => {
       expect(r.text).toContain("run loopstra upgrade first");
       expect(existsSync(join(repo.path, "loopstra", "prompts", "review.md"))).toBe(false);
       expect(existsSync(join(repo.path, STAMP_FILE))).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a stamp that cannot be read is refused, and left as it is", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await init(repo.path);
+      writeFileSync(join(repo.path, STAMP_FILE), "<<<<<<< ours\n{}\n");
+      const r = await customize(repo.path, "review");
+      expect(r).toEqual({ ok: false, text: "loopstra/stamp.json cannot be read (for example, it has merge conflict markers). Fix it, commit it, then run loopstra customize review again." });
+      expect(readFileSync(join(repo.path, STAMP_FILE), "utf8")).toBe("<<<<<<< ours\n{}\n");
+      expect(existsSync(join(repo.path, "loopstra", "prompts", "review.md"))).toBe(false);
     } finally { repo.cleanup(); }
   });
 });

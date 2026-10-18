@@ -8,8 +8,8 @@ import { heartbeatState, readHeartbeat } from "../heartbeat";
 import { onCheckout } from "../lanes";
 import { DEV_VERSION, stampVersion } from "../package";
 import { errorText, lastLine } from "../shell";
-import { closestBase, fetchShipped, loadShippedIndex, type FetchText, type ShippedIndex } from "../shipped";
-import { managedFiles, readStamp, STAMP_FILE, textSha, writeStamp, type Stamp } from "../stamp";
+import { baseOf, baseText, fetchShipped, loadShippedIndex, type FetchText, type ShippedIndex } from "../shipped";
+import { managedFiles, readStamp, STAMP_FILE, stampUnreadable, unreadableStampText, writeStamp, type Stamp } from "../stamp";
 import { upgradeFile, type FileResult } from "./files";
 import { adoptLegacy, type Adopted } from "./legacy";
 import { migrateConfig, MIGRATIONS, type Migration } from "./migrations";
@@ -121,6 +121,8 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
 
   // Checks: a real upgrade works out and writes nothing unless they all pass.
   if (!existsSync(configPath(root))) return refuse(NOT_SET_UP);
+  // Not "no stamp": adopting a repository that has one would treat its overrides as old copies.
+  if (stampUnreadable(root)) return refuse(unreadableStampText("loopstra upgrade"));
   const cfgText = readFileSync(configPath(root), "utf8");
   const { main, poll } = loopSettings(cfgText);
   result.main = main;
@@ -176,27 +178,18 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
   let migrated: { text: string };
   try {
     const removed = new Set(result.removed);
-    // A managed file with no stamp entry (an override made by hand): its base is the shipped version
-    // it is, else the closest one. With no shipped version known, today's text (nothing is merged into
-    // it until that changes). Versions known but none readable (offline): refused, as adoptLegacy does.
+    // A managed file with no stamp entry (an override made by hand) gets its base as adoption gives
+    // one (see baseOf; offline, it throws and the upgrade is refused).
     for (const f of managedFiles(root, base)) {
       const path = join(root, f.path);
       if (base.files[f.path] || removed.has(f.path) || !existsSync(path)) continue;
-      const text = readFileSync(path, "utf8");
-      const sha = textSha(text);
-      const versions = index[f.template] ?? [];
-      if (!versions.length) { base.files[f.path] = { base: textSha(readFileSync(f.shipped, "utf8")) }; continue; }
-      const best = versions.some((e) => e.sha === sha) ? { sha } : await closestBase(index, f.template, text, deps.fetchText);
-      if (!best) throw new Error(`Loopstra's shipped versions of ${f.path} could not be read to merge from; check the connection and run loopstra upgrade again.`);
-      base.files[f.path] = { base: best.sha };
+      const b = await baseOf(index, f, readFileSync(path, "utf8"), deps.fetchText);
+      base.files[f.path] = { base: b.sha };
+      if (b.note) result.notes.push(b.note);
     }
-    const baseFor = (template: string) => async (sha: string) => {
-      const entry = (index[template] ?? []).find((e) => e.sha === sha);
-      return entry ? deps.fetchText(template, entry.commit) : null;
-    };
     for (const f of managedFiles(root, base)) {
       if (removed.has(f.path)) continue;
-      result.files.push(await upgradeFile(root, f, base.files[f.path], baseFor(f.template), { write: false }));
+      result.files.push(await upgradeFile(root, f, base.files[f.path], (sha) => baseText(index, f.template, sha, deps.fetchText), { write: false }));
     }
   } catch (e) {
     return refuse(errorText(e));
@@ -208,7 +201,7 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
     return refuse(`The config could not be brought up to date, so nothing was changed: ${errorText(e)}`);
   }
   if (migrated.text !== cfgText) result.changed.push(CONFIG);
-  const next: Stamp = { loopstra: to, files: Object.fromEntries(result.files.map((r) => [r.path, r.entry])) };
+  const next: Stamp = { loopstra: to, files: Object.fromEntries(result.files.flatMap((r) => (r.entry ? [[r.path, r.entry]] : []))) };
   result.ok = true;
   if (opts.check) return result;
 
@@ -228,15 +221,8 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
   result.written = true;
 
   try {
-    result.committed = await onCheckout(root, async () => {
-      // One path at a time: `add -A` stages a deleted file's removal, and errors on a path git has never seen (a settings file that never existed).
-      for (const p of paths) await git.run(["add", "-A", "--", p], true);
-      const staged = (await git.run(["diff", "--cached", "--name-only", "--", ...paths])).out.split(/\r?\n/).filter(Boolean);
-      if (!staged.length) return false;
-      // Only these paths: anything else a person has staged stays staged and out of the commit.
-      await git.runtime("commit", ["-q", "-m", message, "--", ...staged]);
-      return true;
-    });
+    // Only these paths (a deleted one's removal too): anything else a person has staged stays out of the commit.
+    result.committed = await onCheckout(root, () => git.commitPaths(paths, message, { finish: true }));
   } catch (e) {
     const said = e instanceof GitError ? lastLine(e.stderr, /^warning:/i) || lastLine(e.stdout, /^warning:/i) || e.message : errorText(e);
     return { ...result, ok: false, refusal: `The files were brought up to date but could not be committed (git said: ${said}). Commit them by hand.` };

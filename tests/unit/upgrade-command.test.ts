@@ -98,6 +98,7 @@ describe("report", () => {
         { path: "intent/README.md", outcome: "unchanged", entry: { base: "x" } },
         { path: "loopstra/prompts/review.md", outcome: "conflict", entry: { base: "x" } },
         { path: "intent/README.md", outcome: "deleted", entry: { base: "x", deleted: true } },
+        { path: "loopstra/prompts/plan.md", outcome: "dropped" },
       ],
       removed: [".claude/hooks/loopstra-protect-tests.ts"],
       changed: ["loopstra/config.yaml"],
@@ -107,8 +108,9 @@ describe("report", () => {
     expect(report(r, false)).toEqual([
       "Upgraded this repository to Loopstra 0.9.0 (from 0.8.0).",
       "  REVIEW.md: updated",
-      "  loopstra/prompts/review.md: has conflict markers; resolve them and commit it",
+      "  loopstra/prompts/review.md: has conflict markers: resolve them and commit it (if you undo the file instead, these shipped changes are not brought in again)",
       "  intent/README.md: recorded as removed on purpose; upgrades leave it out",
+      "  loopstra/prompts/plan.md: removed: the shipped prompt is used",
       "  .claude/hooks/loopstra-protect-tests.ts: removed",
       "  loopstra/config.yaml: updated",
       "  loopstra/prompts/plan.md is merged from the version shipped in abc1234.",

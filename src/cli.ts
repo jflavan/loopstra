@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { renderStatus } from "./commands/status";
 import { configPath, NOT_SET_UP } from "./config";
 import { errorText } from "./shell";
+import { olderSetupRefusal } from "./stamp";
 
 const [command = "help", ...rest] = Bun.argv.slice(2);
 const root = process.cwd();
@@ -35,6 +36,16 @@ function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
   return false;
+}
+
+/**
+ * True (having said so) when the repository was set up by a Loopstra from before the stamp: its old
+ * prompt copies would be used as overrides, so `ui` and `chat` wait for an upgrade, like `start`.
+ */
+function olderSetup(then: string): boolean {
+  const refusal = olderSetupRefusal(root, then);
+  if (refusal) console.error(refusal);
+  return refusal !== null;
 }
 
 /**
@@ -125,7 +136,7 @@ async function main(): Promise<number> {
       } catch (e) { console.error(errorText(e)); return 1; }
     }
     case "ui": {
-      if (!setUp()) return 1;
+      if (!setUp() || olderSetup("run loopstra ui again")) return 1;
       const flag = rest.indexOf("--port");
       const port = flag >= 0 ? Number(rest[flag + 1]) : 4646;
       if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("Usage: loopstra ui [--port <number>]"); return 1; }
@@ -133,7 +144,7 @@ async function main(): Promise<number> {
       return ui(root, port, !rest.includes("--no-chat"));
     }
     case "chat": {
-      if (!setUp()) return 1;
+      if (!setUp() || olderSetup("run loopstra chat again")) return 1;
       const { chat } = await import("./commands/chat");
       return chat(root, { terminal: !rest.includes("--no-terminal") });
     }
