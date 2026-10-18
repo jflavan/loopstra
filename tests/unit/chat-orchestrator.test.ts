@@ -470,6 +470,19 @@ describe("the orchestrator's guards (review fixes)", () => {
     } finally { r.cleanup(); }
   });
 
+  test("the context says how the loop takes changes and what it is working on, so a wait need not be guessed", async () => {
+    const r = await chatRepo();
+    try {
+      const at = new Date().toISOString();
+      writeHeartbeat(r.root, { pid: process.pid, startedAt: at, lastTickAt: at, lastBeatAt: at, current: { slug: "atom-feeds" }, working: ["atom-feeds", "faster-suite"], stopping: false, stopped: false });
+      await r.answer("orchestrator", 1, turn("ok"));
+      await new Orchestrator(r.root).handle(message("why is nothing designing?"), sink().send);
+      const p = r.prompts()[0]!.prompt;
+      expect(p).toContain("Loop now: Running — working on atom-feeds and faster-suite");
+      expect(p).toContain("How the loop takes changes: one change runs a step at a time (speed.max_parallel_changes); beside it, design and plan steps run one at a time (speed.think_ahead)");
+    } finally { r.cleanup(); }
+  });
+
   test("chat sessions run in the main checkout with git's optional locks off, so nothing they run holds its index", async () => {
     const r = await chatRepo();
     const seen = join(r.root, ".loopstra", "fake-args.json");

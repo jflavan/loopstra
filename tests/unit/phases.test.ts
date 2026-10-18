@@ -7,7 +7,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
+import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lanes";
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, setEnv, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
@@ -241,6 +241,25 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(true);
     const recorded = await Bun.file(argsFile).json();
     expect(recorded.env.LOOPSTRA_PHASE).toBe("intake");
+    trace.close(); repo.cleanup();
+  });
+
+  test("LOOPSTRA_SLOT reaches a claimed change's commands and the sessions that may run them, not read-only ones", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    const printSlot = `bun -e "console.log('slot=' + process.env.LOOPSTRA_SLOT)"`;
+    claim(ctx.slug);
+    try {
+      await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "build", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+      expect((await Bun.file(argsFile).json()).env.LOOPSTRA_SLOT).toBe("0");
+      await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+      expect((await Bun.file(argsFile).json()).env.LOOPSTRA_SLOT).toBeNull();
+      expect((await projectCommand(ctx, printSlot, repo.path)).lastLine).toBe("slot=0");
+    } finally {
+      release(ctx.slug);
+    }
+    // Not claimed (main's health check, which runs alone): no slot.
+    expect((await projectCommand(ctx, printSlot, repo.path)).lastLine).toBe("slot=undefined");
     trace.close(); repo.cleanup();
   });
 

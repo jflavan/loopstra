@@ -55,16 +55,23 @@ stages:
 # both as an audit. Until then, first runs as shadow. shadow and audits need room in the day's
 # budget for both sessions (three beside the verifier or a plan written ahead), so never with
 # max_budget_usd_per_day and no max_budget_usd; then the strong judge decides alone.
+# think_ahead: design and plan steps also run, one at a time, beside the changes running a step,
+# so a change accepted during another's build is designed and planned by the time the build ends.
+# Their sessions only read code and run none of the project's commands, so they need no room on
+# this machine, only in the budget. A design or plan stage with before or after commands is left
+# to max_parallel_changes.
 # max_parallel_changes: how many changes may each run a step at the same time (1 to 4). Raise it
 # only if the project's commands (test, lint, build, install) can run twice at once on this
 # machine: no fixed ports, no shared test database, no output outside the worktree. Each command
-# gets LOOPSTRA_SLUG, so it can pick its own port or database name. More changes at once also
+# gets LOOPSTRA_SLUG and LOOPSTRA_SLOT (0, 1, ...: no two changes running at once share one), so it
+# can pick its own ports, database and Docker project names. More changes at once also
 # spend the daily budget and the subscription's usage limits faster.
 speed:
   parallel_checks: false
   overlap_judges: true
   plan_ahead: true
   cheap_judges: off
+  think_ahead: true
   max_parallel_changes: 1
 
 signals:

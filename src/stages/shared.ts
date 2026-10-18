@@ -1,7 +1,7 @@
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, passOn } from "../git";
-import { onCheckout } from "../lanes";
+import { onCheckout, slotEnv } from "../lanes";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { Status } from "../intents";
 import { errorText } from "../shell";
@@ -18,7 +18,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
   let timedOut = false;
   const runAll = async () => {
     for (const cmd of cmds) {
-      const res = await projectCommand(ctx, cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage } });
+      const res = await projectCommand(ctx, cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage, ...slotEnv(ctx.slug) } });
       if (res.code !== 0) { timedOut = res.timedOut; throw new Error(`\`${cmd}\` failed: ${res.lastLine || `exit ${res.code}`}`); }
     }
     return { ok: true as const };
