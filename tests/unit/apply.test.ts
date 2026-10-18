@@ -33,7 +33,7 @@ const lockMain = (root: string) => writeFileSync(join(root, ".git", "refs", "hea
 async function killedBeforeCommit(root: string): Promise<void> {
   // Runtime commits skip the commit hooks, but not this one.
   const hook = join(root, ".git", "hooks", "prepare-commit-msg");
-  writeFileSync(hook, "#!/bin/sh\nrm -rf .git/killed && cp -r intent .git/killed\nexit 1\n");
+  writeFileSync(hook, "#!/bin/sh\nrm -rf .git/killed && cp -r intent .git/killed\nexit 1\n", { mode: 0o755 });
   try {
     expect(await apply(root)).toBe(0);
   } finally {

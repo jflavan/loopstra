@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git, GitError } from "../../src/git";
@@ -191,7 +191,7 @@ describe("StepContext", () => {
       const intentMd = join(ctx.intent.dir, "intent.md");
       const before = await Bun.file(intentMd).text();
       // Runtime commits skip the commit hooks, but not this one: the commit itself fails.
-      await Bun.write(join(repo.path, ".git", "hooks", "prepare-commit-msg"), "#!/bin/sh\nexit 1\n");
+      writeFileSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
       await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
         await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
         await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
