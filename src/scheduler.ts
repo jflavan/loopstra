@@ -21,6 +21,7 @@ import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
+import { RECONCILED_PLAN } from "./stages/shared";
 import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
@@ -383,14 +384,21 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
  * None with one change at a time (`lanes` is speed.max_parallel_changes): a cut, since with a remote
  * the watcher may merge a pull request while the one lane builds on the same files; that change is
  * then brought up to date before it merges (see mergeWhenUpToDate), and a clash blocks it. A plan that
- * cannot be read counts as one with no file list.
+ * cannot be read counts as one with no file list. A change past plan-approved also holds the files
+ * its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved change's is
+ * an earlier build's, which its next build drops).
  */
 export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
   if (lanes <= 1) return new Map();
   const files = new Map<string, string[] | null>();
+  const paths = (plan: string | null) => (plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
     const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
-    files.set(i.slug, plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
+    // i.dir is <root>/intent/<slug>.
+    const reconciled = i.file.frontmatter.status === "plan-approved" ? null
+      : await Bun.file(join(i.dir, "..", "..", ".loopstra", "runs", i.slug, RECONCILED_PLAN)).text().catch(() => null);
+    const listed = paths(plan), added = paths(reconciled);
+    files.set(i.slug, listed === null && added === null ? null : [...new Set([...(listed ?? []), ...(added ?? [])])]);
   }
   return fileHolds(ordered, files);
 }

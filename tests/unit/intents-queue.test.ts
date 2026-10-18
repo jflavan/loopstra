@@ -323,6 +323,18 @@ describe("same files: a change waits instead of building into a conflict (more t
     t.cleanup();
   });
 
+  test("a building change also holds the files its build's reconciled plan added", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: building", planned(["src/math.ts"]));
+    await mk(t.path, "say-goodbye", "status: plan-approved", planned(["src/greet.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([]);
+    // The drift reconcile added src/greet.ts; that plan is kept in the run folder, not in plan.md.
+    mkdirSync(join(t.path, ".loopstra", "runs", "add-numbers"), { recursive: true });
+    await Bun.write(join(t.path, ".loopstra", "runs", "add-numbers", "plan.reconciled.md"), plan(["src/math.ts", "src/greet.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([["say-goodbye", "add-numbers"]]);
+    t.cleanup();
+  });
+
   test("of two plan-approved changes listing one file, the earlier in the queue holds the later", async () => {
     const t = tempDir();
     await mk(t.path, "later", "status: plan-approved\npriority: low", planned(["src/math.ts"]));
