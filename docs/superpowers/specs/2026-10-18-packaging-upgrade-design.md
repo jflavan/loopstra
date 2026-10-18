@@ -27,7 +27,7 @@ What we want: in any project repository, `loopstra upgrade` and nothing else.
 ## Distribution
 
 **Package.** The npm package `loopstra` (the name is free; `jflavan/loopstra` is public).
-`package.json` gets a `files` list (`src/`, `templates/`, `shipped.json`, `README.md`) and keeps
+`package.json` gets a `files` list (`src/`, `templates/`, `shipped.json`, `README.md`, and `tsconfig.json`, whose JSX settings Bun needs to bundle the console page at runtime) and keeps
 `bin: { loopstra: "./src/cli.ts" }`. There is no build step: `src/cli.ts` starts with
 `#!/usr/bin/env bun`, so Bun stays a requirement, as today.
 

@@ -16,7 +16,8 @@
     "src/",
     "templates/",
     "shipped.json",
-    "README.md"
+    "README.md",
+    "tsconfig.json"
   ],
   "engines": {
     "bun": ">=1.4.2"

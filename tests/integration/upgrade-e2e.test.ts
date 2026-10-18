@@ -13,10 +13,14 @@ async function exec(cmd: string[], cwd: string, env: Record<string, string | und
   return { code, out, err };
 }
 
-/** Packs the checkout as version `v` (in a copy, so package.json is untouched) with a shipped.json; returns the tarball. */
+/**
+ * Packs the checkout as version `v` (in a copy, so package.json is untouched) with a shipped.json;
+ * returns the tarball. The copy holds what package.json's `files` names, so the test ships what npm would.
+ */
 async function pack(dir: string, v: string): Promise<string> {
   const copy = join(dir, `pkg-${v}`);
-  for (const p of ["src", "templates", "README.md", "package.json"]) cpSync(join(ROOT, p), join(copy, p), { recursive: true });
+  const files = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { files: string[] }).files;
+  for (const p of ["package.json", ...files]) if (existsSync(join(ROOT, p))) cpSync(join(ROOT, p), join(copy, p), { recursive: true });
   const pkg = JSON.parse(readFileSync(join(copy, "package.json"), "utf8"));
   pkg.version = v;
   writeFileSync(join(copy, "package.json"), JSON.stringify(pkg, null, 2));
@@ -95,6 +99,31 @@ describe("upgrade end to end", () => {
         expect((await exec([bin, "--version"], repo.path, env)).out.trim()).toBe("0.9.1");
       } finally {
         server.stop(true);
+      }
+
+      // The installed package serves the console: Bun bundles its page from src/ui, with the JSX
+      // settings in the package's tsconfig.json (without them the page comes back empty).
+      const installed = join(bunHome, "install", "global", "node_modules", "loopstra", "src", "cli.ts");
+      const ui = Bun.spawn({ cmd: [process.execPath, installed, "ui", "--port", "0", "--no-chat"], cwd: repo.path, env, stdout: "pipe", stderr: "pipe" });
+      try {
+        const reader = ui.stdout.getReader();
+        let said = "";
+        let address: string | undefined;
+        while (!address) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error(`loopstra ui ended: ${said}${await new Response(ui.stderr).text()}`);
+          said += new TextDecoder().decode(value);
+          address = /http:\/\/127\.0\.0\.1:\d+/.exec(said)?.[0];
+        }
+        const page = await (await fetch(`${address}/`)).text();
+        const script = /<script[^>]*src="([^"]+)"/.exec(page)?.[1];
+        expect(script).toBeDefined();
+        const bundle = await fetch(`${address}${script}`);
+        expect(bundle.status).toBe(200);
+        expect((await bundle.text()).length).toBeGreaterThan(10_000);
+      } finally {
+        ui.kill();
+        await ui.exited;
       }
     } finally {
       repo.cleanup();
