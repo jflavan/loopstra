@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { lanesFor, loopDayNote, roomBeside, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
+import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
@@ -33,11 +33,11 @@ import { chatDir } from "./chat/threads";
 
 export interface TickResult {
   /**
-   * The change of the first lane's step, and what that step gave; with no lane step, the watcher's
-   * last. Every step is in `steps`, the pull request watcher's too.
+   * The change of the first lane's step, and what that step gave; with no lane step, the thinker's
+   * last, then the watcher's. Every step is in `steps`, the thinker's and the watcher's too.
    */
   picked: string | null; result?: StepResult; signal?: string;
-  /** Every step the tick ran: lane by lane, then the pull request watcher's, each in the order they ran. */
+  /** Every step the tick ran: lane by lane, then the thinker's, then the pull request watcher's, each in the order they ran. */
   steps?: LaneStep[];
   /** The config could not be loaded (plain words); nothing ran. */
   error?: string;
@@ -61,8 +61,7 @@ export interface LaneStep { slug: string; result?: StepResult; durationMs: numbe
 /** What ended a lane's step without a result. Handled once for the whole tick, after every lane has ended. */
 interface LaneProblem { slug: string; error: unknown }
 
-/** What the lanes of one tick share: the changes taken this tick, whether to start no more steps, and the problems met. */
-/** What one tick's lanes share. `lanesRunning`: how many of its lanes have not ended. */
+/** What the lanes of one tick share: the changes taken this tick, whether to start no more steps, the problems met, and how many lanes have not ended. */
 interface TickLanes { taken: Set<string>; halt: boolean; problems: LaneProblem[]; lanesRunning: number }
 
 export async function tick(root: string): Promise<TickResult> {
@@ -172,7 +171,10 @@ export async function tick(root: string): Promise<TickResult> {
     // the lanes take the steps that may run the project's commands first.
     const human = humanGates(cfg);
     const runnable = ordered.filter((i) => forLane(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
-    const candidates = cfg.speed.think_ahead
+    // Not when the day's budget has no room for a second session (never with a daily budget and no
+    // session limit): the thinker could not start, and design and plan steps would only wait longer.
+    const thinking = cfg.speed.think_ahead && roomFor(cfg, trace, 2);
+    const candidates = thinking
       ? [...runnable.filter((i) => !thinkingStep(i, cfg)), ...runnable.filter((i) => thinkingStep(i, cfg))]
       : runnable;
     const lanes = lanesFor(cfg, trace);
@@ -182,8 +184,9 @@ export async function tick(root: string): Promise<TickResult> {
     // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
     const running = Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
     // Started after the lanes, which take their changes at once: the thinker gets what they left.
-    const thinker = cfg.speed.think_ahead ? thinkAhead(root, cfg, trace, shared, human, hasRemote, running) : Promise.resolve([]);
-    const watcher = hasRemote ? watchPullRequests(root, cfg, trace, shared, human, running) : Promise.resolve([]);
+    const thinker = thinking ? thinkAhead(root, cfg, trace, shared, human, hasRemote, running) : Promise.resolve([]);
+    // Watching until the thinker's step has ended too: the tick waits for it.
+    const watcher = hasRemote ? watchPullRequests(root, cfg, trace, shared, human, Promise.allSettled([running, thinker])) : Promise.resolve([]);
     const [settled, [thought, watched]] = await Promise.all([running, Promise.allSettled([thinker, watcher])]);
     const perLane = settled.map((s) => laneSteps(s, shared));
     const thoughtSteps = laneSteps(thought, shared);
@@ -269,7 +272,7 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
   try {
     const fresh = await readFresh(root, trace, slug);
     if (!fresh || !runs(fresh)) return null;
-    if (thinkingStep(fresh, cfg)) runsNoCommands(slug);
+    if (cfg.speed.think_ahead && thinkingStep(fresh, cfg)) runsNoCommands(slug);
     const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
     return { slug, result, durationMs: Date.now() - t0 };
   } catch (e) {
@@ -304,12 +307,15 @@ export function thinkingStep(i: Intent, cfg: Config): boolean {
  * a step that only looked is not run over and over. With nothing to take it looks again every
  * poll_seconds, and once every lane has ended it starts nothing more (the next tick's lanes take
  * over). It starts a step only with room in the day's budget for its session beside the others
- * running (roomBeside). A stop, an outage or the day's budget ends it like a lane (see laneProblem).
+ * running (roomBeside); that is checked as the step starts, so a later session of the lane's step can
+ * still meet the day's end, as with more than one lane. A change that does not match its folder is
+ * left to the next tick's start. A stop, an outage or the day's budget ends it like a lane (see laneProblem).
  */
 async function thinkAhead(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, hasRemote: boolean, lanesDone: Promise<unknown>): Promise<LaneStep[]> {
   const steps: LaneStep[] = [];
   const ranAt = new Map<string, string>();
-  const thinks = (i: Intent) => forLane(i, human, hasRemote) && thinkingStep(i, cfg);
+  // One that does not match its folder (a section or spec.md missing) waits for the next tick's start, which blocks it.
+  const thinks = (i: Intent) => forLane(i, human, hasRemote) && thinkingStep(i, cfg) && checkConsistency(i) === null;
   const goOn = () => shared.lanesRunning > 0 && !shared.halt && !stopRequested() && !readLoopHold(root);
   while (goOn()) {
     const ordered = orderQueue((await scanRepo(root)).intents);
@@ -433,7 +439,8 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
   }
   const crash = problems.find((p) => !notTheStepsFault(p.error));
   if (crash) out.crashed = errorText(crash.error).split("\n")[0] ?? "";
-  const place = (slug: string) => candidates.findIndex((i) => i.slug === slug);
+  // A change the tick did not start with (one the thinker took after it was accepted mid-tick) comes last.
+  const place = (slug: string) => { const k = candidates.findIndex((i) => i.slug === slug); return k < 0 ? Infinity : k; };
   const outage = problems.filter((p) => p.error instanceof AssistantUnavailable).sort((a, b) => place(a.slug) - place(b.slug))[0];
   if (outage) await afterUnavailable(root, cfg, trace, out, outage.slug, outage.error as AssistantUnavailable);
   const outOfDay = problems.filter((p) => p.error instanceof LoopBudgetReached).map((p) => p.slug);

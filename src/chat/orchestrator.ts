@@ -67,11 +67,6 @@ const INVISIBLE = /[​-‍⁠﻿]/g;
 const CANDIDATE = /<[\s/​-‍⁠﻿]*[a-z​-‍⁠﻿]+/gi;
 
 /**
- * Text with any tag that could end the context or message block, or open another, made harmless, and
- * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they
- * go from that tag only: elsewhere they join emoji and words, as in Persian).
- */
-/**
  * How the loop takes changes, in words, so the orchestrator can say why a change waits without
  * guessing: how many run a step at once, and whether design and plan steps run beside them.
  */
@@ -79,11 +74,16 @@ export function loopRules(cfg: Config): string {
   const n = cfg.speed.max_parallel_changes;
   const lanes = n === 1 ? "one change runs a step at a time" : `up to ${n} changes run a step at the same time`;
   const beside = cfg.speed.think_ahead
-    ? `; beside ${n === 1 ? "it" : "them"}, design and plan steps run one at a time (speed.think_ahead), but only while another step runs, and not for a stage with before or after commands`
+    ? `; beside ${n === 1 ? "it" : "them"}, design and plan steps run one at a time (speed.think_ahead), but only while another change runs a step (watching a pull request does not count), with room in the day's budget for both, and not for a stage with before or after commands`
     : "; design and plan steps take their turn like any other";
   return `${lanes} (speed.max_parallel_changes)${beside}. A change also waits for the changes in its depends_on to merge, and for one in progress that changes the same files; queue.md names those waits. Between rounds the loop waits up to ${cfg.poll_seconds} seconds.`;
 }
 
+/**
+ * Text with any tag that could end the context or message block, or open another, made harmless, and
+ * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they
+ * go from that tag only: elsewhere they join emoji and words, as in Persian).
+ */
 export function untagged(s: string): string {
   return s.replace(CANDIDATE, (x) => {
     const bare = x.replace(INVISIBLE, "");

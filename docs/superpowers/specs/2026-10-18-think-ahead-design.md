@@ -39,8 +39,12 @@ not apply to them.
   next tick's lanes take over. A step it has started still finishes first.
 - **One change, many steps.** It scans the intents afresh each look, so a change it designed is
   planned in the same tick, and is ready to build when the build lane frees.
-- **Budget.** It starts a step only when the day's budget has room for its session beside the
-  others running (`roomBeside`), so never with a daily budget and no session limit.
+- **Budget.** It runs only when the day's budget has room for two sessions at the tick's start
+  (`roomFor`), and starts a step only with room for its session beside the others running
+  (`roomBeside`), so never with a daily budget and no session limit. Without that room the lanes
+  keep the queue's order.
+- **Consistency.** A change that does not match its folder (set mid-tick without a section or
+  `spec.md`) is left to the next tick's start, which blocks it.
 - **Problems.** A stop, an outage or the day's budget in its step ends it like a lane
   (`laneProblem`), and the tick handles it once.
 

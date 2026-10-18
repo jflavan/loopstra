@@ -656,12 +656,37 @@ describe("design and plan steps beside the lanes (speed.think_ahead)", () => {
     r.cleanup();
   }, 120_000);
 
-  test("with a daily budget and no session limit, nothing runs beside the lane", async () => {
-    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "accepted" }], "claude:\n  max_budget_usd_per_day: 100\n", {}, true);
+  test("with a daily budget and no session limit, nothing runs beside the lane, which keeps the queue's order", async () => {
+    const changes = [{ slug: "alpha", status: "spec-approved", priority: "urgent" }, { slug: "beta", status: "plan-approved" }, { slug: "gamma", status: "accepted" }];
+    const r = await lanesRepo(1, changes, "claude:\n  max_budget_usd_per_day: 100\n", {}, true);
     await withEnv(r.env, async () => {
       const t = await tick(r.path);
+      // The urgent plan first, as without think_ahead: no thinker could take it.
       expect(t.steps?.map((s) => s.slug)).toEqual(["alpha"]);
-      expect(await statusOf(r.path, "beta")).toBe("accepted");
+      expect(await statusOf(r.path, "alpha")).toBe("plan-approved");
+      expect(await statusOf(r.path, "beta")).toBe("plan-approved");
+      expect(await statusOf(r.path, "gamma")).toBe("accepted");
+    });
+    r.cleanup();
+  }, 120_000);
+
+  test("a change set to a status its folder does not match during the tick is left to the next tick's start, which blocks it", async () => {
+    const r = await lanesRepo(1, [{ slug: "alpha", status: "plan-approved" }], "poll_seconds: 1\n", {}, true);
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await traceShows(r.path, (t) => t.phases("alpha").some((p) => p.name === "verify"));
+      // spec-approved with no spec.md, written while alpha is held at its verifier.
+      mkdirSync(join(r.path, "intent", "beta"), { recursive: true });
+      writeFileSync(join(r.path, "intent", "beta", "intent.md"), "---\nstatus: spec-approved\n---\n# Intent: beta\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
+      // Several of the thinker's looks (one a second).
+      await Bun.sleep(3000);
+      releaseAlpha();
+      const t = await ticking;
+      expect(t.steps?.map((s) => s.slug)).toEqual(["alpha"]);
+      inTrace(r.path, (trace) => expect(trace.phases("beta")).toEqual([]));
+      await tick(r.path);
+      expect(await statusOf(r.path, "beta")).toBe("blocked");
     });
     r.cleanup();
   }, 120_000);
