@@ -477,6 +477,48 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("a send back that moved on leaves conversation.md as it is when a person edited it since the write", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      const record = join(r.root, "intent", "a", "conversation.md");
+      writeFileSync(record, `${readFileSync(record, "utf8")}\nA person's own line.\n`);
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("status: spec-approved", "status: closed"));
+      expect(await apply(r.root)).toBe(1);
+      expect(existsSync(join(r.root, ".loopstra", "runs", "a", "sent-back.md"))).toBe(false);
+      expect(readFileSync(record, "utf8")).toContain("A person's own line.");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("an answer given up on leaves conversation.md as it is when it held a person's uncommitted edit before the write", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const record = join(r.root, "intent", "a", "conversation.md");
+      writeFileSync(record, "# Conversation\n\n## 2026-10-17 12:00 · design asks\nArchived too?\n");
+      await run(["git", "add", "intent/a/conversation.md"], r.root);
+      await run(["git", "commit", "-q", "-m", "the question"], r.root);
+      writeFileSync(record, `${readFileSync(record, "utf8")}\nA person's own line.\n`);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect(readFileSync(record, "utf8")).toContain("A person's own line.");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   for (const kind of ["hold", "release"] as const) {
     test(`a ${kind} whose commit failed is committed on the next pass, not refused as done already`, async () => {
       const start = kind === "release" ? INTENT("building", "x").replace("status: building", "status: building\nhold: legal") : INTENT("building", "x");

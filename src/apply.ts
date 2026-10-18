@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
-import { conversationPath, readConversation, withEntry } from "./conversation";
+import { conversationPath, readConversation, withEntry, type ConversationEntry } from "./conversation";
 import { Git } from "./git";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
@@ -207,7 +207,7 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
 /**
  * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
  * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note and its
- * conversation.md entry. Only an intent.md that still holds exactly what the request wrote: one
+ * conversation.md entry (the record likewise only when nobody edited it, see recordStillOurs). Only an intent.md that still holds exactly what the request wrote: one
  * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
  * ownBefore), or one whose write an older request did not record, is left as it is; the person's
  * edit is what it says now.
@@ -224,7 +224,7 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
       for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
-      if (writesRecord(req) && "slug" in req && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+      if (writesRecord(req) && "slug" in req && slugs.includes(req.slug) && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -258,15 +258,38 @@ function writesRecord(req: Request): boolean {
 }
 
 /**
+ * Writes a request's conversation.md entry, inside commitRecord, and records on the claimed request
+ * the hash of what it wrote (see recordStillOurs). No hash when the file held a person's uncommitted
+ * edit before the write (see matchesHead): putting back HEAD's file would then lose it.
+ */
+async function writeRecord(root: string, req: Request, slug: string, entry: ConversationEntry): Promise<void> {
+  const own = await matchesHead(root, `intent/${slug}/conversation.md`);
+  await Bun.write(conversationPath(root, slug), withEntry(readConversation(root, slug), entry));
+  const hash = own ? fileHash(conversationPath(root, slug)) : null;
+  if (hash) req.recordHash = hash;
+  else delete req.recordHash;
+  saveApplying(root, req);
+}
+
+/**
+ * True when the change's conversation.md still holds exactly what the request wrote, over nobody's
+ * uncommitted edit: only then may it be put back as HEAD has it (unknown for an older request: false).
+ */
+function recordStillOurs(root: string, req: Request, slug: string): boolean {
+  return !!req.recordHash && fileHash(conversationPath(root, slug)) === req.recordHash;
+}
+
+/**
  * A send back (or an undo of one) that never landed takes its conversation.md entry back: the record
- * as main has it. A problem is traced: the entry then stays until a person removes it.
+ * as main has it, unless a person edited it (see recordStillOurs); their edit is then what it says.
+ * A problem is traced: the entry then stays until a person removes it.
  */
 async function putBackConversation(root: string, main: string, trace: Trace, req: StatusRequest): Promise<void> {
   try {
     await onCheckout(root, async () => {
       const git = new Git(root);
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+      if (recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -321,9 +344,14 @@ function byWhom(req: Request): string {
   return `${oneLine(req.byName, 80)} from ${oneLine(req.via, 40)}`;
 }
 
+/** The sha256 (hex) of a file as it is on disk, or null when it cannot be read. */
+function fileHash(path: string): string | null {
+  try { return createHash("sha256").update(readFileSync(path)).digest("hex"); } catch { return null; }
+}
+
 /** The sha256 (hex) of a change's intent.md as it is on disk, or null when it cannot be read. */
 function intentHash(root: string, slug: string): string | null {
-  try { return createHash("sha256").update(readFileSync(join(root, "intent", slug, "intent.md"))).digest("hex"); } catch { return null; }
+  return fileHash(join(root, "intent", slug, "intent.md"));
 }
 
 /** True when this slug's intent.md still holds exactly what the request last wrote (unknown for an older request: false). */
@@ -363,7 +391,11 @@ function markWritten(root: string, req: Request, slug: string, own = true): void
  */
 async function ownBefore(root: string, req: Request, slug: string): Promise<boolean> {
   if ((req.written ?? []).includes(slug)) return stillOurs(root, req, slug);
-  const path = `intent/${slug}/intent.md`;
+  return matchesHead(root, `intent/${slug}/intent.md`);
+}
+
+/** True when a file (relative to the root) on disk is just what HEAD has: no uncommitted edit, and no uncommitted file where HEAD has none. */
+async function matchesHead(root: string, path: string): Promise<boolean> {
   const git = new Git(root);
   // A file main does not have is someone's own when it is on disk already (an uncommitted draft).
   if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code !== 0) return !existsSync(join(root, path));
@@ -518,12 +550,12 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
       // Its first write only: a later try commits the entry already on disk, never adds it twice.
       if (req.kind === "send-back") {
         const entry = { kind: "sent-back" as const, who: req.byName, via: req.via, text: req.note.trim(), at: new Date() };
-        await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), entry));
+        await writeRecord(root, req, req.slug, entry);
       }
       // The send back's note no longer stands: said in the record every work session reads.
       if (undoesSendBack(req)) {
         const entry = { kind: "took-back" as const, who: req.byName, via: req.via, at: new Date() };
-        await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), entry));
+        await writeRecord(root, req, req.slug, entry);
       }
     }
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
@@ -604,7 +636,7 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
       const own = await ownBefore(root, req, req.slug);
       await writeIntent(await readIntent(root, req.slug), {}, { remove: ["question"] });
       markWritten(root, req, req.slug, own);
-      await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), { kind: "answer", who: req.byName, via: req.via, text, at: new Date() }));
+      await writeRecord(root, req, req.slug, { kind: "answer", who: req.byName, via: req.via, text, at: new Date() });
     }
     answerQuestion(root, req.slug, { text, by: req.byName, via: req.via });
   });

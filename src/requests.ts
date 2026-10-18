@@ -20,10 +20,12 @@ export const CONSOLE = "console";
  * commit failed is tried again, and must not then read its own write as someone else's.
  * `writtenHash`: for each of those slugs, the sha256 (hex) of the exact text the loop wrote, so a
  * request given up on puts back only a file nobody else changed, before or since (older requests have none).
+ * `recordHash`: likewise for the conversation.md entry a send back, an undo of one or an answer wrote:
+ * kept only when the file held no uncommitted edit before the write (see writeRecord in src/apply.ts).
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
  * applyRequests, which gives up after a few, and not before some minutes).
  */
-interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; writtenHash?: Record<string, string>; tries?: number; firstFailedAt?: string }
+interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; writtenHash?: Record<string, string>; recordHash?: string; tries?: number; firstFailedAt?: string }
 
 /** What a request asks for. `expect` is the status the person saw. */
 export type RequestBody =
@@ -45,7 +47,7 @@ export type RequestBody =
 export type Request = RequestBase & RequestBody;
 
 /** What submitRequest takes: everything but the id and the time. */
-export type Submission = Omit<RequestBase, "id" | "at" | "written" | "writtenHash" | "tries" | "firstFailedAt"> & RequestBody;
+export type Submission = Omit<RequestBase, "id" | "at" | "written" | "writtenHash" | "recordHash" | "tries" | "firstFailedAt"> & RequestBody;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
