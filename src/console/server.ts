@@ -4,6 +4,7 @@ import { loadConfig, type Config } from "../config";
 import { SLUG } from "../intents";
 import { Trace } from "../trace";
 import { eventsPage } from "./describe";
+import { streamAgents } from "./agents";
 import { changeDetail, spendView } from "./detail";
 import { changeDiff } from "./diff";
 import { resolveDocument, resolveRunFile } from "./files";
@@ -40,7 +41,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     port,
     hostname: "127.0.0.1",
     development: false,
-    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/spend": page, "/c/*": page, "/s/*": page },
+    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/c/*": page, "/s/*": page },
     async fetch(req, server) {
       const url = new URL(req.url);
       if (!LOCAL_HOSTS.has(url.hostname)) return new Response("Forbidden", { status: 403 });
@@ -59,7 +60,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
 }
 
 /**
- * The data routes: `/api/stream`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
+ * The data routes: `/api/stream`, `/api/agents/stream`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
  * `/api/events`, `/api/spend`, run files under `/files/`, a change's documents under `/docs/`. Null: not found.
  * Exported so a test can pass a fake `Timeouts`.
  */
@@ -74,6 +75,7 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
       return () => void off();
     });
   }
+  if (path === "/api/agents/stream") return sse(server, req, (send) => streamAgents(root, hub, send));
   const change = path.match(/^\/api\/changes\/([^/]+)(\/diff)?$/);
   if (change) {
     const slug = decode(change[1]!);

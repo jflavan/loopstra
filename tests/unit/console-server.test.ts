@@ -56,7 +56,7 @@ async function withConsole(fn: (base: string, hub: Hub) => Promise<void>, hubOpt
 describe("the console's server", () => {
   test("serves the page on every screen's path, with the scripts and styles it names", async () => {
     await withConsole(async (base) => {
-      for (const path of ["/", "/inbox", "/changes", "/activity", "/spend", "/c/one", "/c/one/code", "/s/one/1"]) {
+      for (const path of ["/", "/inbox", "/changes", "/activity", "/agents", "/spend", "/c/one", "/c/one/code", "/s/one/1"]) {
         const r = await fetch(base + path);
         expect({ path, status: r.status }).toEqual({ path, status: 200 });
         expect(r.headers.get("content-type")).toContain("text/html");
@@ -90,7 +90,7 @@ describe("the console's server", () => {
         expect({ path, status: (await fetch(base + path)).status }).toEqual({ path, status: 200 });
       }
       // The streams and the diff check it too, before any stream is opened or git is run.
-      for (const path of ["/api/stream", "/api/sessions/one/1/stream", "/api/changes/one/diff"]) {
+      for (const path of ["/api/stream", "/api/agents/stream", "/api/sessions/one/1/stream", "/api/changes/one/diff"]) {
         const r = await fetch(base + path, { headers: { host: "evil.test" } });
         expect({ path, status: r.status }).toEqual({ path, status: 403 });
         await r.body?.cancel();
@@ -188,6 +188,13 @@ describe("the console's server", () => {
     } finally {
       t.cleanup();
     }
+  });
+
+  test("the agents stream answers with a sync when nothing runs", async () => {
+    await withConsole(async (base) => {
+      const frames = await sseFrames(`${base}/api/agents/stream`, 1);
+      expect(frames.map((f) => f.data)).toEqual([{ type: "sync", keys: [] }]);
+    });
   });
 
   test("a session's stream sends its transcript and ends; a phase that does not exist is not found", async () => {
