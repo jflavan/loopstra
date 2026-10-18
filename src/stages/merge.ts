@@ -29,12 +29,15 @@ const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
- * How long after a pull request opens, or Loopstra last pushed its branch, "no checks reported" still
- * means "not registered yet", when the branch has GitHub Actions workflows. After that, a pull request
- * with no checks merges.
+ * How long after a pull request opens, Loopstra last pushed its branch, or took a person's commits
+ * from it, "no checks reported" still means "not registered yet", when the branch has GitHub Actions
+ * workflows. After that, a pull request with no checks merges.
  */
 export const CHECKS_GRACE_MS = 5 * 60_000;
-/** Run-folder marker: when Loopstra last pushed the branch for its pull request (an ISO time). */
+/**
+ * Run-folder marker: when Loopstra last pushed the branch for its pull request, or took commits a
+ * person pushed to it (an ISO time).
+ */
 export const PR_PUSHED = "pr-pushed";
 
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
@@ -431,7 +434,8 @@ async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
  * which a person rewrote while the branch here stayed at Loopstra's push (in the worktree, so its
  * files follow; `reset --keep` keeps unsaved edits and refuses over ones to the same files). From
  * then on the pull request's branch may be pushed over `sha`: the person's work is part of the branch
- * here. A failure to block with when the workspace cannot be prepared, or cannot take them.
+ * here, and GitHub may not have registered their checks yet: the grace period starts again (see
+ * checksMayStillStart). A failure to block with when the workspace cannot be prepared, or cannot take them.
  */
 async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: true } | Failure> {
   const open = await openBranchWorktree(ctx);
@@ -439,6 +443,7 @@ async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: t
   const r = await new Git(ctx.worktreeDir).run([...NO_AUTO_MAINTENANCE, "reset", "-q", "--keep", sha], true);
   if (r.code !== 0) return { ok: false, note: PERSON_COMMITS_NOT_TAKEN_NOTE, detail: `git reset --keep ${sha} in ${ctx.branch}'s workspace: ${(r.err || r.out).trim()}` };
   writeMarker(ctx, PR_LEASE, sha);
+  writeMarker(ctx, PR_PUSHED, new Date().toISOString());
   ctx.trace.event(ctx.slug, "command", { command: "take pull request commits", note: "Commits someone added to the pull request on GitHub were taken into the branch here.", head: sha });
   return { ok: true };
 }
@@ -454,7 +459,7 @@ async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise
   return gained.out.split("\0").some((f) => f && !f.startsWith("intent/"));
 }
 
-/** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */
+/** GitHub may not have registered the workflow runs of a pull request opened, or pushed to (by Loopstra or a person), moments ago. */
 async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolean> {
   const since = Math.max(0, ...[Date.parse(pr.createdAt), Date.parse(readMarker(ctx, PR_PUSHED) ?? "")].filter(Number.isFinite));
   if (!(Date.now() - since < CHECKS_GRACE_MS)) return false;

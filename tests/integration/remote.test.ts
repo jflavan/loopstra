@@ -686,6 +686,32 @@ describe("the loop with a GitHub remote", () => {
     });
     s.cleanup();
   }, 180_000);
+
+  test("commits a person pushed to an old pull request get the grace period for their checks to start, as Loopstra's own push does", async () => {
+    const s = await remoteSetup();
+    await Bun.write(join(s.repo, ".github", "workflows", "ci.yml"), "on: pull_request\njobs: {}\n");
+    await new Git(s.repo).commitAll("ci");
+    await run(["git", "push", "-q", "origin", "main"], s.repo);
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      // Opened and pushed long ago; its checks passed.
+      const old = new Date(Date.now() - 10 * 60_000).toISOString();
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote), createdAt: old });
+      await Bun.write(join(s.repo, ".loopstra", "runs", SLUG, "pr-pushed"), old);
+      await withEnv({ LOOPSTRA_FAKE_GH_AFTER_CHECKS: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).some((e) => e.payload.includes("\"take pull request commits\""))).toBe(true));
+      // GitHub has not registered the checks of the person's commit yet: the change waits for them.
+      await s.setPr({ checks: "none", checksHead: "" });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(false);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("an owner who closes the pull request while the change is reviewed again is not overridden by a new one", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {
