@@ -395,7 +395,7 @@ describe("agentPhase failures", () => {
     const before = pauseAfterUnavailable(repo.path, new Date(), cause);
     const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(true);
-    expect(readPause(repo.path)).toEqual(before);
+    expect(readPause(repo.path)).toEqual({ ...before, gotThrough: ["haiku"] }); // noted, nothing else changes
     trace.close(); repo.cleanup();
   });
 
