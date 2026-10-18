@@ -25,6 +25,18 @@ describe("protect-tests hook", () => {
     expect(blocked.err).toContain("protected");
   });
 
+  test("knows the test names of other languages: Go, pytest, .NET, Java", async () => {
+    const fix = { LOOPSTRA_PHASE: "fix" };
+    for (const p of ["/repo/pkg/add_test.go", "/repo/app/calc_test.py", "/repo/src/App.Tests/CalcTests.cs", "/repo/Tests/X.cs",
+      "/repo/src/main/java/CalcTest.java", "/repo/test/calc.spec.js"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 2 });
+    }
+    for (const p of ["/repo/src/latest.ts", "/repo/src/Latest.java", "/repo/src/contest.py", "/repo/src/attestation.ts",
+      "/repo/docs/testing.md", "/repo/src/protest-utils.ts"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, fix)).code }).toEqual({ p, code: 0 });
+    }
+  });
+
   test("judges the path inside the project: CLAUDE_PROJECT_DIR, or the working folder without it", async () => {
     const t = tempDir();
     try {

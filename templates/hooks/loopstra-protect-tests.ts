@@ -12,7 +12,11 @@ const caseless = process.platform === "win32" || process.platform === "darwin";
 const same = (a: string) => (caseless ? a.toLowerCase() : a);
 let path = slashes(input.tool_input?.file_path ?? input.tool_input?.path ?? "");
 if (root && same(path).startsWith(`${same(root)}/`)) path = path.slice(root.length + 1);
-const isTest = /(^|\/)(tests?|__tests__|spec)\//.test(path) || /\.(test|spec)\.[a-z]+$/.test(path) || /(^|\/)test_[^/]+\.py$/.test(path);
+// A test folder (tests/, Tests/, __tests__/, spec/, a .NET App.Tests/), a test file name (a.test.ts, add_test.go,
+// calc_test.py, test_calc.py), or a .NET/Java-style class name (CalcTests.cs, CalcTest.java; case-sensitive, so Latest.java is not).
+const isTest = /(^|\/)(tests?|__tests__|specs?|[^/]+\.tests?)\//i.test(path)
+  || /[._-](test|spec)s?\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$/i.test(path)
+  || /(^|\/)[A-Za-z0-9_]*Tests?\.(cs|fs|vb|java|kt|scala|swift)$/.test(path);
 if (isTest && !changedOnBranch().some((f) => same(f) === same(path))) {
   // The runtime names the file in the block note, so a person can make the edit instead of rebuilding.
   if (process.env.LOOPSTRA_PROTECTED_LOG) {
