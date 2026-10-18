@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { relativePath, toolTarget } from "../tools";
+import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
 import type { TranscriptItem } from "./types";
 
 /** The longest tool output one item carries. */
@@ -59,10 +60,31 @@ const EDITS = new Set(["Edit", "MultiEdit", "Write"]);
 const HIDDEN = new Set(["StructuredOutput"]);
 
 /**
+ * A user message the session echoed as it took it up (see the live sessions in src/claude.ts): a
+ * person's message or redirect, which the runner starts with MESSAGE_LEAD or REDIRECT_LEAD, is an item
+ * with the person's words (the runner's closing words left out, else the first paragraph). Any other
+ * echo (the prompt, a nudge, an answer to a question) shows nothing.
+ */
+function replayed(content: unknown): TranscriptItem[] {
+  const texts = typeof content === "string" ? [content] : Array.isArray(content) ? (content as unknown[]).filter(isObject).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text as string) : [];
+  const out: TranscriptItem[] = [];
+  for (const raw of texts) {
+    const text = raw.replace(/\r\n/g, "\n").trim();
+    const redirect = text.startsWith(REDIRECT_LEAD);
+    if (!redirect && !text.startsWith(MESSAGE_LEAD)) continue;
+    const tail = text.indexOf(`\n\n${redirect ? REDIRECT_TAIL : MESSAGE_TAIL}`);
+    const words = tail >= 0 ? text.slice(0, tail) : text.split(/\n\s*\n/)[0]!;
+    out.push({ kind: "message", text: cut(words.trim()), redirect });
+  }
+  return out;
+}
+
+/**
  * One raw `stream-json` event as transcript items. `cwd`, the session's folder from its init event,
  * shortens paths. Events the console does not show (thinking, hooks, rate limits, progress) give none.
  */
 export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
+  if (e.type === "user" && e.isReplay === true) return replayed((e.message as { content?: unknown } | undefined)?.content);
   if (e.type === "assistant" || e.type === "user") {
     const content = (e.message as { content?: unknown } | undefined)?.content;
     if (!Array.isArray(content)) return [];

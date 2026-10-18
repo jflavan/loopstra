@@ -333,7 +333,7 @@ describe("what is worth a notification", () => {
 });
 
 describe("when a change page reads its detail again", () => {
-  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [] };
+  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [], question: null };
   test("the age in words, which the server rebuilds every few seconds, does not count", () => {
     expect(detailKey({ ...summary, inStatus: "3 min" }, "2")).toBe(detailKey(summary, "2"));
     expect(detailKey(null, "")).toBe(detailKey(null, ""));

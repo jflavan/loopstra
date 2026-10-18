@@ -16,7 +16,8 @@ import { assertNoCheckoutLock, assertNoLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, readQuestion, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
-import { deliverInbox, STEERABLE } from "./steering";
+import { steerable } from "./console/steerable";
+import { deliverInbox } from "./steering";
 import { toolTarget } from "./tools";
 
 /**
@@ -163,14 +164,14 @@ export const CONVERSATION_HEADING = "What people told earlier sessions of this c
 
 /**
  * The prompt a phase would be sent, or null when its prompt file is missing. A work session (see
- * STEERABLE) gets conversation.md as {{conversation}}; a repository prompt older than that variable
+ * steerable) gets conversation.md as {{conversation}}; a repository prompt older than that variable
  * gets the record at its end instead, when there is one.
  */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
   const promptPath = promptFile(ctx, spec.name);
   if (!existsSync(promptPath)) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const record: PromptVars = STEERABLE.has(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
+  const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
   const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
   const template = await Bun.file(promptPath).text();
   let rendered = skillsLine + renderPrompt(template, vars);

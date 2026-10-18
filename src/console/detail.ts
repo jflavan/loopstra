@@ -37,7 +37,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     };
   });
   return {
-    ...changeSummary(trace, i, ordered, holds.get(slug), busy, now, humanGates(cfg)),
+    ...changeSummary(root, trace, i, ordered, holds.get(slug), busy, now, humanGates(cfg)),
     dependsOn: i.file.frontmatter.depends_on ?? [],
     documents: ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${slug}/${a}` })),
     phases,

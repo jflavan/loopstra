@@ -3,6 +3,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OUTPUT_MAX, toItems, TranscriptReader } from "../../src/console/transcript";
 import type { TranscriptItem } from "../../src/console/types";
+import { messageText, redirectText } from "../../src/steering";
 import { tempDir } from "../helpers";
 
 const CWD = "C:\\repo\\.loopstra\\worktrees\\csv";
@@ -38,6 +39,22 @@ const jsonl = (events: Array<Record<string, unknown>>) => events.map((e) => `${J
 describe("session transcripts", () => {
   test("raw events become items; thinking, hooks, limits and the answer tool are left out", () => {
     expect(RAW.flatMap((e) => toItems(e, CWD))).toEqual(EXPECTED);
+  });
+
+  test("a person's message and redirect echoed by the session are items; the prompt's echo is not", () => {
+    const replay = (text: string) => ({ type: "user", isReplay: true, message: { role: "user", content: [{ type: "text", text }] } });
+    const m = { id: "1", seq: 3, kind: "message" as const, text: "Cover negatives.\n\nAnd zero.", by: "John", via: "the dashboard", at: "" };
+    expect(toItems(replay(messageText(m)))).toEqual([{ kind: "message", text: "A message from John, who is watching this work from the dashboard: Cover negatives.\n\nAnd zero.", redirect: false }]);
+    expect(toItems(replay(redirectText({ ...m, kind: "redirect", text: "Use two steps." })))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
+    // A redirect with what was sent meanwhile: the person's words only.
+    expect(toItems(replay(`${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\nMessages sent meanwhile:\n\nx`))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
+    // Without the runner's closing words (an older runner), the first paragraph.
+    expect(toItems(replay("A message from Ana: keep it small\n\nmore"))).toEqual([{ kind: "message", text: "A message from Ana: keep it small", redirect: false }]);
+    expect(toItems({ type: "user", isReplay: true, message: { role: "user", content: "A message from Ana: as a string" } })).toEqual([{ kind: "message", text: "A message from Ana: as a string", redirect: false }]);
+    // The prompt, the nudge, an answer: replayed, but nothing to show.
+    expect(toItems(replay("You are the design phase. FIXTURE:design"))).toEqual([]);
+    // Not a replay: a user's text block is not shown.
+    expect(toItems({ type: "user", message: { content: [{ type: "text", text: "A message from John: hi" }] } })).toEqual([]);
   });
 
   test("a written file shows its first 400 lines; a long output is cut; a failed session's result says so", () => {

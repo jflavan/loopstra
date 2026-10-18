@@ -171,10 +171,8 @@ export interface SessionControl {
   redirect(text: string, by?: string): boolean;
 }
 
-/** How a message wrapped by the runner starts, so its echo reads as a person's message (not the prompt's). */
-export const MESSAGE_LEAD = "A message from";
-/** How a redirect wrapped by the runner starts. */
-export const REDIRECT_LEAD = "A change of direction from";
+/** How a message and a redirect wrapped by the runner start, so their echoes read as a person's (not the prompt's). Shared with the page. */
+export { MESSAGE_LEAD, REDIRECT_LEAD } from "./console/steerable";
 
 /** What heads, in a redirect's prompt, the messages the killed process had not taken up yet. */
 export const MEANWHILE_HEADING = "Messages sent meanwhile:";

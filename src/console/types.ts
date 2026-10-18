@@ -28,6 +28,8 @@ export interface ChangeSummary {
   statedPriority: string | null;
   /** What a person can do to it now (see src/actions.ts). */
   offers: Offer[];
+  /** The question an agent asked and a person has not answered yet (see src/questions.ts), or null. */
+  question: { text: string; why: string; options: string[]; phase: string } | null;
 }
 
 export interface RunningPhase {
@@ -39,6 +41,8 @@ export interface RunningPhase {
   now: string;
   /** Its newest activity, oldest first: one entry per tool call, piece of text, or result. */
   strip: Array<"tool" | "text" | "result">;
+  /** A person may message or redirect it (a work session; any session may be stopped). */
+  steerable: boolean;
 }
 
 export interface FinishedPhase {
@@ -117,7 +121,9 @@ export type TranscriptItem =
   | { kind: "tool-result"; id: string; ok: boolean; output: string }
   | { kind: "edit"; id: string; tool: string; path: string; diff: string }
   | { kind: "todos"; items: Array<{ text: string; state: string }> }
-  | { kind: "result"; ok: boolean; summary: string; costUsd: number | null };
+  | { kind: "result"; ok: boolean; summary: string; costUsd: number | null }
+  /** A person's message or redirect, as the session took it up (its echo). */
+  | { kind: "message"; text: string; redirect: boolean };
 
 /**
  * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame is a resume point (a byte

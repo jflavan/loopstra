@@ -1,26 +1,24 @@
 import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { MESSAGE_LEAD, REDIRECT_LEAD, type SessionControl } from "./claude";
+import type { SessionControl } from "./claude";
+import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL, steerable as isSteerable } from "./console/steerable";
 import { appendConversation, type ConversationEntry } from "./conversation";
 import type { StepContext } from "./context";
 import { inboxDir, inboxFor, markDone, waitingIn, type Done, type InboxMessage } from "./inbox";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
 
-/** The work sessions a person may message or redirect; any session may be stopped (see the spec's "Which sessions"). */
-export const STEERABLE: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "fix", "reconcile", "revise", "lessons"]);
-
 /** How often the runner looks in the inbox besides when it changes (a watch may miss an event). */
 const LOOK_MS = 1000;
 
 /** A message as the session reads it. Starts with MESSAGE_LEAD, which the console's transcript looks for. */
 export function messageText(m: InboxMessage): string {
-  return `${MESSAGE_LEAD} ${m.by}, who is watching this work from ${m.via}: ${m.text.trim()}\n\nTake it into account and carry on. Your final answer keeps the same format.`;
+  return `${MESSAGE_LEAD} ${m.by}, who is watching this work from ${m.via}: ${m.text.trim()}\n\n${MESSAGE_TAIL}`;
 }
 
 /** A redirect as the resumed session's prompt. Starts with REDIRECT_LEAD. */
 export function redirectText(m: InboxMessage): string {
-  return `${REDIRECT_LEAD} ${m.by} (${m.via}): ${m.text.trim()}\n\nStop what you were doing and work this way instead. Your final answer keeps the same format.`;
+  return `${REDIRECT_LEAD} ${m.by} (${m.via}): ${m.text.trim()}\n\n${REDIRECT_TAIL}`;
 }
 
 /** Traces a problem without ever failing: the trace may have closed meanwhile. */
@@ -85,7 +83,7 @@ function waiting(ctx: StepContext, m: InboxMessage): boolean {
  * once moved.
  */
 export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: SessionControl): () => Promise<void> {
-  const steerable = STEERABLE.has(name);
+  const steerable = isSteerable(name);
   /** The records started while watching. */
   const pending: Promise<void>[] = [];
   /** The messages already written to the session (or the stops already given to it), by id. */

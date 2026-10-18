@@ -260,6 +260,9 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .t-result { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 6px; padding: 12px 14px; border-radius: var(--radius); }
 .t-result.ok { background: var(--ok-bg); }
 .t-result.bad { background: var(--bad-bg); }
+/* A person's message or redirect, as the session took it up. */
+.t-msg { justify-self: end; background: var(--accent-bg); border: 1px solid var(--accent); border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.t-msg-label { display: block; font-size: 12px; color: var(--accent); }
 .t-live { display: flex; align-items: center; gap: 8px; color: var(--fg-3); padding: 6px 2px; }
 .jump { position: absolute; right: 16px; bottom: 16px; box-shadow: var(--shadow); }
 .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; position: sticky; top: 0; }
