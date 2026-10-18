@@ -207,7 +207,8 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
 /**
  * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
  * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note and its
- * conversation.md entry (the record likewise only when nobody edited it, see recordStillOurs). Only an intent.md that still holds exactly what the request wrote: one
+ * conversation.md entry (the record likewise only when nobody edited it, see recordStillOurs; an
+ * answer's only when its intent.md is put back too, as for its stored answer). Only an intent.md that still holds exactly what the request wrote: one
  * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
  * ownBefore), or one whose write an older request did not record, is left as it is; the person's
  * edit is what it says now.
@@ -224,7 +225,9 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
       for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
-      if (writesRecord(req) && "slug" in req && slugs.includes(req.slug) && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+      // An answer's record goes only with its intent.md: one kept (a person edited it) keeps its answer, and so the record of it.
+      const recordGoes = writesRecord(req) && "slug" in req && slugs.includes(req.slug) && !(req.kind === "answer" && kept.includes(req.slug));
+      if (recordGoes && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;

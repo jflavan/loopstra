@@ -622,7 +622,7 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  test("an answer given up on whose intent.md a person edited since keeps the stored answer: the question line stays gone", async () => {
+  test("an answer given up on whose intent.md a person edited since keeps the stored answer and its record: the question line stays gone", async () => {
     const r = await chatRepo({ intents: { a: ASKING } });
     try {
       asked(r.root);
@@ -641,6 +641,8 @@ describe("applying requests", () => {
       expect(readFileSync(file, "utf8")).toContain("A person's own line.");
       expect((await readIntent(r.root, "a")).file.frontmatter.question).toBe("");
       expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
+      // The answer stays, so its entry in conversation.md does too.
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8")).toContain("answers\nLeave them out.\n");
     } finally {
       r.cleanup();
     }
