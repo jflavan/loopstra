@@ -118,7 +118,9 @@ async function main(): Promise<number> {
       if (refusal) { console.error(refusal); return 1; }
       // Printed whenever it arrives, as a line of the loop's output: a slow registry never holds up the loop.
       printNotice(pending, log).catch(() => {});
-      await start(root, { once: rest.includes("--once") });
+      // Two starts at once both pass the preflight; only one gets the loop's lock.
+      const refused = await start(root, { once: rest.includes("--once") });
+      if (refused) { console.error(refused); return 1; }
       return 0;
     }
     case "tail": {

@@ -4,7 +4,7 @@ import { parse } from "yaml";
 import { configPath, NOT_SET_UP, validateConfig } from "../config";
 import { writeFileAtomic } from "../fsutil";
 import { Git, GitError } from "../git";
-import { heartbeatState, readHeartbeat } from "../heartbeat";
+import { runningLoopPid } from "../heartbeat";
 import { onCheckout } from "../lanes";
 import { DEV_VERSION, stampVersion } from "../package";
 import { errorText, lastLine } from "../shell";
@@ -135,9 +135,8 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
     result.warnings.push(why);
     return null;
   };
-  // A loop that is not responding but whose process is alive may still be running.
-  const loop = heartbeatState(readHeartbeat(root), poll).state;
-  if (loop === "running" || loop === "paused" || loop === "not-responding") {
+  // Running, paused, or not responding with its process alive (see runningLoopPid).
+  if (runningLoopPid(root, poll) !== null) {
     const refused = stop(LOOP_RUNNING);
     if (refused) return refused;
   }

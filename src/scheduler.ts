@@ -7,7 +7,7 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release, runsNoCommands } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopAlreadyRunning, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, runningLoopPid, startHeartbeat, takeLoopLock, type LoopBeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
@@ -871,7 +871,7 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
 /**
  * What `start` checks before the loop begins, as a plain message, or null when it may start: the
  * folder is set up (it has loopstra/config.yaml) by a Loopstra with the stamp (an older setup is
- * upgraded first), the tools are installed, the checkout is on
+ * upgraded first), no loop is running in it already, the tools are installed, the checkout is on
  * main_branch, Loopstra's own files are committed there, and a repository with a remote has gh,
  * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
@@ -882,10 +882,13 @@ export async function preflight(root: string, env: Record<string, string | undef
   // Its old prompt copies would be used as overrides, and old copies of some prompts are not safe.
   const older = olderSetupRefusal(root, "run loopstra start again");
   if (older) return older;
+  const cfg = await loadConfig(root).catch(() => null);
+  // By its heartbeat, which also shows a loop started from another machine sharing the folder (WSL, say).
+  const running = runningLoopPid(root, cfg?.poll_seconds ?? 60);
+  if (running !== null) return loopAlreadyRunning(running);
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;
-  let cfg: Config;
-  try { cfg = await loadConfig(root); } catch { return null; }
+  if (!cfg) return null;
   const git = new Git(root);
   const branch = await git.currentBranch();
   if (branch !== cfg.main_branch) return `Run loopstra from a checkout of ${cfg.main_branch}; you are on ${branch || "no branch"}.`;
@@ -949,12 +952,31 @@ export function log(line: string): void {
 /**
  * The loop. It never dies: each tick is guarded, a problem is traced, and the next tick comes.
  * Ctrl-C asks for a stop (the running step is interrupted and resumes on the next start); a
- * second Ctrl-C exits at once.
+ * second Ctrl-C exits at once. It holds the loop's lock while it runs (see takeLoopLock). Returns
+ * the refusal when another loop holds the lock, or null once the loop has run.
  */
-export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<void> {
+export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
+  const refused = await takeLoopLock(root, await loadConfig(root).then((c) => c.poll_seconds, () => 60));
+  if (refused) return refused;
+  let beat: LoopBeat | null = null;
+  // A second Ctrl-C exits at once, past every finally: the lock goes and the heartbeat says stopped on the way out.
+  const onExit = () => { beat?.stopped(); dropLoopLock(root); };
+  process.on("exit", onExit);
+  try {
+    await runLoop(root, opts, (b) => { beat = b; });
+  } finally {
+    process.off("exit", onExit);
+    dropLoopLock(root);
+  }
+  return null;
+}
+
+/** The loop itself, once start holds the lock; `started` gets its heartbeat. */
+async function runLoop(root: string, opts: { once: boolean; installSignals?: boolean }, started: (beat: LoopBeat) => void): Promise<void> {
   resetStop();
   const uninstall = opts.installSignals === false ? () => {} : installStopSignals();
   const beat = startHeartbeat(root);
+  started(beat);
   // Applies requests while steps run, once the first tick has settled the checkout (see armApplier).
   const applier = startApplier(root);
   try {

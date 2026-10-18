@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopHoldText, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, startHeartbeat, writeHeartbeat, type Heartbeat,
+  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, runningLoopPid, startHeartbeat, takeLoopLock, thisHost, writeHeartbeat, type Heartbeat, type LinkFile,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -336,11 +337,244 @@ describe("heartbeat file", () => {
   });
 });
 
+const HEARTBEAT_SRC = pathToFileURL(fileURLToPath(new URL("../../src/heartbeat.ts", import.meta.url))).href;
+const SCHEDULER_SRC = pathToFileURL(fileURLToPath(new URL("../../src/scheduler.ts", import.meta.url))).href;
+
+/** Runs `code` in a child bun process with `env` added; its exit code and output. */
+async function child(code: string, env: Record<string, string>): Promise<{ code: number; out: string }> {
+  const p = Bun.spawn({ cmd: [process.execPath, "-e", code], env: { ...process.env, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  return { code: await p.exited, out: (out + err).trim() };
+}
+
+/** A lock as another process wrote it. */
+function writeLock(root: string, lock: Record<string, unknown>): void {
+  mkdirSync(join(root, ".loopstra"), { recursive: true });
+  writeFileSync(loopLockPath(root), JSON.stringify(lock));
+}
+
+describe("the loop lock", () => {
+  test("says, in plain words, which process runs the loop and the way out when none does", () => {
+    expect(loopAlreadyRunning(4242)).toBe("A loop is already running in this repository (process 4242). Stop it (Ctrl-C in its terminal) before starting another. If no loop is running here, delete .loopstra/loop.lock and .loopstra/heartbeat.json, then start again.");
+  });
+
+  test("a second take is refused while a live process holds it; dropping it frees it", async () => {
+    const t = tempDir();
+    try {
+      expect(await takeLoopLock(t.path)).toBeNull();
+      const held = JSON.parse(readFileSync(loopLockPath(t.path), "utf8"));
+      expect(held).toMatchObject({ pid: process.pid, host: thisHost() });
+      expect(typeof held.startedAt).toBe("string");
+      expect(await takeLoopLock(t.path)).toBe(loopAlreadyRunning(process.pid));
+      dropLoopLock(t.path);
+      expect(existsSync(loopLockPath(t.path))).toBe(false);
+      expect(await takeLoopLock(t.path)).toBeNull();
+      dropLoopLock(t.path);
+      // No temp file is left beside it.
+      expect(readdirSync(join(t.path, ".loopstra"))).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a lock left behind on this machine (process gone), an older one without its machine, or a damaged one is taken over", async () => {
+    const t = tempDir();
+    try {
+      for (const left of [{ pid: DEAD_PID, host: thisHost() }, { pid: DEAD_PID }]) {
+        writeLock(t.path, { ...left, startedAt: ago(60) });
+        expect(await takeLoopLock(t.path)).toBeNull();
+        expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      }
+      // Damaged, and not changed for a while.
+      writeFileSync(loopLockPath(t.path), "not json");
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(loopLockPath(t.path), old, old);
+      expect(await takeLoopLock(t.path)).toBeNull();
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a lock that cannot be read yet counts as held: it may be another start's, still being written", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      writeFileSync(loopLockPath(t.path), "");
+      expect(await takeLoopLock(t.path)).toBe(loopAlreadyRunning(null));
+      expect(loopAlreadyRunning(null)).toStartWith("A loop is already running in this repository. Stop it");
+      expect(readFileSync(loopLockPath(t.path), "utf8")).toBe("");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("where hard links are not available, the lock is made with an exclusive create", async () => {
+    const t = tempDir();
+    try {
+      for (const code of ["EPERM", "ENOTSUP", "ENOSYS", "EXDEV"]) {
+        const noLinks = () => { throw Object.assign(new Error(`${code}: no hard links here`), { code }); };
+        expect(await takeLoopLock(t.path, 60, noLinks)).toBeNull();
+        expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8"))).toMatchObject({ pid: process.pid, host: thisHost() });
+        // No temp file is left beside it.
+        expect(readdirSync(join(t.path, ".loopstra"))).toEqual(["loop.lock"]);
+        expect(await takeLoopLock(t.path, 60, noLinks)).toBe(loopAlreadyRunning(process.pid));
+        dropLoopLock(t.path);
+        expect(existsSync(loopLockPath(t.path))).toBe(false);
+      }
+      // A lock left behind is taken over the same way.
+      writeLock(t.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      expect(await takeLoopLock(t.path, 60, () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); })).toBeNull();
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("another machine's lock is taken over only when its heartbeat says no loop runs", async () => {
+    const t = tempDir();
+    try {
+      writeLock(t.path, { pid: DEAD_PID, host: "elsewhere", startedAt: ago(60) });
+      writeHeartbeat(t.path, hb({ pid: DEAD_PID, host: "elsewhere", lastBeatAt: new Date().toISOString() }));
+      expect(await takeLoopLock(t.path, 60)).toBe(loopAlreadyRunning(DEAD_PID));
+      writeHeartbeat(t.path, hb({ pid: DEAD_PID, host: "elsewhere", stopped: true }));
+      expect(await takeLoopLock(t.path, 60)).toBeNull();
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a problem making the lock refuses in plain words", async () => {
+    const t = tempDir();
+    try {
+      // A file where the folder should be.
+      writeFileSync(join(t.path, ".loopstra"), "");
+      expect(await takeLoopLock(t.path)).toMatch(/^Could not make the loop's lock, \.loopstra\/loop\.lock \(.+\)\. Check that the folder can be written, then start again\.$/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("dropping leaves another process's lock alone", () => {
+    const t = tempDir();
+    try {
+      writeLock(t.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      dropLoopLock(t.path);
+      expect(existsSync(loopLockPath(t.path))).toBe(true);
+      // The same process id on another machine is another process.
+      writeLock(t.path, { pid: process.pid, host: "elsewhere", startedAt: ago(60) });
+      dropLoopLock(t.path);
+      expect(existsSync(loopLockPath(t.path))).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("starts in separate processes at the same moment: exactly one gets the lock, fresh or taken over, with hard links or without", async () => {
+    const dirs = Array.from({ length: 8 }, () => tempDir());
+    const results = tempDir();
+    const release = join(results.path, "release");
+    try {
+      // Fresh folders, and locks left by a process that is gone; the last four without hard links.
+      for (const d of [dirs[2]!, dirs[3]!, dirs[6]!, dirs[7]!]) writeLock(d.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      const go = String(Date.now() + 4000);
+      // Each child says how it did in a file, then holds on until every child has: a winner gone
+      // early would leave a lock that a slow child could take over, fairly.
+      const code = `const { existsSync, writeFileSync } = await import("node:fs");
+        const { takeLoopLock } = await import(${JSON.stringify(HEARTBEAT_SRC)});
+        const noLinks = () => { throw Object.assign(new Error("no hard links here"), { code: "EPERM" }); };
+        await Bun.sleep(Math.max(0, Number(process.env.LOCK_GO) - Date.now()));
+        const r = await takeLoopLock(process.env.LOCK_ROOT, 60, process.env.LOCK_NO_LINKS ? noLinks : undefined);
+        const said = r === null ? "won" : r.startsWith("A loop is already running") ? "refused" : r;
+        writeFileSync(process.env.LOCK_OUT, said);
+        console.log(said);
+        const until = Date.now() + 55_000;
+        while (!existsSync(process.env.LOCK_RELEASE) && Date.now() < until) await Bun.sleep(50);`;
+      const outs = dirs.map((_, i) => Array.from({ length: 4 }, (_, j) => join(results.path, `${i}-${j}`)));
+      const running = dirs.map((d, i) => Promise.all(outs[i]!.map((out) =>
+        child(code, { LOCK_ROOT: d.path, LOCK_GO: go, LOCK_OUT: out, LOCK_RELEASE: release, ...(i >= 4 ? { LOCK_NO_LINKS: "1" } : {}) }))));
+      const until = Date.now() + 50_000;
+      while (!outs.flat().every((o) => existsSync(o)) && Date.now() < until) await Bun.sleep(100);
+      writeFileSync(release, "");
+      const rounds = await Promise.all(running);
+      for (const [i, round] of rounds.entries()) {
+        const said = round.map((r) => r.out).sort();
+        expect({ round: i, said }).toEqual({ round: i, said: ["refused", "refused", "refused", "won"] });
+      }
+    } finally {
+      writeFileSync(release, "");
+      for (const d of [...dirs, results]) d.cleanup();
+    }
+  }, 60_000);
+
+  test("a start keeps a lock it made only while the lock still names it", async () => {
+    const t = tempDir();
+    try {
+      // A stalled start, which read a lock left behind earlier, removes this one just made and makes its own.
+      const replaced: LinkFile = (existing, path) => {
+        linkSync(existing, path);
+        rmSync(path);
+        writeFileSync(path, JSON.stringify({ pid: DEAD_PID, host: thisHost(), startedAt: ago(0) }));
+      };
+      expect(await takeLoopLock(t.path, 60, replaced)).toBe(loopAlreadyRunning(DEAD_PID));
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(DEAD_PID);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("runningLoopPid", () => {
+  test("a heartbeat this machine wrote whose process is gone is no loop at once; another machine's waits to go stale", () => {
+    const t = tempDir();
+    try {
+      expect(runningLoopPid(t.path, 60)).toBeNull();
+      const fresh = { lastBeatAt: new Date().toISOString() };
+      writeHeartbeat(t.path, hb({ ...fresh, host: thisHost() }));
+      expect(runningLoopPid(t.path, 60)).toBe(process.pid);
+      writeHeartbeat(t.path, hb({ ...fresh, pid: DEAD_PID, host: thisHost() }));
+      expect(runningLoopPid(t.path, 60)).toBeNull();
+      // Another machine's process, or an older heartbeat without its machine: its process id says nothing here.
+      writeHeartbeat(t.path, hb({ ...fresh, pid: DEAD_PID, host: "elsewhere" }));
+      expect(runningLoopPid(t.path, 60)).toBe(DEAD_PID);
+      writeHeartbeat(t.path, hb({ ...fresh, pid: DEAD_PID }));
+      expect(runningLoopPid(t.path, 60)).toBe(DEAD_PID);
+      writeHeartbeat(t.path, hb({ pid: DEAD_PID, host: "elsewhere", lastBeatAt: new Date(Date.now() - 3_600_000).toISOString() }));
+      expect(runningLoopPid(t.path, 60)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
 describe("the scheduler writes the heartbeat", () => {
-  test("start once leaves a stopped heartbeat with a last check", async () => {
+  test("start refuses while another loop holds the lock, and leaves its heartbeat alone", async () => {
     const { repo, trace } = await setupRepo("draft");
     try {
-      await start(repo.path, { once: true, installSignals: false });
+      writeHeartbeat(repo.path, hb({ lastBeatAt: new Date().toISOString() }));
+      const before = readFileSync(join(repo.path, ".loopstra", "heartbeat.json"), "utf8");
+      expect(await takeLoopLock(repo.path)).toBeNull();
+      expect(await start(repo.path, { once: true, installSignals: false })).toBe(loopAlreadyRunning(process.pid));
+      expect(readFileSync(join(repo.path, ".loopstra", "heartbeat.json"), "utf8")).toBe(before);
+      expect(existsSync(loopLockPath(repo.path))).toBe(true);
+      dropLoopLock(repo.path);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("start once leaves a stopped heartbeat with a last check, and no lock", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    try {
+      const exits = process.listenerCount("exit");
+      expect(await start(repo.path, { once: true, installSignals: false })).toBeNull();
+      expect(existsSync(loopLockPath(repo.path))).toBe(false);
+      expect(process.listenerCount("exit")).toBe(exits);
+      // The lock was let go: the next start runs.
+      expect(await start(repo.path, { once: true, installSignals: false })).toBeNull();
       const h = readHeartbeat(repo.path)!;
       expect(h.pid).toBe(process.pid);
       expect(h.stopped).toBe(true);
@@ -351,6 +585,26 @@ describe("the scheduler writes the heartbeat", () => {
     }
   });
 
+  test("a second Ctrl-C exits at once, and the lock goes and the heartbeat says stopped on the way out", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    try {
+      // The loop's start in another process, ended the way a second Ctrl-C ends it once it runs.
+      const code = `const { existsSync } = await import("node:fs");
+        const { start } = await import(${JSON.stringify(SCHEDULER_SRC)});
+        const root = process.env.LOCK_ROOT;
+        const t = setInterval(() => {
+          if (existsSync(root + "/.loopstra/loop.lock") && existsSync(root + "/.loopstra/heartbeat.json")) { clearInterval(t); setTimeout(() => process.exit(130), 200); }
+        }, 50);
+        await start(root, { once: false, installSignals: false });`;
+      const r = await child(code, { LOCK_ROOT: repo.path });
+      expect(r.code).toBe(130);
+      expect(existsSync(loopLockPath(repo.path))).toBe(false);
+      expect(readHeartbeat(repo.path)).toMatchObject({ stopped: true, host: thisHost() });
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
   test("a stop request shows as stopping before the loop ends", async () => {
     const { repo, trace } = await setupRepo("draft");
     try {
@@ -359,6 +613,7 @@ describe("the scheduler writes the heartbeat", () => {
       await start(repo.path, { once: false, installSignals: false });
       expect(seen).toMatchObject({ stopping: true, stopped: false });
       expect(readHeartbeat(repo.path)).toMatchObject({ stopping: false, stopped: true });
+      expect(existsSync(loopLockPath(repo.path))).toBe(false);
     } finally {
       trace.close(); repo.cleanup();
     }
