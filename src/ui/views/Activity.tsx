@@ -67,7 +67,7 @@ export function Activity() {
         <label><input type="checkbox" checked={technical} onChange={(e) => setTechnical(e.currentTarget.checked)} /> Technical</label>
         {technical && <button class="btn" onClick={() => void load(0, true)}>Refresh</button>}
       </div>
-      {failed && <p class="muted">The history could not be read.</p>}
+      {failed && <p class="muted">The history could not be read. <button class="link" type="button" onClick={() => void load(0, true)}>Try again</button></p>}
       {/* A page can come back empty with older ones still to read (a long run of events only an engineer would care about). */}
       {!items.length && !loading && !failed && next === null && <p class="muted">Nothing has happened yet.</p>}
       {items.length > 0 && (

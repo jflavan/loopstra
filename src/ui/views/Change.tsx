@@ -17,8 +17,9 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
   const summary = changes.value?.find((c) => c.slug === slug);
   const runningSeqs = running.value?.now.filter((p) => p.slug === slug).map((p) => p.seq).join(",") ?? "";
   const [detail, setDetail] = useState<ChangeDetail | null>(null);
-  // "missing": the server said 404. "failed": anything else; the next change of the key reads it again.
+  // "missing": the server said 404. "failed": anything else; the next change of the key, or Try again, reads it again.
   const [problem, setProblem] = useState<"missing" | "failed" | null>(null);
+  const [tries, setTries] = useState(0);
   // Read again when something that matters changed: the summary's "12s" age is rebuilt with every update and must not count.
   const key = detailKey(summary, runningSeqs);
   useEffect(() => {
@@ -28,11 +29,11 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
       (e) => { if (live) setProblem(e instanceof HttpError && e.status === 404 ? "missing" : "failed"); },
     );
     return () => { live = false; };
-  }, [slug, key]);
+  }, [slug, key, tries]);
   if (problem === "failed" && !detail) {
     return (
       <section class="view">
-        <p class="muted">This change could not be read. The console will try again.</p>
+        <p class="muted">This change could not be read. <button class="link" type="button" onClick={() => setTries((n) => n + 1)}>Try again</button></p>
       </section>
     );
   }

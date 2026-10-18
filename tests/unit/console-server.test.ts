@@ -216,6 +216,10 @@ describe("the console's server", () => {
       const file = await fetch(`${base}/files/one/phases/1-build/prompt.md`);
       expect(file.headers.get("content-type")).toBe("text/plain; charset=utf-8");
       expect(await file.text()).toBe("# the prompt <b>");
+      // Read fresh every time: a document the page reads again after the change moved on must not come from the browser's cache.
+      for (const r of [doc, file, await fetch(`${base}/api/changes/one`), await fetch(`${base}/api/events`), await fetch(`${base}/api/spend`)]) {
+        expect(r.headers.get("cache-control")).toBe("no-store");
+      }
       for (const bad of [
         "/docs/one/plan.md", "/docs/one/secret.txt", "/docs/one/..%2F..%2Fsecret.txt", "/docs/..%2F..%2Fsecret.txt/intent.md", "/docs/One/intent.md",
         "/docs/one%2F..%2Fone/intent.md", "/docs/one", "/docs/", "/docs/one/intent.md/x",
@@ -342,6 +346,17 @@ describe("writes", () => {
       expect((await fetch(`${base}/api/requests/000000000000001-1-0000`, { method: "DELETE", headers: { origin: "http://evil.example" } })).status).toBe(403);
       expect(readLoopHold(root)).toBeNull();
       expect(pendingRequests(root)).toEqual([]);
+    });
+  }, 30_000);
+
+  test("a body over a megabyte is not read: the connection is dropped and nothing is written", async () => {
+    await withRepoConsole(async (base, root) => {
+      const body = { kind: "approve", slug: "a", expect: "plan-review", pad: "x".repeat(2 * 1024 * 1024) };
+      const r = await post(base, "/api/requests", body).catch(() => null);
+      expect(r === null || r.status >= 400).toBe(true);
+      expect(pendingRequests(root)).toEqual([]);
+      // The console is still there for the next, ordinary write.
+      expect((await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" })).status).toBe(202);
     });
   }, 30_000);
 });

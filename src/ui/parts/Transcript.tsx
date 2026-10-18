@@ -53,7 +53,8 @@ export const Transcript = memo(function Transcript({ shown, live, done, compact 
   );
 });
 
-function Row({ item, result, compact }: { item: Shown["items"][number]; result: Result; compact: boolean }) {
+// Memoised too: rows arrive ten times a second while a session works, and the rows already drawn are the same objects each time.
+const Row = memo(function Row({ item, result, compact }: { item: Shown["items"][number]; result: Result; compact: boolean }) {
   switch (item.kind) {
     case "text": return <Markdown text={item.text} />;
     case "tool": return <ToolRow item={item} result={result} />;
@@ -73,7 +74,7 @@ function Row({ item, result, compact }: { item: Shown["items"][number]; result: 
         </div>
       );
   }
-}
+});
 
 const stateOf = (result: Result): string => (!result ? "pending" : result.ok ? "ok" : "bad");
 
@@ -120,7 +121,8 @@ function EditRow({ item, result, compact }: { item: Extract<TranscriptItem, { ki
 
 function Output({ text }: { text: string }) {
   const [all, setAll] = useState(false);
-  const lines = text.split("\n");
+  // An output can be a quarter of a megabyte: split once, not on every draw.
+  const lines = useMemo(() => text.split("\n"), [text]);
   return (
     <>
       <pre>{(all ? lines : lines.slice(0, OUTPUT_LINES)).join("\n")}</pre>

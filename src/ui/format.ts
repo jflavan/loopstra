@@ -1,7 +1,8 @@
 import type { LoopSection } from "../console/types";
 
-/** "$0.81"; "~$0.81" for an estimate; "$0" for nothing worth a cent. */
+/** "$0.81"; "~$0.81" for an estimate; "$0" for nothing worth a cent; a dash for an amount that could not be read. */
 export function usd(n: number, estimate = false): string {
+  if (!Number.isFinite(n)) return "–";
   const v = n < 0.005 ? "$0" : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString("en-US")}`;
   return estimate ? `~${v}` : v;
 }
@@ -30,9 +31,10 @@ export function ago(iso: string, now: number): string {
   return `${Math.floor(s / 86_400)}d`;
 }
 
-/** "14:02" in local time, with the day in front when it is not today. */
+/** "14:02" in local time, with the day in front when it is not today; a dash for a time that could not be read. */
 export function clock(iso: string, now: number): string {
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "–";
   const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return d.toDateString() === new Date(now).toDateString() ? hm : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${hm}`;
 }

@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import { Trace, type PhaseRow } from "../trace";
 import { runsDir } from "./files";
-import { frame, type Send } from "./hub";
+import { frame, PING, type Send } from "./hub";
 import { TranscriptReader } from "./transcript";
 import type { SessionMessage } from "./types";
 
@@ -18,10 +18,25 @@ export type Emit = (msg: SessionMessage, offset?: number) => boolean;
 
 /**
  * Streams one phase's transcript to a page (see followSession), each item with its offset as the
- * frame's id, so a page that reconnects continues there.
+ * frame's id, so a page that reconnects continues there. While nothing else is sent it pings every
+ * `pingMs`: a session on a long command writes nothing for minutes, and without pings the page
+ * could not tell that quiet from a connection that died.
  */
-export function streamSession(root: string, slug: string, seq: number, from: number, send: Send, close: () => void, intervalMs = 250): (() => void) | null {
-  return followSession(root, slug, seq, from, (msg, offset) => send(frame(msg, offset)), close, intervalMs);
+export function streamSession(root: string, slug: string, seq: number, from: number, send: Send, close: () => void, intervalMs = 250, pingMs = 15_000): (() => void) | null {
+  let ping: ReturnType<typeof setInterval> | undefined;
+  let closed = false;
+  // A page that cannot be written to, on any frame, ends the pings at once rather than at the next one.
+  const write = (text: string) => {
+    const ok = send(text);
+    if (!ok) { closed = true; clearInterval(ping); }
+    return ok;
+  };
+  const stop = followSession(root, slug, seq, from, (msg, offset) => write(frame(msg, offset)), () => { closed = true; clearInterval(ping); close(); }, intervalMs);
+  if (!stop) return null;
+  const end = () => { clearInterval(ping); stop(); };
+  // The stream may have ended already (an unreadable file, a page gone): then there is nobody to ping.
+  if (!closed) ping = setInterval(() => { if (!write(PING)) end(); }, pingMs);
+  return end;
 }
 
 /**
