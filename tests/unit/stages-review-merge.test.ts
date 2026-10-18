@@ -595,4 +595,43 @@ describe("merge", () => {
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
     trace.close(); repo.cleanup();
   });
+
+  /**
+   * A formatter committed on main (code the branch lacks, so the merge checks rebase): it rewrites the
+   * branch's src/add.ts once, the way a lint --fix or a format step would, and is set up as `where`
+   * in the config. A fresh context reads that config.
+   */
+  async function withFormatter(repo: string, where: (command: string) => (config: string) => string) {
+    await Bun.write(join(repo, "fmt.ts"), `import { writeFileSync } from "node:fs";\nwriteFileSync("src/add.ts", ${JSON.stringify(FORMATTED)});\n`);
+    const config = await Bun.file(configPath(repo)).text();
+    await Bun.write(configPath(repo), where(`bun "${join(repo, "fmt.ts").replace(/\\/g, "/")}"`)(config));
+    await new Git(repo).commitAll("a formatter");
+    return openRepo(repo);
+  }
+  const FORMATTED = "export function add(a: number, b: number): number {\n  return a + b; // formatted\n}\n";
+
+  test("a review after command that rewrites a tracked file is kept and reviewed, not taken for a conflict", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withFormatter(repo.path, (command) => (config) => `${config}stages:\n  review:\n    after:\n      - ${command}\n`);
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:src/add.ts"]).then((r) => r.out)).toBe(FORMATTED);
+    expect(phaseNames(trace)).toContain("review-2");
+    trace.close(); repo.cleanup();
+  });
+
+  test("a lint command that rewrites a tracked file during the merge checks gets its change merged, after a review", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withFormatter(repo.path, (command) => (config) => config.replace("commands:\n", `commands:\n  lint: ${command}\n`));
+    expect(ctx.cfg.commands.lint).toContain("fmt.ts");
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:src/add.ts"]).then((r) => r.out)).toBe(FORMATTED);
+    expect(phaseNames(trace)).toContain("review-2");
+    trace.close(); repo.cleanup();
+  });
 });

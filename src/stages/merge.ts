@@ -83,6 +83,12 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
+        // Files a command rewrote (a lint --fix, a formatter): kept on the branch, so they go to review
+        // with the rest, and no later rebase or merge meets them unsaved.
+        if (await wt.isDirty()) {
+          const kept = await saveWork(ctx, wt, "chore: keep changes the checks made");
+          if (!kept.ok) return { result: "fail", evidence: kept.detail, payload: kept };
+        }
         const changed = (await wt.headSha()) !== before;
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
       },
@@ -513,7 +519,8 @@ const REVIEW_AGAIN = "review-again";
 /**
  * The merge gate, one entry point for the review step (a review just passed; `onPass` is
  * passMergeGate) and the merge step (merge-approved, or merge-review with no person; `onPass`
- * merges): its automated checks run, and then `onPass`. Fixes the checks committed go back for one
+ * merges): its automated checks run, and then `onPass`. Fixes the checks committed, files their
+ * commands rewrote, and edits waiting unsaved in the worktree before the checks go back for one
  * more review round (see anotherRound), so nothing reaches main that a review did not see.
  *
  * Without a remote it holds the merge lock from the checks to the merge: one change at a time is
@@ -522,6 +529,14 @@ const REVIEW_AGAIN = "review-again";
  * a remote the checks only open a pull request; the lock is taken where it merges (runRemoteMerge).
  */
 async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult | typeof REVIEW_AGAIN> {
+  const wt = new Git(ctx.worktreeDir);
+  if (await wt.isDirty()) {
+    // Edits nobody reviewed (a review after command that rewrote a file, a revision stopped part-way):
+    // keep them on the branch and review again rather than merge them unseen, or let them stop the rebase.
+    const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
+    if (!kept.ok) return block(ctx, kept.note, kept);
+    return anotherRound(ctx);
+  }
   const gate = async () => {
     const verdict = await checkMerge(ctx);
     if (verdict.result === "fail") return block(ctx, verdict.note, verdict);
@@ -589,21 +604,12 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
 /**
  * The merge gate once more, after the review step passed it: in the change's worktree, then
  * `onPass`. Edits nobody reviewed waiting in the worktree are kept on the branch and reviewed
- * first, and so are fixes the checks commit (status reviewing), so nothing merges unseen.
+ * first, and so are fixes the checks commit (status reviewing), so nothing merges unseen (see mergeGate).
  */
 async function checkAgain(ctx: StepContext, onPass: () => Promise<StepResult>): Promise<StepResult> {
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return block(ctx, open.note, open);
-  const wt = new Git(ctx.worktreeDir);
-  let next: StepResult | typeof REVIEW_AGAIN;
-  if (await wt.isDirty()) {
-    // Edits nobody reviewed: keep them on the branch and review again rather than merge them unseen.
-    const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
-    if (!kept.ok) return block(ctx, kept.note, kept);
-    next = await anotherRound(ctx);
-  } else {
-    next = await mergeGate(ctx, onPass);
-  }
+  const next = await mergeGate(ctx, onPass);
   if (next !== REVIEW_AGAIN) return next;
   await setStatus(ctx, "reviewing");
   return { ok: true };
