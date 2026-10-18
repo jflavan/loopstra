@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendConversation, conversationEntry, readConversation, withEntry, withEntryOnce } from "../../src/conversation";
+import { appendConversation, conversationEntry, conversationPath, readConversation, recordedAs, withEntry, withEntryOnce } from "../../src/conversation";
 import { lastCommit } from "../helpers";
 import { chatRepo, INTENT } from "../chat-helpers";
 
@@ -23,6 +23,31 @@ describe("conversation.md", () => {
       await appendConversation(r.root, "main", "a", { kind: "answer", who: "Ana", via: "Slack", text: "Two.", at: new Date(2026, 9, 17, 9, 5) });
       expect(readConversation(r.root, "a")).toBe("# Conversation\n\n## 2026-10-17 09:00 · John (the dashboard) → build\nOne.\n\n## 2026-10-17 09:05 · Ana (Slack) answers\nTwo.\n");
       expect(await lastCommit(r.root)).toContain("loopstra(a): conversation");
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an inbox message's entry is written once, though another entry follows it, until its text leaves the record", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const m = { kind: "message" as const, who: "John", via: "the dashboard", phase: "build", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 0) };
+      // Its first record wrote it; a later message's commit took it along; then its own record is tried again.
+      await appendConversation(r.root, "main", "a", m, { id: "000000000000001-1-0001" });
+      await appendConversation(r.root, "main", "a", { ...m, text: "And zero.", at: new Date(2026, 9, 17, 9, 1) }, { id: "000000000000001-1-0002" });
+      await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 2) }, { id: "000000000000001-1-0001" });
+      // Kept for the next session after it reached its session: written once all the same, as what it was.
+      await appendConversation(r.root, "main", "a", { kind: "later", who: "John", via: "the dashboard", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 3) }, { id: "000000000000001-1-0001" });
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
+      expect(recordedAs(r.root, "a", "000000000000001-1-0001", "Cover negatives.")).toBe("message");
+      // The same words from another message are its own entry.
+      await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 4) }, { id: "000000000000001-1-0003" });
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(2);
+      // Its text gone from the record (a failed write put back): written again.
+      await Bun.write(conversationPath(r.root, "a"), "# Conversation\n");
+      expect(recordedAs(r.root, "a", "000000000000001-1-0001", "Cover negatives.")).toBeNull();
+      await appendConversation(r.root, "main", "a", m, { id: "000000000000001-1-0001" });
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
     } finally {
       r.cleanup();
     }

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readConversation } from "../../src/conversation";
-import { changeStoppedBy, inboxDir, inboxFor, sendToSession, writeChangeStop, type InboxMessage } from "../../src/inbox";
+import { appendConversation, readConversation } from "../../src/conversation";
+import { changeStoppedBy, inboxDir, inboxFor, leaveDelivered, sendToSession, writeChangeStop, type InboxMessage } from "../../src/inbox";
 import { agentPhase } from "../../src/phases";
 import { runStepGuarded } from "../../src/scheduler";
 import { runDesignStep } from "../../src/stages/design";
@@ -313,6 +313,34 @@ describe("steering a running session", () => {
       expect(howDone(repo.path, m)).toBe("delivered");
       const record = readConversation(repo.path, SLUG);
       expect(record.match(/cover negatives/g)).toHaveLength(1);
+      expect(record).not.toContain("the next session");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("after a restart, a message the session got whose move failed is not recorded again: its copy or its entry says it was delivered", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const inbox = inboxDir(repo.path, SLUG);
+      const entry = (m: InboxMessage) => appendConversation(repo.path, "main", SLUG, { kind: "message", who: m.by, via: m.via, phase: "design", text: m.text, at: new Date() }, { id: m.id });
+      // Its delivered copy was left, but the original could not be removed then.
+      const m1 = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      await entry(m1);
+      leaveDelivered(repo.path, SLUG, m1, "delivered");
+      writeFileSync(join(inbox, `${m1.id}.json`), JSON.stringify(m1));
+      // Not even its copy could be written: its entry is all there is.
+      const m2 = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "and zero", by: "John", via: "the dashboard" });
+      await entry(m2);
+      // The process that knew of them is gone; the next step's sweep runs in a new one.
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m1)).toBe("delivered");
+      expect(howDone(repo.path, m2)).toBe("delivered");
+      expect(existsSync(join(inbox, `${m1.id}.json`))).toBe(false);
+      expect(existsSync(join(inbox, `${m2.id}.json`))).toBe(false);
+      const record = readConversation(repo.path, SLUG);
+      expect(record.match(/cover negatives/g)).toHaveLength(1);
+      expect(record.match(/and zero/g)).toHaveLength(1);
       expect(record).not.toContain("the next session");
     } finally {
       trace.close(); repo.cleanup();

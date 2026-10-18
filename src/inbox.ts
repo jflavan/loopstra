@@ -32,11 +32,32 @@ export function sendToSession(root: string, slug: string, m: Omit<InboxMessage, 
   return full;
 }
 
-/** Every message waiting in a change's inbox, oldest first. A file that is not a message is ignored. */
+function deliveredDir(root: string, slug: string): string {
+  return join(inboxDir(root, slug), "delivered");
+}
+
+/** The file names in delivered/: the messages done with (a folder there is not one). */
+function doneNames(root: string, slug: string): Set<string> {
+  const dir = deliveredDir(root, slug);
+  if (!existsSync(dir)) return new Set();
+  return new Set(readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name));
+}
+
+/**
+ * Every message waiting in a change's inbox, oldest first. A file that is not a message is ignored, and
+ * so is one whose copy is in delivered/ already (see leaveDelivered): that stale original is removed
+ * when it can be.
+ */
 export function waitingIn(root: string, slug: string): InboxMessage[] {
   const dir = inboxDir(root, slug);
   if (!existsSync(dir)) return [];
+  const done = doneNames(root, slug);
   return readdirSync(dir).filter((n) => n.endsWith(".json")).sort()
+    .filter((n) => {
+      if (!done.has(n)) return true;
+      try { rmSync(join(dir, n), { force: true }); } catch { /* held open: passed over all the same */ }
+      return false;
+    })
     .map((n) => [n, readJson<InboxMessage>(join(dir, n))] as const)
     .filter(([n, m]) => !!m && typeof m.id === "string" && ID.test(m.id) && n === `${m.id}.json` && KINDS.has(m.kind) && typeof m.seq === "number" && typeof m.text === "string")
     .map(([, m]) => m!);
@@ -73,6 +94,16 @@ export function changeStoppedBy(root: string, slug: string): string | null {
 /** Clears the change's stop: the step it was for has ended. */
 export function clearChangeStop(root: string, slug: string): void {
   rmSync(changeStopPath(root, slug), { force: true });
+}
+
+/**
+ * A message whose move to delivered/ failed (a file held open on Windows) is done with all the same: its
+ * delivered copy is written there, and the original removed when it can be (waitingIn passes over it
+ * meanwhile, and removes it later). Throws when the copy cannot be written.
+ */
+export function leaveDelivered(root: string, slug: string, m: InboxMessage, how: Done): void {
+  writeJson(join(deliveredDir(root, slug), `${m.id}.json`), { ...m, how, delivered: new Date().toISOString() });
+  try { rmSync(join(inboxDir(root, slug), `${m.id}.json`), { force: true }); } catch { /* see waitingIn */ }
 }
 
 /** Moves a message to delivered/ with how it ended; false when it was gone already (done by someone else). */

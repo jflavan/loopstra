@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readJson, writeJson } from "./chat/threads";
 import { commitRecord } from "./context";
 
 /**
@@ -84,13 +85,47 @@ export function withEntryOnce(current: string, e: ConversationEntry): string {
 }
 
 /**
+ * `.loopstra/runs/<slug>/recorded.json`: the inbox messages whose entries were written to conversation.md,
+ * by message id, with the kind of entry each got. Not in the record itself: an id there would show in
+ * the record people read and every prompt quotes.
+ */
+function recordedPath(root: string, slug: string): string {
+  return join(root, ".loopstra", "runs", slug, "recorded.json");
+}
+
+type EntryKind = ConversationEntry["kind"];
+
+/**
+ * The kind of entry an inbox message got in conversation.md ("message", "redirect", "later"), or null
+ * when it has none: never written, or its text is no longer in the record (a failed write put back).
+ */
+export function recordedAs(root: string, slug: string, id: string, text: string, current = readConversation(root, slug)): EntryKind | null {
+  const kinds = readJson<Record<string, EntryKind>>(recordedPath(root, slug));
+  const kind = kinds && typeof kinds === "object" ? kinds[id] : undefined;
+  return typeof kind === "string" && current.includes(body(text)) ? kind : null;
+}
+
+/** Notes that an inbox message's entry is written. A failure is left: at worst a later try writes the entry again. */
+function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): void {
+  try {
+    const kinds = readJson<Record<string, EntryKind>>(recordedPath(root, slug));
+    writeJson(recordedPath(root, slug), { ...(kinds && typeof kinds === "object" ? kinds : {}), [id]: kind });
+  } catch { /* see above */ }
+}
+
+/**
  * Appends one entry and commits it ("loopstra(<slug>): conversation"). Under commitRecord's lock, so two
  * entries written at once (a message and an answer) both land. `once`: not added when the record already
- * ends with it (an earlier try whose commit failed after writing it; see withEntryOnce).
+ * ends with it (an earlier try whose commit failed after writing it; see withEntryOnce). `id`: the inbox
+ * message the entry is for, whose entry is written once only, wherever it is in the record (see
+ * recordedAs): an earlier try whose commit failed wrote it, and a later entry's commit may have taken it
+ * along. What is on disk is committed either way.
  */
-export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { once?: boolean } = {}): Promise<void> {
+export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { once?: boolean; id?: string } = {}): Promise<void> {
   await commitRecord(root, main, slug, "conversation", async () => {
     const current = readConversation(root, slug);
+    if (opts.id && "text" in e && recordedAs(root, slug, opts.id, e.text, current)) return;
     await Bun.write(conversationPath(root, slug), opts.once ? withEntryOnce(current, e) : withEntry(current, e));
+    if (opts.id) noteRecorded(root, slug, opts.id, e.kind);
   });
 }
