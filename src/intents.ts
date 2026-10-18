@@ -521,7 +521,7 @@ export function planFilesNeeded(status: Status): boolean {
 }
 
 /**
- * Same-file waits, with more than one change at a time: a change at plan-approved waits when its plan
+ * Same-file waits, at every speed.max_parallel_changes: a change at plan-approved waits when its plan
  * lists a file that another change's plan lists, and that change is building, in review or waiting to
  * merge (held or not: its branch exists), or is at plan-approved earlier in the queue, not held and not
  * waiting on its own depends_on. Building both would end in a rebase conflict, which needs an engineer.

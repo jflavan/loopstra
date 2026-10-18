@@ -17,9 +17,8 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   if (!i) return null;
   let cfg: Config | null = null;
   try { cfg = await loadConfig(root); } catch { /* the inbox says what is wrong with the config */ }
-  const lanes = cfg?.speed.max_parallel_changes ?? 1;
   const pollSeconds = cfg?.poll_seconds ?? 60;
-  const holds = await sameFileHolds(lanes, ordered);
+  const holds = await sameFileHolds(ordered);
   const rows = trace.phases(slug);
   // The board's rule, so the two never disagree.
   const busy = new Set(runningRows(trace, loopNow(root, pollSeconds, now)).keys());

@@ -64,7 +64,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
     held: live.held,
   };
   const human = humanGates(cfg);
-  const holds = cfg ? await safely("same-file waits", () => sameFileHolds(cfg.speed.max_parallel_changes, ordered), new Map<string, string>()) : new Map<string, string>();
+  const holds = await safely("same-file waits", () => sameFileHolds(ordered), new Map<string, string>());
   const changes = await safely("changes", () => ordered.map((i) => changeSummary(root, trace, i, ordered, holds.get(i.slug), busy, now, human)), [] as ChangeSummary[]);
   const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);

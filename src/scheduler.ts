@@ -132,8 +132,8 @@ export async function tick(root: string): Promise<TickResult> {
     }
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
-    // With more than one change at a time, a change that would build into another's files waits.
-    const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+    // A change that would build into another's files waits (see sameFileHolds).
+    const holds = await sameFileHolds(ordered);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
@@ -378,15 +378,14 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
 
 /**
  * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
- * None with one change at a time (`lanes` is speed.max_parallel_changes): a cut, since with a remote
- * the watcher may merge a pull request while the one lane builds on the same files; that change is
- * then brought up to date before it merges (see mergeWhenUpToDate), and a clash blocks it. A plan that
- * cannot be read counts as one with no file list. A change past plan-approved also holds the files
- * its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved change's is
- * an earlier build's, which its next build drops).
+ * At every speed.max_parallel_changes, one included: with a remote the watcher looks after a pull
+ * request beside the one lane, and without one a change can wait for a person's merge approval, so
+ * the lane would otherwise build another change on the same files, and the two would clash at merge.
+ * A plan that cannot be read counts as one with no file list. A change past plan-approved also holds
+ * the files its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved
+ * change's is an earlier build's, which its next build drops).
  */
-export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
-  if (lanes <= 1) return new Map();
+export async function sameFileHolds(ordered: Intent[]): Promise<Map<string, string>> {
   const files = new Map<string, string[] | null>();
   const paths = (plan: string | null) => (plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
@@ -461,7 +460,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
     if (out.steps?.length) {
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
+      const holds = await sameFileHolds(ordered);
       await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     }
     if (share) await shareMain(root, cfg, trace);

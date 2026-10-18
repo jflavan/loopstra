@@ -222,7 +222,11 @@ describe("the loop with a GitHub remote", () => {
     mkdirSync(join(s.repo, "intent", "other"), { recursive: true });
     await Bun.write(join(s.repo, "intent", "other", "intent.md"), "---\nstatus: plan-approved\n---\n# Intent: other\n\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n");
     await Bun.write(join(s.repo, "intent", "other", "spec.md"), "# Spec\n\n## Summary\ns\n");
-    await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN);
+    // Other changes files of its own: one that changes add-numbers' files would wait for its pull request to merge.
+    await Bun.write(join(s.repo, "intent", "other", "plan.md"), PLAN.replaceAll("add", "sub"));
+    const fixtures = tempDir("loopstra-fixtures-");
+    mkdirSync(join(fixtures.path, "other"));
+    writeFileSync(join(fixtures.path, "other", "build.jsonl"), fixture("build").replaceAll("add", "sub"));
     // The test command of the next build: GitHub's checks pass while it runs, and it keeps running
     // until the pull request has merged (or 30 seconds have passed).
     await Bun.write(join(s.repo, "flip-checks.ts"), [
@@ -236,7 +240,7 @@ describe("the loop with a GitHub remote", () => {
     ].join("\n"));
     await new Git(s.repo).commitAll("another change");
     await run(["git", "push", "-q", "origin", "main"], s.repo);
-    await withEnv(s.env, async () => {
+    await withEnv({ ...s.env, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
       await tick(s.repo); // build add-numbers
       await tick(s.repo); // review, pull request
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "Waiting for the automatic checks on GitHub." });
@@ -265,6 +269,7 @@ describe("the loop with a GitHub remote", () => {
       }
     });
     s.cleanup();
+    fixtures.cleanup();
   }, 180_000);
 
   test("merged through gh while main here cannot be brought up to date: waits, and finishes once main has the merged commit", async () => {
