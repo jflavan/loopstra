@@ -47,6 +47,15 @@ function mergeRetry(ctx: StepContext): Status {
   return ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review";
 }
 
+/** The commit message for files the merge checks' commands rewrote. */
+const CHECKS_KEPT = "chore: keep changes the checks made";
+
+/** The files this branch's commits of files the merge checks rewrote (CHECKS_KEPT) changed. */
+async function filesKeptFromChecks(ctx: StepContext, wt: Git): Promise<Set<string>> {
+  const log = await wt.run(["log", "--format=", "--name-only", "-z", "--fixed-strings", `--grep=${CHECKS_KEPT}`, `${ctx.cfg.main_branch}..HEAD`]);
+  return new Set(log.out.split(/[\0\n]/).filter(Boolean));
+}
+
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
 type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fail" } & Failure);
 
@@ -83,11 +92,23 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
+        // New files are the commands' output (a coverage folder, a junit xml): the worktree had none
+        // before the checks. Removed, so no later look takes them for unsaved work and commits them.
+        await wt.run(["clean", "-f", "-d", "-q"], true);
         // Files a command rewrote (a lint --fix, a formatter): kept on the branch, so they go to review
-        // with the rest, and no later rebase or merge meets them unsaved.
-        if (await wt.isDirty()) {
-          const kept = await saveWork(ctx, wt, "chore: keep changes the checks made");
-          if (!kept.ok) return { result: "fail", evidence: kept.detail, payload: kept };
+        // with the rest, and no later rebase or merge meets them unsaved. Files kept this way before
+        // and rewritten again change on every run (a report with a timestamp): they are put back, or
+        // each round would bring another.
+        const rewritten = await wt.changedTrackedFiles();
+        if (rewritten.length) {
+          const keptBefore = await filesKeptFromChecks(ctx, wt);
+          if (rewritten.every((f) => keptBefore.has(f))) {
+            await wt.run(["checkout", "HEAD", "--", ...rewritten]);
+            ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `put back files the checks rewrite on every run: ${rewritten.join(", ")}` });
+          } else {
+            const kept = await saveWork(ctx, wt, CHECKS_KEPT, { tracked: true });
+            if (!kept.ok) return { result: "fail", evidence: kept.detail, payload: kept };
+          }
         }
         const changed = (await wt.headSha()) !== before;
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };

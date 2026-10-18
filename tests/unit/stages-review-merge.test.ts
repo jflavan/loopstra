@@ -634,4 +634,26 @@ describe("merge", () => {
     expect(phaseNames(trace)).toContain("review-2");
     trace.close(); repo.cleanup();
   });
+
+  test("a lint command that writes a fresh report on every run is merged after one more review, and its new files are not committed", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    // A tracked report with a timestamp, rewritten on every run, and a new file each run.
+    const stamp = 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync("out", { recursive: true });\nwriteFileSync("out/report.txt", `generated ${Date.now()} ${Math.random()}\\n`);\nwriteFileSync("out/run.txt", "new\\n");\n';
+    await Bun.write(join(repo.path, "stamp.ts"), stamp);
+    await Bun.write(join(repo.path, "out", "report.txt"), "generated never\n");
+    const config = await Bun.file(configPath(repo.path)).text();
+    await Bun.write(configPath(repo.path), config.replace("commands:\n", `commands:\n  lint: bun "${join(repo.path, "stamp.ts").replace(/\\/g, "/")}"\n`));
+    await new Git(repo.path).commitAll("a lint that writes a report");
+    const { ctx, trace } = await openRepo(repo.path);
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(phaseNames(trace)).toContain("review-2");
+    expect(phaseNames(trace)).not.toContain("review-3");
+    expect(await onMain(repo.path, "out/run.txt")).toBe(false);
+    const putBack = trace.lastEvents("add-numbers", 200).filter((e) => e.type === "command" && e.payload.includes("out/report.txt"));
+    expect(putBack.length).toBe(1);
+    trace.close(); repo.cleanup();
+  });
 });

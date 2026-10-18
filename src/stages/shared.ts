@@ -55,13 +55,14 @@ export async function artifacts(ctx: StepContext): Promise<Artifacts> {
 }
 
 /**
- * Commits everything in the worktree, but only after confirming it is on the intent branch:
- * a commit anywhere else could put unreviewed work on another branch.
+ * Commits everything in the worktree (`tracked`: only changes to files already tracked), but only
+ * after confirming it is on the intent branch: a commit anywhere else could put unreviewed work on
+ * another branch.
  */
-export async function saveWork(ctx: StepContext, wt: Git, message: string): Promise<{ ok: true } | Failure> {
+export async function saveWork(ctx: StepContext, wt: Git, message: string, opts: { tracked?: boolean } = {}): Promise<{ ok: true } | Failure> {
   try {
     await wt.assertBranch(ctx.branch);
-    await wt.commitAll(message);
+    await (opts.tracked ? wt.commitTracked(message) : wt.commitAll(message));
     return { ok: true };
   } catch (e) {
     passOn(e);

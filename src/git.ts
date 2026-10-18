@@ -311,6 +311,19 @@ export class Git {
     return true;
   }
 
+  /** Commits every change to a tracked file, as the runtime; new files are left out. False when there was nothing to commit. */
+  async commitTracked(message: string): Promise<boolean> {
+    await this.run(["add", "-u"]);
+    if ((await this.run(["diff", "--cached", "--quiet"], true)).code === 0) return false;
+    await this.runtime("commit", ["-q", "-m", message]);
+    return true;
+  }
+
+  /** Tracked files changed in the checkout and not committed (staged or not). New files are left out. */
+  async changedTrackedFiles(): Promise<string[]> {
+    return (await this.run(["diff", "--name-only", "-z", "HEAD"])).out.split("\0").filter(Boolean);
+  }
+
   /**
    * Commits only the given paths, as the runtime. Anything else a person has staged stays staged
    * and out of the commit. False when the paths have nothing to commit. `finish`: once begun, a stop
