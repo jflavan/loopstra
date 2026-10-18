@@ -263,15 +263,16 @@ export class Git {
    * Removes a worktree, even a locked one (--force twice: a `worktree add` killed part way leaves its
    * "initializing" lock behind), then prunes git's records of worktrees whose folder is gone.
    */
-  async worktreeRemove(path: string): Promise<void> {
+  async worktreeRemove(path: string, opts: { cleanup?: boolean } = {}): Promise<void> {
+    const cleanup = opts.cleanup === true;
     await worktreeAdmin(this, async () => {
-      const r = await this.run(["worktree", "remove", "--force", "--force", path], true);
+      const r = await this.run(["worktree", "remove", "--force", "--force", path], { allowFail: true, cleanup });
       if (r.code !== 0) {
         // Windows can hold a brief open handle on a just-written file; retry once after a short wait.
         await new Promise((resolve) => setTimeout(resolve, 200));
-        await this.run(["worktree", "remove", "--force", "--force", path]);
+        await this.run(["worktree", "remove", "--force", "--force", path], { cleanup });
       }
-      await this.run(["worktree", "prune"]);
+      await this.run(["worktree", "prune"], { cleanup });
     });
   }
 
@@ -461,17 +462,20 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
  * Removes a worktree directory however it can: git first, then the file system, then git's record
  * of it, unlocked first in case a `worktree add` killed part way left it locked.
  */
-export async function removeWorktree(git: Git, dir: string): Promise<void> {
+export async function removeWorktree(git: Git, dir: string, opts: { cleanup?: boolean } = {}): Promise<void> {
+  const cleanup = opts.cleanup === true;
   if (existsSync(dir)) {
     try {
-      await git.worktreeRemove(dir);
-    } catch {
+      await git.worktreeRemove(dir, { cleanup });
+    } catch (e) {
+      // A stop request is not a failed removal: the folder goes, and the stop is seen by what comes next.
+      if (e instanceof StopRequested && !cleanup) throw e;
       rmSync(dir, { recursive: true, force: true });
     }
   }
   await worktreeAdmin(git, async () => {
-    await git.run(["worktree", "unlock", dir], true);
-    await git.run(["worktree", "prune"], true);
+    await git.run(["worktree", "unlock", dir], { allowFail: true, cleanup });
+    await git.run(["worktree", "prune"], { allowFail: true, cleanup });
   });
 }
 

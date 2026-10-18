@@ -73,7 +73,7 @@ export class StepContext {
     this.reading = null;
     if (!made) return;
     const dir = await made.catch(() => null);
-    if (dir) await removeWorktree(this.git, dir);
+    if (dir) await removeWorktree(this.git, dir, { cleanup: true });
   }
 }
 
