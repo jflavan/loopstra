@@ -1,6 +1,6 @@
 import type { SlackTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
-import { chunkText, LiveAccess, Reconnector, mentionList, type Access } from "./shared";
+import { chunkText, LiveAccess, Reconnector, mentionList } from "./shared";
 
 /** The Slack Web API; tests point it at a stub server. */
 export const SLACK_API_ENV = "LOOPSTRA_SLACK_API";
@@ -100,18 +100,18 @@ export class SlackTransport implements Transport {
     await this.onEvent(frame.payload.event);
   }
 
-  /** Whether an event is a person's message in the configured channel, from someone allowed to chat. */
-  private wanted(ev: SlackEvent, access: Access): ev is Required<Pick<SlackEvent, "user" | "channel" | "ts">> & SlackEvent {
+  /** Whether an event is a person's message in the configured channel (who may chat is read after). */
+  private wanted(ev: SlackEvent): ev is Required<Pick<SlackEvent, "user" | "channel" | "ts">> & SlackEvent {
     if (ev.type !== "message" && ev.type !== "app_mention") return false;
     if (ev.subtype || ev.bot_id || !ev.user || !ev.ts || ev.user === this.botUser) return false;
-    if (ev.channel !== this.cfg.channel) return false;
-    if (access.allow.length && !access.allow.includes(ev.user)) return false;
-    return true;
+    return ev.channel === this.cfg.channel;
   }
 
   async onEvent(ev: SlackEvent): Promise<void> {
+    // The config is read only for a message to this bot: the workspace's other events are not.
+    if (!this.wanted(ev)) return;
     const access = await this.access.read();
-    if (!access || !this.wanted(ev, access)) return;
+    if (!access || (access.allow.length && !access.allow.includes(ev.user))) return;
     // A mention arrives twice (as a message and as app_mention): once is enough.
     if (this.seen.includes(ev.ts)) return;
     this.seen.push(ev.ts);

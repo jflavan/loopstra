@@ -245,6 +245,23 @@ describe("Slack", () => {
     } finally { r.cleanup(); }
   });
 
+  test("the config is read only for a person's message in the bot's channel", async () => {
+    const r = await chatRepo({ config: SLACK([], []) });
+    try {
+      const logged: string[] = [];
+      const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env: { LOOPSTRA_SLACK_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      (slack as unknown as { onMessage: unknown }).onMessage = async () => {};
+      // Taken out of the config: a read of it says so in the log.
+      await setChat(r.root, "");
+      await slack.onEvent({ type: "message", user: "U1", channel: "C2", text: "elsewhere", ts: "1" });
+      await slack.onEvent({ type: "message", bot_id: "B1", user: "U9", channel: "C1", text: "a bot", ts: "2" });
+      await slack.onEvent({ type: "reaction_added", user: "U1", channel: "C1", ts: "3" });
+      expect(logged).toEqual([]);
+      await slack.onEvent({ type: "message", user: "U1", channel: "C1", text: "hi", ts: "4" });
+      expect(logged).toHaveLength(1);
+    } finally { r.cleanup(); }
+  });
+
   test("a missing token is a plain error at start", async () => {
     const slack = new SlackTransport({ token_env: "NOPE_APP", bot_token_env: "NOPE_BOT", channel: "C1", allow: [], acceptors: [] }, { root: ".", env: {} });
     await expect(slack.start(async () => {})).rejects.toThrow("Slack needs its app-level token in the environment variable NOPE_APP.");
@@ -442,6 +459,23 @@ describe("Discord", () => {
       await say("2");
       expect(got).toEqual([["2", true]]);
       expect(logged).toEqual(["Discord: chat.transports.discord is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat."]);
+    } finally { r.cleanup(); }
+  });
+
+  test("the config is read only for a person's message in the bot's channel or threads", async () => {
+    const r = await chatRepo({ config: DISCORD([], []) });
+    try {
+      const logged: string[] = [];
+      const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      (discord as unknown as { onMessage: unknown }).onMessage = async () => {};
+      writeJson(join(chatDir(r.root), "discord-threads.json"), ["100"]);
+      // Taken out of the config: a read of it says so in the log.
+      await setChat(r.root, "");
+      await discord.onDiscordMessage({ id: "m1", channel_id: "999", content: "elsewhere", author: { id: "1" } });
+      await discord.onDiscordMessage({ id: "m2", channel_id: "500", content: "a bot", author: { id: "8", bot: true } });
+      expect(logged).toEqual([]);
+      await discord.onDiscordMessage({ id: "m3", channel_id: "100", content: "hi", author: { id: "1" } });
+      expect(logged).toHaveLength(1);
     } finally { r.cleanup(); }
   });
 });

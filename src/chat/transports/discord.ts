@@ -170,10 +170,11 @@ export class DiscordTransport implements Transport {
 
   async onDiscordMessage(m: DiscordMessage): Promise<void> {
     if (!this.onMessage || !m?.author || m.author.bot || m.author.id === this.botUser) return;
-    const access = await this.access.read();
-    if (!access || (access.allow.length && !access.allow.includes(m.author.id))) return;
+    // The config is read only for a message to this bot: the server's other channels are not.
     const isOurs = m.channel_id === this.cfg.channel || this.knownThreads().includes(m.channel_id);
     if (!isOurs) return;
+    const access = await this.access.read();
+    if (!access || (access.allow.length && !access.allow.includes(m.author.id))) return;
     const text = this.withoutBotMention(m.content ?? "");
     // Checked before a thread is made, so a bot without the Message Content intent does not open an empty thread per message.
     if (!text) {
