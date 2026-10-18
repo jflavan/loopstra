@@ -656,4 +656,50 @@ describe("merge", () => {
     expect(putBack.length).toBe(1);
     trace.close(); repo.cleanup();
   });
+
+  /**
+   * A lint that upper-cases notes.txt, committed on main with `notes` as its first version there,
+   * and the branch brought up to date with it, so the merge checks need no rebase unless main moves.
+   */
+  async function withUpperCaser(repo: string, notes: string) {
+    await Bun.write(join(repo, "upper.ts"), 'import { existsSync, readFileSync, writeFileSync } from "node:fs";\nif (existsSync("notes.txt")) { const t = readFileSync("notes.txt", "utf8"); if (t !== t.toUpperCase()) writeFileSync("notes.txt", t.toUpperCase()); }\n');
+    await Bun.write(join(repo, "notes.txt"), notes);
+    const config = await Bun.file(configPath(repo)).text();
+    await Bun.write(configPath(repo), config.replace("commands:\n", `commands:\n  lint: bun "${join(repo, "upper.ts").replace(/\\/g, "/")}"\n`));
+    await new Git(repo).commitAll("a lint that upper-cases notes.txt");
+    const opened = await openRepo(repo);
+    const wt = new Git(opened.ctx.worktreeDir);
+    await wt.run(["rebase", "-q", "main"]);
+    return { ...opened, wt };
+  }
+
+  test("a lint reformat of code a fix changed after the checks' earlier commit of that file is kept, not put back", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace, wt } = await withUpperCaser(repo.path, "FIRST\n");
+    // An earlier round's lint reformatted notes.txt and it was kept; then a fix changed it again.
+    await Bun.write(join(ctx.worktreeDir, "notes.txt"), "FIRST\nSECOND\n");
+    await wt.commitAll("chore: keep changes the checks made");
+    await Bun.write(join(ctx.worktreeDir, "notes.txt"), "FIRST\nSECOND\nthird\n");
+    await wt.commitAll("loopstra(add-numbers): fix");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:notes.txt"]).then((r) => r.out)).toBe("FIRST\nSECOND\nTHIRD\n");
+    trace.close(); repo.cleanup();
+  });
+
+  test("a lint reformat of main's edits a rebase brought to a file the checks kept before is kept, not put back", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace, wt } = await withUpperCaser(repo.path, "A\nB\nC\nD\nE\n");
+    await Bun.write(join(ctx.worktreeDir, "notes.txt"), "A2\nB\nC\nD\nE\n");
+    await wt.commitAll("chore: keep changes the checks made");
+    // Main moves on with an edit the lint has not seen, to the same file.
+    await Bun.write(join(repo.path, "notes.txt"), "A\nB\nC\nD\ne\n");
+    await new Git(repo.path).commitAll("an edit on main");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:notes.txt"]).then((r) => r.out)).toBe("A2\nB\nC\nD\nE\n");
+    trace.close(); repo.cleanup();
+  });
 });

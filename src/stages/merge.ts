@@ -54,10 +54,17 @@ function mergeRetry(ctx: StepContext): Status {
 /** The commit message for files the merge checks' commands rewrote. */
 const CHECKS_KEPT = "chore: keep changes the checks made";
 
-/** The files this branch's commits of files the merge checks rewrote (CHECKS_KEPT) changed. */
-async function filesKeptFromChecks(ctx: StepContext, wt: Git): Promise<Set<string>> {
-  const log = await wt.run(["log", "--format=", "--name-only", "-z", "--fixed-strings", `--grep=${CHECKS_KEPT}`, `${ctx.cfg.main_branch}..HEAD`]);
-  return new Set(log.out.split(/[\0\n]/).filter(Boolean));
+/**
+ * Whether each file was last changed on this branch by a commit of files the merge checks rewrote
+ * (CHECKS_KEPT). A file a fix or the build changed after that commit holds code the checks have not
+ * rewritten yet.
+ */
+async function lastKeptFromChecks(ctx: StepContext, wt: Git, files: string[]): Promise<boolean> {
+  for (const f of files) {
+    const last = await wt.run(["log", "-1", "--format=%s", `${ctx.cfg.main_branch}..HEAD`, "--", `:(literal)${f}`]);
+    if (last.out.trim() !== CHECKS_KEPT) return false;
+  }
+  return true;
 }
 
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
@@ -71,13 +78,18 @@ type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fai
 async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
+  // The up-to-date check brought in main's edits, which the checks have not rewritten yet.
+  let rebased = false;
   // A failing check hands back the failure to record; the tests check says whether it committed fixes.
   const checks: Check<Failure | { ok: true; changed: boolean }>[] = [
     {
       name: "up-to-date",
       run: async () => {
         if (await ctx.git.isAncestor(main, ctx.branch)) return { result: "pass", evidence: "branch contains main" };
-        if (await wt.rebaseOnto(main)) return { result: "pass", evidence: "rebased onto main" };
+        if (await wt.rebaseOnto(main)) {
+          rebased = true;
+          return { result: "pass", evidence: "rebased onto main" };
+        }
         return {
           result: "fail", evidence: "rebase onto main hit conflicts",
           payload: { ok: false, note: UPDATE_FAILED_NOTE, detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted` },
@@ -100,13 +112,12 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // before the checks. Removed, so no later look takes them for unsaved work and commits them.
         await wt.run(["clean", "-f", "-d", "-q"], true);
         // Files a command rewrote (a lint --fix, a formatter): kept on the branch, so they go to review
-        // with the rest, and no later rebase or merge meets them unsaved. Files kept this way before
-        // and rewritten again change on every run (a report with a timestamp): they are put back, or
-        // each round would bring another.
+        // with the rest, and no later rebase or merge meets them unsaved. Files last changed by such a
+        // commit and rewritten again, with nothing new brought in by a rebase, change on every run (a
+        // report with a timestamp): they are put back, or each round would bring another.
         const rewritten = await wt.changedTrackedFiles();
         if (rewritten.length) {
-          const keptBefore = await filesKeptFromChecks(ctx, wt);
-          if (rewritten.every((f) => keptBefore.has(f))) {
+          if (!rebased && await lastKeptFromChecks(ctx, wt, rewritten)) {
             await wt.run(["checkout", "HEAD", "--", ...rewritten]);
             ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `put back files the checks rewrite on every run: ${rewritten.join(", ")}` });
           } else {
