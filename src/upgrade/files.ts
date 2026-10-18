@@ -33,15 +33,16 @@ const isCrlf = (s: string) => (s.match(/\r\n/g)?.length ?? 0) * 2 > (s.match(/\n
 /**
  * A 3-way merge with `git merge-file`, all three as `\n` text: the merged text, and whether it has
  * conflict markers. git exits with the number of conflicts (1 to 127) or, when it cannot merge at
- * all, with a code above 127; that is thrown.
+ * all, with a code above 127; that is thrown. `git` is the executable to run (tests name one that
+ * does not exist).
  */
-export async function mergeText(theirs: string, base: string, next: string): Promise<{ text: string; conflict: boolean }> {
+export async function mergeText(theirs: string, base: string, next: string, git = "git"): Promise<{ text: string; conflict: boolean }> {
   const dir = mkdtempSync(join(tmpdir(), "loopstra-merge-"));
   try {
     const [a, o, b] = [join(dir, "theirs"), join(dir, "base"), join(dir, "new")];
     writeFileSync(a, lf(theirs)); writeFileSync(o, lf(base)); writeFileSync(b, lf(next));
     const r = await spawnBounded({
-      cmd: ["git", "merge-file", "-p", "-L", "yours", "-L", "base", "-L", "loopstra", a, o, b],
+      cmd: [git, "merge-file", "-p", "-L", "yours", "-L", "base", "-L", "loopstra", a, o, b],
       cwd: dir, timeoutMs: MERGE_TIMEOUT_MS, onStop: "ignore",
     });
     if (!r.started) throw new Error(`git merge-file could not be started: ${r.err}`);

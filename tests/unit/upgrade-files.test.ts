@@ -145,10 +145,6 @@ describe("mergeText", () => {
   });
 
   test("git that cannot be started is an error, not a conflict", async () => {
-    const saved = process.env.PATH;
-    process.env.PATH = "";
-    try {
-      await expect(mergeText("a\n", "b\n", "c\n")).rejects.toThrow("git merge-file could not be started");
-    } finally { process.env.PATH = saved; }
+    await expect(mergeText("a\n", "b\n", "c\n", "loopstra-no-such-git")).rejects.toThrow("git merge-file could not be started");
   });
 });
