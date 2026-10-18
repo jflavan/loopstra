@@ -43,7 +43,12 @@ export function Drawer() {
   );
 }
 
-function Chat({ about }: { about: About | null }) {
+/**
+ * The conversation with the orchestrator, in the drawer and on the Agents screen. There is one thread
+ * per tab, so both show the same conversation. `autoFocus`: the cursor goes to the box when it
+ * opens; either way it goes there when `about` changes to something.
+ */
+export function Chat({ about, autoFocus = true }: { about: About | null; autoFocus?: boolean }) {
   const [thread] = useState(threadId);
   const [lines, setLines] = useState<Line[]>([]);
   const [busy, setBusy] = useState(false);
@@ -93,8 +98,12 @@ function Chat({ about }: { about: About | null }) {
     const timer = setInterval(refresh, 1500);
     return () => clearInterval(timer);
   }, []);
-  // The cursor is in the box when the drawer opens, and when a button elsewhere reopens it for another change.
-  useEffect(() => { box.current?.focus(); }, [about?.slug, about?.title]);
+  // The cursor is in the box when the drawer opens, and when a button elsewhere points it at another change or session.
+  const opened = useRef(false);
+  useEffect(() => {
+    if (autoFocus || (opened.current && about)) box.current?.focus();
+    opened.current = true;
+  }, [about?.slug, about?.title, about?.seq]);
   useEffect(() => { log.current?.scrollTo(0, log.current.scrollHeight); }, [lines, busy]);
 
   const send = async () => {
