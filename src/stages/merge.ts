@@ -577,7 +577,7 @@ async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): P
     // keep them on the branch and review again rather than merge them unseen, or let them stop the rebase.
     // Never put back: they could be a person's.
     const again = await editedAgain(wt);
-    if (again.length) return block(ctx, `These files change every time the review's after command runs: ${again.join(", ")}. Add them to .gitignore or change the command, then set status to reviewing.`);
+    if (again.length) return block(ctx, `These files change every time the review's after command runs: ${again.join(", ")}. Change the command so it leaves them alone, or stop tracking them (git rm --cached, then add them to .gitignore); then set status to reviewing.`);
     const kept = await saveWork(ctx, wt, KEEP_UNFINISHED);
     if (!kept.ok) return block(ctx, kept.note, kept);
     return anotherRound(ctx);
