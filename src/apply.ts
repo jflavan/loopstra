@@ -233,8 +233,9 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   }
   // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
   if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
-  // An answer that never landed must not resume the session: the question waits again.
-  if (req.kind === "answer" && slugs.includes(req.slug)) takeBackAnswer(root, req.slug);
+  // An answer that never landed must not resume the session: the question waits again. Only when intent.md
+  // was put back: one a person edited since is kept without its question line, so the answer stays with it.
+  if (req.kind === "answer" && slugs.includes(req.slug) && !kept.includes(req.slug)) takeBackAnswer(root, req.slug);
   return kept;
 }
 

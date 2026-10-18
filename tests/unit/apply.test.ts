@@ -622,6 +622,30 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("an answer given up on whose intent.md a person edited since keeps the stored answer: the question line stays gone", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      const file = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(file, `${readFileSync(file, "utf8")}\nA person's own line.\n`);
+      failedLongAgo(r.root, 5);
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect(readFileSync(file, "utf8")).toContain("A person's own line.");
+      expect((await readIntent(r.root, "a")).file.frontmatter.question).toBe("");
+      expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a hold of a held change, or a release of one not held, is refused and traced", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x").replace("status: building", "status: building\nhold: legal"), b: INTENT("building", "y") } });
     try {
