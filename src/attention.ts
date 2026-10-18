@@ -1,14 +1,15 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
-import { dependencyWait, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
 import type { Trace } from "./trace";
 
 /** One thing a person should do or know. The same list in `loopstra status` and the dashboard. */
 export interface AttentionItem {
-  kind: "paused" | "health" | "sync" | "config" | "blocked" | "held" | "unreadable" | "waiting";
+  kind: "paused" | "health" | "sync" | "config" | "blocked" | "held" | "question" | "unreadable" | "waiting";
   /** The kind in plain words, e.g. "Blocked" or "Waiting for you". */
   label: string;
   /** The change it is about; null for the repository as a whole. */
@@ -20,7 +21,7 @@ export interface AttentionItem {
 
 export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
   paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings",
-  blocked: "Blocked", held: "Held", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
+  blocked: "Blocked", held: "Held", question: "Has a question", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
 
 /** What the tests on main say, in plain words: the newest check, and whether main is red. */
@@ -36,6 +37,17 @@ export function healthView(trace: Trace, now: Date): { result: string; ts: strin
     : red ? `The tests on main are failing (checked ${when}).`
     : `The last check of main could not run (${when}). An engineer can find the details in the trace.`;
   return { result: red ? "fail" : newest.result, ts: newest.ts, text };
+}
+
+/** What an open question asks, in plain words, and where to answer it. Parts with no value are left out. */
+function questionWhat(q: Asked | null): string {
+  const answer = "Answer it in the console, or tell the orchestrator.";
+  if (!q) return `Read conversation.md for the question. ${answer}`;
+  const end = (s: string) => s.replace(/[.\s]+$/, "");
+  const parts = [`${q.phase} asks: ${q.text.trim()}`];
+  if (q.why.trim()) parts.push(`Why: ${end(q.why.trim())}.`);
+  if (q.options.length) parts.push(`Options: ${q.options.join(" · ")}.`);
+  return `${parts.join(" ")} ${answer}`;
 }
 
 /** For each gate a person may sit on: the document they read and the status that approves it. */
@@ -85,6 +97,11 @@ export async function attention(root: string, config: Config | { problem: string
     const s = i.file.frontmatter.status;
     if (!heldNote(i) || s === "done" || s === "closed") continue;
     add("held", i.slug, i.file.title || i.slug, `${heldNote(i)} The loop starts no step for it until it is released, in the console or by removing the hold line from intent.md.`);
+  }
+  for (const i of intents) {
+    const s = i.file.frontmatter.status;
+    if (!hasQuestion(i) || s === "done" || s === "closed") continue;
+    add("question", i.slug, i.file.title || i.slug, questionWhat(readQuestion(root, i.slug)?.open ?? null));
   }
   for (const u of scan.unreadable) add("unreadable", u.slug, u.slug, u.problem);
   const human = humanGates(cfg);

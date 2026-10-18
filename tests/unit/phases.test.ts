@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
-import { AssistantUnavailable, StopRequested } from "../../src/stop";
+import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo } from "../helpers";
+import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo, TEMPLATES } from "../helpers";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -179,6 +179,57 @@ describe("agentPhase tools and prompt", () => {
     ctx.cfg.claude.allowed_tools = ["Read", "Bash"];
     expect(commandsFor(ctx, "build")).toBe("any command");
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("conversation.md in the prompt", () => {
+  const RECORD = "# Conversation\n\n## 2026-10-17 09:00 · John (the dashboard) → build\nUse the CSV parser.\n";
+  const design = { name: "design" as const, model: "default" as const, permissionMode: "default" as const, tools: "read" as const, vars: { intent: "i" } };
+  const prompt = (repo: { path: string }, dir: string) => Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", dir, "prompt.md")).text();
+  const shipped = (repo: { path: string }, name: string) => copyFileSync(join(TEMPLATES, `${name}.md`), join(repo.path, "loopstra", "prompts", `${name}.md`));
+
+  test("a work session's prompt has what people told earlier sessions; a check's does not", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      shipped(repo, "design");
+      shipped(repo, "spec-check");
+      await Bun.write(join(repo.path, "intent", "x", "conversation.md"), RECORD);
+      await agentPhase(ctx, design);
+      await agentPhase(ctx, { ...design, name: "spec-check", vars: { intent: "i", spec: "s" } });
+      const work = await prompt(repo, "1-design");
+      expect(work).toContain(`${CONVERSATION_HEADING}\n\n${RECORD}`);
+      expect(work.split("Use the CSV parser.")).toHaveLength(2);
+      const judged = await prompt(repo, "2-spec-check");
+      expect(judged).not.toContain("Use the CSV parser.");
+      expect(judged).not.toContain(CONVERSATION_HEADING);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("with no record, the prompt says (none) there", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      shipped(repo, "design");
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "1-design")).toContain(`${CONVERSATION_HEADING}\n\n(none)\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a repository prompt without {{conversation}} gets the record at its end, and nothing when there is none", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Write the spec for {{slug}}.\n");
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "1-design")).toBe(`Write the spec for x.\n\n${CONTRACT}\n`);
+      await Bun.write(join(repo.path, "intent", "x", "conversation.md"), RECORD);
+      await agentPhase(ctx, design);
+      expect(await prompt(repo, "2-design")).toBe(`Write the spec for x.\n\n${CONVERSATION_HEADING}\n\n${RECORD}\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
   });
 });
 
@@ -363,6 +414,20 @@ describe("codePhase", () => {
     if (!odd.ok) expect(odd.detail).toContain("null");
     trace.close(); repo.cleanup();
   });
+
+  test("a stopped session or a question inside passes on: the row ends interrupted, and the step ends quietly", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await expect(codePhase(ctx, "merge", async () => { throw new SessionStopped("John"); })).rejects.toBeInstanceOf(SessionStopped);
+      await expect(codePhase(ctx, "checks", async () => { throw new QuestionAsked("fix", "Keep the old API?"); })).rejects.toBeInstanceOf(QuestionAsked);
+      const phases = trace.phases("x");
+      expect(phases.map((p) => p.status)).toEqual(["interrupted", "interrupted"]);
+      expect(phases[0]?.error).toBe("stopped by John");
+      expect(phases[1]?.error).toBe("the fix session asked: Keep the old API?");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
 });
 
 describe("alongside", () => {
@@ -398,6 +463,23 @@ describe("alongside", () => {
     // A stop request from either wins, so the loop stops instead of pausing.
     const stop = await alongside(ctx, async () => { throw new AssistantUnavailable("down"); }, { what: "x", run: async () => { throw new StopRequested(); }, wanted: () => true }).catch((e: unknown) => e);
     expect(stop).toBeInstanceOf(StopRequested);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a person's stop of extra work ends the step quietly once both settled; a stop request still wins; a question from it is dropped", async () => {
+    const { repo, ctx, trace } = await setup();
+    let mainEnded = false;
+    const stopped = await alongside(ctx, async () => { await tick(30); mainEnded = true; return 7; }, { what: "plan ahead", run: async () => { throw new SessionStopped("John"); }, wanted: () => true }).catch((e: unknown) => e);
+    expect(stopped).toBeInstanceOf(SessionStopped);
+    expect((stopped as SessionStopped).by).toBe("John");
+    expect(mainEnded).toBe(true);
+    const stop = await alongside(ctx, async () => { throw new StopRequested(); }, { what: "x", run: async () => { throw new SessionStopped("John"); }, wanted: () => true }).catch((e: unknown) => e);
+    expect(stop).toBeInstanceOf(StopRequested);
+    const later = await alongsideFirst(ctx, async () => "pass", { what: "plan ahead", run: async () => { await tick(20); throw new SessionStopped("Ana"); }, wanted: () => true });
+    expect(await later.rest().catch((e: unknown) => e)).toBeInstanceOf(SessionStopped);
+    // A question from work run alongside is not recorded: that work is just not used (decision 7).
+    const [m, x] = await alongside(ctx, async () => 7, { what: "plan ahead", run: async () => { throw new QuestionAsked("plan", "Which?"); }, wanted: () => true });
+    expect([m, x]).toEqual([7, null]);
     trace.close(); repo.cleanup();
   });
 

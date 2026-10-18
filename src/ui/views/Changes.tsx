@@ -68,6 +68,7 @@ function Card({ c }: { c: ChangeSummary }) {
     <Link href={`/c/${c.slug}`} class={`ccard${c.running ? " running" : ""}`}>
       <span class="ccard-title">{c.running && <span class="pulse" role="img" aria-label="running" />}{c.title}</span>
       <span class="ccard-meta"><span><span class={`prio ${c.priority}`}>{c.priority}</span>{c.held && <> <span class="badge warn" title={c.held}>Held</span></>}</span><span>{c.plain}</span></span>
+      {c.question && <span class="badge warn" title={c.question.text}>Has a question</span>}
       <span class="ccard-meta"><span>{c.inStatus ? `for ${c.inStatus}` : ""}</span><span>{usd(c.costUsd)}</span></span>
       {c.waiting && <span class="badge warn">{c.waiting}</span>}
     </Link>
@@ -84,7 +85,7 @@ function ListView({ items }: { items: ChangeSummary[] }) {
           {items.map((c) => (
             <tr key={c.slug}>
               <td><Link href={`/c/${c.slug}`}><b>{c.title}</b></Link></td>
-              <td><span class={`prio ${c.priority}`}>{c.priority}</span>{c.held && <> <span class="badge warn" title={c.held}>Held</span></>}</td>
+              <td><span class={`prio ${c.priority}`}>{c.priority}</span>{c.held && <> <span class="badge warn" title={c.held}>Held</span></>}{c.question && <> <span class="badge warn" title={c.question.text}>Has a question</span></>}</td>
               <td>{c.plain}</td>
               <td>{c.inStatus ?? ""}</td>
               <td class="num">{usd(c.costUsd)}</td>

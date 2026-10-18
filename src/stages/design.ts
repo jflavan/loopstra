@@ -31,7 +31,7 @@ export function runDesignStep(ctx: StepContext): Promise<StepResult> {
   return runArtifactStep(ctx, DESIGN);
 }
 
-/** Intake, before the spec is written: a question for the owner blocks; the priority is recorded when the owner stated none. */
+/** Intake, before the spec is written: the priority is recorded when the owner stated none. A question for the owner asks it (see agentPhase). */
 async function intake(ctx: StepContext): Promise<StepResult> {
   const r = await agentPhase(ctx, {
     name: "intake", model: "cheap", permissionMode: "default", tools: "read",
@@ -39,7 +39,6 @@ async function intake(ctx: StepContext): Promise<StepResult> {
   });
   if (!r.ok) return block(ctx, r.note);
   // Missing sections never get here: the scan's consistency check blocks on them first.
-  if (r.envelope.question.trim()) return block(ctx, `${r.envelope.question.trim()} Update intent.md, then set status to accepted.`);
   await writeIntentPriority(ctx, r.envelope.priority);
   return { ok: true };
 }

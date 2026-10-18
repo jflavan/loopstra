@@ -18,13 +18,19 @@ const requirement = z.object({
   evidence: z.string(),
 });
 
+/** A question for a person (only when the decision is theirs and there is no sensible default). Optional: absent means none. */
+const question = z.object({ text: z.string(), why: z.string(), options: z.array(z.string()).optional() }).optional();
+
 /** The files a change touched come from git, never from the agent's own list. */
 const codeChange = base.extend({
   commit_message: z.string(),
 });
 
+/** Build and revise may ask. Fix and reconcile carry on the build session, which could ask already, so they never do. */
+const askingCodeChange = codeChange.extend({ question });
+
 export const Envelopes = {
-  /** Missing sections never reach intake: the consistency check blocks on them first. */
+  /** Missing sections never reach intake: the consistency check blocks on them first. A non-empty question asks it (see src/questions.ts). */
   intake: base.extend({
     priority: z.enum(["low", "normal", "high", "urgent"]),
     question: z.string(),
@@ -32,6 +38,7 @@ export const Envelopes = {
   /** Concerns are a heading inside spec_markdown, where the owner reads them. */
   design: base.extend({
     spec_markdown: z.string(),
+    question,
   }),
   "spec-check": base.extend({
     approved: z.boolean(),
@@ -40,12 +47,13 @@ export const Envelopes = {
   /** The files the plan touches are read from its "Files that change" list, the one source. */
   plan: base.extend({
     plan_markdown: z.string(),
+    question,
   }),
   "plan-challenge": base.extend({
     approved: z.boolean(),
     concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean() })),
   }),
-  build: codeChange,
+  build: askingCodeChange,
   fix: codeChange,
   reconcile: base.extend({ plan_markdown: z.string() }),
   verify: base.extend({
@@ -57,7 +65,7 @@ export const Envelopes = {
     findings: z.array(finding),
     review_markdown: z.string(),
   }),
-  revise: codeChange,
+  revise: askingCodeChange,
   "done-check": base.extend({
     /** One item per Done when criterion. needs-person: it cannot be judged from the repository. */
     evidence: z.array(z.object({ criterion: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })),

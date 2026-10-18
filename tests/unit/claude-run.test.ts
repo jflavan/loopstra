@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, runPhase, unavailable } from "../../src/claude";
-import { FAKE_CLAUDE as FAKE, tempDir } from "../helpers";
+import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, runPhase, unavailable, type SessionControl } from "../../src/claude";
+import { MEANWHILE_HEADING } from "../../src/console/steerable";
+import { MIN_SESSION_USD, USD_PER_MINUTE } from "../../src/budget";
+import { SessionStopped } from "../../src/stop";
+import { until } from "../console-helpers";
+import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, tempDir } from "../helpers";
 
 
 describe("runPhase", () => {
@@ -315,4 +320,340 @@ describe("runPhase", () => {
   test("FAKE_CLAUDE_ENV names the override variable", () => {
     expect(FAKE_CLAUDE_ENV).toBe("LOOPSTRA_CLAUDE_EXECUTABLE");
   });
+});
+
+describe("live sessions", () => {
+  const base = (cwd: string) => ({ cwd, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: [], timeoutMs: 60_000, executable: FAKE });
+  /** The design fixture, held at `gate` after its init line (so the session id is known while it waits). */
+  const heldDesign = (gate: string) => {
+    const [init, ...rest] = fixture("design").split("\n");
+    return [init, JSON.stringify({ type: "fake_action", wait_for: gate }), ...rest].join("\n");
+  };
+
+  test("a message written while the turn runs is answered by its result; the session then ends", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: `${JSON.stringify({ type: "fake_action", wait_for: gate })}\n${fixture("design")}` });
+    try {
+      let ctl: SessionControl | null = null;
+      let detached = false;
+      const run = runPhase({ ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, live: { attach: (c) => { ctl = c; return () => { detached = true; }; } } });
+      await until(() => ctl !== null);
+      await until(() => ctl!.message("cover negatives"));
+      writeFileSync(gate, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      expect((r.structuredOutput as { summary: string }).summary).toBe("heard: cover negatives");
+      // Ended: nothing more can be sent, and the watching is over.
+      expect(ctl!.message("too late")).toBe(false);
+      expect(detached).toBe(true);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("a message that came after the result keeps the session for the turn that answers it, and that result counts", async () => {
+    const t = tempDir();
+    const fixtures = fixtureDir({ design: fixture("design") });
+    const log = join(t.path, "steer.jsonl");
+    try {
+      let ctl: SessionControl | null = null;
+      let sent = false;
+      // Written from the result event itself: after the turn ended, before the runner decides it is final.
+      const run = runPhase({
+        ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_STEER_LOG: log },
+        live: { attach: (c) => { ctl = c; return () => {}; } },
+        onEvent: (e) => { if (e.type === "result" && !sent) { sent = ctl!.message("and zero"); } },
+      });
+      const r = await run;
+      expect(sent).toBe(true);
+      expect(readFileSync(log, "utf8")).toContain("\"queued\"");
+      expect((r.structuredOutput as { summary: string }).summary).toBe("heard: and zero");
+      // The second turn's result carries the process's running total.
+      expect(r.costUsd).toBeCloseTo(0.1);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("stop ends the session and throws SessionStopped", async () => {
+    const t = tempDir();
+    try {
+      let ctl: SessionControl | null = null;
+      let detached = false;
+      const run = runPhase({ ...base(t.path), prompt: "FIXTURE:hang", live: { attach: (c) => { ctl = c; return () => { detached = true; }; } } });
+      await until(() => ctl !== null);
+      ctl!.stop("John");
+      const e = await run.then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(SessionStopped);
+      expect((e as SessionStopped).by).toBe("John");
+      expect((e as Error).message).toBe("stopped by John");
+      expect(detached).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  }, 90_000);
+
+  test("redirect ends the process and resumes the same session with the new direction; the earlier cost carries over", async () => {
+    const t = tempDir();
+    const calls = join(t.path, "calls.jsonl");
+    const prompts = join(t.path, "prompts.jsonl");
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: heldDesign(gate) });
+    const lines = () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []);
+    try {
+      let ctl: SessionControl | null = null;
+      const run = runPhase({
+        ...base(t.path), prompt: "write it", maxBudgetUsd: 5,
+        env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts },
+        live: { attach: (c) => { ctl = c; return () => {}; } },
+      });
+      await until(() => ctl !== null);
+      await until(() => ctl!.redirect("do it the other way"));
+      // A second redirect waits until the first has been taken up.
+      expect(ctl!.redirect("and another")).toBe(false);
+      await until(() => lines().length === 2);
+      writeFileSync(gate, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      const args = lines().map((l) => JSON.parse(l) as string[]);
+      expect(args).toHaveLength(2);
+      expect(args[1]).toContain("--resume");
+      expect(args[1]![args[1]!.indexOf("--resume") + 1]).toBe("fake-design");
+      expect(args[1]).toContain("--input-format");
+      const sent = readFileSync(prompts, "utf8").trim().split("\n").map((l) => (JSON.parse(l) as { prompt: string }).prompt);
+      expect(sent).toEqual(["write it", "do it the other way"]);
+      // The killed process reported no cost: it is estimated, so the total is above the last process's 0.05.
+      expect(r.costUsd).toBeGreaterThan(0.05);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("redirect waits for the session's id: false before the session's first event, true once it has one", async () => {
+    const t = tempDir();
+    const before = join(t.path, "before");
+    const after = join(t.path, "after");
+    const argsFile = join(t.path, "args.json");
+    const calls = join(t.path, "calls.jsonl");
+    const [init, ...rest] = fixture("design").split("\n");
+    // Without echoes the fake prints nothing until `before` exists; then its init line names the session, and it waits at `after`.
+    const fixtures = fixtureDir({ design: [JSON.stringify({ type: "fake_action", wait_for: before }), init, JSON.stringify({ type: "fake_action", wait_for: after }), ...rest].join("\n") });
+    try {
+      let ctl: SessionControl | null = null;
+      const run = runPhase({
+        ...base(t.path), prompt: "write it",
+        env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_ARGS: argsFile, LOOPSTRA_FAKE_CALLS: calls },
+        live: { attach: (c) => { ctl = c; return () => {}; }, replay: false },
+      });
+      // The fake has read its prompt, so its stdin is open: only the missing id refuses the redirect.
+      await until(() => existsSync(argsFile));
+      expect(ctl!.redirect("too soon")).toBe(false);
+      writeFileSync(before, "");
+      await until(() => ctl!.redirect("now"));
+      writeFileSync(after, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      const args = readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]);
+      expect(args).toHaveLength(2);
+      expect(args[1]![args[1]!.indexOf("--resume") + 1]).toBe("fake-design");
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("a CLI that never echoes: a session nobody messaged ends at its result", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    try {
+      const r = await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", env: { LOOPSTRA_FAKE_ARGS: argsFile }, live: { attach: () => () => {}, replay: false } });
+      expect(r.ok).toBe(true);
+      // Not its whole timeout (60 s) waiting for an echo.
+      expect(r.durationMs).toBeLessThan(30_000);
+      const recorded = await Bun.file(argsFile).json();
+      expect(recorded.args).toContain("--input-format");
+      expect(recorded.args).not.toContain("--replay-user-messages");
+    } finally { t.cleanup(); }
+  }, 90_000);
+
+  test("a message whose echo never comes: the wait for it runs out, stdin closes, and the newest result counts", async () => {
+    const t = tempDir();
+    const fixtures = fixtureDir({ design: fixture("design") });
+    const log = join(t.path, "steer.jsonl");
+    try {
+      let ctl: SessionControl | null = null;
+      let sent = false;
+      const r = await runPhase({
+        ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_STEER_LOG: log },
+        live: { attach: (c) => { ctl = c; return () => {}; }, replay: false, echoWaitMs: 500 },
+        onEvent: (e) => { if (e.type === "result" && !sent) { sent = ctl!.message("and zero"); } },
+      });
+      expect(sent).toBe(true);
+      expect(readFileSync(log, "utf8")).toContain("\"queued\"");
+      expect(r.ok).toBe(true);
+      // The queued turn ran, unechoed, and its result is the phase's.
+      expect((r.structuredOutput as { summary: string }).summary).toBe("heard: and zero");
+      expect(r.costUsd).toBeCloseTo(0.1);
+      expect(r.durationMs).toBeLessThan(30_000);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("once the echo came, the wait for it is over: a long quiet stretch in the queued turn never closes stdin", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: heldDesign(gate) });
+    try {
+      writeFileSync(gate, ""); // the first turn goes straight through
+      let ctl: SessionControl | null = null;
+      let sent = false;
+      let echoed = false;
+      const run = runPhase({
+        ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path },
+        live: { attach: (c) => { ctl = c; return () => {}; }, echoWaitMs: 200 },
+        onEvent: (e) => {
+          // After the first result: the queued turn holds at the gate, quiet, once it has echoed the message.
+          if (e.type === "result" && !sent) { rmSync(gate); sent = ctl!.message("and zero"); }
+          if (e.type === "user" && e.isReplay === true && JSON.stringify(e).includes("and zero")) echoed = true;
+        },
+      });
+      await until(() => echoed);
+      // Well past the echo wait, with nothing from the session meanwhile.
+      await Bun.sleep(1_500);
+      expect(ctl!.message("one more")).toBe(true);
+      writeFileSync(gate, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      expect((r.structuredOutput as { summary: string }).summary).toBe("heard: and zero | one more");
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("an error result never waits for an echo", async () => {
+    const t = tempDir();
+    try {
+      let ctl: SessionControl | null = null;
+      let sent = false;
+      const r = await runPhase({
+        ...base(t.path), prompt: "FIXTURE:budget",
+        live: { attach: (c) => { ctl = c; return () => {}; }, replay: false },
+        onEvent: (e) => { if (e.type === "result" && !sent) { sent = ctl!.message("one more thing"); } },
+      });
+      expect(sent).toBe(true);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("budget");
+      expect(r.durationMs).toBeLessThan(30_000);
+    } finally { t.cleanup(); }
+  }, 90_000);
+
+  test("a stop that comes after the final result is too late: it does nothing, and the result stands", async () => {
+    const t = tempDir();
+    try {
+      let ctl: SessionControl | null = null;
+      let stopped = null as boolean | null;
+      // Linger keeps running after its result, so the stop lands while the process gets its grace to exit.
+      const r = await runPhase({
+        ...base(t.path), prompt: "FIXTURE:linger",
+        live: { attach: (c) => { ctl = c; return () => {}; } },
+        onEvent: (e) => { if (e.type === "result") setTimeout(() => { stopped = ctl!.stop("John"); }, 0); },
+      });
+      expect(stopped).toBe(false);
+      expect(r.ok).toBe(true);
+    } finally { t.cleanup(); }
+  }, 90_000);
+
+  test("once a stop is pending, a message is refused", async () => {
+    const t = tempDir();
+    try {
+      let ctl: SessionControl | null = null;
+      const run = runPhase({ ...base(t.path), prompt: "FIXTURE:hang", live: { attach: (c) => { ctl = c; return () => {}; } } });
+      await until(() => ctl !== null && ctl.message("first"));
+      expect(ctl!.stop("John")).toBe(true);
+      expect(ctl!.message("after the stop")).toBe(false);
+      expect(await run.then(() => null, (err: unknown) => err)).toBeInstanceOf(SessionStopped);
+    } finally { t.cleanup(); }
+  }, 90_000);
+
+  test("a redirect takes the messages the killed process had not taken up yet to the resumed one, after the new direction", async () => {
+    const t = tempDir();
+    const calls = join(t.path, "calls.jsonl");
+    const prompts = join(t.path, "prompts.jsonl");
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: heldDesign(gate) });
+    const lines = () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []);
+    try {
+      let ctl: SessionControl | null = null;
+      const run = runPhase({
+        ...base(t.path), prompt: "write it",
+        env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts },
+        // Never echoed, so the message is still not taken up when the redirect comes.
+        live: { attach: (c) => { ctl = c; return () => {}; }, replay: false },
+      });
+      await until(() => ctl !== null && ctl.message("cover negatives"));
+      await until(() => ctl!.redirect("do it the other way", "John"));
+      await until(() => lines().length === 2);
+      writeFileSync(gate, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      const sent = readFileSync(prompts, "utf8").trim().split("\n").map((l) => (JSON.parse(l) as { prompt: string }).prompt);
+      expect(sent).toEqual(["write it", `do it the other way\n\n${MEANWHILE_HEADING}\n\ncover negatives`]);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("a redirect with too little left of the cap to resume ends the session quietly, as stopped by whoever sent it", async () => {
+    const t = tempDir();
+    const calls = join(t.path, "calls.jsonl");
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: heldDesign(gate) });
+    try {
+      let ctl: SessionControl | null = null;
+      const started = Date.now();
+      const run = runPhase({
+        ...base(t.path), prompt: "write it", maxBudgetUsd: MIN_SESSION_USD + 0.002,
+        env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls },
+        live: { attach: (c) => { ctl = c; return () => {}; } },
+      });
+      // Past this long, the killed process is estimated (at USD_PER_MINUTE) to have spent more than the cap leaves above MIN_SESSION_USD.
+      const enough = (0.002 / USD_PER_MINUTE) * 60_000 + 500;
+      await until(() => Date.now() - started > enough);
+      await until(() => ctl!.redirect("do it the other way", "John"));
+      const e = await run.then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(SessionStopped);
+      expect((e as SessionStopped).by).toBe("John");
+      // Not resumed.
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+    } finally {
+      writeFileSync(gate, "");
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("a live session passes --input-format stream-json and --replay-user-messages", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    try {
+      const r = await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", env: { LOOPSTRA_FAKE_ARGS: argsFile }, live: { attach: () => () => {} } });
+      expect(r.ok).toBe(true);
+      const recorded = await Bun.file(argsFile).json();
+      expect(recorded.args).toEqual(expect.arrayContaining(["--input-format", "stream-json", "--replay-user-messages"]));
+      expect(recorded.args[recorded.args.indexOf("--input-format") + 1]).toBe("stream-json");
+      expect(recorded.prompt).toBe("FIXTURE:simple-success");
+    } finally { t.cleanup(); }
+  });
+
+  test("the resends work live too: a missing envelope is asked for, a notification gets the prompt again", async () => {
+    const t = tempDir();
+    const calls = join(t.path, "calls.jsonl");
+    try {
+      const nudged = await runPhase({ ...base(t.path), prompt: "FIXTURE:no-envelope", maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_CALLS: calls }, live: { attach: () => () => {} } });
+      expect(nudged.ok).toBe(true);
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2);
+      const notified = await runPhase({ ...base(t.path), prompt: "FIXTURE:notification-only", maxBudgetUsd: 1, resume: "build-session", live: { attach: () => () => {} } });
+      expect(notified.ok).toBe(true);
+    } finally { t.cleanup(); }
+  }, 90_000);
 });

@@ -152,6 +152,24 @@ The orchestrator is a drawer on every screen (Ctrl J; see Chat); opened from a c
 
 **Acting from the console.** On a change's page and in the inbox you can approve, send back with a note, retry, start, hold, release, set the priority of and close a change, and the top bar pauses or resumes the loop. Pause and Resume write `.loopstra/hold.json`; every other button leaves a request in `.loopstra/requests/`, and the loop applies it within a couple of seconds, even while steps run, and commits it like an edit of `intent.md` (`loopstra(<slug>): plan approved by <name> from the dashboard`). A status change is refused when the change moved on since you looked; priority, hold and release apply to any open change. The toast that says how it went offers Undo for a few seconds (approve, send back, priority and hold; close asks first instead). A held change keeps its place, but the loop starts no step for it until it is released; a paused loop lets running steps finish and starts no new one. Chat can do the same after a plain yes, and editing `intent.md` still works.
 
+## Steering
+
+You can steer an agent while it works. Open its session (from Live, or a change's timeline). Above the transcript is a box with three buttons:
+
+- **Send message.** The agent reads it at its next step, between two tool calls, and carries on. Ctrl+Enter (⌘+Enter on a Mac) sends it too.
+- **Redirect.** The session stops what it was doing and starts again your way. It is the same session, so it keeps what it knew, and messages it had not read yet go along.
+- **Stop session.** After a confirm, the session ends and the change is held, so it does not start again until someone releases it. The change's controls (on its page and in the inbox) have Stop too, for everything the change is running.
+
+Only work sessions can be messaged or redirected: intake, design, plan, build, fix, reconcile, revise and lessons. Checks (the spec check, the plan challenge, review, verify, the done-check and the cheaper judges) can only be stopped: a message would quietly change a gate. Approve or send back instead. A message that comes after its session has finished is kept for the change's next session.
+
+**Questions.** An agent may ask you when a decision belongs to a person and there is no sensible default. Intake, design, plan, build and revise can ask; fix and reconcile carry on the build's session, so they never ask. The step ends, and the change waits with `question: open` in `intent.md`. It costs nothing while it waits. It shows as "Has a question" in Needs attention, `status`, `queue.md` and the console's inbox, with the question, why it asks, and any options. Chat announces it too.
+
+Answer it with Answer, in the inbox or on the change's page. Or tell the orchestrator in chat; it asks you to confirm first, and only people who may act on changes can answer there. Or answer by hand: write your answer under the question in `conversation.md` and remove the `question:` line. On the change's next step, the agent that asked carries on with your answer. When it cannot (the change moved on meanwhile, or you answered by hand), the next session reads the answer in `conversation.md`.
+
+An agent may ask at most 3 questions while the change stays at one status. After 3, its prompt says it may ask no more, and a 4th blocks the change.
+
+**`conversation.md`.** Each change has `intent/<slug>/conversation.md`: what people told its agents (messages, redirects, answers, send-back notes, messages kept for the next session) and what the agents asked. The loop writes it and commits it. Every work session reads it, so what you said is not lost when a new session starts. You can read it, or edit it like any record.
+
 ## Chat
 
 Instead of writing intents by hand and reading `status`, you can talk to Loopstra's orchestrator:
@@ -189,6 +207,7 @@ The `status` and `note` lines at the top of `intent.md` say what to do; `intent/
 - `merge-review`: checks passed and the change is waiting to go into the main code. Follow the note: with nobody on the merge gate it waits for the checks on GitHub (nothing to do; it merges once they pass, even while another change is being worked on, within about `poll_seconds`); with `pr`, approve the pull request on GitHub; with `status`, read `review.md` and set `merge-approved`.
 - `merged`: the change is in the main code.
 - `verifying`: with a person on the done gate, look at the result and set `done`.
+- `question: open`: an agent asked you something, and the change waits for your answer, whatever its status. See Steering.
 - `outcome.md` may have "For a person to confirm": things the system could not check itself. They never hold a change up.
 
 A person's edits win. If you change the status while a step is running, that step writes nothing and the next tick follows your status. Hand-editing a status cannot skip a stage: the artifacts it implies must exist.

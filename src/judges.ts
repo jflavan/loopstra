@@ -6,7 +6,7 @@ import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
-import { agentPhase, alongsideFirst, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { AssistantUnavailable } from "./stop";
 import { CHEAP, type JudgeRow, type NewJudgeRow } from "./trace";
 
@@ -250,10 +250,18 @@ interface Pair<J extends JudgeName> {
   prompt: string;
 }
 
+/**
+ * A judge session on `prompt`, the one compared (see comparison); a retry after a crash renders its
+ * prompt again, as every phase's does (see agentPhase).
+ */
+function judgeSession<J extends JudgeName>(ctx: StepContext, spec: AgentPhaseSpec & { name: J }, prompt: string | null): Promise<AgentPhaseResult<J>> {
+  return agentPhase(ctx, spec, renderedThen(prompt, () => phasePrompt(ctx, spec)));
+}
+
 /** Runs one judge session and times it. */
 async function timed<J extends JudgeName>(ctx: StepContext, spec: AgentPhaseSpec & { name: J }, prompt: string): Promise<Timed<J>> {
   const started = Date.now();
-  const r = await agentPhase(ctx, spec, prompt);
+  const r = await judgeSession(ctx, spec, prompt);
   return { r, ms: Date.now() - started };
 }
 
@@ -373,7 +381,7 @@ function done<J extends JudgeName>(result: JudgeResult<J>): JudgeAnswer<J> {
 export async function judgeFirst<J extends JudgeName>(ctx: StepContext, phase: AgentPhaseSpec & { name: J }, opts: JudgeOpts = {}): Promise<JudgeAnswer<J>> {
   const prompt = opts.prompt === undefined ? await phasePrompt(ctx, phase) : opts.prompt;
   const c = await comparison(ctx, phase, prompt);
-  if (!c || prompt === null) return done({ ...(await agentPhase(ctx, phase, prompt)), decidedBy: "strong" });
+  if (!c || prompt === null) return done({ ...(await judgeSession(ctx, phase, prompt)), decidedBy: "strong" });
   // Same phase (so the same prompt file, LOOPSTRA_PHASE and tools), on the cheaper model, never
   // retried. It never ends an outage pause: the strong model may be the one that is out.
   const pair: Pair<J> = {
@@ -401,7 +409,7 @@ async function shadow<J extends JudgeName>(ctx: StepContext, pair: Pair<J>, c: C
   if (!roomBeside(ctx.cfg, ctx.trace, ctx.slug, sessions)) {
     // Shadow always gives way to the judge that decides, to the work already running, and to other changes.
     judgeEvent(ctx, pair.strong, "not compared: today's budget has no room for another session");
-    return done({ ...(await agentPhase(ctx, pair.strong, pair.prompt)), decidedBy: "strong" });
+    return done({ ...(await judgeSession(ctx, pair.strong, pair.prompt)), decidedBy: "strong" });
   }
   // The cheaper judge is the extra work: an outage or the day's budget drops it, and the strong judge
   // meets the same trouble on its own. It is always wanted, so the comparison is recorded once the

@@ -1,6 +1,6 @@
 import { signal } from "@preact/signals";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { aboutPrefix, addLines, type About, type Line } from "../chat";
+import { aboutOf, aboutPrefix, addLines, type About, type Line } from "../chat";
 import { drawer, meta } from "../store";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
@@ -9,7 +9,7 @@ interface ChatMessage { id: number; from: "person" | "loopstra"; text: string }
 
 /** A half-typed message, kept when the drawer is closed and opened again in this tab. */
 const draft = signal("");
-/** The context the orchestrator was last told about, so the prefix is said once per opening context and not again after a close and reopen. */
+/** The context (and session) the orchestrator was last told about, so the prefix is said once per opening context and not again after a close and reopen. */
 let toldAbout = "";
 
 /** One conversation per tab, kept across reloads. The server accepts only this plain shape. */
@@ -100,14 +100,18 @@ function Chat({ about }: { about: About | null }) {
   const send = async () => {
     const body = text.trim();
     if (!body || busy) return;
-    // The first message after the drawer was opened from somewhere says what it is about.
+    // The first message after the drawer was opened from somewhere says what it is about, and sends the
+    // change (and session) with it, so the orchestrator hears its context.
     const prefix = aboutPrefix(about);
-    const message = prefix && toldAbout !== prefix ? `${prefix}${body}` : body;
-    toldAbout = prefix;
+    const key = prefix ? `${prefix}|${about?.seq ?? ""}` : "";
+    const first = !!key && toldAbout !== key;
+    const message = first ? `${prefix}${body}` : body;
+    const context = first ? aboutOf(about) : null;
+    toldAbout = key;
     setText("");
     setBusy(true);
     // A send that never reached the server must not leave the drawer waiting for an answer.
-    const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, text: message }) }).catch(() => null);
+    const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, text: message, ...(context ? { about: context } : {}) }) }).catch(() => null);
     if (!r?.ok) {
       // The orchestrator has not heard what this was about yet.
       toldAbout = "";

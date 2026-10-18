@@ -6,6 +6,10 @@ Intent `{{slug}}`:
 
 Priority the owner stated: {{priority}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 Do two things.
 
 1. Decide the priority. If the owner stated one above, return it unchanged. Otherwise decide from the words in the intent: `urgent` for outages or legal deadlines, `high` for clear customer or revenue impact, `low` for nice-to-haves, otherwise `normal`.

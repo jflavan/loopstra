@@ -3,7 +3,7 @@ import { filesExistOrNew, parsePlanFiles } from "../checks";
 import { modelFor, type Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
 import { scanRepo, type Status } from "../intents";
-import { agentPhase, phasePrompt, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
@@ -99,10 +99,15 @@ async function plansAhead(ctx: StepContext): Promise<boolean> {
 async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | null> {
   // An early- row, as for all work run alongside: its failures are not the change's (see EARLY).
   const phase = { ...writerPhase(ctx, PLAN, a, ""), traceName: `${EARLY}plan` }; // the trace name is not part of the prompt
-  const prompt = await phasePrompt(ctx, phase);
-  const r = await agentPhase(ctx, phase, prompt);
-  if (prompt === null || !r.ok) return null;
-  return JSON.stringify({ key: planKey(ctx, phase, prompt), base: await ctx.readCommit(), envelope: r.envelope });
+  // Keyed on the prompt the plan was written on: a retry's is rendered again, with what people told the crashed attempt.
+  let sent = await phasePrompt(ctx, phase);
+  const r = await agentPhase(ctx, phase, renderedThen(sent, async () => {
+    const p = await phasePrompt(ctx, phase);
+    if (p !== null) sent = p;
+    return p;
+  }));
+  if (sent === null || !r.ok) return null;
+  return JSON.stringify({ key: planKey(ctx, phase, sent), base: await ctx.readCommit(), envelope: r.envelope });
 }
 
 /** Keeps the plan written ahead for the plan step (see planAheadRun). */

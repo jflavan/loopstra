@@ -137,10 +137,53 @@ describe("the loop and running steps", () => {
       const m = await model(t.path, now);
       expect(m.sections.running.now).toEqual([{
         slug: "one", title: "One", seq, name: "build", model: "claude-sonnet-5-5", started: expect.any(String),
-        now: "Running bun test", strip: ["text", "tool", "tool"],
+        now: "Running bun test", strip: ["text", "tool", "tool"], steerable: true,
       }]);
       expect(m.sections.changes[0]?.running).toBe(true);
       expect(m.sections.loop.working).toEqual([{ slug: "one", phase: "build" }]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a running work session can be messaged and redirected; a check cannot", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "poll_seconds: 60\n");
+      await intent(t.path, "one", "status: designing");
+      await intent(t.path, "two", "status: designing");
+      withTrace(t.path, (trace) => {
+        trace.phaseStart("one", "design-retry", "agent");
+        trace.phaseStart("two", "spec-check", "agent");
+      });
+      const now = new Date();
+      const iso = (s: number) => new Date(now.getTime() - s * 1000).toISOString();
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: iso(900), lastTickAt: iso(20), lastBeatAt: iso(1), current: { slug: "one" }, working: ["one", "two"], stopping: false, stopped: false });
+      const m = await model(t.path, now);
+      expect(m.sections.running.now.map((p) => [p.name, p.steerable])).toEqual([["design-retry", true], ["spec-check", false]]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a change with an open question carries it, and offers Answer first", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path, "gates:\n  plan: { human: status }\n");
+      await intent(t.path, "a", "status: plan-review\nquestion: open");
+      await intent(t.path, "b", "status: plan-review");
+      mkdirSync(join(t.path, ".loopstra", "runs", "a"), { recursive: true });
+      writeFileSync(join(t.path, ".loopstra", "runs", "a", "question.json"), JSON.stringify({
+        status: "plan-review", count: 1,
+        open: { phase: "plan", traceName: "plan", seq: 3, sessionId: "s1", text: "Archived too?", why: "The list hides them.", options: ["yes", "no"], at: "2026-10-17T12:00:00.000Z" },
+      }));
+      const m = await model(t.path);
+      const a = m.sections.changes.find((c) => c.slug === "a")!;
+      expect(a.question).toEqual({ text: "Archived too?", why: "The list hides them.", options: ["yes", "no"], phase: "plan", at: "2026-10-17T12:00:00.000Z" });
+      expect(a.offers[0]).toEqual({ kind: "answer", label: "Answer" });
+      const b = m.sections.changes.find((c) => c.slug === "b")!;
+      expect(b.question).toBeNull();
+      expect(b.offers.map((o) => o.kind)).not.toContain("answer");
     } finally {
       t.cleanup();
     }

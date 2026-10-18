@@ -316,6 +316,23 @@ and that it must never claim one happened before the result comes back.
 
 # Part 3: Steering
 
+> **Built** (2026-10-17), from `docs/superpowers/plans/2026-10-17-console-part-3.md`; `docs/decisions.md`
+> ("The console, part 3: steering") records the spike, the decisions and what the reviews changed.
+> These places differ from the text below: a repository's own prompts without `{{conversation}}` get
+> conversation.md added to their end, rather than not seeing it; intake keeps its `question` string
+> (non-empty asks) instead of the object the other phases gained; chat answers only through the
+> orchestrator's `answer` action, and a question is announced as a "Has a question" attention item,
+> so a reply in the announcement's thread is an ordinary message rather than an answer; a redirect
+> stays in the same phase row and the same `raw.jsonl`; the answer resumes the asking session in the
+> step's first session of the kind of phase that asked, and only while the change is in the same stay
+> at its status (otherwise a fresh session reads it in conversation.md); the 3 questions are counted
+> per stay at a status rather than per step; a stop also leaves a change-level stop, checked
+> before and after each phase, so it ends the step in a code phase too; `fix` and `reconcile`
+> never ask: they carry on the build's session, which can ask already, and one that asked made the
+> next step run the whole build again before resuming it; and a message a killed loop left goes to
+> conversation.md as "the next session", and is never written to a session twice (the failure
+> handling below says a second copy would say it may repeat an earlier message).
+
 ## Sessions keep stdin open
 
 Every agent session starts with `--input-format stream-json` beside `--output-format stream-json`.

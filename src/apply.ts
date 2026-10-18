@@ -1,21 +1,27 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
+import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, questionChangedText, REQUEST_KINDS, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
+import { conversationPath, readConversation, withEntry, type ConversationEntry } from "./conversation";
 import { Git } from "./git";
+import { asAtHead, fileHash, matchesHead } from "./headfiles";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
+import { answerQuestion, readQuestion, takeBackAnswer } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./chat/threads";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
+type AnswerRequest = Extract<Request, { kind: "answer" }>;
+
+/** The longest answer a request may carry. */
+const MAX_ANSWER = 4000;
 
 /**
  * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
@@ -200,10 +206,12 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
 
 /**
  * Puts back what a request given up on wrote and never committed: each intent.md it wrote (see
- * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note. Only a file
- * that still holds exactly what the request wrote: one changed since (a person's edit), one that held
- * a person's uncommitted edit before the write (see ownBefore), or one whose write an older request
- * did not record, is left as it is; the person's edit is what it says now.
+ * markWritten) as it is at HEAD, or gone when HEAD has none, and a send back's kept note and its
+ * conversation.md entry (the record likewise only when nobody edited it, see recordStillOurs; an
+ * answer's only when its intent.md is put back too, as for its stored answer). Only an intent.md that still holds exactly what the request wrote: one
+ * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
+ * ownBefore), or one whose write an older request did not record, is left as it is; the person's
+ * edit is what it says now.
  * Under the checkout lock, so it never meets a commit half way. Gives the slugs it left as they are,
  * or null (traced) when it could not be done: the request then stays claimed, and the next pass tries
  * it again.
@@ -216,14 +224,10 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       const git = new Git(root);
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      for (const slug of slugs.filter((s) => !kept.includes(s))) {
-        const path = `intent/${slug}/intent.md`;
-        if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
-        else {
-          await git.run(["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
-          rmSync(join(root, path), { force: true });
-        }
-      }
+      for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
+      // An answer's record goes only with its intent.md: one kept (a person edited it) keeps its answer, and so the record of it.
+      const recordGoes = writesRecord(req) && "slug" in req && slugs.includes(req.slug) && !(req.kind === "answer" && kept.includes(req.slug));
+      if (recordGoes && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -232,7 +236,60 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   }
   // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
   if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
+  // An answer that never landed must not resume the session: the question waits again. Only when intent.md
+  // was put back: one a person edited since is kept without its question line, so the answer stays with it.
+  if (req.kind === "answer" && slugs.includes(req.slug) && !kept.includes(req.slug)) takeBackAnswer(root, req.slug);
   return kept;
+}
+
+/** True for an undo that takes back a send back (not an approve). */
+function undoesSendBack(req: Request): boolean {
+  return req.kind === "undo" && SEND_BACK_TO[req.to] === req.expect;
+}
+
+/** True for a request that writes a conversation.md entry: a send back, an answer, an undo of a send back. */
+function writesRecord(req: Request): boolean {
+  return req.kind === "send-back" || req.kind === "answer" || undoesSendBack(req);
+}
+
+/**
+ * Writes a request's conversation.md entry, inside commitRecord, and records on the claimed request
+ * the hash of what it wrote (see recordStillOurs). No hash when the file held a person's uncommitted
+ * edit before the write (see matchesHead): putting back HEAD's file would then lose it.
+ */
+async function writeRecord(root: string, req: Request, slug: string, entry: ConversationEntry): Promise<void> {
+  const own = await matchesHead(root, `intent/${slug}/conversation.md`);
+  await Bun.write(conversationPath(root, slug), withEntry(readConversation(root, slug), entry));
+  const hash = own ? fileHash(conversationPath(root, slug)) : null;
+  if (hash) req.recordHash = hash;
+  else delete req.recordHash;
+  saveApplying(root, req);
+}
+
+/**
+ * True when the change's conversation.md still holds exactly what the request wrote, over nobody's
+ * uncommitted edit: only then may it be put back as HEAD has it (unknown for an older request: false).
+ */
+function recordStillOurs(root: string, req: Request, slug: string): boolean {
+  return !!req.recordHash && fileHash(conversationPath(root, slug)) === req.recordHash;
+}
+
+/**
+ * A send back (or an undo of one) that never landed takes its conversation.md entry back: the record
+ * as main has it, unless a person edited it (see recordStillOurs); their edit is then what it says.
+ * A problem is traced: the entry then stays until a person removes it.
+ */
+async function putBackConversation(root: string, main: string, trace: Trace, req: StatusRequest): Promise<void> {
+  try {
+    await onCheckout(root, async () => {
+      const git = new Git(root);
+      if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
+      if (recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+    });
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event(req.slug, "error", { where: "request", id: req.id, kind: req.kind, error: `the send back's conversation.md entry could not be taken back: ${errorText(e)}` });
+  }
 }
 
 const KINDS: ReadonlySet<string> = new Set(REQUEST_KINDS);
@@ -253,6 +310,10 @@ function badShape(req: Request): string | null {
   }
   if (typeof r.slug !== "string" || !SLUG.test(r.slug)) return "its slug is not a change name";
   if (r.kind === "accept") return null;
+  if (r.kind === "answer") {
+    if (r.question !== undefined && typeof r.question !== "string") return "the question it answers is not named by its time";
+    return typeof r.text === "string" && r.text.trim() && r.text.length <= MAX_ANSWER ? null : `its answer is not text of at most ${MAX_ANSWER} characters`;
+  }
   if (!isStatus(r.expect)) return "the status it saw is not a status";
   if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
   if (r.kind === "priority" && r.priority !== null && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
@@ -271,6 +332,7 @@ function applyOne(root: string, cfg: Config, trace: Trace, req: Request): Promis
     case "accept": return applyAccept(root, cfg.main_branch, trace, req);
     case "new": return applyNew(root, cfg.main_branch, trace, req);
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
+    case "answer": return applyAnswer(root, cfg, trace, req);
     default: return applyStatus(root, cfg, trace, req);
   }
 }
@@ -282,7 +344,7 @@ function byWhom(req: Request): string {
 
 /** The sha256 (hex) of a change's intent.md as it is on disk, or null when it cannot be read. */
 function intentHash(root: string, slug: string): string | null {
-  try { return createHash("sha256").update(readFileSync(join(root, "intent", slug, "intent.md"))).digest("hex"); } catch { return null; }
+  return fileHash(join(root, "intent", slug, "intent.md"));
 }
 
 /** True when this slug's intent.md still holds exactly what the request last wrote (unknown for an older request: false). */
@@ -322,11 +384,7 @@ function markWritten(root: string, req: Request, slug: string, own = true): void
  */
 async function ownBefore(root: string, req: Request, slug: string): Promise<boolean> {
   if ((req.written ?? []).includes(slug)) return stillOurs(root, req, slug);
-  const path = `intent/${slug}/intent.md`;
-  const git = new Git(root);
-  // A file main does not have is someone's own when it is on disk already (an uncommitted draft).
-  if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code !== 0) return !existsSync(join(root, path));
-  return (await git.run(["diff", "--quiet", "HEAD", "--", path], true)).code === 0;
+  return matchesHead(root, `intent/${slug}/intent.md`);
 }
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
@@ -400,7 +458,7 @@ async function current(root: string, slug: string): Promise<{ intent: Intent } |
   }
 }
 
-function traced(trace: Trace, req: StatusRequest | FieldRequest, result: string, more: Record<string, unknown> = {}): void {
+function traced(trace: Trace, req: StatusRequest | FieldRequest | AnswerRequest, result: string, more: Record<string, unknown> = {}): void {
   trace.event(req.slug, "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result, ...more });
 }
 
@@ -428,11 +486,13 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
 
 /**
  * A status request whose change moved on. A send back whose write landed before a failed commit
- * kept its note in the run folder (see writeSentBack): that goes too, or it would steer the next
- * session though the send back never happened.
+ * kept its note in the run folder (see writeSentBack) and wrote its conversation.md entry: both go
+ * too, or they would steer the next session though the send back never happened. An undo of a send
+ * back takes its entry back likewise.
  */
-function movedOn(root: string, trace: Trace, req: StatusRequest, status: Status): Outcome {
+async function movedOn(root: string, main: string, trace: Trace, req: StatusRequest, status: Status): Promise<Outcome> {
   if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug);
+  if (writesRecord(req) && (req.written ?? []).includes(req.slug)) await putBackConversation(root, main, trace, req);
   traced(trace, req, "moved-on", { status });
   return { ok: false, status, text: `${req.slug} moved on to ${status}; nothing changed.` };
 }
@@ -458,7 +518,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Written by an earlier try of this request whose commit failed: commit it now.
   const ours = (req.written ?? []).includes(req.slug) && was === to;
-  if (!ours && was !== req.expect) return movedOn(root, trace, req, was);
+  if (!ours && was !== req.expect) return movedOn(root, cfg.main_branch, trace, req, was);
   const problem = ours ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
   const note = noteFor(req);
@@ -472,11 +532,21 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
         return false;
       }
       markWritten(root, req, req.slug, own);
+      // Its first write only: a later try commits the entry already on disk, never adds it twice.
+      if (req.kind === "send-back") {
+        const entry = { kind: "sent-back" as const, who: req.byName, via: req.via, text: req.note.trim(), at: new Date() };
+        await writeRecord(root, req, req.slug, entry);
+      }
+      // The send back's note no longer stands: said in the record every work session reads.
+      if (undoesSendBack(req)) {
+        const entry = { kind: "took-back" as const, who: req.byName, via: req.via, at: new Date() };
+        await writeRecord(root, req, req.slug, entry);
+      }
     }
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
     if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
   });
-  if (refused !== null) return movedOn(root, trace, req, refused);
+  if (refused !== null) return movedOn(root, cfg.main_branch, trace, req, refused);
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });
@@ -528,4 +598,35 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, effectivePriority({ priority: req.priority ?? undefined }));
   traced(trace, req, "applied", { status: fm.status, what: doneWords(req) });
   return { ok: true, status: fm.status, text: resultText(req, req.slug, fm.status) };
+}
+
+/**
+ * Answers the change's waiting question: on any open change whose question is open, whatever its status
+ * now. In one commit ("question answered by <who> from <where>"), the question line goes and the answer
+ * goes into conversation.md; the answer is stored for the session that asked (see answerQuestion).
+ */
+async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerRequest): Promise<Outcome> {
+  const found = await current(root, req.slug);
+  if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
+  const fm = found.intent.file.frontmatter;
+  if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
+  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as answered already.
+  const ours = (req.written ?? []).includes(req.slug);
+  if (!ours && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
+  // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
+  if (!ours && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }
+  const text = req.text.trim();
+  const shape = { kind: "answer" as const, expect: fm.status, note: text };
+  await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(shape)} by ${byWhom(req)}`, async () => {
+    // Its first write only: a later try commits what is on disk, never adds the entry twice.
+    if (!ours) {
+      const own = await ownBefore(root, req, req.slug);
+      await writeIntent(await readIntent(root, req.slug), {}, { remove: ["question"] });
+      markWritten(root, req, req.slug, own);
+      await writeRecord(root, req, req.slug, { kind: "answer", who: req.byName, via: req.via, text, at: new Date() });
+    }
+    answerQuestion(root, req.slug, { text, by: req.byName, via: req.via });
+  });
+  traced(trace, req, "applied", { status: fm.status, what: doneWords(shape) });
+  return { ok: true, status: fm.status, text: resultText(shape, req.slug, fm.status) };
 }

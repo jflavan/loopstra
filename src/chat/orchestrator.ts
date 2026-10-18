@@ -11,10 +11,12 @@ import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import { Trace } from "../trace";
+import { aboutContext, type About } from "./about";
 import { AnnouncementLog } from "./announcer";
 import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest, type RequestBody } from "../requests";
+import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
 import { oneLine, ThreadStore, threadKey, type ThreadState } from "./threads";
 
@@ -31,6 +33,8 @@ export interface IncomingMessage {
   canAccept: boolean;
   /** Who may, in words, for telling someone who may not. */
   acceptors: string;
+  /** The change (and session) the person opened chat from, sent with the first message from there (the dashboard's drawer). */
+  about?: About;
 }
 
 /** Sends one message back into the thread. */
@@ -57,9 +61,21 @@ function plainName(s: string): string {
   return s.replace(/[\s<>"]+/g, " ").trim() || "someone";
 }
 
-/** Text with any tag that could end the context or message block, or open another, made harmless. */
-function untagged(s: string): string {
-  return s.replace(/<\/?(message|context)\b/gi, (x) => x.replace("<", "&lt;"));
+/** Characters that show as nothing (U+200B-U+200D, U+2060, U+FEFF): one inside a tag would hide it from a plain match. */
+const INVISIBLE = /[​-‍⁠﻿]/g;
+/** What could be a tag's start: "<", spaces, slashes and invisible characters, then a name that may hold invisible ones. */
+const CANDIDATE = /<[\s/​-‍⁠﻿]*[a-z​-‍⁠﻿]+/gi;
+
+/**
+ * Text with any tag that could end the context or message block, or open another, made harmless, and
+ * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they
+ * go from that tag only: elsewhere they join emoji and words, as in Persian).
+ */
+export function untagged(s: string): string {
+  return s.replace(CANDIDATE, (x) => {
+    const bare = x.replace(INVISIBLE, "");
+    return /^<\s*\/?\s*(message|context)$/i.test(bare) ? `&lt;${bare.slice(1)}` : x;
+  });
 }
 
 export class Orchestrator {
@@ -225,6 +241,11 @@ export class Orchestrator {
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
     ];
+    if (m.about) {
+      // Read from the change's own files, which hold people's words: never able to end the context block.
+      const about = await aboutContext(this.root, m.about).catch(() => "");
+      if (about) lines.push(`About this change (from where the person opened chat):\n${untagged(about)}`);
+    }
     if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${untagged(oneLine(l, 1000))}`).join("\n")}`);
     if (declined) lines.push(declined);
     const text = untagged(m.text);
@@ -332,6 +353,7 @@ export class Orchestrator {
       // A hold on a held change, or a release of one not held: its status is not the reason.
       if (a.kind === "hold" && held) await say(`${slug} is held already.`);
       else if (a.kind === "release" && !held) await say(`${slug} is not held.`);
+      else if (a.kind === "answer") await say(`${slug} has no question waiting.`);
       else await say(`${slug} is ${plainStatus(fm.status)} now, so that is not something I can do to it.`);
       return;
     }
@@ -353,6 +375,15 @@ export class Orchestrator {
       case "approve": request = { kind: "approve", slug, expect }; break;
       case "close": request = { kind: "close", slug, expect }; break;
       case "release": request = { kind: "release", slug, expect }; break;
+      case "answer": {
+        if (!note) { await say("Tell me the answer, and I will pass it on."); return; }
+        // The question waiting now: the yes is to answering that one, so the request names it (the loop refuses it once another waits).
+        const open = readQuestion(this.root, slug)?.open;
+        const asked = open && !open.answer && typeof open.at === "string" ? open : null;
+        // `expect`, `note` and `asked` word the question (see askText); the request itself is the answer and the question's time (see doAction).
+        request = { kind: "answer", slug, text: note, expect, note, ...(asked ? { question: asked.at, asked: String(asked.text ?? "") } : {}) };
+        break;
+      }
     }
     const ask = askText(request, slug);
     t.pending = { kind: "action", request, ask, by: m.authorId, at: new Date().toISOString() };
@@ -362,7 +393,11 @@ export class Orchestrator {
 
   private async doAction(cfg: Config, t: ThreadState, m: IncomingMessage, request: RequestBody & RequestShape, say: Send): Promise<void> {
     if (!m.canAccept) { await say(`Only ${m.acceptors} can do that, so I have not.`); return; }
-    submitRequest(this.root, { ...request, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
+    // An answer is its text and the question it answers (none from a proposal made before questions were named: then whichever waits).
+    const body: RequestBody = request.kind === "answer"
+      ? { kind: "answer", slug: request.slug, text: request.text, ...(request.question === undefined ? {} : { question: request.question }) }
+      : request;
+    submitRequest(this.root, { ...body, by: m.authorId, byName: m.authorName, via: m.via, transport: m.transport, thread: m.thread });
     this.store.noteSince(t, `${plainName(m.authorName)} said yes: asked the loop to ${askedWords(request, request.slug)}.`);
     await say(`Asked the loop to do it. ${this.loopWhen(cfg, "does it")}`);
   }

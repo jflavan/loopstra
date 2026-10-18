@@ -11,7 +11,8 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
@@ -21,8 +22,10 @@ import { runDesignStep } from "./stages/design";
 import { cleanupChange, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { runVerifyStep } from "./stages/verify";
+import { sweepInbox } from "./steering";
+import { clearChangeStop } from "./inbox";
 import { uncommittedSetup } from "./init";
-import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, resetStop, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
 
@@ -129,7 +132,7 @@ export async function tick(root: string): Promise<TickResult> {
     const ordered = orderQueue(scan.intents);
     // With more than one change at a time, a change that would build into another's files waits.
     const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
+    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
     await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
@@ -229,12 +232,15 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
 
 /** True when a change is a lane's to run now: runnable, not held, and (with a remote) not watching its pull request. */
 function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
-  return isRunnable(i, human, hasRemote) && !held(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+  return isRunnable(i, human, hasRemote) && !waiting(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
 }
 
-/** A person (or chat) has put the change on hold (`hold:` in intent.md): no step starts for it. */
-function held(i: Intent): boolean {
-  return i.file.frontmatter.hold.trim() !== "";
+/**
+ * The change waits for a person, so no step starts for it: they (or chat) put it on hold (`hold:` in
+ * intent.md), or an agent's question waits for their answer (`question:`; see src/questions.ts).
+ */
+function waiting(i: Intent): boolean {
+  return i.file.frontmatter.hold.trim() !== "" || hasQuestion(i);
 }
 
 /**
@@ -287,7 +293,7 @@ async function watchPullRequests(root: string, cfg: Config, trace: Trace, shared
  * which is looked at again on the next tick. False once a stop or a problem ended it.
  */
 async function watchOnce(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, steps: LaneStep[]): Promise<boolean> {
-  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !held(i);
+  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !waiting(i);
   const didWork = (slug: string) => steps.some((s) => s.slug === slug && !(s.result?.ok && s.result.waiting));
   const ordered = orderQueue((await scanRepo(root)).intents);
   for (const i of ordered) {
@@ -448,7 +454,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
       const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
-      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
+      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     }
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {
@@ -587,17 +593,41 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
 
 /**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
- * plain note (the detail goes to the trace); only a stop request passes through.
+ * plain note (the detail goes to the trace); only a stop request passes through. A session a person
+ * stopped, or a question an agent asked, ends the step quietly: the change keeps its status. First,
+ * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come,
+ * a question from another stay at a status is closed (see closeStaleQuestion), and a stop of the change
+ * is cleared: the step it was for has ended (see writeChangeStop in src/inbox.ts). Once it ends, an
+ * answered question nothing in it used is closed (see closeUnusedAnswer), unless a stop request, an
+ * outage or the day's budget cut it short: the change then does the step again, and that step may use it.
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
+  let cutShort = false;
   try {
+    try {
+      clearChangeStop(ctx.root, ctx.slug);
+    } catch (e) {
+      // It stands, so the step ends quietly at its first phase; the next step's start tries again.
+      ctx.trace.event(ctx.slug, "error", { where: "stop", error: errorText(e) });
+    }
+    await sweepInbox(ctx);
+    closeStaleQuestion(ctx);
     return await runStep(ctx);
   } catch (e) {
-    if (notTheStepsFault(e)) throw e;
+    if (e instanceof SessionStopped) {
+      ctx.trace.event(ctx.slug, "stop", { by: e.by, note: `the session was stopped by ${e.by}; the change keeps its status` });
+      return { ok: true, stoppedBy: e.by };
+    }
+    if (e instanceof QuestionAsked) return { ok: true, asked: true };
+    if (notTheStepsFault(e)) {
+      cutShort = true;
+      throw e;
+    }
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
   } finally {
+    if (!cutShort) closeUnusedAnswer(ctx);
     await dropSnapshot(ctx);
   }
 }
@@ -800,6 +830,8 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
 /** What a step gave, for the console line. */
 function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
+  if (r.stoppedBy) return `stopped by ${r.stoppedBy}`;
+  if (r.asked) return "asked a person a question";
   return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
 }
 

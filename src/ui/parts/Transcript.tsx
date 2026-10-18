@@ -57,6 +57,13 @@ function Row({ item, result }: { item: Shown["items"][number]; result: Result })
     case "text": return <Markdown text={item.text} />;
     case "tool": return <ToolRow item={item} result={result} />;
     case "edit": return <EditRow item={item} result={result} />;
+    case "message":
+      return (
+        <div class={`msg t-msg${item.redirect ? " redirect" : ""}`}>
+          <b class="t-msg-label">{item.redirect ? "Redirect" : "Message"}</b>
+          {item.text}
+        </div>
+      );
     case "result":
       return (
         <div class={`t-result ${item.ok ? "ok" : "bad"}`}>

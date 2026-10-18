@@ -45,6 +45,8 @@ export const Frontmatter = z.object({
    * Written by the runtime (a hold from the console or chat) or by a person; blank reads as absent.
    */
   hold: blankableString,
+  /** "open" while an agent's question waits for a person (runtime-managed; see src/questions.ts). Blank reads as absent. */
+  question: blankableString,
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
 
@@ -99,11 +101,13 @@ function parseSections(body: string): Record<string, string> {
   return sections;
 }
 
+/** Runtime-managed fields that get no line while blank. */
+const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question"]);
+
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
-  // A blank hold is no hold: it gets no line, so a released change's file does not say `hold: ""`.
-  const { hold, ...rest } = file.frontmatter;
-  const fm = stringify(hold ? file.frontmatter : rest, { lineWidth: 0 }).trimEnd();
+  // A blank hold or question is none: it gets no line, so a released change's file does not say `hold: ""`.
+  const fm = stringify(Object.fromEntries(Object.entries(file.frontmatter).filter(([k, v]) => !(BLANK_LEFT_OUT.has(k) && !v))), { lineWidth: 0 }).trimEnd();
   const body = file.body.replace(/^\r?\n/, "");
   const text = `---\n${fm}\n---\n${body}`;
   return crlf ? text.replace(/\r?\n/g, "\r\n") : text;
@@ -117,7 +121,7 @@ export interface Intent {
   artifacts: Set<string>;
 }
 
-export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md"] as const;
+export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
 
 export function intentRoot(root: string): string {
   return join(root, "intent");
@@ -470,9 +474,27 @@ export function heldNote(intent: Intent): string {
   return hold ? `Held: ${hold.replace(/[.\s]+$/, "")}.` : "";
 }
 
-/** The note shown for a change: that it is held, why it waits for others, then its own note. */
-export function shownNote(intent: Intent, intents: Intent[], heldBy?: string): string {
-  return [heldNote(intent), waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
+/** True while an agent's question waits for a person (`question:` in intent.md; see src/questions.ts). */
+export function hasQuestion(intent: Intent): boolean {
+  return intent.file.frontmatter.question.trim() !== "";
+}
+
+/**
+ * "Has a question: <text>." for a change whose question waits, or "". `text`: the question, from
+ * question.json; without it the note sends a person to conversation.md.
+ */
+export function questionNote(intent: Intent, text?: string): string {
+  if (!hasQuestion(intent)) return "";
+  const q = text?.replace(/\s+/g, " ").trim();
+  return q ? `Has a question: ${/[.!?]$/.test(q) ? q : `${q}.`}` : "Has a question. Read conversation.md.";
+}
+
+/**
+ * The note shown for a change: its waiting question, that it is held, why it waits for others, then its
+ * own note. `question`: the question's text (see questionNote).
+ */
+export function shownNote(intent: Intent, intents: Intent[], heldBy?: string, question?: string): string {
+  return [questionNote(intent, question), heldNote(intent), waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
 }
 
 /** Statuses whose change holds the files its plan lists until it merges. */
@@ -549,15 +571,17 @@ const NOBODY: HumanGates = humanGates(null);
 
 /**
  * The generated queue.md. "Needs a person" holds every change waiting for one (blocked, drafts, and
- * reviews with a person on the gate; see waitsForPerson), held changes that are not finished, and intents whose intent.md cannot be read,
- * with their plain problem. `holds`: the same-file waits (see fileHolds), each shown in its note.
+ * reviews with a person on the gate; see waitsForPerson), held changes and changes with an open question
+ * that are not finished, and intents whose intent.md cannot be read, with their plain problem. `holds`:
+ * the same-file waits (see fileHolds), each shown in its note. `questions`: each open question's text
+ * by change (from question.json; the queue is rendered where the root is known).
  */
-export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map()): string {
+export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map(), questions: ReadonlyMap<string, string> = new Map()): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || !!i.file.frontmatter.hold.trim()));
+  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || !!i.file.frontmatter.hold.trim() || hasQuestion(i)));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
-  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug)))} |`;
+  const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug), questions.get(i.slug)))} |`;
   const badRow = (u: Unreadable) => `| ${u.slug} | - | ${plainStatus("blocked")} | ${cell(u.problem)} |`;
   const table = (rows: string[]) => rows.length
     ? ["| Change | Priority | Where it is | Note |", "|---|---|---|---|", ...rows].join("\n")

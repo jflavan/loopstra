@@ -28,12 +28,79 @@
 // Like the real CLI, the process exits 1 after a result event with is_error.
 // $LOOPSTRA_FAKE_DELAY_MS, when set, makes every session take at least that long (to see sessions overlap);
 // as "<phase>=<ms>,..." only those phases' sessions, and as "<phase>@<model>=<ms>" only that phase on that model.
+// Stream mode (--input-format stream-json), like the real CLI: stdin is read as lines while the session runs,
+// and its first user message is the prompt (used for everything the whole stdin is used for above). With
+// --replay-user-messages every user message taken is echoed ({"type":"user","isReplay":true,...}, with the
+// fixture's first session id); the prompt first, as its turn starts. The first turn plays the fixture. A message
+// that arrives while a turn plays (before its result is printed) is taken by that turn; one that arrives after
+// is queued, and once the turn has ended it gets a turn of its own (the same fixture again, without the delay).
+// $LOOPSTRA_FAKE_STEER_LOG, when set, gets one line per message taken ({phase, text, turn, at: "mid" | "queued"}).
+// A turn that took messages says so in its result's summary ("heard: <texts joined by ' | '>"), and each
+// result's total_cost_usd is the fixture's times the turn number (a running total, as the CLI reports). Once
+// stdin closes the fake ends, after its turn and one for each message already queued. "hang" never ends, but
+// still echoes and logs what it is sent; a session that answers only notifications ends after its turn.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const args = Bun.argv.slice(2);
-const prompt = await Bun.stdin.text();
 const phase = process.env.LOOPSTRA_PHASE ?? "";
+const inputAt = args.indexOf("--input-format");
+const streaming = inputAt >= 0 && args[inputAt + 1] === "stream-json";
+const replay = args.includes("--replay-user-messages");
+
+// Stream mode's input: the messages not yet taken, whether stdin has ended, and the wait for either.
+const queue: string[] = [];
+let ended = false;
+let wake: () => void = () => {};
+/** Set while a turn plays: a message that arrives then is taken by that turn. */
+let takeMidTurn: ((text: string) => void) | null = null;
+
+/** A user message's text: its content is a string, or parts of which the text ones count. */
+function userText(e: { message?: { content?: unknown } }): string {
+  const c = e.message?.content;
+  if (typeof c === "string") return c;
+  if (!Array.isArray(c)) return "";
+  return c.filter((p: { type?: string }) => p?.type === "text").map((p: { text?: unknown }) => String(p.text ?? "")).join("");
+}
+
+/** Reads stdin line by line as it comes; each user message is taken by the running turn, or queued. */
+async function readInput(): Promise<void> {
+  const dec = new TextDecoder();
+  let buffer = "";
+  const take = (line: string) => {
+    if (!line.trim()) return;
+    let e: { type?: string; message?: { content?: unknown } };
+    try { e = JSON.parse(line); } catch { return; }
+    if (e.type !== "user") return;
+    const text = userText(e);
+    if (takeMidTurn) takeMidTurn(text);
+    else { queue.push(text); wake(); }
+  };
+  try {
+    for await (const chunk of Bun.stdin.stream()) {
+      buffer += dec.decode(chunk, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) { take(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1); }
+    }
+    take(buffer);
+  } catch { /* stdin broke: as good as closed */ }
+  ended = true;
+  wake();
+}
+
+/** Waits until a message is queued or stdin has ended. */
+async function nextInput(): Promise<void> {
+  while (!queue.length && !ended) await new Promise<void>((resolve) => { wake = resolve; });
+}
+
+let prompt: string;
+if (streaming) {
+  void readInput();
+  await nextInput();
+  prompt = queue.shift() ?? "";
+} else {
+  prompt = await Bun.stdin.text();
+}
 
 if (process.env.LOOPSTRA_FAKE_ARGS) {
   await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, prompt, cwd: process.cwd(), env: {
@@ -94,8 +161,30 @@ if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-session") fixture = joi
 if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-forever") fixture = join(here, "no-envelope-forever.jsonl");
 if (resumeAt >= 0 && args[resumeAt + 1] === "no-envelope-stuck") fixture = join(here, "hang.jsonl");
 
+const fixtureText = await Bun.file(fixture).text();
+// The session id stream mode's echoes carry: the fixture's first.
+const sessionId = fixtureText.split("\n").map((l) => /"session_id":"([^"]*)"/.exec(l)?.[1]).find(Boolean) ?? "fake-session";
+
+/** Echoes a user message the session takes (stream mode, with --replay-user-messages). */
+function echo(text: string): void {
+  if (streaming && replay) console.log(JSON.stringify({ type: "user", isReplay: true, session_id: sessionId, message: { role: "user", content: [{ type: "text", text }] } }));
+}
+
+/** Records a message the session took in $LOOPSTRA_FAKE_STEER_LOG. */
+function logSteer(text: string, turn: number, at: "mid" | "queued"): void {
+  if (process.env.LOOPSTRA_FAKE_STEER_LOG) appendFileSync(process.env.LOOPSTRA_FAKE_STEER_LOG, JSON.stringify({ phase, text, turn, at }) + "\n");
+}
+
+/** From now until the turn's result, a message that arrives is taken by turn `turn` and added to `heard`. */
+function takeDuring(turn: number, heard: string[]): void {
+  if (streaming) takeMidTurn = (text) => { echo(text); logSteer(text, turn, "mid"); heard.push(text); };
+}
+
 if (fixture.endsWith("hang.jsonl")) {
+  echo(prompt);
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "hang-session" }));
+  // In stream mode it still takes what it is sent, so a test can deliver to a session that is waiting.
+  takeDuring(1, []);
   await new Promise(() => {});
 }
 
@@ -114,32 +203,71 @@ const linger = fixture.endsWith("linger.jsonl");
 const delay = process.env.LOOPSTRA_FAKE_DELAY_MS ?? "";
 const delays = delay.split(",").map((d) => d.split("="));
 const delayMs = delay.includes("=") ? (delays.find(([p]) => p === `${phase}@${model}`) ?? delays.find(([p]) => p === phase))?.[1] : delay;
-if (delayMs) await Bun.sleep(Number(delayMs));
 
 let failed = false;
-for (const line of (await Bun.file(fixture).text()).split("\n")) {
-  if (!line.trim()) continue;
-  const e = JSON.parse(line) as { type: string; is_error?: boolean; write?: { path: string; content: string }; refuse?: string; wait_for?: string; code?: number; stderr?: string };
-  if (e.type === "fake_action" && e.wait_for) {
-    while (!existsSync(e.wait_for)) await Bun.sleep(50);
-    continue;
+
+/**
+ * Plays the fixture's lines once, as turn `turn` (from 1) that has taken `heard`. In stream mode the turn takes
+ * messages until its result is printed, and that result is rewritten (see the header).
+ */
+async function playTurn(turn: number, heard: string[]): Promise<void> {
+  takeDuring(turn, heard);
+  for (const line of fixtureText.split("\n")) {
+    if (!line.trim()) continue;
+    const e = JSON.parse(line) as {
+      type: string; is_error?: boolean; write?: { path: string; content: string }; refuse?: string; wait_for?: string; code?: number; stderr?: string;
+      total_cost_usd?: number; structured_output?: { summary?: unknown }; origin?: { kind?: unknown };
+    };
+    if (e.type === "fake_action" && e.wait_for) {
+      while (!existsSync(e.wait_for)) await Bun.sleep(50);
+      continue;
+    }
+    if (e.type === "fake_action" && e.refuse) {
+      if (process.env.LOOPSTRA_PROTECTED_LOG) appendFileSync(process.env.LOOPSTRA_PROTECTED_LOG, `${e.refuse}\n`);
+      continue;
+    }
+    if (e.type === "fake_action" && e.write) {
+      const target = join(process.cwd(), e.write.path);
+      mkdirSync(dirname(target), { recursive: true });
+      await Bun.write(target, e.write.content);
+      continue;
+    }
+    if (e.type === "fake_exit") {
+      if (e.stderr) console.error(e.stderr);
+      process.exit(e.code ?? 1);
+    }
+    if (e.type === "result" && e.is_error) failed = true;
+    if (streaming && e.type === "result" && e.origin?.kind !== "task-notification") {
+      // The turn ends with its result: a message that comes later waits for a turn of its own.
+      takeMidTurn = null;
+      if (typeof e.total_cost_usd === "number") e.total_cost_usd = Math.round(e.total_cost_usd * turn * 1e6) / 1e6;
+      if (heard.length && e.structured_output && "summary" in e.structured_output) e.structured_output.summary = `heard: ${heard.join(" | ")}`;
+      console.log(JSON.stringify(e));
+      continue;
+    }
+    console.log(line);
   }
-  if (e.type === "fake_action" && e.refuse) {
-    if (process.env.LOOPSTRA_PROTECTED_LOG) appendFileSync(process.env.LOOPSTRA_PROTECTED_LOG, `${e.refuse}\n`);
-    continue;
+  takeMidTurn = null;
+}
+
+// The first turn: the prompt is taken as it starts, so a message during the delay is taken by it too.
+const firstHeard: string[] = [];
+echo(prompt);
+takeDuring(1, firstHeard);
+if (delayMs) await Bun.sleep(Number(delayMs));
+await playTurn(1, firstHeard);
+
+// A session that answered only notifications ends without reading the prompt, in stream mode too.
+const answersPrompt = fixtureText.split("\n").some((l) => l.includes('"type":"result"') && !l.includes('"task-notification"'));
+if (streaming && answersPrompt && !linger) {
+  for (let turn = 2; ; turn++) {
+    await nextInput();
+    const text = queue.shift();
+    if (text === undefined) break; // stdin has ended, and nothing is left to take
+    echo(text);
+    logSteer(text, turn, "queued");
+    await playTurn(turn, [text]);
   }
-  if (e.type === "fake_action" && e.write) {
-    const target = join(process.cwd(), e.write.path);
-    mkdirSync(dirname(target), { recursive: true });
-    await Bun.write(target, e.write.content);
-    continue;
-  }
-  if (e.type === "fake_exit") {
-    if (e.stderr) console.error(e.stderr);
-    process.exit(e.code ?? 1);
-  }
-  if (e.type === "result" && e.is_error) failed = true;
-  console.log(line);
 }
 if (linger) {
   Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.sleep(600000)"], stdout: "inherit", stderr: "inherit", stdin: "ignore" });

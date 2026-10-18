@@ -1,4 +1,4 @@
-import type { RunningPhase } from "../../console/types";
+import type { ChangeSummary, RunningPhase } from "../../console/types";
 import type { Status } from "../../intents";
 import { ago, costSoFar, duration, shortModel, stepWord, usd } from "../format";
 import { Link } from "../parts/Link";
@@ -27,7 +27,7 @@ export function Live() {
         <span class="muted">{r.now.length ? `${r.now.length} ${r.now.length === 1 ? "agent is" : "agents are"} working` : l.text}</span>
       </div>
       {r.now.length ? (
-        <div class="cards">{r.now.map((p) => <AgentCard key={`${p.slug}:${p.seq}`} p={p} t={t} rate={m.usdPerMinute} />)}</div>
+        <div class="cards">{r.now.map((p) => <AgentCard key={`${p.slug}:${p.seq}`} p={p} t={t} rate={m.usdPerMinute} asks={list.find((c) => c.slug === p.slug)?.question ?? null} />)}</div>
       ) : (
         <div class="empty">Nothing is running.{l.nextCheck ? ` The next check is in ${duration(Math.max(0, Date.parse(l.nextCheck) - t))}.` : ""}</div>
       )}
@@ -39,6 +39,7 @@ export function Live() {
               <Link href={`/c/${c.slug}`}><b>{c.title}</b></Link>
               <span class="muted">{c.plain}</span>
               {c.waiting && <span class="badge warn">{c.waiting}</span>}
+              {c.question && <span class="badge warn" title={c.question.text}>Has a question</span>}
               <span class="when">{c.inStatus ? `for ${c.inStatus}` : ""}</span>
             </li>
           ))}
@@ -60,7 +61,8 @@ export function Live() {
   );
 }
 
-function AgentCard({ p, t, rate }: { p: RunningPhase; t: number; rate: number }) {
+/** One running session. `asks`: its change's question waiting for a person, if any. */
+function AgentCard({ p, t, rate, asks }: { p: RunningPhase; t: number; rate: number; asks: ChangeSummary["question"] }) {
   return (
     <article class="card live">
       <div class="card-head">
@@ -68,12 +70,14 @@ function AgentCard({ p, t, rate }: { p: RunningPhase; t: number; rate: number })
         <span class="grow" />
         <span class="chip">{p.name}{p.model ? ` · ${shortModel(p.model)}` : ""}</span>
       </div>
+      {asks && <span class="badge warn" title={asks.text}>Has a question</span>}
       <div class="card-now" title={p.now}><span class="pulse" aria-hidden="true" />{p.now}</div>
       <div class="strip" aria-hidden="true">{p.strip.map((k, i) => <i key={i} class={k} />)}</div>
       <div class="card-foot">
         <span title="Running for">{duration(t - Date.parse(p.started))}</span>
         <span title="An estimate: the real cost is recorded when the step ends">{usd(costSoFar(p.started, t, rate), true)}</span>
         <span class="grow" />
+        {p.steerable && <Link href={`/s/${p.slug}/${p.seq}`} class="link" title="Send this session a message from its page">Message</Link>}
         <Link href={`/s/${p.slug}/${p.seq}`} class="btn">Watch</Link>
       </div>
     </article>

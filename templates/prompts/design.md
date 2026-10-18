@@ -4,6 +4,10 @@ Intent `{{slug}}`:
 
 {{intent}}
 
+What people told earlier sessions of this change (conversation.md); take it into account:
+
+{{conversation}}
+
 Findings from a check of an earlier version of this spec; address each one:
 
 {{findings}}
@@ -25,3 +29,5 @@ Two readers:
 - Design and Affected code are for engineers and may be as technical as needed.
 
 Requirements are a list of statements someone could check, each one testable. Design describes how the change fits the existing code, naming the real files and modules you found. Affected code lists them. Carry every open question from the intent forward: answer it, or list it under Open questions. Areas of concern lists anything where policies, constraints, or existing code conflict, or where you had to guess; write "None." when there is nothing.
+
+If a decision belongs to a person and there is no sensible default, ask: set `question` with `text`, `why`, and, when there are a few clear choices, `options`, and stop there. Otherwise decide, and say in your summary what you decided and why. Ask rarely.

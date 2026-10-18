@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
+import { readQuestion } from "../../src/questions";
 import { applyingRequests, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -23,6 +24,16 @@ function failedLongAgo(root: string, tries: number): void {
 
 /** A lock on main's ref: commits fail, but files and the index can still be put back. */
 const lockMain = (root: string) => writeFileSync(join(root, ".git", "refs", "heads", "main.lock"), "");
+
+/** A change whose design asked a question, and the question.json the loop keeps for it. */
+const ASKING = INTENT("designing", "x").replace("status: designing", "status: designing\nquestion: open");
+function asked(root: string): void {
+  mkdirSync(join(root, ".loopstra", "runs", "a"), { recursive: true });
+  writeFileSync(join(root, ".loopstra", "runs", "a", "question.json"), JSON.stringify({
+    status: "designing", count: 1,
+    open: { phase: "design", traceName: "design", seq: 3, sessionId: "s1", text: "Archived too?", why: "", options: [], at: "2026-10-17T12:00:00.000Z" },
+  }));
+}
 
 async function apply(root: string): Promise<number> {
   const trace = Trace.open(root);
@@ -73,6 +84,20 @@ describe("applying requests", () => {
     }
   });
 
+  test("send back writes its note into conversation.md, in the same commit as the status", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3.\n" });
+      await apply(r.root);
+      const show = (path: string) => run(["git", "show", `HEAD:${path}`], r.root);
+      expect((await show("intent/a/intent.md")).out).toContain("status: spec-approved");
+      expect((await show("intent/a/conversation.md")).out).toMatch(/^# Conversation\n\n## \d{4}-\d\d-\d\d \d\d:\d\d · John \(the dashboard\) sent it back\nSplit step 3\.\n$/);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("undo of a send back restores the review and its note, and drops the kept note", async () => {
     const r = await chatRepo({ intents: { a: withNote("plan-review", "Read plan.md.") }, config: PEOPLE });
     try {
@@ -82,6 +107,28 @@ describe("applying requests", () => {
       await apply(r.root);
       expect((await readIntent(r.root, "a")).file.frontmatter).toMatchObject({ status: "plan-review", note: "Read plan.md." });
       expect(existsSync(join(r.root, ".loopstra", "runs", "a", "sent-back.md"))).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("undo of a send back says in conversation.md, in the undo's own commit, that its note no longer stands", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x"), b: INTENT("plan-review", "y") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      submitRequest(r.root, { ...by, kind: "approve", slug: "b", expect: "plan-review" });
+      await apply(r.root);
+      submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "spec-approved", to: "plan-review", note: "" });
+      submitRequest(r.root, { ...by, kind: "undo", slug: "b", expect: "plan-approved", to: "plan-review", note: "" });
+      await apply(r.root);
+      const show = (path: string) => run(["git", "show", `HEAD~1:${path}`], r.root);
+      // The undo of a's send back is the commit before b's undo.
+      expect((await run(["git", "log", "-1", "--format=%s", "HEAD~1"], r.root)).out).toContain("loopstra(a): undone, back to plan-review by John from the dashboard");
+      expect((await show("intent/a/intent.md")).out).toContain("status: plan-review");
+      expect((await show("intent/a/conversation.md")).out).toMatch(/sent it back\nSplit step 3\.\n\n## \d{4}-\d\d-\d\d \d\d:\d\d · John \(the dashboard\) took back the send back\nThe note above no longer stands\.\n$/);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+      // An approve's undo has nothing to take back.
+      expect(existsSync(join(r.root, "intent", "b", "conversation.md"))).toBe(false);
     } finally {
       r.cleanup();
     }
@@ -276,6 +323,8 @@ describe("applying requests", () => {
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
       expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-review");
       expect(existsSync(kept)).toBe(false);
+      // The send back never happened: its conversation.md entry goes with it.
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
 
       const n = submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: INTENT("draft", "y"), update: false }] });
       expect(await apply(r.root)).toBe(0);
@@ -422,6 +471,49 @@ describe("applying requests", () => {
       expect(await apply(r.root)).toBe(1);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "a moved on to closed; nothing changed." });
       expect(existsSync(kept)).toBe(false);
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a send back that moved on leaves conversation.md as it is when a person edited it since the write", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      const record = join(r.root, "intent", "a", "conversation.md");
+      writeFileSync(record, `${readFileSync(record, "utf8")}\nA person's own line.\n`);
+      const path = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("status: spec-approved", "status: closed"));
+      expect(await apply(r.root)).toBe(1);
+      expect(existsSync(join(r.root, ".loopstra", "runs", "a", "sent-back.md"))).toBe(false);
+      expect(readFileSync(record, "utf8")).toContain("A person's own line.");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("an answer given up on leaves conversation.md as it is when it held a person's uncommitted edit before the write", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const record = join(r.root, "intent", "a", "conversation.md");
+      writeFileSync(record, "# Conversation\n\n## 2026-10-17 12:00 · design asks\nArchived too?\n");
+      await run(["git", "add", "intent/a/conversation.md"], r.root);
+      await run(["git", "commit", "-q", "-m", "the question"], r.root);
+      writeFileSync(record, `${readFileSync(record, "utf8")}\nA person's own line.\n`);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(0);
+      failedLongAgo(r.root, 5);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect(readFileSync(record, "utf8")).toContain("A person's own line.");
     } finally {
       r.cleanup();
     }
@@ -446,6 +538,141 @@ describe("applying requests", () => {
       }
     }, 60_000);
   }
+
+  test("an answer removes the question line, records the answer in conversation.md, and stores it for the asking session", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: " Leave them out. " });
+      expect(await apply(r.root)).toBe(1);
+      expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8")).not.toContain("question:");
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("designing");
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8")).toMatch(/## [0-9-]+ [0-9:]+ · John \(the dashboard\) answers\nLeave them out\.\n/);
+      expect(await lastCommit(r.root)).toContain("loopstra(a): question answered by John from the dashboard");
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+      expect(readQuestion(r.root, "a")!.open!.answer).toMatchObject({ text: "Leave them out.", by: "John", via: "the dashboard" });
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: true, status: "designing", text: "a has its answer; the loop goes on with it." });
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ kind: "answer", by: "John", result: "applied", what: "question answered" });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an answer naming the question it answers lands while that one waits, and changes nothing once another does", async () => {
+    const r = await chatRepo({ intents: { a: ASKING, b: ASKING } });
+    try {
+      asked(r.root);
+      mkdirSync(join(r.root, ".loopstra", "runs", "b"), { recursive: true });
+      writeFileSync(join(r.root, ".loopstra", "runs", "b", "question.json"), readFileSync(join(r.root, ".loopstra", "runs", "a", "question.json")));
+      const seen = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out.", question: "2026-10-17T12:00:00.000Z" });
+      // b's session asked another question since the person read theirs.
+      const stale = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out.", question: "2026-10-17T11:00:00.000Z" });
+      const bad = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out.", question: 5 as unknown as string });
+      await apply(r.root);
+      expect(requestState(r.root, seen.id)).toMatchObject({ ok: true, text: "a has its answer; the loop goes on with it." });
+      expect(requestState(r.root, stale.id)).toMatchObject({ ok: false, status: "designing", text: "b's question changed since; nothing changed. Read the new one." });
+      expect(requestState(r.root, bad.id)).toMatchObject({ ok: false, text: "That request could not be read, so nothing changed." });
+      expect((await readIntent(r.root, "b")).file.frontmatter.question).toBe("open");
+      expect(existsSync(join(r.root, "intent", "b", "conversation.md"))).toBe(false);
+      expect(readQuestion(r.root, "b")!.open).not.toHaveProperty("answer");
+      const trace = Trace.open(r.root, () => {});
+      try {
+        expect(trace.events("b").filter((e) => e.type === "request").map((e) => JSON.parse(e.payload))).toContainEqual(expect.objectContaining({ id: stale.id, kind: "answer", result: "refused", why: "question changed" }));
+      } finally { trace.close(); }
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an answer to a change with no question waiting, or a finished one, changes nothing; one that cannot be read is refused", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("designing", "x"), c: ASKING.replace("status: designing", "status: closed") } });
+    try {
+      const none = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const closed = submitRequest(r.root, { ...by, kind: "answer", slug: "c", text: "Leave them out." });
+      const blank = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "  " });
+      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(4001) });
+      await apply(r.root);
+      expect(requestState(r.root, none.id)).toMatchObject({ ok: false, text: "a has no question waiting; nothing changed." });
+      expect(requestState(r.root, closed.id)).toMatchObject({ ok: false, text: "c is closed; nothing changed." });
+      for (const q of [blank, long]) expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "That request could not be read, so nothing changed." });
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("c", "request")!.payload)).toMatchObject({ kind: "answer", result: "refused" });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an answer whose commit failed is committed on the next pass, its entry written once", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+      expect(await lastCommit(r.root)).toContain("loopstra(a): question answered by John from the dashboard");
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8").match(/answers\n/g)).toHaveLength(1);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("an answer given up on puts back the question line and the record, and the stored answer goes", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
+      failedLongAgo(r.root, 5);
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect((await readIntent(r.root, "a")).file.frontmatter.question).toBe("open");
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
+      expect(readQuestion(r.root, "a")!.open).not.toHaveProperty("answer");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("an answer given up on whose intent.md a person edited since keeps the stored answer and its record: the question line stays gone", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      const file = join(r.root, "intent", "a", "intent.md");
+      writeFileSync(file, `${readFileSync(file, "utf8")}\nA person's own line.\n`);
+      failedLongAgo(r.root, 5);
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect(readFileSync(file, "utf8")).toContain("A person's own line.");
+      expect((await readIntent(r.root, "a")).file.frontmatter.question).toBe("");
+      expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
+      // The answer stays, so its entry in conversation.md does too.
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8")).toContain("answers\nLeave them out.\n");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
 
   test("a hold of a held change, or a release of one not held, is refused and traced", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x").replace("status: building", "status: building\nhold: legal"), b: INTENT("building", "y") } });

@@ -2,10 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { z } from "zod";
 import { runChatAgent } from "../../src/chat/agents";
+import type { SessionControl } from "../../src/claude";
 import { configPath, loadConfig } from "../../src/config";
+import { tracedSession } from "../../src/sessions";
+import { SessionStopped } from "../../src/stop";
 import { andList } from "../../src/text";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, tempGitRepo, withEnv } from "../helpers";
+import { until } from "../console-helpers";
+import { FAKE_CLAUDE, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FIXTURES = join(import.meta.dir, "..", "fake-claude", "fixtures");
 
@@ -35,4 +39,60 @@ describe("andList", () => {
     expect(andList(["a", "b"])).toBe("a and b");
     expect(andList(["a", "b", "c"])).toBe("a, b and c");
   });
+});
+
+describe("a session a person stopped", () => {
+  test("ends its row interrupted, saying who stopped it, with what it must have spent, and is thrown on", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const seq = trace.phaseStart("add-numbers", "design", "agent");
+      let ctl: SessionControl | null = null;
+      let running = false;
+      const run = tracedSession({
+        trace, slug: "add-numbers", seq, dir: join(t.path, "phase"), capUsd: 1, stoppedNote: "stopped by request",
+        read: (output) => ({ ok: true, value: output }),
+        onEvent: (e) => { if (e.type === "system") running = true; },
+        run: {
+          cwd: t.path, prompt: "FIXTURE:hang", schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 60_000,
+          maxBudgetUsd: 1, executable: FAKE_CLAUDE, live: { attach: (c) => { ctl = c; return () => {}; } },
+        },
+      });
+      await until(() => running);
+      ctl!.stop("John");
+      const e = await run.then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(SessionStopped);
+      const row = trace.phases("add-numbers")[0]!;
+      expect(row.status).toBe("interrupted");
+      expect(row.error).toBe("stopped by John");
+      expect(row.ended).not.toBeNull();
+      // Killed, it never said what it spent: it counts at about its minutes.
+      expect(row.cost_usd).toBeGreaterThan(0);
+    } finally { trace.close(); t.cleanup(); }
+  }, 90_000);
+});
+
+describe("a session that asked a question", () => {
+  test("ends its row asked once, with no error, and the question is an event of its own under that phase", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const seq = trace.phaseStart("add-numbers", "design", "agent");
+      const out = await tracedSession({
+        trace, slug: "add-numbers", seq, dir: join(t.path, "phase"), capUsd: 1,
+        read: (output) => ({ ok: true, value: output, endAs: "asked", note: "Round half up or to even?" }),
+        run: { cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE_CLAUDE },
+      });
+      expect(out.ok).toBe(true);
+      const row = trace.phases("add-numbers")[0]!;
+      expect(row).toMatchObject({ status: "asked", error: null, session_id: "fake-session-1" });
+      expect(row.cost_usd).toBeCloseTo(0.01);
+      const events = trace.events("add-numbers");
+      expect(events.filter((e) => e.type === "phase_end")).toHaveLength(1);
+      expect(JSON.parse(events.find((e) => e.type === "phase_end")!.payload)).toMatchObject({ status: "asked", error: null });
+      const question = events.find((e) => e.type === "question")!;
+      expect(question.phase_seq).toBe(seq);
+      expect(JSON.parse(question.payload)).toEqual({ question: "Round half up or to even?" });
+    } finally { trace.close(); t.cleanup(); }
+  }, 90_000);
 });

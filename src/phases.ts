@@ -13,7 +13,12 @@ import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
-import { AssistantUnavailable, Cancelled, LoopBudgetReached, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
+import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
+import { readConversation } from "./conversation";
+import { steerable } from "./console/steerable";
+import { deliverInbox } from "./steering";
+import { changeStoppedBy } from "./inbox";
 import { toolTarget } from "./tools";
 
 /**
@@ -46,7 +51,7 @@ export interface AgentPhaseSpec {
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
-  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number }
+  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number; seq?: number }
   | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -155,13 +160,25 @@ export function ownerNote(reason: BlockingReason): string {
 /** Failures worth one automatic retry (spec §15). Budget failures are not retried. */
 const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
-/** The prompt a phase would be sent, or null when its prompt file is missing. */
+/** What heads conversation.md in a work session's prompt (the shipped templates say the same). */
+export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
+
+/**
+ * The prompt a phase would be sent, or null when its prompt file is missing. A work session (see
+ * steerable) gets conversation.md as {{conversation}}; a repository prompt older than that variable
+ * gets the record at its end instead, when there is one.
+ */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
   const promptPath = promptFile(ctx, spec.name);
   if (!existsSync(promptPath)) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
-  const vars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...spec.vars };
-  return withContract(skillsLine + renderPrompt(await Bun.file(promptPath).text(), vars));
+  const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
+  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
+  const template = await Bun.file(promptPath).text();
+  let rendered = skillsLine + renderPrompt(template, vars);
+  const said = vars.conversation?.trim() ?? "";
+  if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
+  return withContract(rendered);
 }
 
 /** The repository's prompt file for a phase. */
@@ -182,20 +199,89 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
   return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
 }
 
-/** Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it. */
-export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
-  const prompt = rendered === undefined ? await phasePrompt(ctx, spec) : rendered;
+/** A phase's prompt as the caller gives it: rendered already (null: its prompt file is missing), or the function that renders it. */
+export type PromptSource = string | null | (() => Promise<string | null>);
+
+/**
+ * A renderer that gives `first` (a prompt the caller rendered already, to match it against work kept
+ * from earlier) the first time, and renders afresh with `render` every time after: a retry then has
+ * what people told the attempt before it.
+ */
+export function renderedThen(first: string | null, render: () => Promise<string | null>): () => Promise<string | null> {
+  let used = false;
+  return async () => {
+    if (used) return render();
+    used = true;
+    return first;
+  };
+}
+
+/**
+ * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller
+ * already has it, or the function that renders it. A retry renders its prompt again (with the function,
+ * else phasePrompt; never a prompt given as text), so it has what people told the crashed attempt.
+ *
+ * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
+ * ends quietly and the change waits. Once it is answered, the step's first session of the kind of phase that
+ * asked resumes the asking session with the answer, when the change has not changed status since (see
+ * answerFor; one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS asked
+ * in this stay at the status the prompt says no more may be, and one more fails the phase. Work run alongside never
+ * asks: a question fails it, and that work is just not used.
+ */
+export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: PromptSource): Promise<AgentPhaseResult<N>> {
+  const render = typeof rendered === "function" ? rendered : rendered === undefined ? () => phasePrompt(ctx, spec) : null;
+  const prompt = render ? await render() : (rendered as string | null);
   if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
 
   const traceName = spec.traceName ?? spec.name;
-  const first = await attempt(ctx, spec, prompt, traceName);
-  if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
-  ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-  return attempt(ctx, spec, prompt, `${traceName}-retry`);
+  const here = ASKERS.has(spec.name) && !cancelSignal();
+  const atLimit = here && askedAt(ctx) >= MAX_QUESTIONS;
+  const ask: AskRule | null = !ASKERS.has(spec.name) ? null : !here ? { refuse: "It asked a question" } : atLimit ? { refuse: TOO_MANY_NOTE } : {};
+  const limited = (p: string) => (atLimit ? `${p.trimEnd()}\n\n${NO_MORE_QUESTIONS}\n` : p);
+  // One run of the phase on `p`, retried once on a timeout or crash. `normal`: `p` is the phase's own
+  // prompt, rendered here; the retry renders it again, so it has what people told the crashed attempt.
+  const tries = async (p: string, resume: string | undefined, normal: boolean): Promise<Attempted<N>> => {
+    const s = { ...spec, resume };
+    const first = await attempt(ctx, s, limited(p), traceName, ask);
+    if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
+    ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
+    const again = normal && render ? ((await render()) ?? p) : p;
+    return attempt(ctx, s, limited(again), `${traceName}-retry`, ask);
+  };
+
+  let r: Attempted<N>;
+  const answered = answerFor(ctx, spec.name, here);
+  if (answered) {
+    // The answer goes to the session that asked; one that cannot be resumed starts fresh with the normal prompt.
+    r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId, false) : await tries(prompt, spec.resume, true);
+    if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined, true);
+    closeQuestion(ctx.root, ctx.slug, answered);
+  } else {
+    r = await tries(prompt, spec.resume, true);
+  }
+  if (!r.ok) return r;
+  const { asked, ...ok } = r as Asking<N>;
+  // Recorded already, as its session ended (see attempt).
+  if (asked) throw new QuestionAsked(spec.name, asked.text);
+  return ok;
 }
+
+/** The phases whose sessions may ask a person a question (see src/questions.ts). */
+export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "revise"]);
+
+/**
+ * What a session of an asker does with a question in its report: it is recorded (no `refuse`), or the
+ * session fails with `refuse` as its note (work run alongside, or a step that asked the most it may).
+ */
+type AskRule = { refuse?: string };
+
+/** A successful attempt, with its question when it asked one (recorded already: see attempt). */
+type Asking<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: true }> & { asked?: Question };
+/** One attempt's result (see attempt). */
+type Attempted<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: false }> | Asking<N>;
 
 /**
  * Two pieces of work running at once (see alongside): whether a session in them succeeded, whether
@@ -241,12 +327,13 @@ export function mayOverlap(ctx: StepContext): boolean {
  * does not need (lessons beside the done-check, round 1's review beside the verifier). Returns both
  * results; extra's is null when it was dropped or cancelled.
  *
- * - Extra work is optional: anything it throws but a stop request is dropped, traced, and never ends
- *   the step; main meets the same trouble on its own.
+ * - Extra work is optional: anything it throws but a stop request or a person's stop of its session
+ *   (SessionStopped) is dropped, traced, and never ends the step; main meets the same trouble on its own.
+ *   A question it asks is not recorded (see agentPhase), so that work is just not used.
  * - Once main ends, extra is cancelled (its session or command killed) unless `extra.wanted` says
  *   main's result still uses it; also when main throws.
  * - It waits for both, so each phase ends its own row; then it throws a stop request from either (so
- *   the loop stops rather than pauses), else main's error.
+ *   the loop stops rather than pauses), else the extra's SessionStopped (the step ends quietly), else main's error.
  * - A session that succeeded inside ends the loop's pause, unless main found the assistant
  *   unavailable: the scheduler then counts that outage on top of the pause before it.
  * - It may run inside another alongside or alongsideFirst (a judge's shadow inside the early review,
@@ -299,7 +386,7 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
     (e: unknown) => { cancel.abort(); throw e; },
   );
   const extraDone = member(extra.run, extraSignal).catch((e: unknown) => {
-    if (e instanceof StopRequested) throw e;
+    if (e instanceof StopRequested || e instanceof SessionStopped) throw e;
     ctx.trace.event(ctx.slug, "command", { command: extra.what, note: e instanceof Cancelled ? e.message : `dropped: ${errorText(e)}` });
     return null;
   });
@@ -307,7 +394,9 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
     // Inside another group this marks that group, which decides about the pause once its work ended.
     if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) assistantReached(ctx);
     group.decided = true;
-    if (x.status === "rejected") throw x.reason; // only ever a stop request
+    const stop = [x, m].find((r) => r.status === "rejected" && r.reason instanceof StopRequested);
+    if (stop?.status === "rejected") throw stop.reason;
+    if (x.status === "rejected") throw x.reason; // only ever a person's stop of its session
     if (m.status === "rejected") throw m.reason;
     return [m.value, x.value];
   });
@@ -341,16 +430,20 @@ export const STOPPED_NOTE = "stopped by request; the step resumes on the next st
  * minutes, and every record, sync and merge would wait for it (under the merge lock is fine: the
  * merge checks run fix sessions).
  */
-async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string): Promise<AgentPhaseResult<N>> {
+async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string, ask: AskRule | null): Promise<Attempted<N>> {
   assertNoCheckoutLock(`The ${traceName} session`);
   throwIfStopping();
   const signal = cancelSignal();
   throwIfCancelled(signal);
+  throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");
+  // The session's question, when it asked one (see agentPhase); `refused`: the note when it may not ask.
+  let asked: Question | null = null;
+  let refused: string | null = null;
   const out = await tracedSession({
     trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE,
     run: {
@@ -366,13 +459,23 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       resume: spec.resume,
       env: { LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog, ...(spec.env ?? {}) },
       signal,
+      // Live: what people send this session while it runs reaches it (see src/steering.ts).
+      live: { attach: (ctl) => deliverInbox(ctx, seq, spec.name, ctl) },
     },
     onEvent: (e) => { if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e, cwd), seq); },
     read: (output) => {
       const parsed = Envelopes[spec.name].safeParse(output);
       if (!parsed.success) return { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
       const envelope = parsed.data as Envelope<N>;
-      return envelope.status === "fail" ? { ok: false, reason: "agent-fail", detail: envelope.summary } : { ok: true, value: envelope };
+      if (envelope.status === "fail") return { ok: false, reason: "agent-fail", detail: envelope.summary };
+      const q = ask ? questionIn(envelope) : null;
+      if (!q) return { ok: true, value: envelope };
+      if (ask?.refuse) {
+        refused = ask.refuse;
+        return { ok: false, reason: "agent-fail", detail: `${ask.refuse}: ${q.text}` };
+      }
+      asked = q;
+      return { ok: true, value: envelope, endAs: "asked", note: q.text };
     },
     // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
     // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
@@ -380,13 +483,29 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail }), note: `${r.reason}: ${r.detail}` }
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
+  // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
+  // its row already ended asked (see tracedSession).
+  const question = out.ok ? (asked as Question | null) : null;
+  if (question) await recordQuestion(ctx, { phase: spec.name, traceName, seq, sessionId: out.sessionId, ...question });
+  // A person stopped the change while this session ran: the step ends here, whatever the session did.
+  throwIfChangeStopped(ctx);
   if (!out.ok) {
+    if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
     const reason = out.reason as BlockingReason;
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx);
-  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd };
+  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, ...(question ? { asked: question } : {}) };
+}
+
+/**
+ * Throws SessionStopped when a person stopped the change (see writeChangeStop in src/inbox.ts): checked
+ * before each phase starts and once it ends, so a stop ends the step whichever phase it came in.
+ */
+export function throwIfChangeStopped(ctx: StepContext): void {
+  const by = changeStoppedBy(ctx.root, ctx.slug);
+  if (by !== null) throw new SessionStopped(by);
 }
 
 /** The test files the protect-tests hook refused during a phase, once each, in the order refused. */
@@ -473,22 +592,31 @@ export async function projectCommand(
 /** `detail`: what went wrong, for the trace (the caller words the owner's note). */
 export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
-/** Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop request (or a cancel) is marked interrupted and passed on. */
+/**
+ * Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop
+ * request (or a cancel, or a session inside that a person stopped or that asked a question) is marked
+ * interrupted and passed on. A change a person stopped (see throwIfChangeStopped) does not start it,
+ * and once it ended, success or failure, ends the step.
+ */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
+  throwIfChangeStopped(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
+  let r: { ok: true } & T;
   try {
-    const r = await fn(seq);
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
-    return r;
+    r = await fn(seq);
   } catch (e) {
-    if (e instanceof StopRequested || e instanceof Cancelled) {
-      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof Cancelled ? e.message : STOPPED_NOTE });
+    if (e instanceof StopRequested || e instanceof Cancelled || endsStepQuietly(e)) {
+      ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof StopRequested ? STOPPED_NOTE : e.message });
       throw e;
     }
     const msg = errorText(e);
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     // A hung git command is reported the same way wherever it happens (see the scheduler).
     if (e instanceof GitTimeout) throw e;
+    throwIfChangeStopped(ctx);
     return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0]}` };
   }
+  ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
+  throwIfChangeStopped(ctx);
+  return r;
 }

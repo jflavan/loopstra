@@ -124,6 +124,35 @@ describe("renderStatus", () => {
 });
 
 describe("attention", () => {
+  test("a change with an open question is in the list as Has a question, with what was asked", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "a", "status: designing\nquestion: open");
+      await intent(t.path, "b", "status: planning\nquestion: open");
+      await intent(t.path, "c", "status: building\nquestion: open");
+      await intent(t.path, "d", "status: closed\nquestion: open");
+      const state = (open: Record<string, unknown>) => JSON.stringify({ status: "designing", count: 1, open: { traceName: "x", seq: 1, sessionId: null, at: "2026-10-17T12:00:00.000Z", ...open } });
+      mkdirSync(join(t.path, ".loopstra", "runs", "a"), { recursive: true });
+      await Bun.write(join(t.path, ".loopstra", "runs", "a", "question.json"), state({ phase: "design", text: "Archived too?", why: "The list hides them.", options: ["yes", "no"] }));
+      mkdirSync(join(t.path, ".loopstra", "runs", "b"), { recursive: true });
+      await Bun.write(join(t.path, ".loopstra", "runs", "b", "question.json"), state({ phase: "plan", text: "One table or two?", why: "", options: [] }));
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = await attention(t.path, await loadConfig(t.path), trace, new Date());
+        expect(items.filter((i) => i.kind === "question")).toEqual([
+          { kind: "question", label: "Has a question", slug: "a", title: "a", what: "design asks: Archived too? Why: The list hides them. Options: yes · no. Answer it in the console, or tell the orchestrator." },
+          { kind: "question", label: "Has a question", slug: "b", title: "b", what: "plan asks: One table or two? Answer it in the console, or tell the orchestrator." },
+          { kind: "question", label: "Has a question", slug: "c", title: "c", what: "Read conversation.md for the question. Answer it in the console, or tell the orchestrator." },
+        ]);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a held change is in the list as Held, with why; a person's pause of the loop is there too", async () => {
     const t = tempDir();
     try {

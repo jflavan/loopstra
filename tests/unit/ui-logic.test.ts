@@ -2,7 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { keyLabel, keyMatcher, keyName, typingIn } from "../../src/ui/keys";
+import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
@@ -11,8 +11,8 @@ import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
-import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { act, beforeOf, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
+import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
+import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -36,6 +36,7 @@ describe("formatting", () => {
     expect(stepWord("success")).toBe("passed");
     expect(stepWord("fail")).toBe("failed");
     expect(stepWord("running")).toBe("running");
+    expect(stepWord("asked")).toBe("asked a question");
     expect(pillText({ state: "running", text: "Running — working on a and b, last check 3s ago", working: [{ slug: "a" }, { slug: "b" }] })).toBe("Running · 2 agents");
     expect(pillText({ state: "running", text: "Running — last check 3s ago", working: [] })).toBe("Running");
     expect(pillText({ state: "running", text: "Stopping — last check 3s ago", working: [{ slug: "a" }] })).toBe("Stopping");
@@ -93,6 +94,28 @@ describe("keys", () => {
     expect(typingIn({ tagName: "DIV", isContentEditable: true } as unknown as EventTarget)).toBe(true);
     expect(typingIn({ tagName: "DIV" } as unknown as EventTarget)).toBe(false);
     expect(typingIn(null)).toBe(false);
+  });
+
+  test("Ctrl or Cmd with Enter sends a message, but not while an input method is picking a character", () => {
+    const enter = (mods: Partial<{ ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }> = {}) =>
+      ({ key: "Enter", ctrlKey: false, metaKey: false, isComposing: false, keyCode: 13, ...mods });
+    expect(sendsMessage(enter({ ctrlKey: true }))).toBe(true);
+    expect(sendsMessage(enter({ metaKey: true }))).toBe(true);
+    expect(sendsMessage(enter())).toBe(false);
+    expect(sendsMessage({ ...enter({ ctrlKey: true }), key: "a" })).toBe(false);
+    expect(sendsMessage(enter({ ctrlKey: true, isComposing: true }))).toBe(false);
+    // Some browsers report a key an input method takes as keyCode 229 without isComposing.
+    expect(sendsMessage(enter({ ctrlKey: true, keyCode: 229 }))).toBe(false);
+  });
+
+  test("after a form closes the focus goes to its button, or to the box when the button is gone or disabled (a stopped session)", () => {
+    const focused: string[] = [];
+    const el = (name: string, disabled = false) => ({ disabled, focus: () => { focused.push(name); } });
+    focusOr(el("stop"), el("box"));
+    focusOr(el("stop", true), el("box"));
+    focusOr(null, el("box"));
+    focusOr(undefined, null);
+    expect(focused).toEqual(["stop", "box", "box"]);
   });
 });
 
@@ -332,7 +355,7 @@ describe("what is worth a notification", () => {
 });
 
 describe("when a change page reads its detail again", () => {
-  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [] };
+  const summary: ChangeSummary = { slug: "a", title: "A", status: "building", plain: "Being built", priority: "normal", stage: "build", since: "2026-01-01T00:00:00Z", inStatus: "12s", costUsd: 1.5, waiting: null, note: "", running: true, held: null, statedPriority: null, offers: [], question: null };
   test("the age in words, which the server rebuilds every few seconds, does not count", () => {
     expect(detailKey({ ...summary, inStatus: "3 min" }, "2")).toBe(detailKey(summary, "2"));
     expect(detailKey(null, "")).toBe(detailKey(null, ""));
@@ -369,6 +392,12 @@ describe("the chat drawer's lines", () => {
     expect(aboutPrefix({ slug: "csv-export", title: "CSV export" })).toBe("About csv-export (CSV export): ");
     expect(aboutPrefix({ title: "Step 3" })).toBe("About Step 3: ");
     expect(aboutPrefix(null)).toBe("");
+  });
+  test("the orchestrator is told which change, and which session, the drawer was opened from", () => {
+    expect(aboutOf({ slug: "csv-export", title: "CSV export", seq: 3 })).toEqual({ slug: "csv-export", seq: 3 });
+    expect(aboutOf({ slug: "csv-export", title: "CSV export" })).toEqual({ slug: "csv-export" });
+    expect(aboutOf({ title: "Step 3" })).toBeNull();
+    expect(aboutOf(null)).toBeNull();
   });
 });
 
@@ -408,6 +437,38 @@ describe("requests from the page", () => {
     expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
     expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
     expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
+    // An answer names no status, whatever the status; it names the question the person saw.
+    expect(bodyFor(change, { kind: "answer", label: "Answer" }, { note: "No." })).toStrictEqual({ kind: "answer", slug: "a", text: "No." });
+    const asking = { ...change, question: { text: "Archived too?", why: "", options: [], phase: "design", at: "2026-10-17T12:00:00.000Z" } };
+    expect(bodyFor(asking, { kind: "answer", label: "Answer" }, { note: "No." })).toStrictEqual({ kind: "answer", slug: "a", text: "No.", question: "2026-10-17T12:00:00.000Z" });
+  });
+
+  test("an answer has no Undo: the session carries on with it", () => {
+    expect(UNDOABLE.has("answer")).toBe(false);
+  });
+
+  test("stopping a change posts to its stop route and says it is held; a refusal says why", async () => {
+    const real = globalThis.fetch;
+    const posted: Array<[string, unknown]> = [];
+    let refuse = false;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      posted.push([url, JSON.parse(String(init?.body))]);
+      return refuse ? Response.json({ error: "Nothing of a is running." }, { status: 409 }) : Response.json({ stopped: 1 }, { status: 202 });
+    }) as unknown as typeof fetch;
+    toasts.value = [];
+    try {
+      expect(await stopChange("a")).toBe(true);
+      refuse = true;
+      expect(await stopChange("a")).toBe(false);
+      expect(posted).toEqual([["/api/changes/a/stop", {}], ["/api/changes/a/stop", {}]]);
+      expect(toasts.value.map((t) => [t.text, t.kind])).toEqual([
+        ["Stopping a. It is held, so it does not start again until someone releases it.", "info"],
+        ["Nothing of a is running.", "bad"],
+      ]);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
   });
 
   test("what an undo puts back is the stated priority: none when the change only reads as normal", () => {
@@ -465,6 +526,44 @@ describe("requests from the page", () => {
     expect(nextPoll(30)).toBe(5000);
     expect(nextPoll(143)).toBe(5000);
     expect(nextPoll(144)).toBeNull();
+  });
+
+  test("a running work session may be messaged and stopped; a running check only stopped; an ended one neither", () => {
+    expect(steerOffer("build", "running", false)).toEqual({ message: true, stop: true });
+    expect(steerOffer("fix-2", "running", false)).toEqual({ message: true, stop: true });
+    expect(steerOffer("review-1", "running", false)).toEqual({ message: false, stop: true, note: "Checks cannot be messaged. Approve or send back instead." });
+    expect(steerOffer("build", "running", true)).toBeNull();
+    expect(steerOffer("build", "success", false)).toBeNull();
+  });
+
+  test("steering a session posts to its message route and says what happens in a toast; a refusal says why", async () => {
+    const real = globalThis.fetch;
+    const posted: Array<[string, unknown]> = [];
+    let refuse = false;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      posted.push([url, JSON.parse(String(init?.body))]);
+      return refuse ? Response.json({ error: "That session is not running." }, { status: 409 }) : Response.json({ id: "m1" }, { status: 202 });
+    }) as unknown as typeof fetch;
+    toasts.value = [];
+    try {
+      expect(await steer("a", 7, "message", "Cover negatives.")).toBe(true);
+      expect(await steer("a", 7, "stop")).toBe(true);
+      refuse = true;
+      expect(await steer("a", 7, "redirect", "Do it the other way.")).toBe(false);
+      expect(posted).toEqual([
+        ["/api/sessions/a/7/message", { kind: "message", text: "Cover negatives." }],
+        ["/api/sessions/a/7/message", { kind: "stop", text: "" }],
+        ["/api/sessions/a/7/message", { kind: "redirect", text: "Do it the other way." }],
+      ]);
+      expect(toasts.value.map((t) => [t.text, t.kind])).toEqual([
+        ["Sent: the session reads it at its next step.", "info"],
+        ["Stopping the session. The change is held, so it does not start again.", "info"],
+        ["That session is not running.", "bad"],
+      ]);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
   });
 
   test("an action that could not be sent says so plainly, without the error itself", () => {

@@ -2,7 +2,9 @@ import { useEffect, useState } from "preact/hooks";
 import type { ChangeDetail, PhaseView, SessionMessage, TranscriptItem } from "../../console/types";
 import { clock, costSoFar, duration, shortModel, stepWord, usd } from "../format";
 import { Link } from "../parts/Link";
+import { Steer } from "../parts/Steer";
 import { Transcript } from "../parts/Transcript";
+import { steerOffer } from "../requests";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
 import { addItems, EMPTY, type Shown } from "../transcript";
 
@@ -89,6 +91,8 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
   const card = running.value?.now.find((p) => p.slug === slug && p.seq === seq);
   const title = slug === "_chat" ? "Chat" : changes.value?.find((c) => c.slug === slug)?.title ?? slug;
   const live = phase?.status === "running" && !ended && !stopped;
+  // What a person may do to the running session; chat's sessions are not a change's, so they are not steered here.
+  const offer = phase && !chat ? steerOffer(phase.name, phase.status, ended || stopped) : null;
   return (
     <section class="view">
       <div class="view-head">
@@ -100,6 +104,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
         {live && <span class="pulse" role="img" aria-label="live" />}
       </div>
       {stopped && <p class="muted">The stream stopped. Reload to see the rest.</p>}
+      {offer && <Steer slug={slug} seq={seq} offer={offer} />}
       <div class="session">
         <Transcript shown={shown} live={live} done={ended} />
         <aside class="side">
@@ -114,7 +119,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
             {detail && detail.denied.length > 0 && <p class="muted">Not allowed: {detail.denied.join(", ")}</p>}
             {detail && detail.files.length > 0 && <p>{detail.files.map((f) => <a key={f.name} href={f.url} target="_blank" rel="noopener noreferrer" class="chip">{f.name}</a>)}</p>}
           </div>
-          {!chat && <button class="btn" onClick={() => openDrawer({ slug, title })}>Ask the orchestrator about this</button>}
+          {!chat && <button class="btn" onClick={() => openDrawer({ slug, title, seq })}>Ask the orchestrator about this</button>}
         </aside>
       </div>
     </section>

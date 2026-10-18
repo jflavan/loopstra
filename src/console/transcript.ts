@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { relativePath, toolTarget } from "../tools";
+import { MEANWHILE_HEADING, MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
 import type { TranscriptItem } from "./types";
 
 /** The longest tool output one item carries. */
@@ -59,10 +60,55 @@ const EDITS = new Set(["Edit", "MultiEdit", "Write"]);
 const HIDDEN = new Set(["StructuredOutput"]);
 
 /**
+ * A user message the session echoed as it took it up (see the live sessions in src/claude.ts): a
+ * person's message or redirect, which the runner starts with MESSAGE_LEAD or REDIRECT_LEAD, is an item
+ * with the person's words (the runner's lead and closing words left out, else the first paragraph). Any other
+ * echo (the prompt, a nudge, an answer to a question) shows nothing.
+ */
+function replayed(content: unknown): TranscriptItem[] {
+  const texts = typeof content === "string" ? [content] : Array.isArray(content) ? (content as unknown[]).filter(isObject).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text as string) : [];
+  const out: TranscriptItem[] = [];
+  for (const raw of texts) {
+    const text = raw.replace(/\r\n/g, "\n").trim();
+    const redirect = text.startsWith(REDIRECT_LEAD);
+    if (!redirect && !text.startsWith(MESSAGE_LEAD)) continue;
+    const tail = text.indexOf(`\n\n${redirect ? REDIRECT_TAIL : MESSAGE_TAIL}`);
+    const words = tail >= 0 ? text.slice(0, tail) : text.split(/\n\s*\n/)[0]!;
+    out.push({ kind: "message", text: cut(ownWords(words.trim())), redirect });
+    if (redirect) out.push(...carried(text));
+  }
+  return out;
+}
+
+/**
+ * The messages a redirect carries (sent to the killed process, not taken up yet: see src/claude.ts),
+ * one item each, the runner's closing words left out.
+ */
+function carried(redirect: string): TranscriptItem[] {
+  const at = redirect.indexOf(`\n\n${MEANWHILE_HEADING}\n\n`);
+  if (at < 0) return [];
+  return redirect.slice(at + MEANWHILE_HEADING.length + 4).split(`\n\n${MESSAGE_TAIL}`)
+    .map((m) => m.trim())
+    .filter((m) => m.startsWith(MESSAGE_LEAD))
+    .map((m) => ({ kind: "message" as const, text: cut(ownWords(m)), redirect: false }));
+}
+
+/**
+ * A message or redirect without the runner's lead ("A message from John, who is watching this work from
+ * the dashboard: "): up to and including the first ": " of its first line. The bubble's label says which it is.
+ */
+function ownWords(text: string): string {
+  const firstLine = text.split("\n", 1)[0]!;
+  const at = firstLine.indexOf(": ");
+  return at < 0 ? text : text.slice(at + 2);
+}
+
+/**
  * One raw `stream-json` event as transcript items. `cwd`, the session's folder from its init event,
  * shortens paths. Events the console does not show (thinking, hooks, rate limits, progress) give none.
  */
 export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
+  if (e.type === "user" && e.isReplay === true) return replayed((e.message as { content?: unknown } | undefined)?.content);
   if (e.type === "assistant" || e.type === "user") {
     const content = (e.message as { content?: unknown } | undefined)?.content;
     if (!Array.isArray(content)) return [];

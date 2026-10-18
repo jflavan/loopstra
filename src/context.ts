@@ -18,6 +18,10 @@ export class StepContext {
   private reading: Promise<string> | null = null;
   /** The step's snapshot, once asked for (see snapshot). */
   private made: Promise<string> | null = null;
+  /** The kinds of phase (see phaseKind) whose first session of the step has started: only that one may resume an answered question (see answerFor). */
+  readonly kindsStarted = new Set<string>();
+  /** When the step began (ms since the epoch): a question asked before it and not used is closed when it ends (see closeUnusedAnswer). */
+  readonly startedAt = Date.now();
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
@@ -76,8 +80,12 @@ export class StepContext {
  * `waiting`: the step only looked at a pull request (the watcher's steps) and nothing changed; it
  * looks again later. `personChanged`: a person set the status while the step ran, so
  * the step ended without writing anything over it; the next tick picks up their status.
+ * `stoppedBy`: a person stopped the step's session (who), so the step ended and the change kept its
+ * status. `asked`: an agent asked a person a question, so the change waits for the answer.
  */
-export type StepResult = { ok: true; waiting?: boolean; personChanged?: boolean } | { ok: false; note: string };
+export type StepResult =
+  | { ok: true; waiting?: boolean; personChanged?: boolean; stoppedBy?: string; asked?: boolean }
+  | { ok: false; note: string };
 
 /**
  * A person changed the status in intent.md while the step ran. The step ends without blocking or
@@ -142,7 +150,7 @@ export function commitRecord(root: string, main: string, slug: string, what: str
  * Writes frontmatter keys for the runtime (inside commitRecord), re-read from disk right before
  * writing, never over a status a person set while the step ran (throws PersonChangedStatus instead).
  */
-async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
+export async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
   const expected = ctx.intent.file.frontmatter.status;
   if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }))) {
     const found = (await readIntent(ctx.root, ctx.slug)).file.frontmatter.status;

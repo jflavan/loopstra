@@ -6,12 +6,14 @@ import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
 import { loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readLoopHold, readPause, type Heartbeat, type LoopHold, type LoopStatus } from "../heartbeat";
 import { effectivePriority, humanGates, orderQueue, plainStatus, scanRepo, waitNote, type HumanGates, type Intent, type Scan, type Status } from "../intents";
+import { readQuestion } from "../questions";
 import { pendingRequests, type Request } from "../requests";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
 import { nowText } from "../tools";
 import type { EventRow, PhaseRow, Trace } from "../trace";
 import { parsePayload } from "./describe";
+import { steerable } from "./steerable";
 import type { ChangeSummary, FinishedPhase, LoopSection, Meta, PendingRequest, RunningPhase, Sections, Stage, Totals } from "./types";
 
 /** The board column of each status: where the change is, or is heading next. */
@@ -63,7 +65,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
   const human = humanGates(cfg);
   const holds = cfg ? await safely("same-file waits", () => sameFileHolds(cfg.speed.max_parallel_changes, ordered), new Map<string, string>()) : new Map<string, string>();
-  const changes = await safely("changes", () => ordered.map((i) => changeSummary(trace, i, ordered, holds.get(i.slug), busy, now, human)), [] as ChangeSummary[]);
+  const changes = await safely("changes", () => ordered.map((i) => changeSummary(root, trace, i, ordered, holds.get(i.slug), busy, now, human)), [] as ChangeSummary[]);
   const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);
   const totals = await safely("costs", () => totalsOf(trace.allPhases(), now), { todayUsd: 0, weekUsd: 0, allUsd: 0 });
@@ -85,7 +87,7 @@ function nextCheck(lastTickAt: string | null | undefined, pollSeconds: number): 
  * One change as the board and the lists show it. `heldBy`: the change it waits for over the same
  * files. `human`: who sits on each gate, which decides whether Approve and Send back are offered.
  */
-export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: string | undefined, busy: ReadonlySet<string>, now: Date, human: HumanGates): ChangeSummary {
+export function changeSummary(root: string, trace: Trace, i: Intent, all: Intent[], heldBy: string | undefined, busy: ReadonlySet<string>, now: Date, human: HumanGates): ChangeSummary {
   const fm = i.file.frontmatter;
   const since = statusSince(trace, i);
   return {
@@ -94,7 +96,16 @@ export function changeSummary(trace: Trace, i: Intent, all: Intent[], heldBy: st
     costUsd: endedCost(trace.phases(i.slug)), waiting: waitNote(i, all, heldBy) || null, note: fm.note, running: busy.has(i.slug),
     held: fm.hold.trim() || null, statedPriority: fm.priority ?? null,
     offers: offers(fm, human, fm.status === "blocked" ? retryOptions(trace, i.slug, fm.note) : []),
+    question: openQuestion(root, i),
   };
+}
+
+/** The change's unanswered question, when intent.md says one is open and question.json has it. */
+function openQuestion(root: string, i: Intent): ChangeSummary["question"] {
+  if (!i.file.frontmatter.question.trim()) return null;
+  const q = readQuestion(root, i.slug)?.open;
+  if (!q || q.answer || typeof q.text !== "string") return null;
+  return { text: q.text, why: typeof q.why === "string" ? q.why : "", options: Array.isArray(q.options) ? q.options.map(String) : [], phase: String(q.phase ?? ""), at: String(q.at ?? "") };
 }
 
 /**
@@ -162,6 +173,7 @@ function runningPhases(trace: Trace, running: ReadonlyMap<string, PhaseRow[]>, t
         model: modelOf(trace.firstEvent(slug, p.seq, "claude_event")),
         now: p.kind === "agent" ? nowLine(events) : `Running ${p.name}`,
         strip: stripOf(events),
+        steerable: steerable(p.name),
       });
     }
   }

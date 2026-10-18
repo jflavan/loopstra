@@ -123,12 +123,13 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .status { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--bg-hover); white-space: nowrap; }
 .status.success, .status.pass, .status.done, .status.merged { background: var(--ok-bg); color: var(--ok); }
 .status.fail, .status.blocked { background: var(--bad-bg); color: var(--bad); }
-.status.running, .status.waiting, .status.interrupted { background: var(--warn-bg); color: var(--warn); }
+.status.running, .status.waiting, .status.interrupted, .status.asked { background: var(--warn-bg); color: var(--warn); }
 
 /* Live */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 14px; }
 .card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
 .card.live { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.card > .badge { align-self: flex-start; max-width: 100%; }
 .card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-now { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -159,6 +160,10 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .control-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; }
 .control-form textarea { width: 100%; min-height: 72px; resize: vertical; }
 .control-form input[type="text"] { flex: 1 1 200px; min-width: 0; }
+/* An agent's question above the answer's field; each option fills it in. */
+.control-form .question { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.control-form .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.control-form .options .btn { white-space: normal; text-align: left; max-width: 100%; }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.danger:hover { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
 .prio-pick { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); }
@@ -208,7 +213,7 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .tl-bar.success { background: var(--ok); }
 .tl-bar.fail { background: var(--bad); }
 .tl-bar.running { background: var(--accent); animation: pulse 1.6s infinite; }
-.tl-bar.interrupted { background: var(--warn); }
+.tl-bar.interrupted, .tl-bar.asked { background: var(--warn); }
 .tl-meta { color: var(--fg-3); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 /* On a phone the name sits over the bar and the facts under it, as the feed does. */
 @media (max-width: 600px) { .tl-row { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 6px; } .tl-meta { text-align: left; } }
@@ -260,7 +265,14 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .t-result { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 6px; padding: 12px 14px; border-radius: var(--radius); }
 .t-result.ok { background: var(--ok-bg); }
 .t-result.bad { background: var(--bad-bg); }
+/* A person's message or redirect, as the session took it up. */
+.t-msg { justify-self: end; background: var(--accent-bg); border: 1px solid var(--accent); border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.t-msg-label { display: block; font-size: 12px; color: var(--accent); }
 .t-live { display: flex; align-items: center; gap: 8px; color: var(--fg-3); padding: 6px 2px; }
+/* The box that steers a running session (see parts/Steer.tsx): it wraps, never scrolls, down to a phone's width. */
+.steer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 18px; }
+.steer textarea { width: 100%; min-height: 72px; resize: vertical; }
+.steer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .jump { position: absolute; right: 16px; bottom: 16px; box-shadow: var(--shadow); }
 .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; position: sticky; top: 0; }
 .side dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 13px; }

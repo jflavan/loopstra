@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { FAKE_CLAUDE, tempDir } from "../helpers";
+import { until } from "../console-helpers";
+import { FAKE_CLAUDE, fixture as shipped, fixtureDir, tempDir } from "../helpers";
 
 /** A one-line fixture whose result names it (by `id`, its name by default), so a test sees which fixture was replayed. */
 function fixture(dir: string, name: string, id = name) {
@@ -95,4 +96,127 @@ describe("the fake claude's fixtures for one model", () => {
       expect(await replayed(dir.path, "plan", "opus")).toBe("plan-2");
     } finally { dir.cleanup(); }
   });
+});
+
+describe("stream-json input", () => {
+  const user = (text: string) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } }) + "\n";
+
+  /** Runs the fake with stream-json input kept open: the test writes messages and reads stdout lines as they come. */
+  function live(env: Record<string, string>, extraArgs: string[] = []) {
+    const p = Bun.spawn({
+      cmd: [process.execPath, FAKE_CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages", "--output-format", "stream-json", ...extraArgs],
+      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, LOOPSTRA_FAKE_FIXTURE: "", LOOPSTRA_FAKE_FIXTURE_DIR: "", LOOPSTRA_FAKE_DELAY_MS: "", ...env },
+    });
+    const lines: Array<Record<string, unknown>> = [];
+    const reading = (async () => {
+      const dec = new TextDecoder();
+      let buf = "";
+      for await (const chunk of p.stdout) {
+        buf += dec.decode(chunk, { stream: true });
+        let i: number;
+        while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) lines.push(JSON.parse(l)); }
+      }
+    })();
+    return {
+      send: (t: string) => { p.stdin.write(user(t)); void p.stdin.flush(); },
+      close: () => { void p.stdin.end(); },
+      kill: () => p.kill(),
+      lines,
+      done: async () => { const code = await p.exited; await reading; return code; },
+    };
+  }
+  const results = (ls: Array<Record<string, unknown>>) => ls.filter((l) => l.type === "result") as Array<{ total_cost_usd: number; structured_output: { summary?: string } }>;
+  const replays = (ls: Array<Record<string, unknown>>) => ls.filter((l) => l.type === "user" && l.isReplay).map((l) => ((l.message as { content: Array<{ text: string }> }).content[0]!.text));
+
+  test("the prompt is echoed, the fixture plays, and closing stdin ends it", async () => {
+    const s = live({ LOOPSTRA_PHASE: "design" });
+    s.send("write the spec");
+    await until(() => results(s.lines).length === 1);
+    s.close();
+    expect(await s.done()).toBe(0);
+    expect(replays(s.lines)).toEqual(["write the spec"]);
+    // The echo carries the session id, from the fixture, before any of its lines.
+    expect(s.lines[0]).toMatchObject({ type: "user", isReplay: true, session_id: "fake-design" });
+    expect(results(s.lines)[0]!.structured_output.summary).toBe("spec written");
+  }, 30_000);
+
+  test("a message during a turn is answered by that turn; one after its result gets a turn of its own", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: `${JSON.stringify({ type: "fake_action", wait_for: gate })}\n${shipped("design")}` });
+    try {
+      const s = live({ LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_STEER_LOG: join(t.path, "steer.jsonl") });
+      s.send("write the spec");
+      await until(() => replays(s.lines).length === 1);
+      s.send("cover negatives");
+      await until(() => replays(s.lines).length === 2);
+      writeFileSync(gate, "");
+      await until(() => results(s.lines).length === 1);
+      expect(results(s.lines)[0]!.structured_output.summary).toBe("heard: cover negatives");
+      s.send("and zero");
+      await until(() => results(s.lines).length === 2);
+      s.close();
+      expect(await s.done()).toBe(0);
+      expect(replays(s.lines)).toEqual(["write the spec", "cover negatives", "and zero"]);
+      expect(results(s.lines)[1]!.structured_output.summary).toBe("heard: and zero");
+      expect(results(s.lines).map((r) => r.total_cost_usd)).toEqual([0.05, 0.1]);
+      expect(readFileSync(join(t.path, "steer.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l).at)).toEqual(["mid", "queued"]);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 30_000);
+
+  test("messages written before stdin closes still get their turns once the current one ends", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: `${JSON.stringify({ type: "fake_action", wait_for: gate })}\n${shipped("design")}` });
+    try {
+      const s = live({ LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path });
+      s.send("write the spec");
+      await until(() => replays(s.lines).length === 1);
+      writeFileSync(gate, "");
+      await until(() => results(s.lines).length === 1);
+      s.send("one");
+      s.send("two");
+      s.close();
+      expect(await s.done()).toBe(0);
+      expect(results(s.lines).map((r) => r.structured_output.summary)).toEqual(["spec written", "heard: one", "heard: two"]);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 30_000);
+
+  test("the prompt is the first message: it picks the fixture and is what LOOPSTRA_FAKE_ARGS records; an error result exits 1", async () => {
+    const t = tempDir();
+    const argsFile = join(t.path, "args.json");
+    try {
+      const s = live({ LOOPSTRA_FAKE_ARGS: argsFile });
+      s.send("FIXTURE:budget please");
+      await until(() => results(s.lines).length === 1);
+      s.close();
+      expect(await s.done()).toBe(1);
+      expect(JSON.parse(readFileSync(argsFile, "utf8")).prompt).toBe("FIXTURE:budget please");
+    } finally { t.cleanup(); }
+  }, 30_000);
+
+  test("hang still never ends, but echoes what it is sent", async () => {
+    const t = tempDir();
+    const log = join(t.path, "steer.jsonl");
+    const s = live({ LOOPSTRA_FAKE_STEER_LOG: log });
+    try {
+      s.send("FIXTURE:hang");
+      await until(() => s.lines.some((l) => l.type === "system"));
+      s.send("hello");
+      await until(() => replays(s.lines).includes("hello"));
+      s.close();
+      await Bun.sleep(300);
+      expect(results(s.lines)).toEqual([]);
+      expect(JSON.parse(readFileSync(log, "utf8").trim()).text).toBe("hello");
+    } finally {
+      s.kill();
+      await s.done();
+      t.cleanup();
+    }
+  }, 30_000);
 });

@@ -1,6 +1,7 @@
-import { MIN_SESSION_USD } from "./budget";
-import { lastLine, spawnBounded, withBunOnPath } from "./shell";
-import { Cancelled, StopRequested } from "./stop";
+import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
+import { lastLine, spawnBounded, withBunOnPath, type StdinWriter } from "./shell";
+import { Cancelled, SessionStopped, StopRequested } from "./stop";
+import { MEANWHILE_HEADING } from "./console/steerable";
 
 export interface StreamEvent {
   type: string;
@@ -144,6 +145,120 @@ export interface RunPhaseInput {
   exitGraceMs?: number;
   /** Aborting it kills the session; runPhase then throws Cancelled. */
   signal?: AbortSignal;
+  /**
+   * A live session: stream-json input, kept open, with every message echoed back (see the spike in
+   * docs/decisions.md). `attach` gets the control once the session runs, and gives back what ends its watching
+   * (awaited before the phase ends, so what it records lands first).
+   */
+  live?: {
+    attach: (ctl: SessionControl) => () => void | Promise<void>;
+    /** false leaves out --replay-user-messages (tests: a CLI that never echoes). Default true. */
+    replay?: boolean;
+    /** How long a result waits for a message's echo before stdin is closed (see ECHO_WAIT_MS). Tests shorten it. */
+    echoWaitMs?: number;
+  };
+}
+
+/** What the runner of a live session may do to it while it runs (see RunPhaseInput.live). */
+export interface SessionControl {
+  /** Writes a message to the running session; false while no process can take one (a redirect is resuming it, or it has ended). */
+  message(text: string): boolean;
+  /** Ends the session now; runPhase then throws SessionStopped. False once the session's final result was taken: it has finished. */
+  stop(by: string): boolean;
+  /**
+   * Ends the running process and resumes the session at once with `text` as its prompt (sent by `by`); false
+   * until the session has an id, and while it cannot take one.
+   */
+  redirect(text: string, by?: string): boolean;
+}
+
+/** A user message as one stream-json input line. */
+export function userLine(text: string): string {
+  return `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
+}
+
+/**
+ * The state a live session's control acts on: the process running now (its stdin, what was written
+ * to it and what it echoed), and what a person asked of it.
+ */
+class LiveSession {
+  writer: StdinWriter | null = null;
+  /** Messages written to the running process. */
+  written = 0;
+  /** Their texts, in the order written. */
+  sent: string[] = [];
+  /** User messages the running process echoed; the first is its prompt. */
+  replays = 0;
+  kill = new AbortController();
+  sessionId: string | null;
+  stoppedBy: string | null = null;
+  redirectTo: string | null = null;
+  /** Who sent the newest redirect. */
+  redirectBy: string | null = null;
+  /** The final result was taken (stdin closed at it): the session has finished, and a stop comes too late. */
+  finished = false;
+
+  constructor(resume: string | undefined) {
+    this.sessionId = resume ?? null;
+  }
+
+  /** A new process starts: nothing written to it yet, and a kill of its own. */
+  next(): AbortSignal {
+    this.writer = null;
+    this.written = 0;
+    this.sent = [];
+    this.replays = 0;
+    this.finished = false;
+    this.kill = new AbortController();
+    return this.kill.signal;
+  }
+
+  /** Stdin closes, and nothing more can be sent to the process (its final result came, or the wait for an echo ran out). */
+  done(): void {
+    this.writer?.end();
+    this.writer = null;
+  }
+
+  /** How many messages written to the running process it has not echoed yet (its first echo is the prompt). */
+  unechoed(): number {
+    return this.written - Math.max(0, this.replays - 1);
+  }
+
+  /** A message written but not echoed yet: the session takes it after this result, with a turn and a result of its own. */
+  waiting(): boolean {
+    return this.unechoed() > 0;
+  }
+
+  /** The texts written to the running process that it has not echoed yet, oldest first. */
+  meanwhile(): string[] {
+    const n = this.unechoed();
+    return n > 0 ? this.sent.slice(-n) : [];
+  }
+
+  readonly control: SessionControl = {
+    message: (text) => {
+      if (!this.writer || this.redirectTo !== null || this.stoppedBy !== null || !this.writer.write(userLine(text))) return false;
+      this.written++;
+      this.sent.push(text);
+      return true;
+    },
+    stop: (by) => {
+      if (this.finished) return false;
+      this.stoppedBy ??= by;
+      this.kill.abort();
+      return true;
+    },
+    redirect: (text, by) => {
+      if (!this.writer || this.sessionId === null || this.redirectTo !== null || this.stoppedBy !== null) return false;
+      // What was written to this process but not taken up yet goes to the resumed one, after the redirect.
+      const meanwhile = this.meanwhile();
+      this.redirectTo = meanwhile.length ? `${text}\n\n${MEANWHILE_HEADING}\n\n${meanwhile.join("\n\n")}` : text;
+      this.redirectBy = by ?? null;
+      this.writer = null;
+      this.kill.abort();
+      return true;
+    },
+  };
 }
 
 export type RunPhaseResult = Collected & {
@@ -156,6 +271,12 @@ export type RunPhaseResult = Collected & {
 
 /** After the result event, how long the process gets to exit on its own before its tree is killed. */
 const EXIT_GRACE_MS = 2_000;
+/**
+ * How long a live session's result waits for the echo of a message written to it (see LiveSession.waiting)
+ * before stdin is closed: the CLI then ends after any turn it queued, and the newest result is the phase's.
+ * Any event of the process starts the wait again.
+ */
+const ECHO_WAIT_MS = 60_000;
 /** How many times a session that ended having answered only notifications gets the prompt again. */
 const NOTIFICATION_RESENDS = 2;
 /**
@@ -176,9 +297,22 @@ export function resolveClaude(override?: string): string | null {
  * plus a short grace: it stops reading stdout at the prompt's result event, never waits on pipes a
  * leftover grandchild may hold, and kills the process tree if it does not exit by itself.
  * After a stop request it does not start, or it kills the running session, and throws StopRequested;
- * likewise Cancelled for `signal`.
+ * likewise Cancelled for `signal`. A live session (`input.live`) keeps stdin open while it runs, so a
+ * person can send it messages, stop it (SessionStopped) or redirect it (resumed with the new direction).
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
+  if (!input.live) return runSession(input, null);
+  const live = new LiveSession(input.resume);
+  const detach = input.live.attach(live.control);
+  try {
+    return await runSession(input, live);
+  } finally {
+    try { await detach(); } catch { /* watching must never fail the phase */ }
+  }
+}
+
+/** runPhase's work; `live` is the live session's state, or null. */
+async function runSession(input: RunPhaseInput, live: LiveSession | null): Promise<RunPhaseResult> {
   const started = Date.now();
   let collector = new StreamCollector();
   // What earlier sends of the prompt cost, and what they were refused (see the resends below).
@@ -210,6 +344,9 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
+  // Every user message the session takes is echoed, so the runner knows which result answers it.
+  if (live) args.push("--input-format", "stream-json", ...(input.live!.replay === false ? [] : ["--replay-user-messages"]));
+  const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;
 
   // A .ts fake must be run through bun; the real CLI is a native executable.
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
@@ -232,17 +369,73 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   };
   let r: Awaited<ReturnType<typeof spawnBounded>>;
   for (let resends = 0; ; resends++) {
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
     const resumeArgs = resume ? ["--resume", resume] : [];
+    // A live process is killed by its own signal too (a stop or a redirect), as well as by the caller's.
+    const kill = live?.next();
+    const signal = kill ? (input.signal ? AbortSignal.any([input.signal, kill]) : kill) : input.signal;
+    const processStarted = Date.now();
+    // What this process may spend: what the earlier ones left of the cap.
+    const leftAtStart = capped ? Math.max(0, input.maxBudgetUsd! - earlierCostUsd) : Infinity;
+    // The wait for an echo after a result (see ECHO_WAIT_MS). Once it ran out, stdin is closed and reading goes on to the end.
+    let echoTimer: ReturnType<typeof setTimeout> | undefined;
+    let echoGaveUp = false;
+    const awaitEcho = () => {
+      clearTimeout(echoTimer);
+      echoTimer = setTimeout(() => { echoGaveUp = true; live?.done(); }, echoWaitMs);
+    };
     r = await spawnBounded({
-      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env, stdin,
-      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal: input.signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
+      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env,
+      stdin: live ? { open: userLine(stdin) } : stdin,
+      onStdin: live ? (w) => { live.writer = w; } : undefined,
+      timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
       // Reading ends at the prompt's result event; the process then gets the grace to exit before it is killed.
       onLine: (line) => {
         const e = collector.push(line);
         if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
-        return e?.type === "result" && !answersNotification(e);
+        if (!e) return false;
+        if (live && e.session_id) live.sessionId = e.session_id;
+        if (live && e.type === "user" && e.isReplay === true) live.replays++;
+        // Any event of the process while it waits for an echo starts the wait again; once nothing waits
+        // for one (the echo came), the wait is over, so a quiet stretch later in that turn never closes stdin.
+        if (echoTimer !== undefined && !echoGaveUp) {
+          if (live?.waiting()) awaitEcho();
+          else { clearTimeout(echoTimer); echoTimer = undefined; }
+        }
+        if (e.type !== "result" || answersNotification(e)) return false;
+        if (!live) return true;
+        // A message written but not yet taken: its own turn and result follow, and that result is the phase's.
+        // Never at an error result; and once the wait for its echo ran out, reading goes on to the end.
+        const failed = e.is_error === true || e.subtype !== "success";
+        if (!failed && live.waiting()) {
+          if (!echoGaveUp) awaitEcho();
+          return false;
+        }
+        clearTimeout(echoTimer);
+        live.finished = true;
+        live.done();
+        return true;
       },
     });
+    clearTimeout(echoTimer);
+    live?.done();
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
+    if (live && live.redirectTo !== null && !r.stopped && !input.signal?.aborted && r.started) {
+      // What the killed process spent counts toward the cap, as a resend's does: its newest result's
+      // running total, or about its minutes when it gave none (never more than it could spend).
+      const reported = collector.events.filter((e) => e.type === "result").at(-1)?.total_cost_usd;
+      earlierCostUsd += typeof reported === "number" ? reported : Math.min(leftAtStart, ((Date.now() - processStarted) / 60_000) * USD_PER_MINUTE);
+      earlierDenied = [...new Set([...earlierDenied, ...collector.finish().denied])];
+      resume = live.sessionId ?? resume;
+      stdin = live.redirectTo;
+      live.redirectTo = null;
+      collector = new StreamCollector();
+      // Too little is left to resume it: the session ends quietly, as if its sender had stopped it. The change
+      // keeps its status, and conversation.md has the redirect for the next session.
+      if (budgetArgs(earlierCostUsd) === null) throw new SessionStopped(live.redirectBy ?? "a person");
+      resends--; // a redirect is not a notification resend
+      continue;
+    }
     if (r.stopped || r.cancelled || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {

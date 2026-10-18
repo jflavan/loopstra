@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { isStatus, offers, REQUEST_KINDS, retryOptions, undoMatches, type RequestKind } from "../actions";
+import { isStatus, offers, questionChangedText, REQUEST_KINDS, retryOptions, sameQuestion, undoMatches, type RequestKind } from "../actions";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig, type Config } from "../config";
 import { holdLoop, readLoopHold, releaseLoop } from "../heartbeat";
 import { humanGates, PRIORITIES, readIntent, SLUG, type Frontmatter, type Priority } from "../intents";
+import { readQuestion } from "../questions";
 import { cancelRequest, CONSOLE, requestState, submitRequest, type RequestBody } from "../requests";
 import { Trace } from "../trace";
 import { touchWake } from "../wake";
@@ -37,7 +38,7 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
     const s = requestState(root, decode(one[1]!));
     return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
   }
-  if (req.headers.get("origin") !== url.origin) return new Response("Forbidden", { status: 403 });
+  if (!fromPage(req, url)) return new Response("Forbidden", { status: 403 });
   if (one && req.method === "DELETE") {
     const cancelled = cancelRequest(root, decode(one[1]!));
     hub.poke();
@@ -54,8 +55,13 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
   return answer;
 }
 
+/** True when a write comes from the page itself: its Origin is the console's own. */
+export function fromPage(req: Request, url: URL): boolean {
+  return req.headers.get("origin") === url.origin;
+}
+
 /** True when a content type's MIME essence (before any parameters) is JSON. */
-function isJson(ct: string | null): boolean {
+export function isJson(ct: string | null): boolean {
   return ((ct ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
 }
 
@@ -84,6 +90,14 @@ function parse(body: Record<string, unknown>): RequestBody | string {
   if (!slug || !SLUG.test(slug)) return "Unknown change.";
   const k = kind as Kind;
   if (k === "accept") return { kind: k, slug };
+  // An answer names no status: it lands whatever the status. It names the question the person saw, when the page sent it.
+  if (k === "answer") {
+    const text = str(body.text)?.trim() ?? "";
+    if (!text || text.length > MAX_NOTE) return `Say your answer (at most ${MAX_NOTE} characters).`;
+    if (body.question === undefined) return { kind: k, slug, text };
+    const question = str(body.question);
+    return question ? { kind: k, slug, text, question } : "Say which question you answer.";
+  }
   const expect = body.expect;
   if (!isStatus(expect)) return "Say which status the change was at.";
   switch (k) {
@@ -136,12 +150,14 @@ async function action(root: string, body: Record<string, unknown>): Promise<Resp
   try { cfg = await loadConfig(root); } catch { /* nobody on any gate, as the model reads it too */ }
   let fm: Frontmatter;
   try { fm = (await readIntent(root, r.slug)).file.frontmatter; } catch { return refuse(`${r.slug}'s intent.md cannot be read.`); }
-  const expect = r.kind === "accept" ? "draft" : r.expect;
   const status = fm.status;
-  // Priority, hold and release land on any open change, whatever its status now (see apply.ts).
-  const fieldOnly = r.kind === "priority" || r.kind === "hold" || r.kind === "release";
+  const expect = r.kind === "accept" ? "draft" : r.kind === "answer" ? status : r.expect;
+  // Priority, hold, release and an answer land on any open change, whatever its status now (see apply.ts).
+  const fieldOnly = r.kind === "priority" || r.kind === "hold" || r.kind === "release" || r.kind === "answer";
   if (!fieldOnly && status !== expect) return refuse(`${r.slug} is ${status} now, not ${expect}. The page shows it as it is now.`);
   if (!allowed(root, r, fm, cfg)) return refuse(r.kind === "undo" ? "That cannot be undone now." : `That is not something ${r.slug} can do now.`);
+  // An answer to a question that is no longer the one waiting (the loop checks again when it applies it).
+  if (r.kind === "answer" && !sameQuestion(r.question, readQuestion(root, r.slug)?.open?.at)) return refuse(questionChangedText(r.slug));
   const user = localUser();
   const sent = submitRequest(root, { ...r, by: user, byName: user, via: "the dashboard", transport: CONSOLE, thread: "" });
   return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? 60, new Date()).state.state }, 202);

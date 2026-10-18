@@ -3,11 +3,16 @@ import { join } from "node:path";
 import { sessionCost } from "./budget";
 import { runPhase, type FailureReason, type RunPhaseInput, type RunPhaseResult, type StreamEvent } from "./claude";
 import { errorText } from "./shell";
-import { Cancelled, StopRequested } from "./stop";
+import { Cancelled, SessionStopped, StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
-/** How a session's report is read: its value, or why it cannot be used. */
-export type ReportRead<T> = { ok: true; value: T } | { ok: false; reason: "invalid-envelope" | "agent-fail"; detail: string };
+/**
+ * How a session's report is read: its value, or why it cannot be used. `endAs: "asked"`: the session asked a
+ * person `note` (see src/questions.ts); its row ends asked, and the question is traced as an event of its own.
+ */
+export type ReportRead<T> =
+  | { ok: true; value: T; endAs?: "asked"; note?: string }
+  | { ok: false; reason: "invalid-envelope" | "agent-fail"; detail: string };
 
 /**
  * One traced agent session, for the loop's phases (src/phases.ts) and chat (src/chat/agents.ts) alike.
@@ -48,8 +53,8 @@ export type SessionOutcome<T> =
  * Runs one traced session: the prompt, the raw events and the report go in its phase folder, and its
  * row always ends (never left running), with what it cost and the commands it was refused, so an
  * engineer can add allow rules. Never throws for the session's own failure; a stop request (or a
- * cancel) ends the row interrupted, with what the killed session must have spent, and is thrown on,
- * and so is what `interrupt` gives.
+ * cancel, or a person stopping the session) ends the row interrupted, with what the killed session
+ * must have spent, and is thrown on, and so is what `interrupt` gives.
  */
 export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutcome<T>> {
   const started = Date.now();
@@ -58,7 +63,7 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
   let costUsd: number | null = null;
   let denied: string[] = [];
   let ended = false;
-  const end = (status: "success" | "fail" | "interrupted", cost: number, sessionId: string | null, error?: string) => {
+  const end = (status: "success" | "fail" | "interrupted" | "asked", cost: number, sessionId: string | null, error?: string) => {
     ended = true;
     s.trace.phaseEnd(s.slug, s.seq, { status, costUsd: cost, sessionId: sessionId ?? undefined, error, denied });
   };
@@ -86,14 +91,15 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
     const valid = read.ok || read.reason === "agent-fail";
     await Bun.write(join(s.dir, "envelope.json"), JSON.stringify({ valid, output: r.structuredOutput }, null, 2));
     if (!read.ok) return failed(read.reason, read.detail, r.sessionId, costUsd);
-    end("success", costUsd, r.sessionId);
+    end(read.endAs ?? "success", costUsd, r.sessionId);
+    if (read.endAs === "asked" && read.note) s.trace.event(s.slug, "question", { question: read.note }, s.seq);
     return { ok: true, value: read.value, sessionId: r.sessionId, costUsd, denied };
   } catch (e) {
     if (ended) throw e; // what `interrupt` gave: its row is already ended
-    if (e instanceof StopRequested || e instanceof Cancelled) {
-      // A session the stop (or a cancel) killed never reported its cost.
+    if (e instanceof StopRequested || e instanceof Cancelled || e instanceof SessionStopped) {
+      // A session the stop (or a cancel, or a person's stop) killed never reported its cost.
       const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, s.capUsd);
-      end("interrupted", spent, null, e instanceof Cancelled ? e.message : s.stoppedNote ?? "stopped by request");
+      end("interrupted", spent, null, e instanceof StopRequested ? s.stoppedNote ?? "stopped by request" : e.message);
       throw e;
     }
     return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd ?? 0);
