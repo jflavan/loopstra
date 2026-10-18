@@ -6,7 +6,7 @@ import { readConversation } from "../../src/conversation";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside } from "../../src/phases";
-import { answerQuestion, closeStaleQuestion, closeUnusedAnswer, readQuestion, recordQuestion } from "../../src/questions";
+import { answerQuestion, askedAt, closeStaleQuestion, closeUnusedAnswer, readQuestion, recordQuestion } from "../../src/questions";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runDesignStep } from "../../src/stages/design";
@@ -278,9 +278,23 @@ describe("questions", () => {
       closeStaleQuestion(await nextStep(ctx));
       expect(readQuestion(repo.path, SLUG)!.open).toMatchObject({ text: "Archived too?" });
       // A person sent it back and it came round again: the question was asked in an earlier stay.
-      trace.statusChange(SLUG, "designing", "designing", "sent back");
+      trace.statusChange(SLUG, "designing", "spec-review", "");
+      trace.statusChange(SLUG, "spec-review", "designing", "sent back");
       closeStaleQuestion(await nextStep(ctx));
       expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: null });
+    } finally { trace.close(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a status change to the same status (a spec written again) does not start a stay: the question and the count stay", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    try {
+      await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS });
+      // What artifact.ts does before a rewrite: the same status, with a new note.
+      await setStatus(await nextStep(ctx), "designing", "The first spec did not pass its automatic check, so it is being written again.");
+      const step = await nextStep(ctx);
+      closeStaleQuestion(step);
+      expect(readQuestion(repo.path, SLUG)!.open).toMatchObject({ text: "Archived too?" });
+      expect(askedAt(step)).toBe(1);
     } finally { trace.close(); repo.cleanup(); }
   }, 90_000);
 

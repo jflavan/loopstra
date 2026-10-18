@@ -31,9 +31,10 @@ export interface Asked {
 
 /**
  * `status` and `since`: the change's stay at a status the question and the count belong to (`since`: the
- * id of the trace's newest status change then, 0 when there was none; see stayAt). `count`: the questions
- * asked in that stay; it starts again at 0 once the status changes, even back to the same one (a block
- * and a retry, a send back).
+ * id of the trace's newest status change to another status then, 0 when there was none; see stayAt).
+ * `count`: the questions asked in that stay; it starts again at 0 once the status changes, even back to
+ * the same one (a block and a retry, a send back). A status change to the same status, which only
+ * rewrites the note (a spec written again), does not start a stay.
  */
 export interface QuestionState { status: Status; since?: number; count: number; open: Asked | null }
 
@@ -59,9 +60,12 @@ export function readQuestion(root: string, slug: string): QuestionState | null {
   return readJson<QuestionState>(statePath(root, slug));
 }
 
-/** The change's present stay at its status: the status, and the id of the trace's newest status change (0: none). */
+/**
+ * The change's present stay at its status: the status, and the id of the trace's newest status change
+ * to another status (0: none). One to the same status only rewrote the note, so it does not count.
+ */
 export function stayAt(ctx: StepContext): { status: Status; since: number } {
-  return { status: ctx.intent.file.frontmatter.status, since: ctx.trace.lastEvent(ctx.slug, "status_change")?.id ?? 0 };
+  return { status: ctx.intent.file.frontmatter.status, since: ctx.trace.lastStatusMove(ctx.slug) };
 }
 
 /** True when the state belongs to the change's present stay at its status (see stayAt). */

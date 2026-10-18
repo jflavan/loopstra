@@ -309,6 +309,15 @@ export class Trace {
   }
 
   /**
+   * The id of the newest status change of a slug to another status, or 0 when there is none. One to
+   * the same status, which only rewrote the note, is passed over.
+   */
+  lastStatusMove(slug: string): number {
+    return this.db.query<{ id: number }, [string]>(
+      "SELECT id FROM events WHERE slug = ? AND type = 'status_change' AND json_valid(payload) AND json_extract(payload, '$.from') IS NOT json_extract(payload, '$.to') ORDER BY id DESC LIMIT 1").get(slug)?.id ?? 0;
+  }
+
+  /**
    * Records an event unless the newest one like it (see lastEvent: the same slug and type, its payload
    * containing `like`) says the same `field`, and is no older than `since` when given. A condition that
    * lasts is then one line in the trace, not one per tick.
