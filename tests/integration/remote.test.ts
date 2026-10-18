@@ -337,6 +337,46 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("recording a merged pull request that keeps failing is traced once, and after 30 minutes blocks with a look again", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass" });
+      // The step's git commands after `git remote` fail the same way once GitHub has merged the pull request.
+      const merged = () => JSON.parse(readFileSync(join(s.remote, "fake-gh.json"), "utf8")).prs[BRANCH].merged === true;
+      const git = new Git(s.repo);
+      git.run = async (args, opts) => {
+        if (merged() && args[0] !== "remote") throw new Error("fatal: unable to read the repository");
+        return Git.prototype.run.call(git, args, opts);
+      };
+      const trace = Trace.open(s.repo);
+      const look = async () => {
+        const ctx = new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG));
+        (ctx as { git: Git }).git = git;
+        return runStepGuarded(ctx);
+      };
+      try {
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"finish merge\""))).toHaveLength(1);
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        // The failures started 31 minutes ago.
+        writeFileSync(join(s.repo, ".loopstra", "runs", SLUG, "finish-failing"), new Date(Date.now() - 31 * 60_000).toISOString());
+        expect((await look()).ok).toBe(false);
+        const blocked = await intentOf(s.repo);
+        expect(blocked.status).toBe("blocked");
+        expect(blocked.note).toContain("The pull request merged on GitHub, but recording it here kept failing: fatal: unable to read the repository");
+        expect(blocked.note).toContain("set status to merge-review");
+        await writeIntent(await readIntent(s.repo, SLUG), { status: "merge-review", note: "" });
+        await new Git(s.repo).commitAll("person: look again");
+        expect(await runStepGuarded(new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG)))).toEqual({ ok: true });
+      } finally { trace.close(); }
+      expect((await intentOf(s.repo)).status).toBe("merged");
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a merge gh only queued waits with the branch kept, and is recorded once it merges", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {

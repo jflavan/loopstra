@@ -41,6 +41,10 @@ export const PR_PUSHED = "pr-pushed";
 const BRANCH_KEPT = "branch-kept";
 /** Run-folder marker: the pull request merged, but main here does not have it yet (traced once). */
 const MAIN_BEHIND = "main-behind";
+/** Run-folder marker: when recording a merged pull request first failed (an ISO time; see finishRemoteMerge). */
+const FINISH_FAILING = "finish-failing";
+/** How long recording a merged pull request may keep failing before the change blocks. */
+const FINISH_FAILING_MS = 30 * 60_000;
 
 /** How a person asks the merge step to look again without a rebuild: the status that is runnable for this gate. */
 function mergeRetry(ctx: StepContext): Status {
@@ -504,8 +508,9 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  * the pull request's merge commit, or the branch's changes when gh does not name one. Main only
  * moves forward meanwhile, so once it has them it keeps them. Right after `gh pr merge`
  * (`justMerged`), the branch on GitHub is deleted first. Whatever fails from here on, except a stop,
- * an outage, the day's budget or a person's status change, is traced and waits: the pull request is
- * merged, so the next look records it (a block would advise building it again).
+ * an outage, the day's budget or a person's status change, is traced (once per error) and waits: the
+ * pull request is merged, so the next look records it (a block would advise building it again). Once
+ * the failures have lasted FINISH_FAILING_MS, it blocks, and a person asks for another look.
  */
 async function finishRemoteMerge(ctx: StepContext, pr: PrInfo, justMerged = false): Promise<StepResult> {
   try {
@@ -513,10 +518,19 @@ async function finishRemoteMerge(ctx: StepContext, pr: PrInfo, justMerged = fals
       const deleted = await deleteRemoteBranch(ctx.git, ctx.branch);
       if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
     }
-    return await recordRemoteMerge(ctx, pr);
+    const recorded = await recordRemoteMerge(ctx, pr);
+    clearMarker(ctx, FINISH_FAILING);
+    return recorded;
   } catch (e) {
     if (notTheStepsFault(e) || endsStepQuietly(e) || e instanceof PersonChangedStatus) throw e;
-    ctx.trace.event(ctx.slug, "error", { where: "finish merge", error: errorText(e), note: "the pull request is merged; recording it is tried again on the next look" });
+    const error = errorText(e);
+    const since = readMarker(ctx, FINISH_FAILING);
+    if (since === null) writeMarker(ctx, FINISH_FAILING, new Date().toISOString());
+    else if (Date.now() - Date.parse(since) >= FINISH_FAILING_MS) {
+      clearMarker(ctx, FINISH_FAILING);
+      return block(ctx, `The pull request merged on GitHub, but recording it here kept failing: ${error}. An engineer needs to look at it.`, { retryFrom: mergeRetry(ctx) });
+    }
+    ctx.trace.eventOnChange(ctx.slug, "error", '"where":"finish merge"', { where: "finish merge", error, note: "the pull request is merged; recording it is tried again on the next look" }, "error");
     return { ok: true, waiting: true };
   }
 }
