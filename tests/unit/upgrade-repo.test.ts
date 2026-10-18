@@ -455,6 +455,25 @@ describe("upgradeRepo", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("a repository that ignores .claude/ (the skill never tracked) is upgraded and committed", async () => {
+    const repo = await setUpRepo();
+    try {
+      writeFileSync(join(repo.path, ".gitignore"), ".loopstra/\n.claude/\n");
+      await run(["git", "rm", "-q", "-r", "--cached", ".claude"], repo.path);
+      await run(["git", "commit", "-qam", "keep .claude/ out of git"], repo.path);
+      writeFileSync(join(repo.path, SKILL), OLD_SKILL);
+      writeStamp(repo.path, { loopstra: "0.8.0", files: { ...readStamp(repo.path)!.files, [SKILL]: { base: textSha(OLD_SKILL) } } });
+      await run(["git", "commit", "-qam", "older"], repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.refusal).toBeUndefined();
+      expect(r.ok).toBe(true);
+      expect(r.committed).toBe(true);
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(readFileSync(templatePath("skill", "SKILL.md"), "utf8"));
+      expect((await run(["git", "show", "--name-only", "--format=", "HEAD"], repo.path)).out.trim()).toBe("loopstra/stamp.json");
+      expect(await status(repo.path)).toBe("");
+    } finally { repo.cleanup(); }
+  });
+
   test("a stamp that cannot be read is refused, also with --check, and nothing is adopted", async () => {
     const repo = await setUpRepo();
     try {

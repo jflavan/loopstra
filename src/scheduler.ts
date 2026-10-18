@@ -779,7 +779,7 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
   if (!existsSync(configPath(root))) return NOT_SET_UP;
   // Its old prompt copies would be used as overrides, and old copies of some prompts are not safe.
-  const older = olderSetupRefusal(root, "start again");
+  const older = olderSetupRefusal(root, "run loopstra start again");
   if (older) return older;
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;

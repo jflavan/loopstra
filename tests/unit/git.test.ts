@@ -133,6 +133,39 @@ describe("Git", () => {
     repo.cleanup();
   });
 
+  test("commitPaths leaves out a path that is ignored and untracked, file or folder", async () => {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    await Bun.write(join(repo.path, ".gitignore"), ".loopstra/\n.claude/\n");
+    await git.commitAll("ignore .claude");
+    // A tracked file in an ignored folder is still committed.
+    await Bun.write(join(repo.path, ".claude", "tracked.md"), "t");
+    await run(["git", "add", "-f", ".claude/tracked.md"], repo.path);
+    await git.commitAll("track one");
+    await Bun.write(join(repo.path, ".claude", "skills", "SKILL.md"), "skill");
+    await Bun.write(join(repo.path, ".claude", "tracked.md"), "t2");
+    await Bun.write(join(repo.path, "a.md"), "a");
+    expect(await git.commitPaths([".claude/skills/SKILL.md", ".claude/skills", ".claude/tracked.md", "a.md"], "a")).toBe(true);
+    expect((await git.run(["show", "--name-only", "--format=", "HEAD"])).out.trim().split(/\r?\n/).sort()).toEqual([".claude/tracked.md", "a.md"]);
+    // Only ignored paths: nothing to do.
+    expect(await git.commitPaths([".claude/skills/SKILL.md"], "nothing")).toBe(false);
+    repo.cleanup();
+  });
+
+  test("commitPaths commits a removal already staged with git rm, file or folder", async () => {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    await Bun.write(join(repo.path, "b.md"), "b");
+    await Bun.write(join(repo.path, "intent", "x", "intent.md"), "x");
+    await git.commitAll("files");
+    await run(["git", "rm", "-q", "b.md"], repo.path);
+    await run(["git", "rm", "-q", "-r", "intent/x"], repo.path);
+    expect(await git.commitPaths(["b.md", "intent/x", "intent/queue.md"], "record")).toBe(true);
+    expect((await git.run(["show", "--name-status", "--format=", "HEAD"])).out.trim().split(/\r?\n/).sort()).toEqual(["D\tb.md", "D\tintent/x/intent.md"]);
+    expect((await git.run(["status", "--porcelain"])).out.trim()).toBe("");
+    repo.cleanup();
+  });
+
   test("commitPaths with nothing to commit is a no-op", async () => {
     const repo = await tempGitRepo();
     const git = new Git(repo.path);

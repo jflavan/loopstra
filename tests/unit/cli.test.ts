@@ -73,7 +73,7 @@ describe("the command line outside a set-up repo", () => {
       await run(["git", "commit", "-qm", "an older setup"], repo.path);
       const older = "This repository was set up by an older Loopstra. Run loopstra upgrade first, then";
       const env = { ...process.env, LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE };
-      expect(await preflight(repo.path, env)).toBe(`${older} start again.`);
+      expect(await preflight(repo.path, env)).toBe(`${older} run loopstra start again.`);
       for (const cmd of ["chat", "ui"]) {
         const r = await run([process.execPath, CLI, cmd], repo.path);
         expect({ cmd, code: r.code, said: r.err.trim() }).toEqual({ cmd, code: 1, said: `${older} run loopstra ${cmd} again.` });
