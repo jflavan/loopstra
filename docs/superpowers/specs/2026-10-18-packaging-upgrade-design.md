@@ -160,11 +160,13 @@ text now.
 - `theirs` is missing and was never deleted (a new managed file): write `new`.
 - `hash(theirs) == base`: unedited. Write `new`.
 - Otherwise, edited: fetch `base` text and run `git merge-file theirs base new`. A clean merge is
-  written. A conflict leaves the markers in the file, keeps the stamp's old `base` for it, and
-  lists it. If `base` cannot be fetched (offline), the file is left alone and listed.
+  written. A conflict leaves the markers in the file, lists it, and is left out of the commit; its
+  base becomes `hash(new)` too, so once the person resolves it the same conflict does not come
+  back. If `base` cannot be fetched (offline), nothing is written.
 - After a write, the stamp's `base` becomes `hash(new)`.
 
-A managed file deleted since the last upgrade is recorded as `deleted`.
+A managed file deleted since the last upgrade is recorded as `deleted`, except a prompt override:
+deleting one means going back to the shipped prompt, so its stamp entry is dropped.
 
 ### The first upgrade of a repository set up before this
 
