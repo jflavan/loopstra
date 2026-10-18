@@ -694,7 +694,9 @@ describe("more than one change at a time, with a GitHub remote", () => {
         }
         await running;
         expect(await statusOf(c.path, "alpha")).toBe("merged");
-        expect(await statusOf(c.path, "beta")).toBe("blocked");
+        // Its question asks a person: the change waits at its status, with the question open.
+        expect(await statusOf(c.path, "beta")).toBe("designing");
+        expect((await readIntent(c.path, "beta")).file.frontmatter.question).toBe("open");
         expect((await new Git(c.path).run(["cat-file", "-e", "main:src/alpha.ts"], true)).code).toBe(0);
         expect(existsSync(join(c.path, ".loopstra", "snapshots", "beta"))).toBe(false);
         inTrace(c.path, (trace) => expect(trace.events("alpha").some((e) => e.payload.includes("\"finish merge\""))).toBe(false));
