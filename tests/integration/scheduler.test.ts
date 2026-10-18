@@ -10,7 +10,7 @@ import { holdLoop, readPause, releaseLoop } from "../../src/heartbeat";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
-import { FAKE_CLAUDE, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { touchWake, wakeStamp } from "../../src/wake";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -195,6 +195,27 @@ describe("scheduler resilience", () => {
     expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
     expect(trace.phases(SLUG).filter((p) => p.name === "probe").map((p) => p.status)).toEqual(["fail"]);
     trace.close(); repo.cleanup();
+  }, 60_000);
+
+  test("only the strong model is out: the cheap intake getting through keeps the pause, and the probe asks the strong model", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const dir = fixtureDir({ "design@opus": fixture("outage"), "probe@opus": fixture("outage") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        for (const n of [1, 2, 3]) {
+          const r = await tick(repo.path);
+          expect(r.paused).toMatch(/^The assistant is unavailable/);
+          expect(readPause(repo.path)).toMatchObject({ phase: "design", model: "opus", repeats: n, failures: n });
+          const p = readPause(repo.path)!;
+          await Bun.write(join(repo.path, ".loopstra", "paused.json"), JSON.stringify({ ...p, until: new Date(Date.now() - 1000).toISOString() }));
+        }
+      });
+      // A probe on the cheap model would have got through and blocked the change.
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+      expect(trace.phases(SLUG).filter((p) => p.name === "probe").map((p) => p.status)).toEqual(["fail"]);
+    } finally {
+      dir.cleanup(); trace.close(); repo.cleanup();
+    }
   }, 60_000);
 
   test("queue.md is written every tick but committed only along with another runtime commit", async () => {

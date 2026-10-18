@@ -148,12 +148,14 @@ export interface Pause {
   slug?: string | null;
   phase?: string | null;
   line?: string | null;
-  /** Pauses in a row for the same change, phase, and line (see PROBE_AFTER in the scheduler). */
+  /** The model that phase asked (null when unknown): another model getting through does not end the pause. */
+  model?: string | null;
+  /** Pauses in a row for the same change, phase, line, and model (see PROBE_AFTER in the scheduler). */
   repeats?: number;
 }
 
-/** What made the loop pause: the change, its phase, and the line that matched. */
-export interface PauseCause { slug: string; phase: string; line: string }
+/** What made the loop pause: the change, its phase, the line that matched, and the model it asked. */
+export interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
 
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
@@ -180,18 +182,19 @@ export function activePause(root: string, now: Date = new Date()): Pause | null 
 
 /**
  * Records one more unavailable session in a row and pauses for the next back-off step, with what
- * caused it. `repeats` counts pauses in a row for the same change, phase, and line. Never throws.
+ * caused it. `repeats` counts pauses in a row for the same change, phase, line, and model. Never throws.
  */
 export function pauseAfterUnavailable(root: string, now: Date = new Date(), cause: PauseCause | null = null): Pause {
   const last = readPause(root);
   const failures = (last?.failures ?? 0) + 1;
-  const same = !!cause && !!last && last.slug === cause.slug && last.phase === cause.phase && last.line === cause.line;
+  const same = !!cause && !!last && last.slug === cause.slug && last.phase === cause.phase && last.line === cause.line
+    && (last.model ?? null) === (cause.model ?? null);
   const repeats = same ? (last?.repeats ?? 1) + 1 : 1;
   const minutes = BACKOFF_MINUTES[Math.min(failures, BACKOFF_MINUTES.length) - 1]!;
   const until = new Date(now.getTime() + minutes * 60_000);
   const pause: Pause = {
     until: until.toISOString(), reason: `The assistant is unavailable (sign-in, usage limit, or network). Retrying at ${clockText(until)}.`, failures,
-    slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, repeats,
+    slug: cause?.slug ?? null, phase: cause?.phase ?? null, line: cause?.line ?? null, model: cause?.model ?? null, repeats,
   };
   try {
     // Whole (temp file, then rename): the tick and the dashboard read it while it is written.
@@ -257,15 +260,18 @@ export function clockText(d: Date): string {
 }
 
 /**
- * A phase of change `slug` got through to the assistant, so the pause and its back-off end. When the
- * pause names another change as its cause, its cause and repeat count stay: that change's own phase
- * may keep failing with words that look like an outage, and it must still reach the probe (see
- * PROBE_AFTER in the scheduler) while other changes get through in between. Without `slug`, or with
- * no cause recorded, the pause is removed completely. Never throws.
+ * A phase of change `slug` got through to the assistant on `model`, so the pause and its back-off end.
+ * When the pause names another model, it stays as it is: that model may still be out (the strong
+ * model's limit, say, while the cheap intake gets through). When it names another change as its
+ * cause, its cause and repeat count stay: that change's own phase may keep failing with words that
+ * look like an outage, and it must still reach the probe (see PROBE_AFTER in the scheduler) while
+ * other changes get through in between. Without `slug`, or with no cause recorded, the pause is
+ * removed completely. Never throws.
  */
-export function clearPause(root: string, slug?: string, now: Date = new Date()): void {
+export function clearPause(root: string, slug?: string, now: Date = new Date(), model?: string): void {
   const p = readPause(root);
   if (!p) return;
+  if (model && p.model && model !== p.model) return;
   try {
     if (!slug || !p.slug || p.slug === slug) rmSync(pausePath(root), { force: true });
     else writeFileAtomic(pausePath(root), JSON.stringify({ ...p, until: now.toISOString(), failures: 0 }, null, 2));

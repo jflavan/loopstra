@@ -269,7 +269,8 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       for (const n of [1, 2]) {
         const t = await tick(r.path);
         expect(t.paused).toMatch(/^The assistant is unavailable/);
-        expect(readPause(r.path)).toMatchObject({ slug: "alpha", phase: "intake", repeats: n, failures: 1 });
+        // beta's sessions after its intake ask other models than alpha's intake, so they do not end the back-off.
+        expect(readPause(r.path)).toMatchObject({ slug: "alpha", phase: "intake", model: "haiku", repeats: n, failures: n });
         await expirePause(r.path);
       }
       expect(await statusOf(r.path, "beta")).toBe("plan-approved");

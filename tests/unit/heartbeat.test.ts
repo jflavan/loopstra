@@ -143,6 +143,28 @@ describe("pause after the assistant was unavailable", () => {
     }
   });
 
+  test("the pause names the model that failed; a success on another model leaves it as it is", () => {
+    const t = tempDir();
+    try {
+      const cause = { slug: "add-numbers", phase: "design", line: "API Error: 529 Overloaded", model: "opus" };
+      pauseAfterUnavailable(t.path, NOW, cause);
+      const before = pauseAfterUnavailable(t.path, NOW, cause);
+      expect(before).toMatchObject({ ...cause, repeats: 2, failures: 2 });
+      // The change's cheap intake got through, or another change's: opus may still be out.
+      clearPause(t.path, "add-numbers", NOW, "haiku");
+      expect(readPause(t.path)).toEqual(before);
+      clearPause(t.path, "say-goodbye", NOW, "haiku");
+      expect(readPause(t.path)).toEqual(before);
+      // The same words from another model start the count again.
+      expect(pauseAfterUnavailable(t.path, NOW, { ...cause, model: "sonnet" })).toMatchObject({ model: "sonnet", repeats: 1, failures: 3 });
+      // A success on the model that failed ends the pause as before.
+      clearPause(t.path, "add-numbers", NOW, "sonnet");
+      expect(readPause(t.path)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("another change getting through ends the wait and the back-off, but keeps the cause and its repeats", () => {
     const t = tempDir();
     try {

@@ -5,12 +5,12 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE as FAKE, setEnv, tempGitRepo, TEMPLATES } from "../helpers";
+import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, setEnv, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -356,6 +356,7 @@ describe("agentPhase failures", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(AssistantUnavailable);
     expect((thrown as AssistantUnavailable).detail).toContain("Please run /login");
+    expect((thrown as AssistantUnavailable).model).toBe("haiku");
     expect(trace.phases("x").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
     expect(trace.phases("x")[0]?.error).toMatch(/^environment: /);
     trace.close(); repo.cleanup();
@@ -385,6 +386,34 @@ describe("agentPhase failures", () => {
     await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
     expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
+  });
+
+  test("a phase on another model getting through leaves the pause of the model that failed", async () => {
+    const { repo, ctx, trace } = await setup();
+    const cause = { slug: "x", phase: "design", line: "API Error: 529 Overloaded", model: "opus" };
+    pauseAfterUnavailable(repo.path, new Date(), cause);
+    const before = pauseAfterUnavailable(repo.path, new Date(), cause);
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(readPause(repo.path)).toEqual(before);
+    trace.close(); repo.cleanup();
+  });
+
+  test("the probe runs on the model it is given, with a cap the strong model can answer within; over budget means it answered", async () => {
+    const { repo, ctx, trace } = await setup();
+    const dir = fixtureDir({ "probe@opus": fixture("budget") });
+    const args = tempDir();
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path, LOOPSTRA_FAKE_CALLS: join(args.path, "calls.txt") }, async () => {
+        expect(await probeAssistant(repo.path, ctx.cfg, trace, "x", "opus")).toMatchObject({ reached: true });
+        expect(await probeAssistant(repo.path, ctx.cfg, trace, "x")).toMatchObject({ reached: true });
+      });
+      const calls = (await Bun.file(join(args.path, "calls.txt")).text()).trim().split(/\r?\n/).map((l) => JSON.parse(l) as string[]);
+      const flag = (a: string[], name: string) => a[a.indexOf(name) + 1];
+      expect(calls.map((a) => [flag(a, "--model"), flag(a, "--max-budget-usd")])).toEqual([["opus", "0.25"], ["haiku", "0.05"]]);
+    } finally {
+      dir.cleanup(); args.cleanup(); trace.close(); repo.cleanup();
+    }
   });
 
   test("a runtime error inside the phase never leaves the phase running", async () => {

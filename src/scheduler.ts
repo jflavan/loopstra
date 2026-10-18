@@ -488,15 +488,15 @@ export const PROBE_AFTER = 3;
  * probe does not → the loop keeps backing off. `slug` is the change whose step met it (null outside a step).
  */
 async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: TickResult, slug: string | null, e: AssistantUnavailable): Promise<TickResult> {
-  const cause = slug && e.phase ? { slug, phase: e.phase, line: e.line } : null;
+  const cause = slug && e.phase ? { slug, phase: e.phase, line: e.line, model: e.model } : null;
   const p = pauseAfterUnavailable(root, new Date(), cause);
-  trace.event(slug ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, detail: e.detail });
+  trace.event(slug ?? "_loop", "pause", { reason: p.reason, until: p.until, failures: p.failures, repeats: p.repeats, phase: p.phase, line: p.line, model: p.model, detail: e.detail });
   out.paused = p.reason;
   if (!cause || (p.repeats ?? 0) < PROBE_AFTER) return out;
   // The probe is a session too: with the loop's day used up, keep backing off instead.
   if (loopDayUsedUp(cfg, trace)) return out;
   try {
-    const probe = await probeAssistant(root, cfg, trace, cause.slug);
+    const probe = await probeAssistant(root, cfg, trace, cause.slug, cause.model ?? undefined);
     if (!probe.reached) {
       trace.event(cause.slug, "pause", { note: "the probe could not reach the assistant either; still backing off", probe: probe.detail });
       return out;
