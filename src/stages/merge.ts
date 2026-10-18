@@ -387,9 +387,9 @@ async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: t
  */
 async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise<boolean> {
   if (await ctx.git.isAncestor(ref, branch)) return false;
-  const gained = await ctx.git.run(["diff", "--name-only", `${branch}...${ref}`], true);
+  const gained = await ctx.git.run(["diff", "--name-only", "-z", `${branch}...${ref}`], true);
   if (gained.code !== 0) return true;
-  return gained.out.split(/\r?\n/).map((f) => f.trim()).some((f) => f && !f.startsWith("intent/"));
+  return gained.out.split("\0").some((f) => f && !f.startsWith("intent/"));
 }
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to, moments ago. */

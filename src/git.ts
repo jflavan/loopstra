@@ -270,9 +270,10 @@ export class Git {
    */
   async containsChanges(target: string, branch: string, ignore: string[] = []): Promise<boolean> {
     if (await this.isAncestor(branch, target)) return true;
-    const changed = await this.run(["diff", "--name-only", `${target}...${branch}`], true);
+    // -z: the names as they are; without it git quotes a non-ASCII name, and a quoted name matches no file.
+    const changed = await this.run(["diff", "--name-only", "-z", `${target}...${branch}`], true);
     if (changed.code !== 0) return false;
-    const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter((f) => f && !ignore.some((p) => f.startsWith(p)));
+    const files = changed.out.split("\0").filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
     for (const chunk of chunks(files, DIFF_CHUNK)) {
@@ -320,7 +321,7 @@ export class Git {
   }
 
   async changedFilesSince(base: string): Promise<string[]> {
-    return (await this.run(["diff", "--name-only", `${base}...HEAD`])).out.trim().split("\n").filter(Boolean);
+    return (await this.run(["diff", "--name-only", "-z", `${base}...HEAD`])).out.split("\0").filter(Boolean);
   }
 
   /** True when a rebase is in progress in this checkout. */

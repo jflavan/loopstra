@@ -339,6 +339,26 @@ describe("Git across systems", () => {
       expect(await git.containsChanges("main", "feature")).toBe(false);
     } finally { repo.cleanup(); }
   });
+
+  test("containsChanges and changedFilesSince read non-ASCII paths and names with spaces", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      await Bun.write(join(wt, "docs", "café.md"), "bonjour\n");
+      await Bun.write(join(wt, "docs", "two words.md"), "spaced\n");
+      await new Git(wt).commitAll("café");
+      expect((await new Git(wt).changedFilesSince("main")).sort()).toEqual(["docs/café.md", "docs/two words.md"]);
+      // git quotes such a name unless asked not to; quoted, it matched nothing, so main seemed to have it.
+      expect(await git.containsChanges("main", "intent/x")).toBe(false);
+      await run(["git", "merge", "-q", "--squash", "intent/x"], repo.path);
+      await run(["git", "commit", "-q", "-m", "squash"], repo.path);
+      expect(await git.containsChanges("main", "intent/x")).toBe(true);
+      await git.worktreeRemove(wt);
+    } finally { repo.cleanup(); }
+  });
 });
 
 describe("Git and the locks", () => {
