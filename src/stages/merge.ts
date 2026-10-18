@@ -41,10 +41,15 @@ export const PR_PUSHED = "pr-pushed";
 const BRANCH_KEPT = "branch-kept";
 /** Run-folder marker: the pull request merged, but main here does not have it yet (traced once). */
 const MAIN_BEHIND = "main-behind";
-/** Run-folder marker: when recording a merged pull request first failed (an ISO time; see finishRemoteMerge). */
+/**
+ * Run-folder marker: when recording a merged pull request first failed and when it last did (two ISO
+ * times, one per line; see finishRemoteMerge).
+ */
 const FINISH_FAILING = "finish-failing";
 /** How long recording a merged pull request may keep failing before the change blocks. */
 const FINISH_FAILING_MS = 30 * 60_000;
+/** A failure this long after the last one (the loop was off meanwhile) starts the count again. */
+const FINISH_FAILING_GAP_MS = 10 * 60_000;
 
 /** How a person asks the merge step to look again without a rebuild: the status that is runnable for this gate. */
 function mergeRetry(ctx: StepContext): Status {
@@ -534,12 +539,16 @@ async function finishRemoteMerge(ctx: StepContext, pr: PrInfo, justMerged = fals
   } catch (e) {
     if (notTheStepsFault(e) || endsStepQuietly(e) || e instanceof PersonChangedStatus) throw e;
     const error = errorText(e);
-    const since = readMarker(ctx, FINISH_FAILING);
-    if (since === null) writeMarker(ctx, FINISH_FAILING, new Date().toISOString());
-    else if (Date.now() - Date.parse(since) >= FINISH_FAILING_MS) {
+    const now = Date.now();
+    const [first = "", last = first] = (readMarker(ctx, FINISH_FAILING) ?? "").trim().split("\n");
+    const started = Date.parse(first);
+    // A failure long after the last one, or a marker that cannot be read, starts the count again.
+    const since = now - Date.parse(last) < FINISH_FAILING_GAP_MS && started <= now ? started : now;
+    if (now - since >= FINISH_FAILING_MS) {
       clearMarker(ctx, FINISH_FAILING);
       return block(ctx, `The pull request merged on GitHub, but recording it here kept failing: ${error}. An engineer needs to look at it.`, { retryFrom: mergeRetry(ctx) });
     }
+    writeMarker(ctx, FINISH_FAILING, `${new Date(since).toISOString()}\n${new Date(now).toISOString()}`);
     ctx.trace.eventOnChange(ctx.slug, "error", '"where":"finish merge"', { where: "finish merge", error, note: "the pull request is merged; recording it is tried again on the next look" }, "error");
     return { ok: true, waiting: true };
   }

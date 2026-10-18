@@ -337,7 +337,7 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
-  test("recording a merged pull request that keeps failing is traced once, and after 30 minutes blocks with a look again", async () => {
+  test("recording a merged pull request that keeps failing is traced once, and after 30 minutes blocks with a look again; a pause of over 10 minutes starts the count again", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {
       await tick(s.repo); // build
@@ -361,8 +361,14 @@ describe("the loop with a GitHub remote", () => {
         expect(await look()).toEqual({ ok: true, waiting: true });
         expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"finish merge\""))).toHaveLength(1);
         expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
-        // The failures started 31 minutes ago.
-        writeFileSync(join(s.repo, ".loopstra", "runs", SLUG, "finish-failing"), new Date(Date.now() - 31 * 60_000).toISOString());
+        const failing = join(s.repo, ".loopstra", "runs", SLUG, "finish-failing");
+        const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+        // The failures started 31 minutes ago, but the last was 11 minutes ago (the loop was off since): the count starts again.
+        writeFileSync(failing, `${ago(31)}\n${ago(11)}`);
+        expect(await look()).toEqual({ ok: true, waiting: true });
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        // They started 31 minutes ago and went on since.
+        writeFileSync(failing, `${ago(31)}\n${ago(1)}`);
         expect((await look()).ok).toBe(false);
         const blocked = await intentOf(s.repo);
         expect(blocked.status).toBe("blocked");
