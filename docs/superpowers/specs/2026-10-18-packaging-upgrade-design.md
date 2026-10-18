@@ -55,10 +55,11 @@ Every file `init` writes today falls in one of four groups.
 ### Prompts
 
 A phase reads `loopstra/prompts/<name>.md` when the repository has one (an override), else the
-package's `templates/prompts/<name>.md`. `init` no longer copies prompts. This replaces the
-`missing-prompt` failure (a shipped prompt is always there) and removes the old-copy patching in
-`chatTemplate` and the `withNote` fallback: an override is the engineer's own and is kept up to
-date by `upgrade` (see Merging).
+package's `templates/prompts/<name>.md`. `init` no longer copies prompts. The `missing-prompt`
+failure stays only for a broken install (no override and no shipped file). The old-copy patching in
+`chatTemplate` goes: it rewrote specific sentences of old shipped orchestrator prompts, which
+`upgrade` now brings up to date. `withNote` and the conversation fallback in `phasePrompt` stay,
+because an engineer's override may leave a variable out on purpose.
 
 `loopstra customize <prompt>` copies a shipped prompt into `loopstra/prompts/` and records it in
 the stamp, so later upgrades can merge into it. Run with no name it lists the prompts and which are
@@ -70,14 +71,13 @@ shipped one.
 ### The test-protection hook
 
 The hook only acts when `LOOPSTRA_PHASE=fix`, so it belongs to the loop's sessions, not to the
-repository. When Loopstra starts a fix session it adds
+repository. Every agent-phase session Loopstra starts gets (the hook itself does nothing outside a fix phase)
 `--settings '{"hooks":{"PreToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"bun \"<package>/templates/hooks/loopstra-protect-tests.ts\""}]}]}}'`
 to the `claude` arguments, with the hook's absolute path in the installed package. `init` stops
 writing `.claude/hooks/` and stops editing `.claude/settings.json`.
 
-Verify first: that `claude --settings` with inline JSON adds hooks to a `-p` session alongside the
-repository's own settings, on Windows as well (where Claude Code runs hooks through Git Bash, so the
-path is written with forward slashes).
+Verified on Windows (2026-10-18): `claude -p --settings '<inline JSON>'` runs the PreToolUse hook,
+and its exit 2 blocks the Write. The path is written with forward slashes for Git Bash.
 
 ### `loopstra/stamp.json`
 
@@ -123,18 +123,31 @@ Run in a project repository.
    --repo` and exit with its code. The new code runs the new migrations. If the global install
    fails (for instance, the Windows shim is locked by the running process), run
    `bunx loopstra@<version> upgrade --repo` instead and print the one install command to run by
-   hand. Verify the Windows shim lock first.
-2. **Loop.** If the loop is running in this repository, ask it to stop (as `loopstra stop` does),
-   wait for it, and start it again after step 5.
+   hand. Verified on Windows (2026-10-18): a running Bun global shim can `bun add -g` a new version
+   of its own package, so the fallback is only for an install that fails for another reason. The new
+   version is run as `<bun pm bin -g>/loopstra`.
+2. **Loop.** If the loop is running in this repository (its heartbeat says running or paused and
+   its process is alive), refuse: "The loop is running. Stop it (Ctrl-C in its terminal), run
+   loopstra upgrade, then start it again." A stop is in-process (a signal), Windows has no graceful
+   signal to send another process, and a loop restarted in the background would lose its terminal.
+   The tool step (1) runs before this check, since installing does not touch the repository; loops
+   in other repositories keep the code they loaded until they are restarted.
 3. **Checks.** The main checkout must be on `main_branch`, and no managed file, `stamp.json` or the
    config may have uncommitted changes. Otherwise refuse, name what is wrong, write nothing.
 4. **Repo files.** Apply the rules below to each managed file, migrate the config, write the stamp.
-5. **Commit.** One commit on main through `commitRecord` (pushed the way the loop pushes its own
-   records): `chore: upgrade Loopstra 0.4.2 → 0.6.0`, with the release notes between the two
-   versions in the body. Files left with conflict markers are not in the commit.
+5. **Commit.** One commit on main, made as the runtime (Loopstra's author, like its records), so
+   the loop's next tick shares it with the remote the way it shares its own records (`shareMain`):
+   `loopstra: upgrade to 0.6.0 (from 0.4.2)`, with the release notes between the two versions in
+   the body. Files left with conflict markers are not in the commit.
 6. **Report.** What changed per file, the version change, and any file to resolve by hand.
 
 `loopstra upgrade --repo` runs steps 2 to 6 with the installed version only.
+
+**A development checkout** (version `0.0.0-dev`, run through `bun link` or `bun src/cli.ts`) is not
+upgraded from npm: step 1 says to `git pull` instead, and the repo steps run with the checkout's
+templates. Without a `shipped.json` it builds the same index from its own git history, and fetches
+base texts with `git show` instead of from GitHub. The stamp records `0.0.0-dev+<short commit>`. The
+update notice is off in a development checkout.
 `loopstra upgrade --check` changes nothing: it prints the installed and latest versions, the
 release notes between them, and what would happen to each file.
 
@@ -219,7 +232,7 @@ publish` from a clean checkout of main with the version and `shipped.json` set a
 | A merge conflicts | Markers stay in that file, it is listed and left out of the commit. |
 | A merge base cannot be fetched | That file is left alone and listed. |
 | A config migration fails | Nothing is written; the setting is named. |
-| The loop does not stop | Refuses after the wait, says the loop is still running. |
+| The loop is running in this repository | Refuses, says to stop it first. The tool step has already run. |
 
 ## Testing
 
@@ -230,7 +243,7 @@ Unit tests:
 - the first upgrade of a stampless repository: unedited prompts removed, overrides kept, closest
   base chosen, hook file and settings entry removed;
 - prompt resolution: override first, else shipped; `customize`;
-- the fix session's `--settings` arguments carry the hook's absolute path; other phases have none;
+- an agent session's `--settings` argument carries the hook's absolute path;
 - the migration runner (a test migration, a throwing one, one whose result does not load);
 - next-version calculation and the release-skip check;
 - `shipped.json` built from a throwaway repository with history;
@@ -240,8 +253,7 @@ End to end: `bun pm pack` the package, install it into a temporary global folder
 temporary repository with an older build, then `upgrade` against a fake registry (the registry URL
 and the install command can be injected through environment variables used only by tests).
 
-Checked by hand once: the first npm publish, trusted publishing on the first workflow release, and
-the Windows shim lock.
+Checked by hand once: the first npm publish, and trusted publishing on the first workflow release.
 
 ## Out of scope
 
