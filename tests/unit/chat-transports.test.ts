@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
+import { join } from "node:path";
 import { ChatService } from "../../src/chat/service";
+import { chatDir, writeJson } from "../../src/chat/threads";
+import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
 import { chunkText } from "../../src/chat/transports/shared";
@@ -10,6 +13,17 @@ import { Hub } from "../../src/console/hub";
 import { serveConsole } from "../../src/console/server";
 import { chatRepo, turn } from "../chat-helpers";
 import { model, sseFrames } from "../console-helpers";
+
+/** A bot's section of loopstra/config.yaml, as YAML under chat.transports. */
+const SLACK = (allow: string[], acceptors: string[], more = "") =>
+  `chat:\n  transports:\n    slack:\n      token_env: APP\n      bot_token_env: BOT\n      channel: C1\n      allow: ${JSON.stringify(allow)}\n      acceptors: ${JSON.stringify(acceptors)}\n${more}`;
+const DISCORD = (allow: string[], acceptors: string[], more = "") =>
+  `chat:\n  transports:\n    discord:\n      token_env: TOKEN\n      channel: "500"\n      allow: ${JSON.stringify(allow)}\n      acceptors: ${JSON.stringify(acceptors)}\n${more}`;
+
+/** Rewrites a chat repository's config with `chat` after its commands (see chatRepo). */
+function setChat(root: string, chat: string): Promise<number> {
+  return Bun.write(configPath(root), `version: 1\ncommands:\n  test: echo ok\n${chat}`);
+}
 
 /** Waits until `check` holds (or fails after a few seconds). */
 async function until(check: () => boolean | Promise<boolean>, ms = 8_000): Promise<void> {
@@ -164,10 +178,10 @@ function slackStub() {
 
 describe("Slack", () => {
   test("acknowledges events, answers people in the channel in a thread, ignores everyone else, and announces", async () => {
-    const r = await chatRepo();
+    const r = await chatRepo({ config: SLACK(["U1", "U2"], ["U1"], "      announce_to: C9\n") });
     const stub = slackStub();
     const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
-    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1", "U2"], acceptors: ["U1"], announce_to: "C9" }, { env, log: () => {} });
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1", "U2"], acceptors: ["U1"], announce_to: "C9" }, { root: r.root, env, log: () => {} });
     const service = new ChatService(r.root, [slack], { announce: false, pollMs: 60_000 });
     try {
       await r.answer("orchestrator", 1, turn("Hi Ana."));
@@ -210,8 +224,29 @@ describe("Slack", () => {
     }
   });
 
+  test("allow and acceptors are read from the config for each message; a bot taken out of it ignores messages", async () => {
+    const r = await chatRepo({ config: SLACK(["U1"], []) });
+    try {
+      const logged: string[] = [];
+      const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: ["U1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_SLACK_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      const got: Array<[string, boolean]> = [];
+      (slack as unknown as { onMessage: unknown }).onMessage = async (m: { authorId: string; canAccept: boolean }) => { got.push([m.authorId, m.canAccept]); };
+      let ts = 0;
+      const say = (user: string) => slack.onEvent({ type: "message", user, channel: "C1", text: "hi", ts: String(++ts) });
+      await setChat(r.root, SLACK(["U2"], ["U2"]));
+      await say("U1");
+      await say("U2");
+      expect(got).toEqual([["U2", true]]);
+      await setChat(r.root, "");
+      await say("U2");
+      await say("U2");
+      expect(got).toEqual([["U2", true]]);
+      expect(logged).toEqual(["Slack: chat.transports.slack is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat."]);
+    } finally { r.cleanup(); }
+  });
+
   test("a missing token is a plain error at start", async () => {
-    const slack = new SlackTransport({ token_env: "NOPE_APP", bot_token_env: "NOPE_BOT", channel: "C1", allow: [], acceptors: [] }, { env: {} });
+    const slack = new SlackTransport({ token_env: "NOPE_APP", bot_token_env: "NOPE_BOT", channel: "C1", allow: [], acceptors: [] }, { root: ".", env: {} });
     await expect(slack.start(async () => {})).rejects.toThrow("Slack needs its app-level token in the environment variable NOPE_APP.");
   });
 });
@@ -262,7 +297,7 @@ async function startDiscord(stub: ReturnType<typeof discordStub>, root: string) 
 
 describe("Discord", () => {
   test("identifies with the message intents, gives each new request a thread, and carries on in it", async () => {
-    const r = await chatRepo();
+    const r = await chatRepo({ config: DISCORD([], ["7"], "      announce_to: \"501\"\n") });
     const stub = discordStub();
     const env = { LOOPSTRA_DISCORD_API: `http://127.0.0.1:${stub.server.port}/api`, TOKEN: "t-1" };
     const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: ["7"], announce_to: "501" }, { root: r.root, env, log: () => {} });
@@ -338,13 +373,34 @@ describe("Discord", () => {
   });
 
   test("the allow list is checked before anything is done", async () => {
-    const r = await chatRepo();
+    const r = await chatRepo({ config: DISCORD(["1"], []) });
     try {
       const discord = new DiscordTransport({ token_env: "T", channel: "500", allow: ["1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: () => {} });
       let called = false;
       (discord as unknown as { onMessage: unknown }).onMessage = async () => { called = true; };
       await discord.onDiscordMessage({ id: "m", channel_id: "500", content: "hi", author: { id: "2" } });
       expect(called).toBe(false);
+    } finally { r.cleanup(); }
+  });
+
+  test("allow and acceptors are read from the config for each message; a bot taken out of it ignores messages", async () => {
+    const r = await chatRepo({ config: DISCORD(["1"], []) });
+    try {
+      const logged: string[] = [];
+      const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: ["1"], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      const got: Array<[string, boolean]> = [];
+      (discord as unknown as { onMessage: unknown }).onMessage = async (m: { authorId: string; canAccept: boolean }) => { got.push([m.authorId, m.canAccept]); };
+      writeJson(join(chatDir(r.root), "discord-threads.json"), ["100"]);
+      const say = (author: string) => discord.onDiscordMessage({ id: "m", channel_id: "100", content: "hi", author: { id: author } });
+      await setChat(r.root, DISCORD(["2"], ["2"]));
+      await say("1");
+      await say("2");
+      expect(got).toEqual([["2", true]]);
+      await setChat(r.root, "");
+      await say("2");
+      await say("2");
+      expect(got).toEqual([["2", true]]);
+      expect(logged).toEqual(["Discord: chat.transports.discord is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat."]);
     } finally { r.cleanup(); }
   });
 });

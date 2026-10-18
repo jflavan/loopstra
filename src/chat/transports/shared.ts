@@ -1,5 +1,35 @@
 import { userInfo } from "node:os";
+import { loadConfig, type Config } from "../../config";
 import { andList } from "../../text";
+
+/** Who may chat with a bot (empty: anyone in its channel), and who may also start drafts. */
+export interface Access { allow: string[]; acceptors: string[] }
+
+/**
+ * A bot's `allow` and `acceptors`, read from the config for each message, so a change counts from the
+ * next message without a restart (the token and the channel need one). Null when the bot's section is
+ * gone from the config: its messages are ignored, and that is logged once. A config that cannot be
+ * read (a half-saved edit) keeps the lists last read.
+ */
+export class LiveAccess {
+  private gone = false;
+
+  constructor(private readonly root: string, private readonly name: "slack" | "discord", private last: Access, private readonly log: (line: string) => void) {}
+
+  async read(): Promise<Access | null> {
+    let cfg: Config;
+    try { cfg = await loadConfig(this.root); } catch { return this.last; }
+    const section = cfg.chat.transports[this.name];
+    if (!section) {
+      if (!this.gone) this.log(`${this.name === "slack" ? "Slack" : "Discord"}: chat.transports.${this.name} is no longer in loopstra/config.yaml, so messages to this bot are ignored. Put it back, or stop loopstra chat.`);
+      this.gone = true;
+      return null;
+    }
+    this.gone = false;
+    this.last = { allow: section.allow, acceptors: section.acceptors };
+    return this.last;
+  }
+}
 
 /** Splits a message into parts of at most `max` characters, at line breaks where it can. */
 export function chunkText(text: string, max: number): string[] {

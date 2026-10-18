@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { DiscordTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
 import { chatDir, readJson, writeJson } from "../threads";
-import { chunkText, mentionList, Reconnector } from "./shared";
+import { chunkText, LiveAccess, mentionList, Reconnector } from "./shared";
 
 /** The Discord REST API; tests point it at a stub server (which also hands out the gateway address). */
 export const DISCORD_API_ENV = "LOOPSTRA_DISCORD_API";
@@ -42,6 +42,7 @@ export class DiscordTransport implements Transport {
   private beat: ReturnType<typeof setInterval> | null = null;
   private onMessage: OnMessage | null = null;
   private readonly reconnect: Reconnector;
+  private readonly access: LiveAccess;
   private warnedEmpty = false;
   /** The refusal last logged (a gateway close code), so a lasting one is one line. */
   private refusedCode: number | null = null;
@@ -49,6 +50,7 @@ export class DiscordTransport implements Transport {
   constructor(private readonly cfg: DiscordTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void }) {
     this.api = (opts.env ?? process.env)[DISCORD_API_ENV] ?? "https://discord.com/api/v10";
     this.reconnect = new Reconnector(() => this.connect(), (e) => this.log(`Discord connection failed, retrying: ${e}`));
+    this.access = new LiveAccess(opts.root, "discord", cfg, (l) => this.log(l));
   }
 
   private log(line: string): void { (this.opts.log ?? ((l) => console.error(l)))(line); }
@@ -147,7 +149,8 @@ export class DiscordTransport implements Transport {
 
   async onDiscordMessage(m: DiscordMessage): Promise<void> {
     if (!this.onMessage || !m?.author || m.author.bot || m.author.id === this.botUser) return;
-    if (this.cfg.allow.length && !this.cfg.allow.includes(m.author.id)) return;
+    const access = await this.access.read();
+    if (!access || (access.allow.length && !access.allow.includes(m.author.id))) return;
     const isOurs = m.channel_id === this.cfg.channel || this.knownThreads().includes(m.channel_id);
     if (!isOurs) return;
     const text = this.withoutBotMention(m.content ?? "");
@@ -173,8 +176,8 @@ export class DiscordTransport implements Transport {
     }
     await this.onMessage({
       thread, authorId: m.author.id, authorName: m.author.global_name || m.author.username || m.author.id, text,
-      canAccept: this.cfg.acceptors.includes(m.author.id),
-      acceptors: mentionList(this.cfg.acceptors.map((id) => `<@${id}>`), "chat.transports.discord.acceptors"),
+      canAccept: access.acceptors.includes(m.author.id),
+      acceptors: mentionList(access.acceptors.map((id) => `<@${id}>`), "chat.transports.discord.acceptors"),
     });
   }
 

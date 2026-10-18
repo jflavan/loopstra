@@ -1,6 +1,6 @@
 import type { SlackTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
-import { chunkText, Reconnector, mentionList } from "./shared";
+import { chunkText, LiveAccess, Reconnector, mentionList, type Access } from "./shared";
 
 /** The Slack Web API; tests point it at a stub server. */
 export const SLACK_API_ENV = "LOOPSTRA_SLACK_API";
@@ -36,10 +36,12 @@ export class SlackTransport implements Transport {
   private readonly seen: string[] = [];
   private readonly names = new Map<string, string>();
   private readonly reconnect: Reconnector;
+  private readonly access: LiveAccess;
 
-  constructor(private readonly cfg: SlackTransportConfig, private readonly opts: { env?: Record<string, string | undefined>; log?: (line: string) => void } = {}) {
+  constructor(private readonly cfg: SlackTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void }) {
     this.api = (opts.env ?? process.env)[SLACK_API_ENV] ?? "https://slack.com/api";
     this.reconnect = new Reconnector(() => this.connect(), (e) => this.log(`Slack connection failed, retrying: ${e}`));
+    this.access = new LiveAccess(opts.root, "slack", cfg, (l) => this.log(l));
   }
 
   private log(line: string): void { (this.opts.log ?? ((l) => console.error(l)))(line); }
@@ -99,16 +101,17 @@ export class SlackTransport implements Transport {
   }
 
   /** Whether an event is a person's message in the configured channel, from someone allowed to chat. */
-  private wanted(ev: SlackEvent): ev is Required<Pick<SlackEvent, "user" | "channel" | "ts">> & SlackEvent {
+  private wanted(ev: SlackEvent, access: Access): ev is Required<Pick<SlackEvent, "user" | "channel" | "ts">> & SlackEvent {
     if (ev.type !== "message" && ev.type !== "app_mention") return false;
     if (ev.subtype || ev.bot_id || !ev.user || !ev.ts || ev.user === this.botUser) return false;
     if (ev.channel !== this.cfg.channel) return false;
-    if (this.cfg.allow.length && !this.cfg.allow.includes(ev.user)) return false;
+    if (access.allow.length && !access.allow.includes(ev.user)) return false;
     return true;
   }
 
   async onEvent(ev: SlackEvent): Promise<void> {
-    if (!this.wanted(ev)) return;
+    const access = await this.access.read();
+    if (!access || !this.wanted(ev, access)) return;
     // A mention arrives twice (as a message and as app_mention): once is enough.
     if (this.seen.includes(ev.ts)) return;
     this.seen.push(ev.ts);
@@ -118,8 +121,8 @@ export class SlackTransport implements Transport {
     const thread = `${ev.channel}:${ev.thread_ts ?? ev.ts}`;
     await this.onMessage({
       thread, authorId: ev.user, authorName: await this.nameOf(ev.user), text,
-      canAccept: this.cfg.acceptors.includes(ev.user),
-      acceptors: mentionList(this.cfg.acceptors.map((id) => `<@${id}>`), "chat.transports.slack.acceptors"),
+      canAccept: access.acceptors.includes(ev.user),
+      acceptors: mentionList(access.acceptors.map((id) => `<@${id}>`), "chat.transports.slack.acceptors"),
     });
   }
 
