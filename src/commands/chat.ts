@@ -34,7 +34,7 @@ export async function chat(root: string, opts: ChatOptions): Promise<number> {
     return 1;
   }
   resetStop();
-  const uninstall = installStopSignals();
+  const uninstall = installStopSignals("Stopping chat.");
   const service = new ChatService(root, transports);
   try {
     try {
