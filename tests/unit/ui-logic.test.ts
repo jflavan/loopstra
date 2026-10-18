@@ -11,7 +11,7 @@ import { addItems, EMPTY } from "../../src/ui/transcript";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
-import { aboutPrefix, addLines } from "../../src/ui/chat";
+import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
@@ -370,6 +370,12 @@ describe("the chat drawer's lines", () => {
     expect(aboutPrefix({ slug: "csv-export", title: "CSV export" })).toBe("About csv-export (CSV export): ");
     expect(aboutPrefix({ title: "Step 3" })).toBe("About Step 3: ");
     expect(aboutPrefix(null)).toBe("");
+  });
+  test("the orchestrator is told which change, and which session, the drawer was opened from", () => {
+    expect(aboutOf({ slug: "csv-export", title: "CSV export", seq: 3 })).toEqual({ slug: "csv-export", seq: 3 });
+    expect(aboutOf({ slug: "csv-export", title: "CSV export" })).toEqual({ slug: "csv-export" });
+    expect(aboutOf({ title: "Step 3" })).toBeNull();
+    expect(aboutOf(null)).toBeNull();
   });
 });
 

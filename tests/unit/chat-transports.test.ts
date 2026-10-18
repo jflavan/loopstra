@@ -99,6 +99,24 @@ describe("the dashboard panel", () => {
     }
   });
 
+  test("a post's about is passed on; a bad one is dropped, not refused", async () => {
+    const r = await chatRepo();
+    try {
+      const dash = new DashboardTransport(r.root, "ana");
+      const got: unknown[] = [];
+      await dash.start(async (m) => { got.push(m.about ?? null); });
+      const base = "http://127.0.0.1:4000";
+      const post = (thread: string, about: unknown) => dash.handle(
+        new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread, text: "what is wrong?", about }) }),
+        new URL(`${base}/api/chat`),
+      );
+      const abouts: unknown[] = [{ slug: "csv-export", seq: 3 }, { slug: "csv-export" }, { slug: "Not A Slug" }, { slug: "csv-export", seq: "3" }, { slug: "csv-export", seq: 0 }, "csv-export"];
+      for (const [i, about] of abouts.entries()) expect((await post(`tab-abcdefg${i}`, about)).status).toBe(202);
+      await until(() => got.length === abouts.length);
+      expect(got).toEqual([{ slug: "csv-export", seq: 3 }, { slug: "csv-export" }, null, null, null, null]);
+    } finally { r.cleanup(); }
+  });
+
   test("without chat, /api/chat is not there and the totals include what chat spent", async () => {
     const r = await chatRepo();
     try {

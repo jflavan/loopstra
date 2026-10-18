@@ -1,3 +1,5 @@
+import { SLUG } from "../../intents";
+import type { About } from "../about";
 import { AnnouncementLog } from "../announcer";
 import type { OnMessage, Transport } from "../service";
 import { localUser } from "./shared";
@@ -8,6 +10,19 @@ const THREAD = /^[a-z0-9-]{8,64}$/;
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost"]);
 /** The longest message the panel takes. */
 const MAX_TEXT = 20_000;
+
+/**
+ * The change (and session) a post says the drawer was opened from: a slug that is a change name, and
+ * a seq that is a positive whole number when there is one. Anything else is dropped, not refused: the
+ * message itself still goes through.
+ */
+function aboutOf(v: unknown): About | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const { slug, seq } = v as { slug?: unknown; seq?: unknown };
+  if (typeof slug !== "string" || !SLUG.test(slug)) return null;
+  if (seq === undefined) return { slug };
+  return typeof seq === "number" && Number.isInteger(seq) && seq > 0 ? { slug, seq } : null;
+}
 
 /**
  * The chat panel in `loopstra ui`: one conversation per browser tab. The page posts a message to
@@ -63,7 +78,7 @@ export class DashboardTransport implements Transport {
     // The page's own origin only.
     if (req.headers.get("origin") !== url.origin) return new Response("Forbidden", { status: 403 });
     if (!(req.headers.get("content-type") ?? "").includes("application/json")) return new Response("Expected JSON", { status: 415 });
-    let body: { thread?: unknown; text?: unknown };
+    let body: { thread?: unknown; text?: unknown; about?: unknown };
     try { body = await req.json() as typeof body; } catch { return Response.json({ error: "json" }, { status: 400 }); }
     const thread = typeof body.thread === "string" ? body.thread : "";
     const text = typeof body.text === "string" ? body.text.trim() : "";
@@ -72,7 +87,8 @@ export class DashboardTransport implements Transport {
     if (this.busy.has(thread)) return Response.json({ error: "busy" }, { status: 409 });
     this.busy.add(thread);
     const handle = this.onMessage;
-    void handle({ thread, authorId: this.user, authorName: this.user, text, canAccept: true, acceptors: "you" })
+    const about = aboutOf(body.about);
+    void handle({ thread, authorId: this.user, authorName: this.user, text, canAccept: true, acceptors: "you", ...(about ? { about } : {}) })
       .catch(() => { /* the orchestrator logs its own failures into the thread */ })
       .finally(() => this.busy.delete(thread));
     return Response.json({ accepted: true }, { status: 202 });

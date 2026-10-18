@@ -11,6 +11,7 @@ import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import { Trace } from "../trace";
+import { aboutContext, type About } from "./about";
 import { AnnouncementLog } from "./announcer";
 import { CHAT_SLUG, chatSpentToday, chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { handOff, type HandoffOutcome } from "./publish";
@@ -31,6 +32,8 @@ export interface IncomingMessage {
   canAccept: boolean;
   /** Who may, in words, for telling someone who may not. */
   acceptors: string;
+  /** The change (and session) the person opened chat from, sent with the first message from there (the dashboard's drawer). */
+  about?: About;
 }
 
 /** Sends one message back into the thread. */
@@ -225,6 +228,11 @@ export class Orchestrator {
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
     ];
+    if (m.about) {
+      // Read from the change's own files, which hold people's words: never able to end the context block.
+      const about = await aboutContext(this.root, m.about).catch(() => "");
+      if (about) lines.push(`About this change (from where the person opened chat):\n${untagged(about)}`);
+    }
     if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${untagged(oneLine(l, 1000))}`).join("\n")}`);
     if (declined) lines.push(declined);
     const text = untagged(m.text);

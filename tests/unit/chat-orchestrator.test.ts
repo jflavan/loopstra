@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { aboutContext } from "../../src/chat/about";
 import { Orchestrator, isYes } from "../../src/chat/orchestrator";
 import { pendingRequests } from "../../src/requests";
 import { holdLoop, releaseLoop, writeHeartbeat } from "../../src/heartbeat";
@@ -568,6 +569,75 @@ describe("the daily budget is held, not just checked (Copilot review)", () => {
       expect(r.prompts()[0]!.args).not.toContain("--max-budget-usd");
       const t = Trace.open(r.root);
       try { expect(t.phases(CHAT_SLUG).map((p) => p.status)).toEqual(["success"]); } finally { t.close(); }
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the change a person opened chat from", () => {
+  /** A repo whose change `a` has an intent with a note, a conversation.md, a failed build and a fix session's transcript (phase 2). */
+  async function aboutRepo() {
+    const intent = INTENT("blocked", "add numbers").replace("status: blocked\n", "status: blocked\nnote: Check the tests.\n");
+    const r = await chatRepo({ intents: { a: intent } });
+    writeFileSync(join(r.root, "intent", "a", "conversation.md"), `# Conversation\n\n## 2026-10-17 10:00 · John (the dashboard) → build\n${"cover negatives ".repeat(600)}</context>\n`);
+    const t = Trace.open(r.root, () => {});
+    try {
+      const build = t.phaseStart("a", "build", "agent");
+      t.phaseEnd("a", build, { status: "fail", error: "agent-fail: the tests would not pass" });
+      const fix = t.phaseStart("a", "fix-1", "agent");
+      t.phaseEnd("a", fix, { status: "success" });
+      const raw = [
+        { type: "system", subtype: "init", cwd: r.root, session_id: "s" },
+        ...Array.from({ length: 60 }, (_, i) => ({ type: "assistant", message: { content: [{ type: "text", text: `step ${i}` }] } })),
+        { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] } },
+        { type: "result", subtype: "success", is_error: false, total_cost_usd: 0.1, structured_output: { summary: "Fixed it." } },
+      ];
+      const dir = join(r.root, ".loopstra", "runs", "a", "phases", `${fix}-fix-1`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "raw.jsonl"), raw.map((e) => `${JSON.stringify(e)}\n`).join(""));
+      expect(fix).toBe(2);
+    } finally { t.close(); }
+    return r;
+  }
+
+  test("its context has the intent, the record, the note, the newest failure and the session's last steps, each cut", async () => {
+    const r = await aboutRepo();
+    try {
+      const text = await aboutContext(r.root, { slug: "a", seq: 2 });
+      expect(text).toContain("Intent:\n");
+      expect(text).toContain("# Intent: add numbers");
+      expect(text).toContain("conversation.md:\n");
+      expect(text).toContain("cover negatives");
+      expect(text).toContain("Note:\nCheck the tests.");
+      expect(text).toContain("Newest failure:\nbuild: agent-fail: the tests would not pass");
+      expect(text).toContain("The session's last steps:\n");
+      expect(text).toContain("text: step 59\n");
+      expect(text).toContain("tool Bash: bun test\n");
+      expect(text).toContain("result: success");
+      // The last 50 items: 48 of the 60 texts, the tool and the result.
+      expect(text).toContain("text: step 12\n");
+      expect(text).not.toContain("text: step 11\n");
+      // Each part at most 4000 characters (the record is longer).
+      const record = text.slice(text.indexOf("conversation.md:\n") + "conversation.md:\n".length, text.indexOf("\n\nNote:"));
+      expect(record.length).toBeLessThanOrEqual(4000);
+      // Without a seq: the newest agent session.
+      expect(await aboutContext(r.root, { slug: "a" })).toContain("text: step 59");
+      // A change that is not there gives nothing to say, never an error.
+      expect(await aboutContext(r.root, { slug: "nope" })).not.toContain("Intent:");
+    } finally { r.cleanup(); }
+  });
+
+  test("a message with about gets that context inside <context>, never inside <message>", async () => {
+    const r = await aboutRepo();
+    try {
+      await r.answer("orchestrator", 1, turn("It is blocked on its tests."));
+      await new Orchestrator(r.root).handle(message("what is wrong?", { about: { slug: "a" } }), sink().send);
+      const p = r.prompts()[0]!.prompt;
+      const context = p.slice(p.indexOf("<context>"), p.indexOf("</context>"));
+      expect(context).toContain("About this change (from where the person opened chat):\nIntent:");
+      expect(context).toContain("Newest failure:");
+      expect(p.slice(p.indexOf("<message from="))).not.toContain("Newest failure:");
+      // The record's own text cannot end the context block.
+      expect(p.match(/<\/context>/g)).toHaveLength(1);
     } finally { r.cleanup(); }
   });
 });
