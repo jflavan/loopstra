@@ -18,7 +18,7 @@ const SLUG = "add-numbers";
 const BRANCH = `intent/${SLUG}`;
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-interface FakePr { number: number; state: string; reviewDecision: string; checks: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
+interface FakePr { number: number; state: string; reviewDecision: string; checks: string; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
 
 /**
  * A bare "GitHub" remote and a clone of it with Loopstra set up and one intent at plan-approved.
@@ -70,6 +70,43 @@ async function elsewhere(remote: string) {
 
 async function onRemoteMain(remote: string, path: string): Promise<boolean> {
   return (await run(["git", "cat-file", "-e", `main:${path}`], remote)).code === 0;
+}
+
+/** The change's branch head on the remote. */
+async function headOn(remote: string): Promise<string> {
+  return (await run(["git", "rev-parse", BRANCH], remote)).out.trim();
+}
+
+function inTrace<T>(repo: string, fn: (t: Trace) => T): T {
+  const t = Trace.open(repo);
+  try { return fn(t); } finally { t.close(); }
+}
+
+/**
+ * A bun script for the fake gh's knobs: a person pushes a commit adding src/person.ts to the change's
+ * branch on the remote, the first time it runs (`done` exists after).
+ */
+async function personPushesOnce(remote: string): Promise<{ script: string; done: string }> {
+  const done = join(remote, "person-pushed");
+  const script = join(remote, "person-pushes.ts");
+  await Bun.write(script, [
+    'import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";',
+    'import { tmpdir } from "node:os";',
+    'import { join } from "node:path";',
+    `if (!existsSync(${JSON.stringify(done)})) {`,
+    '  const dir = mkdtempSync(join(tmpdir(), "loopstra-person-"));',
+    '  const git = (...a: string[]) => Bun.spawnSync({ cmd: ["git", "-c", "user.name=Person", "-c", "user.email=person@example.com", ...a], cwd: dir });',
+    `  git("clone", "-q", "-b", ${JSON.stringify(BRANCH)}, ${JSON.stringify(remote)}, ".");`,
+    '  writeFileSync(join(dir, "src", "person.ts"), "export const person = 1;");',
+    '  git("add", "-A");',
+    '  git("commit", "-q", "-m", "person: a fix");',
+    `  git("push", "-q", "origin", ${JSON.stringify(BRANCH)});`,
+    '  rmSync(dir, { recursive: true, force: true });',
+    `  writeFileSync(${JSON.stringify(done)}, "");`,
+    "}",
+    "",
+  ].join("\n"));
+  return { script, done };
 }
 
 describe("the loop with a GitHub remote", () => {
@@ -495,6 +532,52 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("commits a person pushes to the pull request as it merges are not merged until their own checks pass", async () => {
+    const s = await remoteSetup();
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote) });
+      // The push lands between the look at the checks and GitHub's merge.
+      await withEnv({ LOOPSTRA_FAKE_GH_BEFORE_MERGE: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      expect((await s.pr()).merged).toBe(false);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).some((e) => e.payload.includes("New commits arrived on the pull request"))).toBe(true));
+      // GitHub's checks of the person's commit still run.
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(false);
+      // They pass: the commit is taken into the branch here, and the pull request merges with it.
+      await s.setPr({ checksHead: await headOn(s.remote) });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/person.ts")).toBe(true);
+      inTrace(s.repo, (trace) => expect(trace.events(SLUG).filter((e) => e.payload.includes("\"take pull request commits\""))).toHaveLength(1));
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("commits a person pushed after the checks were read are taken, and wait for their own checks before it merges", async () => {
+    const s = await remoteSetup();
+    const push = await personPushesOnce(s.remote);
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass", checksHead: await headOn(s.remote) });
+      // The push lands just after the checks were read, before the step fetches the branch.
+      await withEnv({ LOOPSTRA_FAKE_GH_AFTER_CHECKS: push.script }, () => tick(s.repo));
+      expect(existsSync(push.done)).toBe(true);
+      expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      expect((await run(["git", "rev-parse", BRANCH], s.repo)).out.trim()).toBe(await headOn(s.remote));
+      await s.setPr({ checksHead: await headOn(s.remote) });
+      await tick(s.repo);
+      expect((await s.pr()).merged).toBe(true);
+      expect(await onRemoteMain(s.remote, "src/person.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
   test("an owner who closes the pull request while the change is reviewed again is not overridden by a new one", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {

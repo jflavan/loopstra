@@ -299,13 +299,17 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
 
 /** The trace's plain line when a pull request was brought up to date before it could merge. */
 const BROUGHT_UP_TO_DATE = "Brought up to date with changes merged meanwhile; waiting for the automatic checks on GitHub again.";
+/** The trace's plain line when GitHub refused the merge because commits arrived after the checks were read. */
+const NEW_COMMITS = "New commits arrived on the pull request after its checks were read, so it was not merged; their checks are looked at next.";
 
 /**
  * Whether the pull request's branch on GitHub still has what it was checked against (see upToDate).
  * `not pushed`: the branch here has commits GitHub's copy lacks (a bring-up-to-date that stopped
  * before its push). `both changed`: on top of that, a person added commits to GitHub's copy.
+ * `taken`: up to date, but only once a person's commits were taken from GitHub's copy, whose
+ * checks were read before those commits: they are read again first.
  */
-type Freshness = "up to date" | "main ahead" | "not pushed" | "remote ahead" | "both changed" | "unreachable";
+type Freshness = "up to date" | "taken" | "main ahead" | "not pushed" | "remote ahead" | "both changed" | "unreachable";
 
 /**
  * Another change may have merged since this pull request's checks ran (the watcher merges beside
@@ -337,6 +341,8 @@ async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Prom
   if (r !== "unreachable") clearMarker(ctx, REMOTE_AHEAD);
   if (typeof r !== "string") return r;
   if (r === "both changed") return block(ctx, PR_BRANCH_MOVED_NOTE, { detail: `${ctx.branch} here and on GitHub each have commits the other lacks`, retryFrom: mergeRetry(ctx) });
+  // A person's commits: the next look reads GitHub's checks of them.
+  if (r === "taken") return { ok: true, waiting: true };
   if (r === "unreachable" || othersRunning(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return { ok: true, waiting: true };
   // Brought up to date and pushed: real work, so the watcher looks again only on the next tick, once
   // GitHub has started the checks of the new head.
@@ -374,15 +380,17 @@ async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
   const theirs = (await ctx.git.run(["rev-parse", "--verify", "--quiet", pushed], true)).out.trim();
   await settleLease(ctx, theirs);
   // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
+  let took = false;
   if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim()) {
     if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "both changed";
     const taken = await takePersonCommits(ctx, theirs);
     if (!taken.ok) return taken;
+    took = true;
   }
   if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
   if (await outOfDate(ctx, main, pushed)) return "main ahead";
   if (await outOfDate(ctx, `${remote}/${main}`, pushed)) return "remote ahead";
-  return "up to date";
+  return took ? "taken" : "up to date";
 }
 
 /**
@@ -420,9 +428,14 @@ async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolea
   return r.code === 0 && r.out.split("\0").some((f) => /\.ya?ml$/i.test(f));
 }
 
+/**
+ * Merges the pull request on GitHub, only at `pr.head`, the head GitHub had when its checks were read
+ * after it: commits pushed since are not merged untested. GitHub refusing because the branch moved
+ * on waits, and the next look reads the checks of the new head.
+ */
 async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
   const merged = await codePhase(ctx, "merge", async () => {
-    await gh.merge(pr.number, ctx.cfg.gates.merge.method);
+    await gh.merge(pr.number, ctx.cfg.gates.merge.method, pr.head);
     return { ok: true as const };
   });
   // Asked again either way: gh can report a problem after the merge went through, and the merged
@@ -430,6 +443,10 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
   const again = await gh.lookupPr(String(pr.number));
   const after = "pr" in again ? again.pr : null;
   if (!after?.merged) {
+    if (!merged.ok && pr.head && after?.head && after.head !== pr.head) {
+      ctx.trace.event(ctx.slug, "command", { command: "merge", waiting: NEW_COMMITS, pr: pr.number, head: after.head });
+      return { ok: true, waiting: true };
+    }
     if (!merged.ok) return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
     // gh accepted the merge but it has not happened yet (a merge queue, or GitHub not answering):
     // the branch stays, since deleting it would close the pull request, and the next tick looks again.
