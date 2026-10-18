@@ -1,6 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
-import { parseDiff } from "../../src/ui/diff";
+import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
@@ -135,6 +135,11 @@ describe("the command palette's matching", () => {
 });
 
 describe("diffs", () => {
+  test("an edit's added and removed lines, as counts", () => {
+    expect(diffCounts("--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n")).toEqual({ added: 2, removed: 1 });
+    expect(diffCounts("")).toEqual({ added: 0, removed: 0 });
+  });
+
   test("git's diffs and an edit's diff become rows; a deleted line that looks like a header stays a line", () => {
     const git = "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n--- sql comment\n\\ No newline at end of file\n";
     expect(parseDiff(git)).toEqual([

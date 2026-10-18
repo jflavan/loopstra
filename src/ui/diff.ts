@@ -30,3 +30,14 @@ export function parseDiff(text: string): DiffRow[] {
   }
   return rows;
 }
+
+/** How many lines a diff adds and removes. */
+export function diffCounts(text: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const r of parseDiff(text)) {
+    if (r.kind === "add") added++;
+    else if (r.kind === "del") removed++;
+  }
+  return { added, removed };
+}
