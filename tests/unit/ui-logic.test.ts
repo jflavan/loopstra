@@ -12,7 +12,7 @@ import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, undoFor, unsentText } from "../../src/ui/requests";
+import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -409,6 +409,36 @@ describe("requests from the page", () => {
     expect(bodyFor({ ...change, status: "blocked" }, { kind: "retry", label: "Retry from accepted", to: "accepted" })).toEqual({ kind: "retry", slug: "a", expect: "blocked", to: "accepted" });
     expect(bodyFor(change, { kind: "priority", label: "Priority" }, { priority: "high" })).toEqual({ kind: "priority", slug: "a", expect: "plan-review", priority: "high" });
     expect(bodyFor(change, { kind: "hold", label: "Hold" }, { reason: "legal" })).toEqual({ kind: "hold", slug: "a", expect: "plan-review", reason: "legal" });
+    // An answer goes to the question open now, whatever the status: it names none.
+    expect(bodyFor(change, { kind: "answer", label: "Answer" }, { note: "No." })).toEqual({ kind: "answer", slug: "a", text: "No." });
+  });
+
+  test("an answer has no Undo: the session carries on with it", () => {
+    expect(UNDOABLE.has("answer")).toBe(false);
+  });
+
+  test("stopping a change posts to its stop route and says it is held; a refusal says why", async () => {
+    const real = globalThis.fetch;
+    const posted: Array<[string, unknown]> = [];
+    let refuse = false;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      posted.push([url, JSON.parse(String(init?.body))]);
+      return refuse ? Response.json({ error: "Nothing of a is running." }, { status: 409 }) : Response.json({ stopped: 1 }, { status: 202 });
+    }) as unknown as typeof fetch;
+    toasts.value = [];
+    try {
+      expect(await stopChange("a")).toBe(true);
+      refuse = true;
+      expect(await stopChange("a")).toBe(false);
+      expect(posted).toEqual([["/api/changes/a/stop", {}], ["/api/changes/a/stop", {}]]);
+      expect(toasts.value.map((t) => [t.text, t.kind])).toEqual([
+        ["Stopping a. It is held, so it does not start again until someone releases it.", "info"],
+        ["Nothing of a is running.", "bad"],
+      ]);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
   });
 
   test("what an undo puts back is the stated priority: none when the change only reads as normal", () => {

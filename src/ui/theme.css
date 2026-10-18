@@ -129,6 +129,7 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 14px; }
 .card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
 .card.live { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.card > .badge { align-self: flex-start; max-width: 100%; }
 .card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-now { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -159,6 +160,10 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .control-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; }
 .control-form textarea { width: 100%; min-height: 72px; resize: vertical; }
 .control-form input[type="text"] { flex: 1 1 200px; min-width: 0; }
+/* An agent's question above the answer's field; each option fills it in. */
+.control-form .question { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.control-form .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.control-form .options .btn { white-space: normal; text-align: left; max-width: 100%; }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.danger:hover { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
 .prio-pick { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); }

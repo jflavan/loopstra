@@ -7,8 +7,11 @@ import { dismiss, toast } from "./store";
  * it (cancel it while the loop has not claimed it, or send the reverse once it has applied it).
  */
 
-/** What the page posts to /api/requests. A `priority` of null takes the priority line out (an undo to no stated priority). */
-export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string }
+/**
+ * What the page posts to /api/requests. A `priority` of null takes the priority line out (an undo to no
+ * stated priority). `text`: an answer's words.
+ */
+export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string; text?: string }
 
 /** What the change was before an action, so an undo can put it back. `priority`: the priority line as written, or null when there was none. */
 export interface Before { note: string; priority: string | null }
@@ -18,8 +21,12 @@ export function beforeOf(c: ChangeSummary): Before {
   return { note: c.note, priority: c.statedPriority };
 }
 
-/** The request for an offer on a change: the change, the status the person saw, and what the action needs. */
+/**
+ * The request for an offer on a change: the change, the status the person saw, and what the action needs.
+ * An answer (its words in `note`) names no status: it goes to the question open now, whatever the status.
+ */
 export function bodyFor(c: ChangeSummary, offer: Offer, input: { note?: string; priority?: string; reason?: string } = {}): ActionBody {
+  if (offer.kind === "answer") return { kind: "answer", slug: c.slug, text: input.note ?? "" };
   const b: ActionBody = { kind: offer.kind, slug: c.slug, expect: c.status };
   if (offer.kind === "retry") b.to = offer.to;
   if (offer.kind === "send-back") b.note = input.note ?? "";
@@ -167,6 +174,14 @@ export async function steer(slug: string, seq: number, kind: "message" | "redire
   const r = await post(`/api/sessions/${encodeURIComponent(slug)}/${seq}/message`, { kind, text });
   if (!r.ok) { toast(r.error, "bad"); return false; }
   toast(kind === "stop" ? "Stopping the session. The change is held, so it does not start again." : kind === "redirect" ? "Sent: the session starts again your way." : "Sent: the session reads it at its next step.");
+  return true;
+}
+
+/** Stops every running session of a change, which is held so it does not start again; says so in a toast. Gives whether it was sent. */
+export async function stopChange(slug: string): Promise<boolean> {
+  const r = await post(`/api/changes/${encodeURIComponent(slug)}/stop`, {});
+  if (!r.ok) { toast(r.error, "bad"); return false; }
+  toast(`Stopping ${slug}. It is held, so it does not start again until someone releases it.`);
   return true;
 }
 
