@@ -211,20 +211,24 @@ const CHANGED_SINCE = "The loop could not apply this request, and intent.md hold
  * answer's only when its intent.md is put back too, as for its stored answer). Only an intent.md that still holds exactly what the request wrote: one
  * changed since (a person's edit), one that held a person's uncommitted edit before the write (see
  * ownBefore), or one whose write an older request did not record, is left as it is; the person's
- * edit is what it says now.
+ * edit is what it says now. One as HEAD has it holds nothing to put back or keep: a failed commit
+ * puts its write back at once (see commitRecord), so only a loop killed between a write and its
+ * commit leaves one on disk.
  * Under the checkout lock, so it never meets a commit half way. Gives the slugs it left as they are,
  * or null (traced) when it could not be done: the request then stays claimed, and the next pass tries
  * it again.
  */
 async function putBack(root: string, main: string, trace: Trace, req: Request): Promise<string[] | null> {
   const slugs = (req.written ?? []).filter((s) => SLUG.test(s));
-  const kept = slugs.filter((s) => !stillOurs(root, req, s));
+  const ours = slugs.filter((s) => stillOurs(root, req, s));
+  const kept: string[] = [];
+  for (const s of slugs) if (!ours.includes(s) && !(await matchesHead(root, `intent/${s}/intent.md`))) kept.push(s);
   try {
     await onCheckout(root, async () => {
       const git = new Git(root);
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
-      for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
+      for (const slug of ours) await asAtHead(git, root, `intent/${slug}/intent.md`);
       // An answer's record goes only with its intent.md: one kept (a person edited it) keeps its answer, and so the record of it.
       const recordGoes = writesRecord(req) && "slug" in req && slugs.includes(req.slug) && !(req.kind === "answer" && kept.includes(req.slug));
       if (recordGoes && recordStillOurs(root, req, req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
@@ -378,13 +382,13 @@ function markWritten(root: string, req: Request, slug: string, own = true): void
 }
 
 /**
- * True when a write now would replace only what this request wrote before, or, on its first, only
- * what main has: a person's uncommitted edit would be under the write, and putting back HEAD's file
+ * True when a write now would replace only what this request wrote before (a try the loop was killed
+ * in before its commit), or only what main has (a first try, or one whose failed commit put the write
+ * back): otherwise a person's uncommitted edit would be under the write, and putting back HEAD's file
  * would lose it. Called inside commitRecord, under the checkout lock, before writing.
  */
 async function ownBefore(root: string, req: Request, slug: string): Promise<boolean> {
-  if ((req.written ?? []).includes(slug)) return stillOurs(root, req, slug);
-  return matchesHead(root, `intent/${slug}/intent.md`);
+  return stillOurs(root, req, slug) || matchesHead(root, `intent/${slug}/intent.md`);
 }
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
@@ -399,7 +403,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async () => {
     const intent = await readIntent(root, req.slug);
     const was = intent.file.frontmatter.status;
-    // Written by an earlier try of this request whose commit failed: commit it now.
+    // Written by an earlier try of this request the loop was killed in before its commit: commit it now.
     const ours = was === "accepted" && (req.written ?? []).includes(req.slug);
     // Looked at even when an earlier try wrote it: a person may have edited it since (see ownBefore).
     const own = await ownBefore(root, req, req.slug);
@@ -425,7 +429,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const dir = join(root, "intent", i.slug);
     const path = join(dir, "intent.md");
-    // Written by an earlier try of this request whose commit failed: that is ours, not someone else's
+    // Written by an earlier try of this request the loop was killed in before its commit: that is ours, not someone else's
     // (unless someone changed it since).
     const ours = (req.written ?? []).includes(i.slug) && !changedSince(root, req, i.slug);
     if (existsSync(path) && !ours) {
@@ -516,7 +520,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const was = found.intent.file.frontmatter.status;
   const to = targetOf(req);
-  // Written by an earlier try of this request whose commit failed: commit it now.
+  // Written by an earlier try of this request the loop was killed in before its commit: commit it now.
   const ours = (req.written ?? []).includes(req.slug) && was === to;
   if (!ours && was !== req.expect) return movedOn(root, cfg.main_branch, trace, req, was);
   const problem = ours ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
@@ -582,7 +586,7 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
-  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as done.
+  // Written by an earlier try of this request (the loop was killed before its commit, or its failed commit put it back): write it and commit it now, not refuse it as done.
   const ours = (req.written ?? []).includes(req.slug);
   if (!ours && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!ours && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
@@ -610,8 +614,9 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
-  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as answered already.
-  const ours = (req.written ?? []).includes(req.slug);
+  // Written by an earlier try of this request that the loop was killed in before its commit (the question line is gone): commit it now, not
+  // refuse it as answered already. A try whose failed commit put the write back left the question line: it is answered again.
+  const ours = (req.written ?? []).includes(req.slug) && !fm.question.trim();
   if (!ours && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
   // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
   if (!ours && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }

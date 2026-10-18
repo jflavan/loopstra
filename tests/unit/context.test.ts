@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
-import { Git } from "../../src/git";
+import { Git, GitError } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
@@ -181,6 +181,48 @@ describe("StepContext", () => {
       expect(wrote).toBe(false);
     } finally {
       resetStop();
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a record whose commit fails is put back as it was, nothing staged, and the error surfaces", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      // Runtime commits skip the commit hooks, but not this one: the commit itself fails.
+      await Bun.write(join(repo.path, ".git", "hooks", "prepare-commit-msg"), "#!/bin/sh\nexit 1\n");
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+        await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
+        await Bun.write(join(repo.path, "intent", "queue.md"), "# Queue\n");
+      })).rejects.toBeInstanceOf(GitError);
+      expect(await Bun.file(intentMd).text()).toBe(before);
+      expect(existsSync(join(ctx.intent.dir, "note.md"))).toBe(false);
+      expect(existsSync(join(repo.path, "intent", "queue.md"))).toBe(false);
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect((await run(["git", "diff", "--cached", "--name-only"], repo.path)).out.trim()).toBe("");
+      expect(await lastCommit(repo.path)).toContain("intent");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a record whose commit meets a held index lock goes back to what was there, a person's uncommitted edit included", async () => {
+    const { repo, ctx, trace } = await setup();
+    const lock = join(repo.path, ".git", "index.lock");
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      // A person's edit, not committed, before the loop writes the record.
+      const persons = (await Bun.file(intentMd).text()).replace("## Problem\np", "## Problem\nthe person's words");
+      await Bun.write(intentMd, persons);
+      await Bun.write(lock, "");
+      await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(GitError);
+      expect(await Bun.file(intentMd).text()).toBe(persons);
+      rmSync(lock);
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("M intent/x/intent.md");
+    } finally {
+      rmSync(lock, { force: true });
       trace.close(); repo.cleanup();
     }
   });

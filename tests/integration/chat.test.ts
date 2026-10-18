@@ -102,13 +102,13 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
-  test("a request whose commit failed is finished on the next tick, not mistaken for someone else's edit", async () => {
+  test("a request the loop was killed in before its commit is finished on the next tick, not mistaken for someone else's edit", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
       const { writeJson } = await import("../../src/chat/threads");
       const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
-      // As if an earlier tick wrote both files and then failed to commit.
+      // As if the loop was killed after an earlier tick wrote both files, before it committed them.
       await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
       await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
       writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"] });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
@@ -24,6 +24,25 @@ function failedLongAgo(root: string, tries: number): void {
 
 /** A lock on main's ref: commits fail, but files and the index can still be put back. */
 const lockMain = (root: string) => writeFileSync(join(root, ".git", "refs", "heads", "main.lock"), "");
+
+/**
+ * One pass whose request writes and is never committed, as when the loop is killed between the two:
+ * a failed commit puts the write back (see commitRecord), so the commit fails in a hook that keeps
+ * a copy of intent/, and the copy is put back on disk after.
+ */
+async function killedBeforeCommit(root: string): Promise<void> {
+  // Runtime commits skip the commit hooks, but not this one.
+  const hook = join(root, ".git", "hooks", "prepare-commit-msg");
+  writeFileSync(hook, "#!/bin/sh\nrm -rf .git/killed && cp -r intent .git/killed\nexit 1\n");
+  try {
+    expect(await apply(root)).toBe(0);
+  } finally {
+    rmSync(hook);
+  }
+  const copy = join(root, ".git", "killed");
+  cpSync(copy, join(root, "intent"), { recursive: true });
+  rmSync(copy, { recursive: true });
+}
 
 /** A change whose design asked a question, and the question.json the loop keeps for it. */
 const ASKING = INTENT("designing", "x").replace("status: designing", "status: designing\nquestion: open");
@@ -265,7 +284,7 @@ describe("applying requests", () => {
     }
   });
 
-  test("a request that keeps failing is given up after five tries and ten minutes, with its write put back; a checkout off main only waits", async () => {
+  test("a request that keeps failing is given up after five tries and ten minutes; each failed commit put its write back; a checkout off main only waits", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
       const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
@@ -281,10 +300,31 @@ describe("applying requests", () => {
       for (let i = 0; i < 6; i++) {
         expect(await apply(r.root)).toBe(0);
         expect(applyingRequests(r.root)[0]!.tries).toBe(i + 1);
+        expect((await readIntent(r.root, "a")).file.frontmatter.hold).toBe("");
       }
       const first = applyingRequests(r.root)[0]!.firstFailedAt!;
       expect(Date.now() - Date.parse(first)).toBeLessThan(60_000);
-      // Ten minutes on, but the hold it wrote cannot be put back either (the same lock): it stays claimed.
+      // Ten minutes on it is given up, the lock still held: nothing it wrote is left to put back.
+      failedLongAgo(r.root, 6);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(lock);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
+      expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8").replaceAll("\r\n", "\n")).toBe(INTENT("building", "x"));
+      expect((await run(["git", "status", "--short", "--", "intent/a"], r.root)).out.trim()).toBe("");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a request the loop was killed in before its commit is given up with its write put back, once that can be done", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      await killedBeforeCommit(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.hold).not.toBe("");
+      // Ten minutes on, but the hold it wrote cannot be put back (a held index lock): it stays claimed.
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
       failedLongAgo(r.root, 6);
       expect(await apply(r.root)).toBe(0);
       expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
@@ -306,7 +346,7 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  test("a send back given up on drops its kept note; a new intent given up on is removed", async () => {
+  test("a send back given up on drops its kept note; a new intent whose commit fails is removed at once", async () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
     try {
       const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
@@ -328,7 +368,7 @@ describe("applying requests", () => {
 
       const n = submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: INTENT("draft", "y"), update: false }] });
       expect(await apply(r.root)).toBe(0);
-      expect(existsSync(join(r.root, "intent", "b", "intent.md"))).toBe(true);
+      expect(existsSync(join(r.root, "intent", "b", "intent.md"))).toBe(false);
       failedLongAgo(r.root, 5);
       expect(await apply(r.root)).toBe(1);
       rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
@@ -344,14 +384,14 @@ describe("applying requests", () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
       const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
-      lockMain(r.root);
-      expect(await apply(r.root)).toBe(0);
+      await killedBeforeCommit(r.root);
       expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
-      // A person edits the file the request wrote while its commit keeps failing.
+      // A person edits the file the request wrote, and its next commit fails.
       const path = join(r.root, "intent", "a", "intent.md");
       const edited = readFileSync(path, "utf8").replace("x", "x, and also y");
       writeFileSync(path, edited);
       failedLongAgo(r.root, 5);
+      lockMain(r.root);
       expect(await apply(r.root)).toBe(1);
       rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
       expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: "The loop could not apply this request, and intent.md holds changes it did not make, so it was left as it is. An engineer can find the details in the trace." });
@@ -369,14 +409,15 @@ describe("applying requests", () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
     try {
       const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
-      lockMain(r.root);
-      expect(await apply(r.root)).toBe(0);
+      await killedBeforeCommit(r.root);
       expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
-      // The person sets the status back by hand and edits the text; the next try writes again over it.
+      // The person sets the status back by hand and edits the text; the next try writes again over it,
+      // and its failed commit puts back the person's file.
       const path = join(r.root, "intent", "a", "intent.md");
       writeFileSync(path, readFileSync(path, "utf8").replace("status: plan-approved", "status: plan-review").replace("x", "x, and also y"));
+      lockMain(r.root);
       expect(await apply(r.root)).toBe(0);
-      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-approved");
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-review");
       expect(applyingRequests(r.root)[0]!.writtenHash?.a).toBeUndefined();
       failedLongAgo(r.root, 5);
       expect(await apply(r.root)).toBe(1);
@@ -392,12 +433,12 @@ describe("applying requests", () => {
     const r = await chatRepo({ intents: { a: INTENT("draft", "x") } });
     try {
       const q = submitRequest(r.root, { ...by, kind: "accept", slug: "a" });
-      lockMain(r.root);
-      expect(await apply(r.root)).toBe(0);
+      await killedBeforeCommit(r.root);
       expect(applyingRequests(r.root)[0]!.writtenHash?.a).toMatch(/^[0-9a-f]{64}$/);
       // The person edits the body, keeping the accepted status the try wrote; the next try finds it accepted.
       const path = join(r.root, "intent", "a", "intent.md");
       writeFileSync(path, readFileSync(path, "utf8").replace("x", "x, and also y"));
+      lockMain(r.root);
       expect(await apply(r.root)).toBe(0);
       expect(applyingRequests(r.root)[0]!.writtenHash?.a).toBeUndefined();
       failedLongAgo(r.root, 5);
@@ -438,14 +479,14 @@ describe("applying requests", () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
       const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
-      lockMain(r.root);
-      expect(await apply(r.root)).toBe(0);
+      await killedBeforeCommit(r.root);
       const req = applyingRequests(r.root)[0]!;
       delete req.writtenHash;
       saveApplying(r.root, req);
       const path = join(r.root, "intent", "a", "intent.md");
       const before = readFileSync(path, "utf8");
       failedLongAgo(r.root, 5);
+      lockMain(r.root);
       expect(await apply(r.root)).toBe(1);
       rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("holds changes it did not make") });
@@ -455,14 +496,11 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  test("a send back whose write landed and whose commit failed drops its kept note when the change moved on", async () => {
+  test("a send back whose write landed and was never committed drops its kept note when the change moved on", async () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
     try {
       const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
-      const lock = join(r.root, ".git", "index.lock");
-      writeFileSync(lock, "");
-      expect(await apply(r.root)).toBe(0);
-      rmSync(lock);
+      await killedBeforeCommit(r.root);
       const kept = join(r.root, ".loopstra", "runs", "a", "sent-back.md");
       expect(existsSync(kept)).toBe(true);
       // A person sets another status meanwhile.
@@ -481,10 +519,7 @@ describe("applying requests", () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
     try {
       submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
-      const lock = join(r.root, ".git", "index.lock");
-      writeFileSync(lock, "");
-      expect(await apply(r.root)).toBe(0);
-      rmSync(lock);
+      await killedBeforeCommit(r.root);
       const record = join(r.root, "intent", "a", "conversation.md");
       writeFileSync(record, `${readFileSync(record, "utf8")}\nA person's own line.\n`);
       const path = join(r.root, "intent", "a", "intent.md");
@@ -519,16 +554,18 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  for (const kind of ["hold", "release"] as const) {
-    test(`a ${kind} whose commit failed is committed on the next pass, not refused as done already`, async () => {
+  for (const kind of ["hold", "release"] as const) for (const how of ["whose commit failed", "the loop was killed in before its commit"]) {
+    test(`a ${kind} ${how} is committed on the next pass, not refused as done already`, async () => {
       const start = kind === "release" ? INTENT("building", "x").replace("status: building", "status: building\nhold: legal") : INTENT("building", "x");
       const r = await chatRepo({ intents: { a: start } });
       try {
         const q = submitRequest(r.root, kind === "hold" ? { ...by, kind, slug: "a", expect: "building", reason: "legal" } : { ...by, kind, slug: "a", expect: "building" });
-        const lock = join(r.root, ".git", "index.lock");
-        writeFileSync(lock, "");
-        expect(await apply(r.root)).toBe(0);
-        rmSync(lock);
+        if (how === "whose commit failed") {
+          const lock = join(r.root, ".git", "index.lock");
+          writeFileSync(lock, "");
+          expect(await apply(r.root)).toBe(0);
+          rmSync(lock);
+        } else await killedBeforeCommit(r.root);
         expect(await apply(r.root)).toBe(1);
         expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
         expect(await lastCommit(r.root)).toContain(`loopstra(a): ${kind === "hold" ? "held" : "released"} by John from the dashboard`);
@@ -625,15 +662,17 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  test("an answer given up on puts back the question line and the record, and the stored answer goes", async () => {
+  for (const how of ["whose commit failed", "the loop was killed in before its commit"]) test(`an answer ${how}, given up on, leaves the question line and no record, and the stored answer goes`, async () => {
     const r = await chatRepo({ intents: { a: ASKING } });
     try {
       asked(r.root);
       const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
-      const lock = join(r.root, ".git", "index.lock");
-      writeFileSync(lock, "");
-      expect(await apply(r.root)).toBe(0);
-      rmSync(lock);
+      if (how === "whose commit failed") {
+        const lock = join(r.root, ".git", "index.lock");
+        writeFileSync(lock, "");
+        expect(await apply(r.root)).toBe(0);
+        rmSync(lock);
+      } else await killedBeforeCommit(r.root);
       expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
       failedLongAgo(r.root, 5);
       lockMain(r.root);
@@ -653,10 +692,7 @@ describe("applying requests", () => {
     try {
       asked(r.root);
       const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
-      const lock = join(r.root, ".git", "index.lock");
-      writeFileSync(lock, "");
-      expect(await apply(r.root)).toBe(0);
-      rmSync(lock);
+      await killedBeforeCommit(r.root);
       const file = join(r.root, "intent", "a", "intent.md");
       writeFileSync(file, `${readFileSync(file, "utf8")}\nA person's own line.\n`);
       failedLongAgo(r.root, 5);
