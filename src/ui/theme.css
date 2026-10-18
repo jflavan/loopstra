@@ -273,6 +273,8 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .steer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 18px; }
 .steer textarea { width: 100%; min-height: 72px; resize: vertical; }
 .steer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.steer.compact { margin: 0; padding: 8px; gap: 6px; }
+.steer.compact input[type="text"] { flex: 1 1 100%; min-width: 0; }
 .jump { position: absolute; right: 16px; bottom: 16px; box-shadow: var(--shadow); }
 .transcript-wrap.compact .transcript { height: 300px; max-height: none; padding-bottom: 8px; }
 .transcript-wrap.compact .jump { right: 8px; bottom: 8px; }
