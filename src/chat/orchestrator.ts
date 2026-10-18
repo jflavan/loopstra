@@ -353,6 +353,10 @@ export class Orchestrator {
       case "approve": request = { kind: "approve", slug, expect }; break;
       case "close": request = { kind: "close", slug, expect }; break;
       case "release": request = { kind: "release", slug, expect }; break;
+      case "answer":
+        if (!note) { await say("Tell me the answer, and I will pass it on."); return; }
+        request = { kind: "answer", slug, text: note, expect, note };
+        break;
     }
     const ask = askText(request, slug);
     t.pending = { kind: "action", request, ask, by: m.authorId, at: new Date().toISOString() };

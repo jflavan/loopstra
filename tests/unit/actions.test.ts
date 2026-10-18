@@ -36,6 +36,15 @@ describe("what a change offers", () => {
   });
 });
 
+describe("a waiting question", () => {
+  test("a change with an open question offers answer first; one without, none", () => {
+    expect(offers(fm("designing", "question: open\n"), everyone, [])[0]).toEqual({ kind: "answer", label: "Answer" });
+    expect(kinds(offers(fm("designing", "question: open\n"), everyone, []))).toEqual(["answer", "hold", "priority", "close"]);
+    expect(kinds(offers(fm("designing"), everyone, []))).not.toContain("answer");
+    expect(kinds(offers(fm("closed", "question: open\n"), everyone, []))).not.toContain("answer");
+  });
+});
+
 describe("retry targets", () => {
   test("the block's own status first, then each status a sentence about the status names; never draft, blocked, done or closed", () => {
     expect(retryTargets("The spec did not pass its automatic check. Set status to spec-approved to accept the spec as it is, or to accepted to write it again.", null)).toEqual(["spec-approved", "accepted"]);
@@ -103,5 +112,9 @@ describe("words", () => {
     expect(askText({ kind: "hold", expect: "building", reason: "" }, "csv-export")).toBe("Hold csv-export, so the loop starts no step for it?");
     expect(resultText({ kind: "approve", expect: "plan-review" }, "csv-export", "plan-approved")).toBe("Plan approved: csv-export is now plan approved, waiting to build.");
     expect(resultText({ kind: "hold", expect: "building" }, "csv-export", "building")).toBe("csv-export is held: the loop starts no step for it until it is released.");
+    expect(doneWords({ kind: "answer", expect: "designing" })).toBe("question answered");
+    expect(requestLabel({ kind: "answer", expect: "designing" })).toBe("Answer");
+    expect(askText({ kind: "answer", expect: "designing", note: " Leave them out. " }, "csv-export")).toBe("Send this answer to csv-export's waiting question?\n\nLeave them out.");
+    expect(resultText({ kind: "answer", expect: "designing" }, "csv-export", "designing")).toBe("csv-export has its answer; the loop goes on with it.");
   });
 });

@@ -11,12 +11,17 @@ import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, fin
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
+import { answerQuestion, takeBackAnswer } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./chat/threads";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
+type AnswerRequest = Extract<Request, { kind: "answer" }>;
+
+/** The longest answer a request may carry. */
+const MAX_ANSWER = 4000;
 
 /**
  * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
@@ -219,7 +224,7 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
       for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
-      if (req.kind === "send-back" && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+      if ((req.kind === "send-back" || req.kind === "answer") && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -228,6 +233,8 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   }
   // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
   if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
+  // An answer that never landed must not resume the session: the question waits again.
+  if (req.kind === "answer" && slugs.includes(req.slug)) takeBackAnswer(root, req.slug);
   return kept;
 }
 
@@ -275,6 +282,7 @@ function badShape(req: Request): string | null {
   }
   if (typeof r.slug !== "string" || !SLUG.test(r.slug)) return "its slug is not a change name";
   if (r.kind === "accept") return null;
+  if (r.kind === "answer") return typeof r.text === "string" && r.text.trim() && r.text.length <= MAX_ANSWER ? null : `its answer is not text of at most ${MAX_ANSWER} characters`;
   if (!isStatus(r.expect)) return "the status it saw is not a status";
   if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
   if (r.kind === "priority" && r.priority !== null && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
@@ -293,6 +301,7 @@ function applyOne(root: string, cfg: Config, trace: Trace, req: Request): Promis
     case "accept": return applyAccept(root, cfg.main_branch, trace, req);
     case "new": return applyNew(root, cfg.main_branch, trace, req);
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
+    case "answer": return applyAnswer(root, cfg, trace, req);
     default: return applyStatus(root, cfg, trace, req);
   }
 }
@@ -422,7 +431,7 @@ async function current(root: string, slug: string): Promise<{ intent: Intent } |
   }
 }
 
-function traced(trace: Trace, req: StatusRequest | FieldRequest, result: string, more: Record<string, unknown> = {}): void {
+function traced(trace: Trace, req: StatusRequest | FieldRequest | AnswerRequest, result: string, more: Record<string, unknown> = {}): void {
   trace.event(req.slug, "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result, ...more });
 }
 
@@ -558,4 +567,33 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if (req.kind === "priority") trace.upsertIntent(req.slug, fm.status, effectivePriority({ priority: req.priority ?? undefined }));
   traced(trace, req, "applied", { status: fm.status, what: doneWords(req) });
   return { ok: true, status: fm.status, text: resultText(req, req.slug, fm.status) };
+}
+
+/**
+ * Answers the change's waiting question: on any open change whose question is open, whatever its status
+ * now. In one commit ("question answered by <who> from <where>"), the question line goes and the answer
+ * goes into conversation.md; the answer is stored for the session that asked (see answerQuestion).
+ */
+async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerRequest): Promise<Outcome> {
+  const found = await current(root, req.slug);
+  if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
+  const fm = found.intent.file.frontmatter;
+  if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
+  // Written by an earlier try of this request whose commit failed: commit it now, not refuse it as answered already.
+  const ours = (req.written ?? []).includes(req.slug);
+  if (!ours && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
+  const text = req.text.trim();
+  const shape = { kind: "answer" as const, expect: fm.status, note: text };
+  await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(shape)} by ${byWhom(req)}`, async () => {
+    // Its first write only: a later try commits what is on disk, never adds the entry twice.
+    if (!ours) {
+      const own = await ownBefore(root, req, req.slug);
+      await writeIntent(await readIntent(root, req.slug), {}, { remove: ["question"] });
+      markWritten(root, req, req.slug, own);
+      await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), { kind: "answer", who: req.byName, via: req.via, text, at: new Date() }));
+    }
+    answerQuestion(root, req.slug, { text, by: req.byName, via: req.via });
+  });
+  traced(trace, req, "applied", { status: fm.status, what: doneWords(shape) });
+  return { ok: true, status: fm.status, text: resultText(shape, req.slug, fm.status) };
 }

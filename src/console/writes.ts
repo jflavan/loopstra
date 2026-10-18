@@ -84,6 +84,11 @@ function parse(body: Record<string, unknown>): RequestBody | string {
   if (!slug || !SLUG.test(slug)) return "Unknown change.";
   const k = kind as Kind;
   if (k === "accept") return { kind: k, slug };
+  // An answer goes to the question open now, whatever the status: it names none.
+  if (k === "answer") {
+    const text = str(body.text)?.trim() ?? "";
+    return text && text.length <= MAX_NOTE ? { kind: k, slug, text } : `Say your answer (at most ${MAX_NOTE} characters).`;
+  }
   const expect = body.expect;
   if (!isStatus(expect)) return "Say which status the change was at.";
   switch (k) {
@@ -136,10 +141,10 @@ async function action(root: string, body: Record<string, unknown>): Promise<Resp
   try { cfg = await loadConfig(root); } catch { /* nobody on any gate, as the model reads it too */ }
   let fm: Frontmatter;
   try { fm = (await readIntent(root, r.slug)).file.frontmatter; } catch { return refuse(`${r.slug}'s intent.md cannot be read.`); }
-  const expect = r.kind === "accept" ? "draft" : r.expect;
   const status = fm.status;
-  // Priority, hold and release land on any open change, whatever its status now (see apply.ts).
-  const fieldOnly = r.kind === "priority" || r.kind === "hold" || r.kind === "release";
+  const expect = r.kind === "accept" ? "draft" : r.kind === "answer" ? status : r.expect;
+  // Priority, hold, release and an answer land on any open change, whatever its status now (see apply.ts).
+  const fieldOnly = r.kind === "priority" || r.kind === "hold" || r.kind === "release" || r.kind === "answer";
   if (!fieldOnly && status !== expect) return refuse(`${r.slug} is ${status} now, not ${expect}. The page shows it as it is now.`);
   if (!allowed(root, r, fm, cfg)) return refuse(r.kind === "undo" ? "That cannot be undone now." : `That is not something ${r.slug} can do now.`);
   const user = localUser();

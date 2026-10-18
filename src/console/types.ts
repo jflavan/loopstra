@@ -151,7 +151,7 @@ export interface SpendView {
 }
 
 /** What a person can do to a change from the console or chat. */
-export type ActionKind = "approve" | "send-back" | "retry" | "accept" | "close" | "priority" | "hold" | "release";
+export type ActionKind = "approve" | "send-back" | "retry" | "accept" | "close" | "priority" | "hold" | "release" | "answer";
 
 /** One action a change offers now: its kind, its button's words, and the status it leads to (when it sets one). */
 export interface Offer { kind: ActionKind; label: string; to?: string; confirm?: boolean }

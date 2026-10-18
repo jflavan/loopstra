@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { readIntent } from "../../src/intents";
+import { readQuestion } from "../../src/questions";
 import { applyingRequests, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -23,6 +24,16 @@ function failedLongAgo(root: string, tries: number): void {
 
 /** A lock on main's ref: commits fail, but files and the index can still be put back. */
 const lockMain = (root: string) => writeFileSync(join(root, ".git", "refs", "heads", "main.lock"), "");
+
+/** A change whose design asked a question, and the question.json the loop keeps for it. */
+const ASKING = INTENT("designing", "x").replace("status: designing", "status: designing\nquestion: open");
+function asked(root: string): void {
+  mkdirSync(join(root, ".loopstra", "runs", "a"), { recursive: true });
+  writeFileSync(join(root, ".loopstra", "runs", "a", "question.json"), JSON.stringify({
+    status: "designing", count: 1,
+    open: { phase: "design", traceName: "design", seq: 3, sessionId: "s1", text: "Archived too?", why: "", options: [], at: "2026-10-17T12:00:00.000Z" },
+  }));
+}
 
 async function apply(root: string): Promise<number> {
   const trace = Trace.open(root);
@@ -463,6 +474,89 @@ describe("applying requests", () => {
       }
     }, 60_000);
   }
+
+  test("an answer removes the question line, records the answer in conversation.md, and stores it for the asking session", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: " Leave them out. " });
+      expect(await apply(r.root)).toBe(1);
+      expect(readFileSync(join(r.root, "intent", "a", "intent.md"), "utf8")).not.toContain("question:");
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("designing");
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8")).toMatch(/## [0-9-]+ [0-9:]+ · John \(the dashboard\) answers\nLeave them out\.\n/);
+      expect(await lastCommit(r.root)).toContain("loopstra(a): question answered by John from the dashboard");
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+      expect(readQuestion(r.root, "a")!.open!.answer).toMatchObject({ text: "Leave them out.", by: "John", via: "the dashboard" });
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: true, status: "designing", text: "a has its answer; the loop goes on with it." });
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ kind: "answer", by: "John", result: "applied", what: "question answered" });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an answer to a change with no question waiting, or a finished one, changes nothing; one that cannot be read is refused", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("designing", "x"), c: ASKING.replace("status: designing", "status: closed") } });
+    try {
+      const none = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const closed = submitRequest(r.root, { ...by, kind: "answer", slug: "c", text: "Leave them out." });
+      const blank = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "  " });
+      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(4001) });
+      await apply(r.root);
+      expect(requestState(r.root, none.id)).toMatchObject({ ok: false, text: "a has no question waiting; nothing changed." });
+      expect(requestState(r.root, closed.id)).toMatchObject({ ok: false, text: "c is closed; nothing changed." });
+      for (const q of [blank, long]) expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "That request could not be read, so nothing changed." });
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
+      const trace = Trace.open(r.root, () => {});
+      expect(JSON.parse(trace.lastEvent("c", "request")!.payload)).toMatchObject({ kind: "answer", result: "refused" });
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an answer whose commit failed is committed on the next pass, its entry written once", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+      expect(await lastCommit(r.root)).toContain("loopstra(a): question answered by John from the dashboard");
+      expect(readFileSync(join(r.root, "intent", "a", "conversation.md"), "utf8").match(/answers\n/g)).toHaveLength(1);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("an answer given up on puts back the question line and the record, and the stored answer goes", async () => {
+    const r = await chatRepo({ intents: { a: ASKING } });
+    try {
+      asked(r.root);
+      const q = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
+      const lock = join(r.root, ".git", "index.lock");
+      writeFileSync(lock, "");
+      expect(await apply(r.root)).toBe(0);
+      rmSync(lock);
+      expect(readQuestion(r.root, "a")!.open!.answer?.text).toBe("Leave them out.");
+      failedLongAgo(r.root, 5);
+      lockMain(r.root);
+      expect(await apply(r.root)).toBe(1);
+      rmSync(join(r.root, ".git", "refs", "heads", "main.lock"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false });
+      expect((await readIntent(r.root, "a")).file.frontmatter.question).toBe("open");
+      expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
+      expect(readQuestion(r.root, "a")!.open).not.toHaveProperty("answer");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
 
   test("a hold of a held change, or a release of one not held, is refused and traced", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x").replace("status: building", "status: building\nhold: legal"), b: INTENT("building", "y") } });

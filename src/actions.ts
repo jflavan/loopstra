@@ -8,7 +8,7 @@ import type { Trace } from "./trace";
  */
 
 /** The actions on a change chat may propose (start is its own, `accept`). */
-export const CHANGE_ACTIONS = ["approve", "send-back", "retry", "close", "priority", "hold", "release"] as const;
+export const CHANGE_ACTIONS = ["approve", "send-back", "retry", "close", "priority", "hold", "release", "answer"] as const;
 
 /** Every kind of request the loop applies: start, chat's written intents (`new`), the actions on a change, and undo. */
 export const REQUEST_KINDS = ["accept", "new", ...CHANGE_ACTIONS, "undo"] as const;
@@ -79,6 +79,8 @@ export function retryOptions(trace: Trace, slug: string, note: string): Status[]
 export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Offer[] {
   const s = fm.status;
   const out: Offer[] = [];
+  // An agent's question waits for a person: answering it is what the change needs first.
+  if (isOpen(s) && fm.question.trim()) out.push({ kind: "answer", label: "Answer" });
   if (personReviews(s, human) && APPROVE_TO[s]) {
     out.push({ kind: "approve", label: APPROVE_LABEL[s]!, to: APPROVE_TO[s] });
     if (SEND_BACK_TO[s]) out.push({ kind: "send-back", label: "Send back", to: SEND_BACK_TO[s] });
@@ -93,7 +95,7 @@ export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Off
   return out;
 }
 
-/** The parts of a request these rules read. */
+/** The parts of a request these rules read. An answer's text is its `note`. */
 export interface RequestShape { kind: ActionKind | "undo"; expect: Status; to?: Status; priority?: Priority | null; note?: string; reason?: string }
 
 /** The status a status-changing request leads to, from the request alone; null for one that sets no status, or that is not allowed from `expect`. */
@@ -141,6 +143,7 @@ export function doneWords(r: RequestShape): string {
     case "priority": return `priority set to ${r.priority ?? "normal"}`;
     case "hold": return "held";
     case "release": return "released";
+    case "answer": return "question answered";
     case "undo": return `undone, back to ${r.to}`;
   }
 }
@@ -156,6 +159,7 @@ export function requestLabel(r: RequestShape): string {
     case "priority": return `Set priority to ${r.priority ?? "normal"}`;
     case "hold": return "Hold";
     case "release": return "Release";
+    case "answer": return "Answer";
     case "undo": return `Undo, back to ${r.to}`;
   }
 }
@@ -177,6 +181,7 @@ export function askText(r: RequestShape, slug: string): string {
     case "priority": return `Set ${slug}'s priority to ${r.priority ?? "normal"}?`;
     case "hold": return reason ? `Hold ${slug}, so the loop starts no step for it, with this reason?\n\n${reason}` : `Hold ${slug}, so the loop starts no step for it?`;
     case "release": return `Release ${slug}, so the loop goes on with it?`;
+    case "answer": return `Send this answer to ${slug}'s waiting question?\n\n${note}`;
     case "undo": return `Take ${slug} back to ${r.to}?`;
   }
 }
@@ -192,6 +197,7 @@ export function askedWords(r: RequestShape, slug: string): string {
     case "priority": return `set ${slug}'s priority to ${r.priority ?? "normal"}`;
     case "hold": return `hold ${slug}`;
     case "release": return `release ${slug}`;
+    case "answer": return `answer ${slug}'s question`;
     case "undo": return `take ${slug} back to ${r.to}`;
   }
 }
@@ -204,6 +210,7 @@ export function resultText(r: RequestShape, slug: string, now: Status): string {
     case "priority": return `${slug} now has priority ${r.priority ?? "normal"}.`;
     case "hold": return `${slug} is held: the loop starts no step for it until it is released.`;
     case "release": return `${slug} is released: the loop goes on with it.`;
+    case "answer": return `${slug} has its answer; the loop goes on with it.`;
     default: return `${capital(doneWords(r))}: ${slug} is now ${plainStatus(now)}.`;
   }
 }

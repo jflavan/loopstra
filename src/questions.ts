@@ -101,6 +101,14 @@ export function answerQuestion(root: string, slug: string, answer: { text: strin
   return true;
 }
 
+/** Takes back a stored answer that never landed (an `answer` request given up on; see src/apply.ts): the question waits again. */
+export function takeBackAnswer(root: string, slug: string): void {
+  const s = readQuestion(root, slug);
+  if (!s?.open?.answer) return;
+  const { answer: _, ...open } = s.open;
+  writeState(root, slug, { ...s, open });
+}
+
 /** The prompt that resumes the asking session with its answer. */
 export function answerPrompt(a: Asked): string {
   return `${a.answer!.by} answered your question: ${a.answer!.text.trim()}\n\nCarry on.`;

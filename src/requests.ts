@@ -37,6 +37,8 @@ export type RequestBody =
   | { kind: "priority"; slug: string; expect: Status; priority: Priority | null }
   | { kind: "hold"; slug: string; expect: Status; reason: string }
   | { kind: "release"; slug: string; expect: Status }
+  /** Answers the change's waiting question (see src/questions.ts); on any open change whose question is open. */
+  | { kind: "answer"; slug: string; text: string }
   /** Takes back an approve or a send back (see undoAllowed): from `expect` to `to`, restoring the note it replaced. */
   | { kind: "undo"; slug: string; expect: Status; to: Status; note: string };
 
