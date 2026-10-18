@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { relativePath, toolTarget } from "../tools";
-import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
+import { MEANWHILE_HEADING, MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
 import type { TranscriptItem } from "./types";
 
 /** The longest tool output one item carries. */
@@ -75,8 +75,22 @@ function replayed(content: unknown): TranscriptItem[] {
     const tail = text.indexOf(`\n\n${redirect ? REDIRECT_TAIL : MESSAGE_TAIL}`);
     const words = tail >= 0 ? text.slice(0, tail) : text.split(/\n\s*\n/)[0]!;
     out.push({ kind: "message", text: cut(words.trim()), redirect });
+    if (redirect) out.push(...carried(text));
   }
   return out;
+}
+
+/**
+ * The messages a redirect carries (sent to the killed process, not taken up yet: see src/claude.ts),
+ * one item each, the runner's closing words left out.
+ */
+function carried(redirect: string): TranscriptItem[] {
+  const at = redirect.indexOf(`\n\n${MEANWHILE_HEADING}\n\n`);
+  if (at < 0) return [];
+  return redirect.slice(at + MEANWHILE_HEADING.length + 4).split(`\n\n${MESSAGE_TAIL}`)
+    .map((m) => m.trim())
+    .filter((m) => m.startsWith(MESSAGE_LEAD))
+    .map((m) => ({ kind: "message" as const, text: cut(m), redirect: false }));
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { MEANWHILE_HEADING } from "../../src/console/steerable";
 import { OUTPUT_MAX, toItems, TranscriptReader } from "../../src/console/transcript";
 import type { TranscriptItem } from "../../src/console/types";
 import { messageText, redirectText } from "../../src/steering";
@@ -48,6 +49,13 @@ describe("session transcripts", () => {
     expect(toItems(replay(redirectText({ ...m, kind: "redirect", text: "Use two steps." })))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
     // A redirect with what was sent meanwhile: the person's words only.
     expect(toItems(replay(`${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\nMessages sent meanwhile:\n\nx`))).toEqual([{ kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true }]);
+    // The messages it carries (sent to the killed process, not taken up yet) show too, each after the redirect.
+    const carried = `${redirectText({ ...m, kind: "redirect", text: "Use two steps." })}\n\n${MEANWHILE_HEADING}\n\n${messageText(m)}\n\n${messageText({ ...m, by: "Ana", text: "Keep it small." })}`;
+    expect(toItems(replay(carried))).toEqual([
+      { kind: "message", text: "A change of direction from John (the dashboard): Use two steps.", redirect: true },
+      { kind: "message", text: "A message from John, who is watching this work from the dashboard: Cover negatives.\n\nAnd zero.", redirect: false },
+      { kind: "message", text: "A message from Ana, who is watching this work from the dashboard: Keep it small.", redirect: false },
+    ]);
     // Without the runner's closing words (an older runner), the first paragraph.
     expect(toItems(replay("A message from Ana: keep it small\n\nmore"))).toEqual([{ kind: "message", text: "A message from Ana: keep it small", redirect: false }]);
     expect(toItems({ type: "user", isReplay: true, message: { role: "user", content: "A message from Ana: as a string" } })).toEqual([{ kind: "message", text: "A message from Ana: as a string", redirect: false }]);

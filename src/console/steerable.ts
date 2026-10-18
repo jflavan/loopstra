@@ -31,3 +31,6 @@ export const REDIRECT_LEAD = "A change of direction from";
 /** The words the runner ends a message and a redirect with, after a blank line; the transcript leaves them out. */
 export const MESSAGE_TAIL = "Take it into account and carry on. Your final answer keeps the same format.";
 export const REDIRECT_TAIL = "Stop what you were doing and work this way instead. Your final answer keeps the same format.";
+
+/** What heads, in a redirect's prompt, the messages the killed process had not taken up yet (see src/claude.ts); the transcript shows each. */
+export const MEANWHILE_HEADING = "Messages sent meanwhile:";

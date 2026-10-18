@@ -1,6 +1,7 @@
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
 import { lastLine, spawnBounded, withBunOnPath, type StdinWriter } from "./shell";
 import { Cancelled, SessionStopped, StopRequested } from "./stop";
+import { MEANWHILE_HEADING } from "./console/steerable";
 
 export interface StreamEvent {
   type: string;
@@ -175,7 +176,7 @@ export interface SessionControl {
 export { MESSAGE_LEAD, REDIRECT_LEAD } from "./console/steerable";
 
 /** What heads, in a redirect's prompt, the messages the killed process had not taken up yet. */
-export const MEANWHILE_HEADING = "Messages sent meanwhile:";
+export { MEANWHILE_HEADING };
 
 /** A user message as one stream-json input line. */
 export function userLine(text: string): string {
