@@ -11,6 +11,7 @@ import { addItems, EMPTY, lastCost } from "../../src/ui/transcript";
 import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
+import { RECENT_DONE_MS, splitFinished } from "../../src/ui/board";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
@@ -358,6 +359,26 @@ describe("what is worth a notification", () => {
     expect(needsAPerson(item("blocked"))).toBe(true);
     expect(needsAPerson(item("waiting"))).toBe(true);
     for (const k of ["paused", "health", "sync", "config", "unreadable"]) expect(needsAPerson(item(k))).toBe(false);
+  });
+});
+
+describe("which changes the board folds away", () => {
+  const now = Date.parse("2026-10-18T12:00:00Z");
+  const change = (slug: string, stage: ChangeSummary["stage"], since: string | null) => ({ slug, stage, since }) as ChangeSummary;
+  test("done changes finished within the week stay on the board; older ones fold with the closed ones", () => {
+    const fresh = change("fresh", "done", new Date(now - RECENT_DONE_MS + 60_000).toISOString());
+    const old = change("old", "done", new Date(now - RECENT_DONE_MS - 60_000).toISOString());
+    const closed = change("closed", "closed", new Date(now).toISOString());
+    const building = change("building", "build", new Date(0).toISOString());
+    const { open, earlier, closed: shut } = splitFinished([fresh, old, closed, building], now);
+    expect(open.map((c) => c.slug)).toEqual(["fresh", "building"]);
+    expect(earlier.map((c) => c.slug)).toEqual(["old"]);
+    expect(shut.map((c) => c.slug)).toEqual(["closed"]);
+  });
+  test("a done change with no known or readable finish time stays on the board", () => {
+    const { open, earlier } = splitFinished([change("a", "done", null), change("b", "done", "not a time")], now);
+    expect(open.map((c) => c.slug)).toEqual(["a", "b"]);
+    expect(earlier).toEqual([]);
   });
 });
 
