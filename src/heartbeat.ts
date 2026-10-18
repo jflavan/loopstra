@@ -163,12 +163,16 @@ export function thisHost(): string {
  * The process of the loop running in this repository, by its heartbeat, or null when none is:
  * running, paused, or not responding. A heartbeat written on this machine whose process is gone is
  * a loop that ended (closed window, killed, crashed) at once; one from another machine sharing the
- * folder, or an older one without its machine, counts as running until it goes stale.
+ * folder, or an older one without its machine, counts as running until it goes stale. Another
+ * machine's process id means nothing here, so once its heartbeat is stale it is a loop that ended,
+ * even when a process on this machine happens to have the same id; an older heartbeat without its
+ * machine is taken as this machine's.
  */
 export function runningLoopPid(root: string, pollSeconds: number): number | null {
   const hb = readHeartbeat(root);
   if (!hb || (hb.host === thisHost() && !pidAlive(hb.pid))) return null;
-  return heartbeatState(hb, pollSeconds).state === "stopped" ? null : hb.pid;
+  const here = hb.host === undefined || hb.host === thisHost();
+  return heartbeatState(hb, pollSeconds, new Date(), { alive: here ? pidAlive : () => false }).state === "stopped" ? null : hb.pid;
 }
 
 /**
@@ -390,7 +394,7 @@ export function readLoopHold(root: string): LoopHold | null {
   let h: Partial<Record<keyof LoopHold, unknown>> = {};
   try {
     const read = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (read && typeof read === "object") h = read as typeof h;
+    if (read && typeof read === "object") h = read;
   } catch { /* unreadable: it still pauses */ }
   return { by: typeof h.by === "string" ? h.by : "someone", at: typeof h.at === "string" ? h.at : since };
 }

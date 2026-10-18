@@ -159,7 +159,7 @@ export function claim(slug: string): boolean {
   return true;
 }
 
-/** The claimed changes whose step runs none of the project's commands (a design or plan step). */
+/** The claimed changes whose step runs none of the project's commands (a design or plan step, in a lane or beside them; see thinkingStep in the scheduler). */
 const noCommands = new Set<string>();
 
 /** Marks a claimed change's step as one that runs none of the project's commands, until it is released. */
