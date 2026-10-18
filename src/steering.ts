@@ -11,6 +11,8 @@ import { StopRequested, stopRequested } from "./stop";
 
 /** How often the runner looks in the inbox besides when it changes (a watch may miss an event). */
 const LOOK_MS = 1000;
+/** How many times the end of deliverInbox looks for messages written while its records landed. */
+const END_LOOKS = 5;
 
 /** A message as the session reads it. Starts with MESSAGE_LEAD, which the console's transcript looks for. */
 export function messageText(m: InboxMessage): string {
@@ -139,7 +141,8 @@ function keepDelivered(ctx: StepContext, seq: number, m: InboxMessage): void {
  * to it (a work session only; a check's is kept for the next session), a stop ends it, a redirect resumes
  * it the new way. Looks when the inbox changes and every second. Gives back what ends the watching; once
  * it ends, what is left for this session goes to the next one (stops are dropped), and it resolves once
- * every record it started has landed (or failed, traced), so the next session's prompt has them. After a
+ * every record it started has landed (or failed, traced), so the next session's prompt has them; what
+ * was written meanwhile is looked for again, until a look finds nothing new (at most END_LOOKS). After a
  * stop request what is left stays where it is, for the next step's sweep: the loop records nothing while it stops.
  *
  * A message is written to the session once only: when its move to delivered/ fails (a file held open on
@@ -204,27 +207,42 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
   } catch { /* no watching: the timer looks */ }
   const timer = setInterval(safeLook, LOOK_MS);
   safeLook();
+  /** The messages the end has dealt with: a later look passes over them. */
+  const ended = new Set<string>();
+  /** One look as the watching ends; true when it found a message it had not dealt with. */
+  const lastLook = (): boolean => {
+    if (stopRequested()) return false;
+    let found = false;
+    try {
+      for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
+        if (ended.has(m.id)) continue;
+        ended.add(m.id);
+        found = true;
+        // Given to the session already, but not moved: one more try, else its delivered copy is left. The
+        // session got it either way, so it is traced and recorded as delivered (stops are not recorded).
+        if (sent.has(m.id)) {
+          if (!settle(m, "delivered")) keepDelivered(ctx, seq, m);
+          delivered(m);
+        }
+        else if (m.kind === "message" || m.kind === "redirect") pending.push(keepForNext(ctx, m));
+        else markDone(ctx.root, ctx.slug, m, "dropped");
+      }
+    } catch (e) {
+      traceError(ctx, { where: "inbox", seq, error: errorText(e) });
+    }
+    return found;
+  };
   return async () => {
     clearInterval(timer);
     watcher?.close();
     watcher = null;
-    if (!stopRequested()) {
-      try {
-        for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
-          // Given to the session already, but not moved: one more try, else its delivered copy is left. The
-          // session got it either way, so it is traced and recorded as delivered (stops are not recorded).
-          if (sent.has(m.id)) {
-            if (!settle(m, "delivered")) keepDelivered(ctx, seq, m);
-            delivered(m);
-          }
-          else if (m.kind === "message" || m.kind === "redirect") pending.push(keepForNext(ctx, m));
-          else markDone(ctx.root, ctx.slug, m, "dropped");
-        }
-      } catch (e) {
-        traceError(ctx, { where: "inbox", seq, error: errorText(e) });
-      }
+    // A message written while the records land (the session's last moments) is looked for again, so it
+    // reaches the step's next session too: until a look finds nothing new, at most END_LOOKS times.
+    for (let i = 0; i < END_LOOKS; i++) {
+      const found = lastLook();
+      await Promise.all(pending.splice(0));
+      if (!found) break;
     }
-    await Promise.all(pending);
   };
 }
 

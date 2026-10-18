@@ -230,6 +230,27 @@ describe("steering a running session", () => {
     }
   }, 30_000);
 
+  test("a message written while the end's records land is looked for again, and recorded for the next session too", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const ctl = { message: () => false, stop: () => false, redirect: () => false };
+      const detach = deliverInbox(ctx, 5, "design", ctl);
+      const m1 = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      // The end looks once at once, then waits for m1's record: m2 comes in between.
+      const ending = detach();
+      const m2 = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "and zero", by: "Ana", via: "the dashboard" });
+      await ending;
+      expect(howDone(repo.path, m1)).toBe("next session");
+      expect(howDone(repo.path, m2)).toBe("next session");
+      const record = readConversation(repo.path, SLUG);
+      expect(record).toContain("· John (the dashboard) → the next session\ncover negatives");
+      expect(record).toContain("· Ana (the dashboard) → the next session\nand zero");
+      expect(inboxFor(repo.path, SLUG, 5)).toEqual([]);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
   test("a message whose move to delivered/ fails is written to the session once, traced once it is moved, and the error once", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     try {
