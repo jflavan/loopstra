@@ -138,7 +138,8 @@ export async function init(root: string): Promise<InitReport> {
   const top = await repositoryTop(root);
   if (top) {
     const here = (await new Git(root).run(["rev-parse", "--show-prefix"])).out.trim().replace(/\/$/, "");
-    const example = `cd ${here} && ${d.test ?? "<your test command>"}`;
+    // A folder name with a space is quoted, or the shell reads it as two words.
+    const example = `cd ${/\s/.test(here) ? `"${here}"` : here} && ${d.test ?? "<your test command>"}`;
     return { ...report, stopped: true, warnings: [`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run loopstra init in ${top}, and set its commands to run in this folder (for example ${example}).`] };
   }
 

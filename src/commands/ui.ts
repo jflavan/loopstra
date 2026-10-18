@@ -7,7 +7,7 @@ import { installStopSignals, resetStop, stopPromise } from "../stop";
  */
 export async function ui(root: string, port: number, chat: boolean): Promise<number> {
   resetStop();
-  const uninstall = installStopSignals();
+  const uninstall = installStopSignals("Stopping the console.");
   let service: import("../chat/service").ChatService | undefined;
   try {
     let dashboard: import("../chat/transports/dashboard").DashboardTransport | undefined;

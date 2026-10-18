@@ -143,23 +143,26 @@ export function resetStop(): void {
   stopping = new Promise<void>((resolve) => { resolveStop = resolve; });
 }
 
-/** What a signal does: the first asks for a stop, a second exits with 130. */
-export function onStopSignal(exit: (code: number) => void = (code) => process.exit(code), say: (s: string) => void = (s) => console.log(s)): void {
+/** What the first signal says the loop does. */
+const LOOP_STOPPING = "Stopping. The current step is interrupted and resumes on the next start.";
+
+/** What a signal does: the first asks for a stop and says `stopping`, a second exits with 130. */
+export function onStopSignal(exit: (code: number) => void = (code) => process.exit(code), say: (s: string) => void = (s) => console.log(s), stopping = LOOP_STOPPING): void {
   if (requested) {
     say("Stopping now.");
     exit(130);
     return;
   }
   requestStop();
-  say("\nStopping. The current step is interrupted and resumes on the next start. Press Ctrl-C again to exit at once.");
+  say(`\n${stopping} Press Ctrl-C again to exit at once.`);
 }
 
 // SIGHUP (the terminal closed) stops like SIGTERM on POSIX; Windows has no such signal to catch.
 export const STOP_SIGNALS: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 
-/** Installs the stop handlers once. Returns a function that removes them. */
-export function installStopSignals(): () => void {
-  const handler = () => onStopSignal();
+/** Installs the stop handlers once; `stopping` is what the first signal says. Returns a function that removes them. */
+export function installStopSignals(stopping?: string): () => void {
+  const handler = () => onStopSignal(undefined, undefined, stopping);
   for (const s of STOP_SIGNALS) process.on(s, handler);
   return () => { for (const s of STOP_SIGNALS) process.off(s, handler); };
 }

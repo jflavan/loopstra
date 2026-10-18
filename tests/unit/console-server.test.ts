@@ -491,4 +491,20 @@ describe("loopstra ui", () => {
       r.cleanup();
     }
   }, 30_000);
+
+  test("the first Ctrl-C says the console is stopping, not the loop's step", async () => {
+    const r = await chatRepo();
+    const said = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const done = ui(r.root, 0, false);
+      await until(() => said.mock.calls.length > 0);
+      process.emit("SIGINT", "SIGINT");
+      expect(await done).toBe(0);
+      expect(said.mock.calls.map((c) => String(c[0])).slice(1)).toEqual(["\nStopping the console. Press Ctrl-C again to exit at once."]);
+    } finally {
+      said.mockRestore();
+      resetStop();
+      r.cleanup();
+    }
+  }, 30_000);
 });

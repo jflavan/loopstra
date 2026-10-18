@@ -178,6 +178,17 @@ describe("init", () => {
     } finally { t.cleanup(); }
   });
 
+  test("a folder below the top whose name has a space is quoted in the command it suggests", async () => {
+    const t = await tempGitRepo();
+    try {
+      const sub = join(t.path, "packages", "my app");
+      mkdirSync(sub, { recursive: true });
+      await Bun.write(join(sub, "package.json"), JSON.stringify({ name: "app", scripts: { test: "bun test" } }));
+      const report = await init(sub);
+      expect(report.warnings[0]).toEndWith(`(for example cd "packages/my app" && bun test).`);
+    } finally { t.cleanup(); }
+  });
+
   test("in a folder that is not a git repository, warns and writes nothing", async () => {
     const t = tempDir();
     try {
