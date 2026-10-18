@@ -33,6 +33,8 @@ const design = (ctx: StepContext) => agentPhase(ctx, { name: "design", model: "d
 const plan = (ctx: StepContext) => agentPhase(ctx, { name: "plan", model: "default", permissionMode: "plan", tools: "read", vars: { intent: ctx.intent.file.body, spec: "", concerns: "" } });
 const build = (ctx: StepContext) => agentPhase(ctx, { name: "build", model: "default", permissionMode: "plan", tools: "read", vars: { plan: "", spec: "", feedback: "", test_command: "echo ok" } });
 const fix = (ctx: StepContext, i: number) => agentPhase(ctx, { name: "fix", traceName: `fix-${i}`, model: "default", permissionMode: "plan", tools: "read", vars: { failure_output: `failure ${i}`, test_command: "echo ok" } });
+const reconcile = (ctx: StepContext) => agentPhase(ctx, { name: "reconcile", model: "default", permissionMode: "plan", tools: "read", vars: { plan: "", findings: "" } });
+const revise = (ctx: StepContext, i: number) => agentPhase(ctx, { name: "revise", traceName: `revise-${i}`, model: "default", permissionMode: "plan", tools: "read", vars: { findings: `finding ${i}`, test_command: "echo ok" } });
 
 /** The next step's context: one is made per step. */
 async function nextStep(ctx: StepContext): Promise<StepContext> {
@@ -126,16 +128,16 @@ describe("questions", () => {
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 
-  test("a fix that asked as fix-2 resumes as the next step's first fix session, whatever its number", async () => {
-    const { repo, ctx, trace } = await setupRepo("building");
-    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS), fix: fixture("fix") });
+  test("a revise that asked as revise-2 resumes as the next step's first revise session, whatever its number", async () => {
+    const { repo, ctx, trace } = await setupRepo("reviewing");
+    const fixtures = fixtureDir({ "revise-1": asking("revise", ASKS), revise: fixture("revise") });
     const calls = join(fixtures.path, "calls.jsonl");
     const prompts = join(fixtures.path, "prompts.jsonl");
     try {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
-        expect(await fix(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(await revise(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
         expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
-        expect((await fix(await nextStep(ctx), 1)).ok).toBe(true);
+        expect((await revise(await nextStep(ctx), 1)).ok).toBe(true);
       });
       expect(logLines<string[]>(calls).at(-1)).toContain("--resume");
       expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).toBe("John answered your question: No.\n\nCarry on.");
@@ -143,31 +145,31 @@ describe("questions", () => {
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 
-  test("an answer waits for the step's first session of the asking kind: a build before it skips it, and a later fix starts fresh", async () => {
-    const { repo, ctx, trace } = await setupRepo("building");
-    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS), fix: fixture("fix"), build: fixture("build") });
+  test("an answer waits for the step's first session of the asking kind: a build before it skips it, and a later revise starts fresh", async () => {
+    const { repo, ctx, trace } = await setupRepo("reviewing");
+    const fixtures = fixtureDir({ "revise-1": asking("revise", ASKS), revise: fixture("revise"), build: fixture("build") });
     const calls = join(fixtures.path, "calls.jsonl");
     const prompts = join(fixtures.path, "prompts.jsonl");
     try {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
-        expect(await fix(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(await revise(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
         expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
         // The next step starts with a build: another kind of phase. It neither takes the answer nor closes it.
         const step = await nextStep(ctx);
         expect((await build(step)).ok).toBe(true);
         expect(readQuestion(repo.path, SLUG)!.open?.answer?.text).toBe("No.");
-        // The step's first fix resumes the asking session with the answer.
-        expect((await fix(step, 1)).ok).toBe(true);
+        // The step's first revise resumes the asking session with the answer.
+        expect((await revise(step, 1)).ok).toBe(true);
         expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
-        // A later fix of the same step starts fresh, with its own failure.
-        expect((await fix(step, 2)).ok).toBe(true);
+        // A later revise of the same step starts fresh, with its own findings.
+        expect((await revise(step, 2)).ok).toBe(true);
       });
       const sent = logLines<{ phase: string; args: string[]; prompt: string }>(prompts);
-      expect(sent.map((p) => p.phase)).toEqual(["fix", "build", "fix", "fix"]);
+      expect(sent.map((p) => p.phase)).toEqual(["revise", "build", "revise", "revise"]);
       expect(sent[1]!.prompt).not.toContain("answered your question");
       expect(sent[2]!.prompt).toBe("John answered your question: No.\n\nCarry on.");
       expect(sent[2]!.args).toContain("--resume");
-      expect(sent[3]!.prompt).toContain("failure 2");
+      expect(sent[3]!.prompt).toContain("finding 2");
       expect(sent[3]!.prompt).not.toContain("answered your question");
       // A fresh session still reads the question and its answer, in conversation.md.
       expect(sent[3]!.prompt).toContain("Archived too?");
@@ -193,26 +195,25 @@ describe("questions", () => {
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 
-  test("a fix that asked during the test loop resumes as the next step's first fix, after the build", async () => {
-    const { repo, ctx, trace } = await setupRepo("plan-approved", { commands: { test: "exit 1" }, config: "stages:\n  build:\n    max_fix_loops: 1\n" });
-    await Bun.write(join(repo.path, "intent", SLUG, "spec.md"), "# Spec\n\n## Summary\ns\n");
-    await Bun.write(join(repo.path, "intent", SLUG, "plan.md"), "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n");
-    await new Git(repo.path).commitAll("artifacts");
-    await ctx.reload();
-    // The asking fix has its own session id, so its resume is told apart from fix's usual resume of the build.
-    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS).replaceAll("fake-build", "fake-fix-asked"), fix: fixture("fix") });
+  test("fix and reconcile never ask: they carry on the build's session, so a question in their report is dropped", async () => {
+    const { repo, ctx, trace } = await setupRepo("building");
+    const fixtures = fixtureDir({ fix: asking("fix", ASKS), reconcile: asking("reconcile", ASKS) });
     const prompts = join(fixtures.path, "prompts.jsonl");
     try {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
-        expect(await runBuildStep(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
-        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
-        await runBuildStep(await nextStep(ctx));
+        const fixed = await fix(ctx, 1);
+        expect(fixed.ok).toBe(true);
+        expect(fixed.ok && fixed.envelope).not.toHaveProperty("question");
+        const reconciled = await reconcile(ctx);
+        expect(reconciled.ok).toBe(true);
+        expect(reconciled.ok && reconciled.envelope).not.toHaveProperty("question");
       });
-      const fixes = logLines<{ phase: string; args: string[]; prompt: string }>(prompts).filter((p) => p.phase === "fix");
-      expect(fixes).toHaveLength(2);
-      expect(fixes[1]!.args[fixes[1]!.args.indexOf("--resume") + 1]).toBe("fake-fix-asked");
-      expect(fixes[1]!.prompt).toBe("John answered your question: No.\n\nCarry on.");
-      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+      // Their prompts do not offer it either.
+      for (const p of logLines<{ prompt: string }>(prompts)) expect(p.prompt).not.toContain("set `question`");
+      expect(readQuestion(repo.path, SLUG)?.open ?? null).toBeNull();
+      expect(questionEvents(trace)).toEqual([]);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.question).toBe("");
+      expect(trace.phases(SLUG).map((p) => [p.name, p.status])).toEqual([["fix-1", "success"], ["reconcile", "success"]]);
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 

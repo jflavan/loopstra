@@ -326,8 +326,10 @@ and that it must never claim one happened before the result comes back.
 > stays in the same phase row and the same `raw.jsonl`; the answer resumes the asking session in the
 > step's first session of the kind of phase that asked, and only while the change is in the same stay
 > at its status (otherwise a fresh session reads it in conversation.md); the 3 questions are counted
-> per stay at a status rather than per step; and a stop also leaves a change-level stop, checked
-> before and after each phase, so it ends the step in a code phase too.
+> per stay at a status rather than per step; a stop also leaves a change-level stop, checked
+> before and after each phase, so it ends the step in a code phase too; and `fix` and `reconcile`
+> never ask: they carry on the build's session, which can ask already, and one that asked made the
+> next step run the whole build again before resuming it.
 
 ## Sessions keep stdin open
 

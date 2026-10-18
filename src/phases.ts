@@ -270,7 +270,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 }
 
 /** The phases whose sessions may ask a person a question (see src/questions.ts). */
-export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "fix", "reconcile", "revise"]);
+export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "revise"]);
 
 /**
  * What a session of an asker does with a question in its report: it is recorded (no `refuse`), or the
