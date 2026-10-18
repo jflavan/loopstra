@@ -1,6 +1,6 @@
 {
   "name": "loopstra",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "description": "Unattended, Claude Code based SDLC loop. Code owns the loop; agents own bounded phases.",
   "type": "module",
   "bin": {
