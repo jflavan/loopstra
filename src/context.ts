@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
-import { effectivePriority, readIntent, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
+import { effectivePriority, readIntent, writeChangeFile, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
@@ -283,11 +283,11 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
   return existsSync(p) ? await Bun.file(p).text() : null;
 }
 
-/** Writes an artifact on main and commits it (see commitRecord); never into a change a person deleted (PersonChangedStatus). */
+/** Writes an artifact whole on main and commits it (see commitRecord); never into a change a person deleted (PersonChangedStatus). */
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `write ${name}`, async () => {
     throwIfDeleted(ctx);
-    await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
+    writeChangeFile(ctx.intent, name, text.endsWith("\n") ? text : text + "\n");
     ctx.intent.artifacts.add(name);
   });
 }
