@@ -413,7 +413,8 @@ describe("Git across systems", () => {
       await git.commitAll("change the last file");
       expect(await git.containsChanges("main", "feature")).toBe(false);
     } finally { repo.cleanup(); }
-  });
+    // Writing and committing 450 files takes more than the suite's 30 s on GitHub's Windows runners.
+  }, 120_000);
 
   test("putBack puts back hundreds of files, and a name with brackets names only itself", async () => {
     const repo = await tempGitRepo();
