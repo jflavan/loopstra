@@ -377,6 +377,8 @@ bun install
 bun src/cli.ts <command>   # run the checkout, in place of loopstra <command>
 bun run test               # the suite, one process per file, four at a time (see scripts/test.ts); bun run test:serial runs it in one process
 bun run typecheck
+bun run lint             # type-aware ESLint: unwatched promises, `any` leaking in, text that would print [object Object]
+bun run check            # typecheck, lint and the suite, as CI runs them
 ```
 
 To use the checkout as your global `loopstra`, run `bun link` in it (and `bun unlink` there before installing from npm). Its version is `0.0.0-dev`, so `loopstra upgrade` installs nothing (update the checkout with `git pull`) and only brings the repository up to the checkout's templates, reading their history from the checkout's git instead of `shipped.json`. The stamp then records `0.0.0-dev+<commit>`, and the update notice only says when a repository was set up by an older Loopstra.
