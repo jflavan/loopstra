@@ -1,3 +1,4 @@
+import { steerable } from "../console/steerable";
 import type { ChangeSummary, Offer } from "../console/types";
 import { dismiss, toast } from "./store";
 
@@ -149,6 +150,23 @@ export async function act(b: ActionBody, before: Before, label: string, opts: { 
     if (afterUndo) { afterUndo(d); return; }
     toast(d.text, d.ok ? "info" : "bad");
   });
+  return true;
+}
+
+/**
+ * What a person may do to a session from its page: message (and redirect) a running work session, stop
+ * any running one. Null once it has ended, or when it is not running. `note` says why a check cannot be messaged.
+ */
+export function steerOffer(phaseName: string, status: string, ended: boolean): { message: boolean; stop: boolean; note?: string } | null {
+  if (ended || status !== "running") return null;
+  return steerable(phaseName) ? { message: true, stop: true } : { message: false, stop: true, note: "Checks cannot be messaged. Approve or send back instead." };
+}
+
+/** Sends a message, a redirect or a stop to a running session; says what happened in a toast. Gives whether it was sent. */
+export async function steer(slug: string, seq: number, kind: "message" | "redirect" | "stop", text = ""): Promise<boolean> {
+  const r = await post(`/api/sessions/${encodeURIComponent(slug)}/${seq}/message`, { kind, text });
+  if (!r.ok) { toast(r.error, "bad"); return false; }
+  toast(kind === "stop" ? "Stopping the session. The change is held, so it does not start again." : kind === "redirect" ? "Sent: the session starts again your way." : "Sent: the session reads it at its next step.");
   return true;
 }
 

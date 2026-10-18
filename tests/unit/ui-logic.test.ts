@@ -12,7 +12,7 @@ import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutPrefix, addLines } from "../../src/ui/chat";
-import { act, beforeOf, bodyFor, nextPoll, undoFor, unsentText } from "../../src/ui/requests";
+import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, undoFor, unsentText } from "../../src/ui/requests";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -466,6 +466,44 @@ describe("requests from the page", () => {
     expect(nextPoll(30)).toBe(5000);
     expect(nextPoll(143)).toBe(5000);
     expect(nextPoll(144)).toBeNull();
+  });
+
+  test("a running work session may be messaged and stopped; a running check only stopped; an ended one neither", () => {
+    expect(steerOffer("build", "running", false)).toEqual({ message: true, stop: true });
+    expect(steerOffer("fix-2", "running", false)).toEqual({ message: true, stop: true });
+    expect(steerOffer("review-1", "running", false)).toEqual({ message: false, stop: true, note: "Checks cannot be messaged. Approve or send back instead." });
+    expect(steerOffer("build", "running", true)).toBeNull();
+    expect(steerOffer("build", "success", false)).toBeNull();
+  });
+
+  test("steering a session posts to its message route and says what happens in a toast; a refusal says why", async () => {
+    const real = globalThis.fetch;
+    const posted: Array<[string, unknown]> = [];
+    let refuse = false;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      posted.push([url, JSON.parse(String(init?.body))]);
+      return refuse ? Response.json({ error: "That session is not running." }, { status: 409 }) : Response.json({ id: "m1" }, { status: 202 });
+    }) as unknown as typeof fetch;
+    toasts.value = [];
+    try {
+      expect(await steer("a", 7, "message", "Cover negatives.")).toBe(true);
+      expect(await steer("a", 7, "stop")).toBe(true);
+      refuse = true;
+      expect(await steer("a", 7, "redirect", "Do it the other way.")).toBe(false);
+      expect(posted).toEqual([
+        ["/api/sessions/a/7/message", { kind: "message", text: "Cover negatives." }],
+        ["/api/sessions/a/7/message", { kind: "stop", text: "" }],
+        ["/api/sessions/a/7/message", { kind: "redirect", text: "Do it the other way." }],
+      ]);
+      expect(toasts.value.map((t) => [t.text, t.kind])).toEqual([
+        ["Sent: the session reads it at its next step.", "info"],
+        ["Stopping the session. The change is held, so it does not start again.", "info"],
+        ["That session is not running.", "bad"],
+      ]);
+    } finally {
+      globalThis.fetch = real;
+      toasts.value = [];
+    }
   });
 
   test("an action that could not be sent says so plainly, without the error itself", () => {
