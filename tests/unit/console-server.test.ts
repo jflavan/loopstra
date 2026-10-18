@@ -6,7 +6,9 @@ import { loadConfig } from "../../src/config";
 import { Hub, type HubOptions } from "../../src/console/hub";
 import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
-import { readLoopHold } from "../../src/heartbeat";
+import { localUser } from "../../src/chat/transports/shared";
+import { readLoopHold, writeHeartbeat } from "../../src/heartbeat";
+import { inboxFor } from "../../src/inbox";
 import { pendingRequests } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { wakeStamp } from "../../src/wake";
@@ -329,6 +331,126 @@ describe("writes", () => {
       expect((await fetch(`${base}/api/loop`, { method: "POST", headers: { origin: base, "content-type": "application/json", host: "evil.example" }, body: '{"action":"pause"}' })).status).toBe(403);
       expect((await fetch(`${base}/api/requests/000000000000001-1-0000`, { method: "DELETE", headers: { origin: "http://evil.example" } })).status).toBe(403);
       expect(readLoopHold(root)).toBeNull();
+      expect(pendingRequests(root)).toEqual([]);
+    });
+  }, 30_000);
+});
+
+/**
+ * A console on a repository whose loop works on "d" (designing): its design session and its spec-check
+ * run now (rows started since the heartbeat's tick); "q" (designing) has an open question, "a" none.
+ */
+async function withSteerConsole(fn: (base: string, root: string, seqs: { design: number; check: number; ended: number }) => Promise<void>) {
+  const asking = INTENT("designing", "q").replace("status: designing", "status: designing\nquestion: open");
+  const r = await chatRepo({ intents: { a: INTENT("plan-review", "a"), d: INTENT("designing", "d"), q: asking }, config: PEOPLE });
+  const now = Date.now();
+  writeHeartbeat(r.root, { pid: process.pid, startedAt: new Date(now - 600_000).toISOString(), lastTickAt: new Date(now - 20_000).toISOString(), lastBeatAt: new Date(now).toISOString(), current: { slug: "d" }, working: ["d"], stopping: false, stopped: false });
+  const trace = Trace.open(r.root, () => {});
+  const ended = trace.phaseStart("d", "intake", "agent");
+  trace.phaseEnd("d", ended, { status: "success", costUsd: 0.1 });
+  const design = trace.phaseStart("d", "design", "agent");
+  const check = trace.phaseStart("d", "spec-check", "agent");
+  trace.close();
+  const hub = new Hub(r.root);
+  const server = serveConsole(r.root, 0, { hub });
+  try {
+    await fn(`http://127.0.0.1:${server.port}`, r.root, { design, check, ended });
+  } finally {
+    server.stop(true);
+    await until(() => hub.latest() === null);
+    await hub.whenStopped();
+    r.cleanup();
+  }
+}
+
+describe("steering", () => {
+  const post = (base: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: base, ...headers }, body: JSON.stringify(body) });
+  const holds = (root: string) => pendingRequests(root).filter((q) => q.kind === "hold");
+
+  test("a message to a running work session lands in its inbox, by this machine's user, from the dashboard", async () => {
+    await withSteerConsole(async (base, root, { design }) => {
+      const r = await post(base, `/api/sessions/d/${design}/message`, { kind: "message", text: " Cover negatives. " });
+      expect(r.status).toBe(202);
+      const { id } = await r.json() as { id: string };
+      expect(inboxFor(root, "d", design)).toEqual([expect.objectContaining({ id, seq: design, kind: "message", text: "Cover negatives.", by: localUser(), via: "the dashboard" })]);
+      expect((await post(base, `/api/sessions/d/${design}/message`, { kind: "redirect", text: "Use two steps." })).status).toBe(202);
+      expect(inboxFor(root, "d", design).map((m) => m.kind)).toEqual(["message", "redirect"]);
+      expect(holds(root)).toEqual([]);
+    });
+  }, 30_000);
+
+  test("a check cannot be messaged; a session that is not running cannot be steered; a message is 1 to 4000 characters", async () => {
+    await withSteerConsole(async (base, root, { design, check, ended }) => {
+      const toCheck = await post(base, `/api/sessions/d/${check}/message`, { kind: "message", text: "hi" });
+      expect(toCheck.status).toBe(409);
+      expect((await toCheck.json() as { error: string }).error).toBe("Checks cannot be messaged. Approve or send back instead.");
+      for (const [slug, seq] of [["d", ended], ["d", 99], ["a", design]] as const) {
+        const r = await post(base, `/api/sessions/${slug}/${seq}/message`, { kind: "message", text: "hi" });
+        expect({ slug, seq, status: r.status }).toEqual({ slug, seq, status: 409 });
+        expect((await r.json() as { error: string }).error).toBe("That session is not running.");
+      }
+      for (const text of ["  ", "x".repeat(4001), 3]) {
+        expect((await post(base, `/api/sessions/d/${design}/message`, { kind: "message", text })).status).toBe(400);
+      }
+      expect((await post(base, `/api/sessions/d/${design}/message`, { kind: "explode", text: "hi" })).status).toBe(400);
+      expect((await post(base, `/api/sessions/D_x/${design}/message`, { kind: "message", text: "hi" })).status).toBe(404);
+      expect(inboxFor(root, "d", design)).toEqual([]);
+      expect(inboxFor(root, "d", check)).toEqual([]);
+    });
+  }, 30_000);
+
+  test("stop on a running session, a check too, writes a stop and leaves a hold request", async () => {
+    await withSteerConsole(async (base, root, { check }) => {
+      const r = await post(base, `/api/sessions/d/${check}/message`, { kind: "stop" });
+      expect(r.status).toBe(202);
+      expect(inboxFor(root, "d", check)).toEqual([expect.objectContaining({ kind: "stop", text: "", by: localUser(), via: "the dashboard" })]);
+      expect(holds(root)).toEqual([expect.objectContaining({ kind: "hold", slug: "d", expect: "designing", reason: "Stopped from the dashboard", via: "the dashboard", transport: "console" })]);
+    });
+  }, 30_000);
+
+  test("stopping a change stops every running session of it and leaves one hold; with nothing running it is refused", async () => {
+    await withSteerConsole(async (base, root, { design, check }) => {
+      const r = await post(base, "/api/changes/d/stop", {});
+      expect(r.status).toBe(202);
+      expect(await r.json()).toEqual({ stopped: 2 });
+      expect(inboxFor(root, "d", design).map((m) => m.kind)).toEqual(["stop"]);
+      expect(inboxFor(root, "d", check).map((m) => m.kind)).toEqual(["stop"]);
+      expect(holds(root)).toHaveLength(1);
+      const idle = await post(base, "/api/changes/a/stop", {});
+      expect(idle.status).toBe(409);
+      expect((await idle.json() as { error: string }).error).toBe("Nothing of a is running.");
+      expect((await post(base, "/api/changes/nope/stop", {})).status).toBe(404);
+    });
+  }, 30_000);
+
+  test("an answer is taken while the change's question is open, and refused without one", async () => {
+    await withSteerConsole(async (base, root) => {
+      const ok = await post(base, "/api/requests", { kind: "answer", slug: "q", text: "Leave them out." });
+      expect(ok.status).toBe(202);
+      expect(pendingRequests(root).filter((x) => x.kind === "answer")).toEqual([expect.objectContaining({ slug: "q", text: "Leave them out.", via: "the dashboard" })]);
+      expect((await post(base, "/api/requests", { kind: "answer", slug: "d", text: "Leave them out." })).status).toBe(409);
+      expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: " " })).status).toBe(400);
+      expect((await post(base, "/api/requests", { kind: "answer", slug: "q", text: "x".repeat(4001) })).status).toBe(400);
+    });
+  }, 30_000);
+
+  test("every steering write refuses another origin and anything but JSON", async () => {
+    await withSteerConsole(async (base, root, { design }) => {
+      const writes: Array<[string, unknown]> = [
+        [`/api/sessions/d/${design}/message`, { kind: "message", text: "hi" }],
+        [`/api/sessions/d/${design}/message`, { kind: "stop" }],
+        ["/api/changes/d/stop", {}],
+        ["/api/requests", { kind: "answer", slug: "q", text: "yes" }],
+      ];
+      for (const [path, body] of writes) {
+        expect({ path, status: (await post(base, path, body, { origin: "http://evil.example" })).status }).toEqual({ path, status: 403 });
+        expect({ path, status: (await post(base, path, body, { origin: "" })).status }).toEqual({ path, status: 403 });
+        const plain = await fetch(`${base}${path}`, { method: "POST", headers: { origin: base, "content-type": "text/plain" }, body: JSON.stringify(body) });
+        expect({ path, status: plain.status }).toEqual({ path, status: 415 });
+      }
+      expect((await fetch(`${base}/api/changes/d/stop`)).status).toBe(405);
+      expect(inboxFor(root, "d", design)).toEqual([]);
       expect(pendingRequests(root)).toEqual([]);
     });
   }, 30_000);

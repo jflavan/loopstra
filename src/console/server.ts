@@ -9,6 +9,7 @@ import { changeDiff } from "./diff";
 import { resolveDocument, resolveRunFile } from "./files";
 import { Hub, type Send } from "./hub";
 import { streamSession } from "./session";
+import { steerRoutes } from "./steer";
 import { ANY_SLUG } from "./types";
 import { writes } from "./writes";
 
@@ -31,7 +32,7 @@ export const JSON_IDLE_SECONDS = 60;
  * on the screens' paths (the page's router knows the same ones). They are the same static code for
  * everyone and never reach `fetch`, so only the data routes check the host. Its only writes are
  * `/api/chat` (when `chat` is given, see DashboardTransport), `/api/requests` and `/api/loop` (see
- * writes.ts); each needs the page's own Origin.
+ * writes.ts), and steering a running session (see steer.ts); each needs the page's own Origin.
  */
 export function serveConsole(root: string, port = 4646, opts: { chat?: DashboardTransport; hub?: Hub } = {}): ReturnType<typeof Bun.serve> {
   const hub = opts.hub ?? new Hub(root, { chat: !!opts.chat });
@@ -44,7 +45,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
       const url = new URL(req.url);
       if (!LOCAL_HOSTS.has(url.hostname)) return new Response("Forbidden", { status: 403 });
       if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
-      const written = await writes(root, hub, req, url);
+      const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url));
       if (written) return written;
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
       return (await read(root, hub, req, url, server)) ?? NOT_FOUND();

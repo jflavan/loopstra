@@ -37,7 +37,7 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
     const s = requestState(root, decode(one[1]!));
     return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
   }
-  if (req.headers.get("origin") !== url.origin) return new Response("Forbidden", { status: 403 });
+  if (!fromPage(req, url)) return new Response("Forbidden", { status: 403 });
   if (one && req.method === "DELETE") {
     const cancelled = cancelRequest(root, decode(one[1]!));
     hub.poke();
@@ -54,8 +54,13 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
   return answer;
 }
 
+/** True when a write comes from the page itself: its Origin is the console's own. */
+export function fromPage(req: Request, url: URL): boolean {
+  return req.headers.get("origin") === url.origin;
+}
+
 /** True when a content type's MIME essence (before any parameters) is JSON. */
-function isJson(ct: string | null): boolean {
+export function isJson(ct: string | null): boolean {
   return ((ct ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
 }
 
