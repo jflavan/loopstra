@@ -146,10 +146,11 @@ export interface RunPhaseInput {
   signal?: AbortSignal;
   /**
    * A live session: stream-json input, kept open, with every message echoed back (see the spike in
-   * docs/decisions.md). `attach` gets the control once the session runs, and gives back what ends its watching.
+   * docs/decisions.md). `attach` gets the control once the session runs, and gives back what ends its watching
+   * (awaited before the phase ends, so what it records lands first).
    */
   live?: {
-    attach: (ctl: SessionControl) => () => void;
+    attach: (ctl: SessionControl) => () => void | Promise<void>;
     /** false leaves out --replay-user-messages (tests: a CLI that never echoes). Default true. */
     replay?: boolean;
     /** How long a result waits for a message's echo before stdin is closed (see ECHO_WAIT_MS). Tests shorten it. */
@@ -313,7 +314,7 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   try {
     return await runSession(input, live);
   } finally {
-    try { detach(); } catch { /* watching must never fail the phase */ }
+    try { await detach(); } catch { /* watching must never fail the phase */ }
   }
 }
 

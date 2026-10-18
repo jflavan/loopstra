@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readConversation } from "../../src/conversation";
 import { inboxDir, inboxFor, sendToSession, type InboxMessage } from "../../src/inbox";
 import { agentPhase } from "../../src/phases";
 import { runStepGuarded } from "../../src/scheduler";
-import { sweepInbox } from "../../src/steering";
-import { SessionStopped } from "../../src/stop";
+import { deliverInbox, sweepInbox } from "../../src/steering";
+import { requestStop, resetStop, SessionStopped } from "../../src/stop";
 import type { Trace } from "../../src/trace";
 import { until } from "../console-helpers";
 import { fixture, fixtureDir, lastCommit, setupRepo, tempDir, withEnv } from "../helpers";
@@ -157,7 +157,7 @@ describe("steering a running session", () => {
     try {
       const m = sendToSession(repo.path, SLUG, { seq: 7, kind: "message", text: "use two steps", by: "John", via: "Slack" });
       const s = sendToSession(repo.path, SLUG, { seq: 7, kind: "stop", text: "", by: "John", via: "Slack" });
-      sweepInbox(ctx);
+      await sweepInbox(ctx);
       expect(howDone(repo.path, m)).toBe("next session");
       expect(howDone(repo.path, s)).toBe("dropped");
       expect(inboxFor(repo.path, SLUG, 7)).toEqual([]);
@@ -178,4 +178,116 @@ describe("steering a running session", () => {
       trace.close(); repo.cleanup();
     }
   }, 30_000);
+
+  test("a message kept for the next session stays in the inbox when the loop starts stopping before its record lands", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const m = sendToSession(repo.path, SLUG, { seq: 7, kind: "message", text: "use two steps", by: "John", via: "Slack" });
+      requestStop();
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m)).toBeNull();
+      expect(inboxFor(repo.path, SLUG, 7).map((x) => x.id)).toEqual([m.id]);
+      expect(readConversation(repo.path, SLUG)).toBe("");
+      resetStop();
+      // The next sweep records it; two looks at once record it once.
+      await Promise.all([sweepInbox(ctx), sweepInbox(ctx)]);
+      expect(howDone(repo.path, m)).toBe("next session");
+      expect(readConversation(repo.path, SLUG).match(/use two steps/g)).toHaveLength(1);
+      expect(await lastCommit(repo.path)).toContain(`loopstra(${SLUG}): conversation`);
+    } finally {
+      resetStop(); trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("what a stopped loop left in the inbox reaches the step's very first session", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    const t = tempDir();
+    const prompts = join(t.path, "prompts.jsonl");
+    try {
+      sendToSession(repo.path, SLUG, { seq: 3, kind: "redirect", text: "keep it small", by: "Ana", via: "the dashboard" });
+      await withEnv({ LOOPSTRA_FAKE_PROMPTS: prompts }, () => runStepGuarded(ctx));
+      const first = JSON.parse(readFileSync(prompts, "utf8").split("\n")[0]!) as { prompt: string };
+      expect(first.prompt).toContain("keep it small");
+    } finally {
+      trace.close(); t.cleanup(); repo.cleanup();
+    }
+  }, 60_000);
+
+  test("once watching ends, what is left for the session is recorded before the phase goes on", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      // A session that cannot take a message now (a redirect is resuming it).
+      const ctl = { message: () => false, stop: () => false, redirect: () => false };
+      const detach = deliverInbox(ctx, 5, "design", ctl);
+      const m = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      await detach();
+      expect(howDone(repo.path, m)).toBe("next session");
+      expect(readConversation(repo.path, SLUG)).toContain("· John (the dashboard) → the next session\ncover negatives");
+      expect(await lastCommit(repo.path)).toContain(`loopstra(${SLUG}): conversation`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a message whose move to delivered/ fails is written to the session once, traced once it is moved, and the error once", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const written: string[] = [];
+      const ctl = { message: (text: string) => { written.push(text); return true; }, stop: () => false, redirect: () => false };
+      // A folder where the move would put the message: the move fails until it is gone.
+      const id = `${Date.now().toString().padStart(15, "0")}-1-0001`;
+      const blocker = join(inboxDir(repo.path, SLUG), "delivered", `${id}.json`);
+      mkdirSync(join(blocker, "x"), { recursive: true });
+      const m1: InboxMessage = { id, seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard", at: new Date().toISOString() };
+      writeFileSync(join(inboxDir(repo.path, SLUG), `${id}.json`), JSON.stringify(m1));
+      const detach = deliverInbox(ctx, 5, "design", ctl);
+      const errors = () => trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes(id));
+      await until(() => errors().length > 0);
+      // A later look (it delivers the next message) leaves the first one alone.
+      const m2 = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "and zero", by: "John", via: "the dashboard" });
+      await until(() => howDone(repo.path, m2) === "delivered");
+      expect(written).toHaveLength(2);
+      expect(steers(trace).map((s) => s.text)).toEqual(["and zero"]);
+      rmSync(blocker, { recursive: true, force: true });
+      await until(() => howDone(repo.path, m1) === "delivered");
+      await detach();
+      expect(written).toHaveLength(2);
+      expect(written[0]).toContain("cover negatives");
+      expect(steers(trace).map((s) => s.text)).toEqual(["and zero", "cover negatives"]);
+      expect(errors()).toHaveLength(1);
+      const record = readConversation(repo.path, SLUG);
+      expect(record.match(/cover negatives/g)).toHaveLength(1);
+      expect(record.match(/and zero/g)).toHaveLength(1);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a retry after a crash renders its prompt again, so it has what people told the crashed attempt", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const prompts = join(t.path, "prompts.jsonl");
+    // The first attempt waits, then ends without a result (a crash); the retry succeeds.
+    const crash = [fixture("design").split("\n")[0], JSON.stringify({ type: "fake_action", wait_for: gate })].join("\n");
+    const fixtures = fixtureDir({ "design-1": crash, design: fixture("design") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        const run = agentPhase(ctx, design);
+        await until(() => running(trace, "design") !== null);
+        const seq = running(trace, "design")!;
+        const m = sendToSession(repo.path, SLUG, { seq, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+        await until(() => howDone(repo.path, m) === "delivered");
+        writeFileSync(gate, "");
+        const r = await run;
+        expect(r.ok).toBe(true);
+        expect(trace.phases(SLUG).map((p) => p.name)).toEqual(["design", "design-retry"]);
+        const sent = readFileSync(prompts, "utf8").trim().split("\n").map((l) => (JSON.parse(l) as { prompt: string }).prompt);
+        expect(sent[0]).not.toContain("cover negatives");
+        expect(sent.at(-1)).toContain("cover negatives");
+      });
+    } finally {
+      trace.close(); fixtures.cleanup(); t.cleanup(); repo.cleanup();
+    }
+  }, 60_000);
 });

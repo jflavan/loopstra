@@ -598,7 +598,7 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
-    sweepInbox(ctx);
+    await sweepInbox(ctx);
     return await runStep(ctx);
   } catch (e) {
     if (e instanceof SessionStopped) {

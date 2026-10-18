@@ -218,24 +218,26 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   const atLimit = here && askedAt(ctx.root, ctx.slug, ctx.intent.file.frontmatter.status) >= MAX_QUESTIONS;
   const ask: AskRule | null = !ASKERS.has(spec.name) ? null : !here ? { refuse: "It asked a question" } : atLimit ? { refuse: TOO_MANY_NOTE } : {};
   const limited = (p: string) => (atLimit ? `${p.trimEnd()}\n\n${NO_MORE_QUESTIONS}\n` : p);
-  // One run of the phase on `p`, retried once on a timeout or crash.
-  const tries = async (p: string, resume: string | undefined): Promise<Attempted<N>> => {
+  // One run of the phase on `p`, retried once on a timeout or crash. `normal`: `p` is the phase's own
+  // prompt, rendered here; the retry renders it again, so it has what people told the crashed attempt.
+  const tries = async (p: string, resume: string | undefined, normal: boolean): Promise<Attempted<N>> => {
     const s = { ...spec, resume };
     const first = await attempt(ctx, s, limited(p), traceName, ask);
     if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
     ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-    return attempt(ctx, s, limited(p), `${traceName}-retry`, ask);
+    const again = normal && rendered === undefined ? ((await phasePrompt(ctx, spec)) ?? p) : p;
+    return attempt(ctx, s, limited(again), `${traceName}-retry`, ask);
   };
 
   let r: Attempted<N>;
   const answered = here ? readQuestion(ctx.root, ctx.slug)?.open : null;
   if (answered?.answer && answered.phase === spec.name) {
     // The answer goes to the session that asked; one that cannot be resumed starts fresh with the normal prompt.
-    r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId) : await tries(prompt, spec.resume);
-    if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined);
+    r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId, false) : await tries(prompt, spec.resume, true);
+    if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined, true);
     closeQuestion(ctx.root, ctx.slug);
   } else {
-    r = await tries(prompt, spec.resume);
+    r = await tries(prompt, spec.resume, true);
   }
   if (!r.ok) return r;
   const { asked, traceName: endedAs, ...ok } = r as Asking<N>;
