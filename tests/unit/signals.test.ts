@@ -116,4 +116,33 @@ describe("main_health", () => {
     expect(mainHealthDue(repo.path, soon, trace).due).toBe(true);
     trace.close(); repo.cleanup();
   });
+
+  test("a check that errors keeps the merged changes pending, tries again after the interval, and a red check then names them", async () => {
+    const { repo, cfg, trace } = await setup("  test: echo ok\n");
+    await runMainHealth(repo.path, cfg, trace, []);
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: exit 1\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, mainHealthDue(repo.path, broken, trace).afterSlugs)).toBe("error");
+    // Not at once (an install that keeps failing would run every tick), and not forgotten.
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: false, afterSlugs: ["a"] });
+    const red = await recommit(repo.path, "  test: exit 1\n");
+    const later = { ...red, signals: { main_health: { every_minutes: 0 } } };
+    const due = mainHealthDue(repo.path, later, trace);
+    expect(due).toEqual({ due: true, afterSlugs: ["a"] });
+    expect(await runMainHealth(repo.path, later, trace, due.afterSlugs)).toBe("fail");
+    expect(intents(repo.path)).toEqual(["fix-tests-after-a"]);
+    expect(mainHealthDue(repo.path, red, trace)).toEqual({ due: false, afterSlugs: [] });
+    trace.close(); repo.cleanup();
+  });
+
+  test("a merge after a check that errored asks for a check at once", async () => {
+    const { repo, trace } = await setup("  test: echo ok\n");
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: echo ok\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, ["a"])).toBe("error");
+    expect(mainHealthDue(repo.path, broken, trace).due).toBe(false);
+    markHealthPending(repo.path, "b");
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: true, afterSlugs: ["a", "b"] });
+    trace.close(); repo.cleanup();
+  });
 });

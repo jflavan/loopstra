@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { commitRecord } from "./context";
@@ -14,8 +14,8 @@ export type HealthResult = "pass" | "fail" | "error";
 const SIGNAL = "main_health";
 
 /**
- * Written at merge; the next tick runs the check and removes it. Holds the changes merged since the
- * last check, one per line, in the order they merged.
+ * Written at merge; the next check that gives a result removes it (one that errors keeps it, see
+ * mainHealthDue). Holds the changes merged since the last check, one per line, in the order they merged.
  */
 function pendingPath(root: string): string {
   return join(root, ".loopstra", "health-pending");
@@ -41,12 +41,18 @@ export function markHealthPending(root: string, slug: string): void {
 /**
  * Whether main_health should run now, from what is on disk and in the trace (no process state):
  * a merge asked for it, or the newest check is older than the interval, or there never was one.
+ * After a check that errored (an install that failed, say), the merged changes stay pending, but
+ * the next try waits for the interval, unless another merge asked since.
  */
 export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: boolean; afterSlugs: string[] } {
-  if (existsSync(pendingPath(root))) return { due: true, afterSlugs: pendingSlugs(root) };
   const last = trace.lastSignal(SIGNAL);
-  const due = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
-  return { due, afterSlugs: [] };
+  const intervalPassed = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
+  if (existsSync(pendingPath(root))) {
+    const askedSince = (at: string) => { try { return statSync(pendingPath(root)).mtimeMs >= Date.parse(at); } catch { return true; } };
+    const waiting = last?.result === "error" && !intervalPassed && !askedSince(last.ts);
+    return { due: !waiting, afterSlugs: pendingSlugs(root) };
+  }
+  return { due: intervalPassed, afterSlugs: [] };
 }
 
 /**
@@ -78,7 +84,8 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   }
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);
-  rmSync(pendingPath(root), { force: true });
+  // An error says nothing about the merged changes: they stay pending for the next try.
+  if (result !== "error") rmSync(pendingPath(root), { force: true });
   if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, cfg.main_branch, trace, afterSlugs, output);
   return result;
 }
