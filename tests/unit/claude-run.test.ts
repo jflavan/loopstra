@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, MEANWHILE_HEADING, runPhase, unavailable, type SessionControl } from "../../src/claude";
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "../../src/budget";
@@ -494,6 +494,37 @@ describe("live sessions", () => {
       expect((r.structuredOutput as { summary: string }).summary).toBe("heard: and zero");
       expect(r.costUsd).toBeCloseTo(0.1);
       expect(r.durationMs).toBeLessThan(30_000);
+    } finally {
+      fixtures.cleanup(); t.cleanup();
+    }
+  }, 90_000);
+
+  test("once the echo came, the wait for it is over: a long quiet stretch in the queued turn never closes stdin", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const fixtures = fixtureDir({ design: heldDesign(gate) });
+    try {
+      writeFileSync(gate, ""); // the first turn goes straight through
+      let ctl: SessionControl | null = null;
+      let sent = false;
+      let echoed = false;
+      const run = runPhase({
+        ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path },
+        live: { attach: (c) => { ctl = c; return () => {}; }, echoWaitMs: 200 },
+        onEvent: (e) => {
+          // After the first result: the queued turn holds at the gate, quiet, once it has echoed the message.
+          if (e.type === "result" && !sent) { rmSync(gate); sent = ctl!.message("and zero"); }
+          if (e.type === "user" && e.isReplay === true && JSON.stringify(e).includes("and zero")) echoed = true;
+        },
+      });
+      await until(() => echoed);
+      // Well past the echo wait, with nothing from the session meanwhile.
+      await Bun.sleep(1_500);
+      expect(ctl!.message("one more")).toBe(true);
+      writeFileSync(gate, "");
+      const r = await run;
+      expect(r.ok).toBe(true);
+      expect((r.structuredOutput as { summary: string }).summary).toBe("heard: and zero | one more");
     } finally {
       fixtures.cleanup(); t.cleanup();
     }

@@ -399,10 +399,14 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
         const e = collector.push(line);
         if (e && input.onEvent) { try { input.onEvent(e); } catch { /* tracing must never stop the phase */ } }
         if (!e) return false;
-        // Any event of the process while it waits for an echo starts the wait again.
-        if (echoTimer !== undefined && !echoGaveUp) awaitEcho();
         if (live && e.session_id) live.sessionId = e.session_id;
         if (live && e.type === "user" && e.isReplay === true) live.replays++;
+        // Any event of the process while it waits for an echo starts the wait again; once nothing waits
+        // for one (the echo came), the wait is over, so a quiet stretch later in that turn never closes stdin.
+        if (echoTimer !== undefined && !echoGaveUp) {
+          if (live?.waiting()) awaitEcho();
+          else { clearTimeout(echoTimer); echoTimer = undefined; }
+        }
         if (e.type !== "result" || answersNotification(e)) return false;
         if (!live) return true;
         // A message written but not yet taken: its own turn and result follow, and that result is the phase's.
