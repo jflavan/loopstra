@@ -96,7 +96,9 @@ New module `src/console/agents.ts`, routed in `server.ts` beside the session str
   start: the same replay the session page does when it opens. Ended sessions are not sent again;
   instead, after its first look the stream sends `{ type: "sync", keys }` with every session it
   follows, and the page ends the running tiles that `sync` does not name (they ended while it was
-  away). The stream sends no pings: an EventSource notices a closed connection by itself.
+  away; such a tile takes its result and cost from the steps just finished). It pings every 15 s,
+  and the page opens it again after 20 s of silence, as it does the live stream. A session missing
+  from the running ones for 5 s (a killed loop left its row running) is let go and sent `end`.
 - **The page goes away**: every follower stops and the trace closes, as the other streams do.
 - Why one stream: the console is HTTP/1.1, and a browser keeps at most six connections to one
   origin. The page already holds `/api/stream`; one EventSource per tile would reach that limit

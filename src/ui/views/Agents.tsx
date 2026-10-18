@@ -5,7 +5,7 @@ import type { About } from "../chat";
 import { duration } from "../format";
 import { route } from "../nav";
 import { AgentTile, ChatTile, QuestionTile, tileId } from "../parts/AgentTile";
-import { changes, loop, meta, now } from "../store";
+import { changes, loop, meta, now, STALE_MS } from "../store";
 
 /** How long the page waits before opening the agents stream again after the browser gave up on it. */
 const RETRY_MS = 2000;
@@ -15,6 +15,8 @@ const FLASH_MS = 1600;
 export function Agents() {
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [down, setDown] = useState(false);
+  // Whether the stream has said which sessions run: until then the screen cannot say none does.
+  const [synced, setSynced] = useState(false);
   const [about, setAbout] = useState<{ about: About; label: string } | null>(null);
   // The tile a link pointed at, until it has been shown (it may arrive after the page opens). Read again
   // on every navigation, since the palette can point at another tile while this screen is open.
@@ -26,6 +28,7 @@ export function Agents() {
     let buffer: AgentMessage[] = [];
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let last = Date.now();
     const flush = () => {
       if (!buffer.length) return;
       const batch = buffer;
@@ -34,23 +37,43 @@ export function Agents() {
     };
     // Rows arrive in bursts; drawing them ten times a second keeps many sessions smooth.
     const timer = setInterval(flush, 100);
+    const reopen = () => {
+      source?.close();
+      source = null;
+      setDown(true);
+      if (!retry) retry = setTimeout(() => { retry = null; open(); }, RETRY_MS);
+    };
     const open = () => {
+      // The silence is counted from now, so a new stream gets its own STALE_MS to say something.
+      last = Date.now();
       const s = new EventSource("/api/agents/stream");
       source = s;
-      s.onopen = () => setDown(false);
-      s.onmessage = (ev) => {
-        try { buffer.push(JSON.parse(ev.data as string) as AgentMessage); } catch { /* a bad frame is skipped */ }
+      const alive = () => {
+        last = Date.now();
+        setDown(false);
       };
+      s.onmessage = (ev) => {
+        alive();
+        try {
+          const msg = JSON.parse(ev.data as string) as AgentMessage;
+          buffer.push(msg);
+          if (msg.type === "sync") setSynced(true);
+        } catch { /* a bad frame is skipped */ }
+      };
+      s.addEventListener("ping", alive);
       s.onerror = () => {
         if (s !== source) return;
         setDown(true);
         // The browser reconnects by itself unless it gave up; then the page opens a new stream.
-        if (s.readyState === EventSource.CLOSED && !retry) retry = setTimeout(() => { retry = null; open(); }, RETRY_MS);
+        if (s.readyState === EventSource.CLOSED) reopen();
       };
     };
     open();
+    // A connection can die without an error (a laptop that slept): a stream silent for STALE_MS, pings included, is opened again.
+    const watch = setInterval(() => { if (source && Date.now() - last > STALE_MS) reopen(); }, 1000);
     return () => {
       clearInterval(timer);
+      clearInterval(watch);
       if (retry) clearTimeout(retry);
       source?.close();
       source = null;
@@ -64,7 +87,10 @@ export function Agents() {
   const chatOn = !!meta.value?.chat;
   const shown = slots(tiles, changes.value, chatOn);
 
-  // Once the tile a link named is there: scroll to it, highlight it, and for Message put the cursor in its box.
+  // Once the tile a link named is there: scroll to it, highlight it, and for Message put the cursor in its box
+  // (without a jump of its own, which would cut the smooth scroll short).
+  const flash = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (flash.current) clearTimeout(flash.current); }, []);
   useEffect(() => {
     const want = target.current;
     if (!want) return;
@@ -73,8 +99,9 @@ export function Agents() {
     target.current = null;
     el.scrollIntoView({ block: "nearest", behavior: "smooth" });
     el.classList.add("flash");
-    setTimeout(() => el.classList.remove("flash"), FLASH_MS);
-    if (want.message) el.querySelector<HTMLInputElement>(".steer input")?.focus();
+    if (flash.current) clearTimeout(flash.current);
+    flash.current = setTimeout(() => el.classList.remove("flash"), FLASH_MS);
+    if (want.message) el.querySelector<HTMLInputElement>(".steer input")?.focus({ preventScroll: true });
   }, [tiles, r]);
 
   const ask = (tile: Tile) => () => {
@@ -92,7 +119,7 @@ export function Agents() {
         {working > 0 && <span class="muted">{working} {working === 1 ? "agent is" : "agents are"} working</span>}
       </div>
       {down && <p class="muted" role="status">Reconnecting…</p>}
-      {!working && !asking && (
+      {synced && !down && !working && !asking && (
         <div class="empty">No agent is working.{l?.nextCheck ? ` The next check is in ${duration(Math.max(0, Date.parse(l.nextCheck) - t))}.` : ""}</div>
       )}
       <div class="agent-grid">

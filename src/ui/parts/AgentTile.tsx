@@ -3,7 +3,7 @@ import type { Tile } from "../agents";
 import type { About } from "../chat";
 import { costSoFar, duration, shortModel, stepWord, usd } from "../format";
 import { steerOffer } from "../requests";
-import { meta, now } from "../store";
+import { meta, now, running } from "../store";
 import { lastCost } from "../transcript";
 import { Actions } from "./Actions";
 import { Chat } from "./Drawer";
@@ -23,12 +23,15 @@ export function AgentTile({ tile, onAsk }: { tile: Tile; onAsk: (() => void) | n
   const t = now.value;
   const a = tile.agent;
   const ended = tile.endedAt !== null;
-  const status = tile.phase?.status ?? "running";
+  // A session that ended while the page was away never sent its last phase: the steps just finished say how it went.
+  const finished = ended ? running.value?.recent.find((r) => r.slug === a.slug && r.seq === a.seq) : undefined;
+  const status = tile.phase && tile.phase.status !== "running" ? tile.phase.status : finished?.status ?? "running";
   const offer = steerOffer(a.name, status, ended);
-  const until = tile.phase?.ended ? Date.parse(tile.phase.ended) : ended ? tile.endedAt! : t;
+  const endedAt = tile.phase?.ended ?? finished?.ended;
+  const until = endedAt ? Date.parse(endedAt) : ended ? tile.endedAt! : t;
   const rate = meta.value?.usdPerMinute;
-  // A running session's cost is an estimate until it ends; then its result row says what it was.
-  const cost = ended ? lastCost(tile.shown) : rate === undefined ? null : costSoFar(a.started, t, rate);
+  // A running session's cost is an estimate until it ends; then the trace (or its result row) says what it was.
+  const cost = ended ? finished?.costUsd ?? lastCost(tile.shown) : rate === undefined ? null : costSoFar(a.started, t, rate);
   return (
     <article id={tileId(tile.key)} class={`card agent-tile${ended ? " ended" : " live"}`} aria-label={`${a.title}, ${a.name}`}>
       <div class="card-head">
@@ -38,9 +41,8 @@ export function AgentTile({ tile, onAsk }: { tile: Tile; onAsk: (() => void) | n
         <span class="muted nowrap tabular">{duration(until - Date.parse(a.started))}{cost !== null ? ` · ${usd(cost, !ended)}` : ""}</span>
         <Link href={`/s/${a.slug}/${a.seq}`} class="ghost" title="Open the session's page"><Icon name="open" /></Link>
       </div>
-      {!tile.shown.items.length && !ended
-        ? <p class="muted note">Starting…</p>
-        : <Transcript shown={tile.shown} live={!ended} done={ended} compact />}
+      {/* Always drawn, even while it has no rows (a stream that came back sends them again), so its scroll and "show earlier" stay. */}
+      <Transcript shown={tile.shown} live={!ended} done={ended} compact />
       {ended ? (
         <p class="muted note">{status === "running" ? "Ended" : `It ${stepWord(status)}.`}</p>
       ) : offer && (

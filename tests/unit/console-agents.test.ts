@@ -34,7 +34,7 @@ async function repo(slugs: string[]) {
 /** A page for the agents stream. */
 function page() {
   const frames: string[] = [];
-  return { frames, send: (f: string) => { frames.push(f); return true; }, msgs: () => parseFrames(frames.join("")).map((f) => f.data as AgentMessage) };
+  return { frames, send: (f: string) => { frames.push(f); return true; }, msgs: () => parseFrames(frames.join("")).filter((f) => f.event !== "ping").map((f) => f.data as AgentMessage) };
 }
 
 describe("the agents stream", () => {
@@ -47,7 +47,7 @@ describe("the agents stream", () => {
       const one = trace.phaseStart("one", "build", "agent");
       writeFileSync(raw(t.path, "one", one, "build"), lines([TEXT("Looking.")]));
       const p = page();
-      stop = await streamAgents(t.path, hub, p.send, 20);
+      stop = await streamAgents(t.path, hub, p.send, { intervalMs: 20 });
       const k1 = `one:${one}`;
       await until(() => p.msgs().some((m) => m.type === "item" && m.key === k1));
       const first = p.msgs();
@@ -99,10 +99,10 @@ describe("the agents stream", () => {
       const one = trace.phaseStart("one", "build", "agent");
       writeFileSync(raw(t.path, "one", one, "build"), lines([TEXT("a"), TEXT("b")]));
       const first = page();
-      stops.push(await streamAgents(t.path, hub, first.send, 20));
+      stops.push(await streamAgents(t.path, hub, first.send, { intervalMs: 20 }));
       await until(() => first.msgs().filter((m) => m.type === "item").length === 2);
       const again = page();
-      stops.push(await streamAgents(t.path, hub, again.send, 20));
+      stops.push(await streamAgents(t.path, hub, again.send, { intervalMs: 20 }));
       await until(() => again.msgs().filter((m) => m.type === "item").length === 2);
       expect(again.msgs().find((m) => m.type === "sync")).toEqual({ type: "sync", keys: [`one:${one}`] });
       expect(again.msgs().filter((m) => m.type === "open")).toHaveLength(1);
@@ -123,7 +123,7 @@ describe("the agents stream", () => {
       const one = trace.phaseStart("one", "build", "agent");
       writeFileSync(raw(t.path, "one", one, "build"), lines([TEXT("a")]));
       let calls = 0;
-      await streamAgents(t.path, hub, () => { calls++; return false; }, 20);
+      await streamAgents(t.path, hub, () => { calls++; return false; }, { intervalMs: 20 });
       // Its first write failed: the hub is let go and nothing more is tried.
       await until(() => hub.latest() === null);
       await Bun.sleep(100);
@@ -131,6 +131,47 @@ describe("the agents stream", () => {
     } finally {
       await hub.whenStopped();
       trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("a session the loop left running but no longer works on is let go, and said to have ended", async () => {
+    const t = await repo(["one"]);
+    const trace = Trace.open(t.path);
+    const hub = new Hub(t.path, { intervalMs: 20, minRebuildMs: 0 });
+    let stop: (() => void) | null = null;
+    try {
+      const one = trace.phaseStart("one", "build", "agent");
+      writeFileSync(raw(t.path, "one", one, "build"), lines([TEXT("a")]));
+      const p = page();
+      stop = await streamAgents(t.path, hub, p.send, { intervalMs: 20, goneMs: 100 });
+      await until(() => p.msgs().some((m) => m.type === "item"));
+      // The loop was killed and started again: its new tick works on nothing, and the old row still says running.
+      const now = Date.now();
+      writeHeartbeat(t.path, { pid: process.pid, startedAt: new Date(now).toISOString(), lastTickAt: new Date(now).toISOString(), lastBeatAt: new Date(now).toISOString(), current: null, working: [], stopping: false, stopped: false });
+      await until(() => p.msgs().some((m) => m.type === "end"));
+      expect(p.msgs().filter((m) => m.type === "end")).toEqual([{ type: "end", key: `one:${one}` }]);
+    } finally {
+      stop?.();
+      await until(() => hub.latest() === null);
+      await hub.whenStopped();
+      trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("pings while nothing else is sent", async () => {
+    const t = await repo(["one"]);
+    const hub = new Hub(t.path, { intervalMs: 20, minRebuildMs: 0 });
+    let stop: (() => void) | null = null;
+    try {
+      const p = page();
+      stop = await streamAgents(t.path, hub, p.send, { intervalMs: 20, pingMs: 30 });
+      await until(() => parseFrames(p.frames.join("")).some((f) => f.event === "ping"));
+    } finally {
+      stop?.();
+      await until(() => hub.latest() === null);
+      await hub.whenStopped();
       t.cleanup();
     }
   });

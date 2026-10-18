@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { TranscriptItem } from "../../console/types";
 import { usd } from "../format";
 import { diffCounts } from "../diff";
@@ -99,7 +99,7 @@ function ToolRow({ item, result }: { item: Extract<TranscriptItem, { kind: "tool
 function EditRow({ item, result, compact }: { item: Extract<TranscriptItem, { kind: "edit" }>; result: Result; compact: boolean }) {
   // A small edit shows at once on the session's page; a whole written file, and any edit on a tile, waits to be opened.
   const [open, setOpen] = useState(!compact && item.tool !== "Write");
-  const counts = compact ? diffCounts(item.diff) : null;
+  const counts = useMemo(() => (compact ? diffCounts(item.diff) : null), [compact, item.diff]);
   return (
     <div class={`t-edit ${stateOf(result)}`}>
       <button class="t-head" onClick={() => setOpen(!open)} aria-expanded={open}>
