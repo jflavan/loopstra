@@ -229,6 +229,25 @@ input[type="search"]:focus-visible, input[type="text"]:focus-visible, textarea:f
 .card-title { font-weight: 600; letter-spacing: var(--track-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-now { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: var(--text-code); color: var(--fg-2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .card-foot { display: flex; align-items: center; gap: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; font-size: var(--text-sm); }
+/* The Agents screen (see views/Agents.tsx): a grid of tiles, each a session with its transcript and controls. */
+.view.wide { max-width: none; }
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 14px; align-items: start; }
+.agent-tile { gap: 8px; min-width: 0; }
+/* A tile is narrow: its rows wrap or cut off with an ellipsis rather than widen it. */
+.agent-tile .transcript { grid-template-columns: minmax(0, 1fr); }
+.agent-tile .card-head { flex-wrap: wrap; }
+.agent-tile .nowrap { white-space: nowrap; }
+.agent-tile .tabular { font-variant-numeric: tabular-nums; }
+.agent-tile.ended { opacity: 0.6; }
+.agent-tile.asks { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.agent-tile.flash { box-shadow: 0 0 0 3px var(--ring); }
+.agent-tile .question { display: grid; gap: 4px; }
+/* The answer form shows the question again, with its options: the tile's own copy steps aside meanwhile. */
+.agent-tile.asks:has(.control-form) > .question { display: none; }
+.agent-tile .note { margin: 0; }
+.chat-tile .chat-log { max-height: 300px; min-height: 120px; padding: 0; }
+.chat-tile .chat-form { padding: 8px 0 0; }
+.chat-tile .chip .ghost { padding: 0 2px; }
 .strip { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
 .strip i { flex: 1; max-width: 6px; border-radius: var(--radius-full); background: var(--line-strong); height: 40%; }
 .strip i.tool { background: var(--accent); height: 100%; }
@@ -384,6 +403,13 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 /* Floats over the transcript, so it is made of the material. */
 .jump { position: absolute; right: 16px; bottom: 16px; background: var(--material-thick); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--shadow); animation: rise var(--spring-time) var(--spring); }
 .jump:hover:not(:disabled) { background: var(--material-thick); border-color: var(--line-strong); }
+.steer.compact { margin: 0; padding: 8px; gap: 6px; }
+.steer.compact input[type="text"] { flex: 1 1 100%; min-width: 0; }
+.transcript-wrap.compact .transcript { height: 300px; max-height: none; padding-bottom: 8px; align-content: start; }
+.transcript-wrap.compact .jump { right: 8px; bottom: 8px; }
+.t-counts { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.t-counts .add { color: var(--ok); }
+.t-counts .del { color: var(--bad); }
 .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; position: sticky; top: 0; }
 .side dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: var(--text-sm); }
 .side dt { color: var(--fg-3); }

@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { TranscriptItem } from "../../console/types";
 import { usd } from "../format";
+import { diffCounts } from "../diff";
 import type { Shown } from "../transcript";
 import { Diff } from "./Diff";
 import { Markdown } from "./Markdown";
@@ -13,9 +14,9 @@ const OUTPUT_LINES = 200;
 
 type Result = Shown["results"][string] | undefined;
 
-/** A session's transcript. It follows the newest row until the person scrolls up, then offers to jump back. */
+/** A session's transcript. It follows the newest row until the person scrolls up, then offers to jump back. `compact`: a tile's, of a fixed height, with edits closed and shown as counts. */
 // Memoised: the session screen redraws for other reasons (its facts, its status) and the rows need not be rebuilt for them.
-export const Transcript = memo(function Transcript({ shown, live, done }: { shown: Shown; live: boolean; done: boolean }) {
+export const Transcript = memo(function Transcript({ shown, live, done, compact = false }: { shown: Shown; live: boolean; done: boolean; compact?: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const [all, setAll] = useState(false);
@@ -40,23 +41,23 @@ export const Transcript = memo(function Transcript({ shown, live, done }: { show
     if ((e.target as Element).closest(".t-head")) setFollow(false);
   };
   return (
-    <div class="transcript-wrap">
+    <div class={`transcript-wrap${compact ? " compact" : ""}`}>
       <div class="transcript" ref={box} onScroll={onScroll} onClick={onClick}>
         {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
-        {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results[item.id] : undefined} />)}
+        {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results[item.id] : undefined} compact={compact} />)}
         {!shown.items.length && done && <p class="muted">This step left no transcript.</p>}
         {live && <div class="t-live"><span class="pulse" aria-hidden="true" /> Working…</div>}
       </div>
-      {!follow && <button class="btn jump" onClick={() => setFollow(true)}>Jump to live ↓</button>}
+      {!follow && <button class="btn jump" onClick={() => setFollow(true)}>{compact ? "↓ live" : "Jump to live ↓"}</button>}
     </div>
   );
 });
 
-function Row({ item, result }: { item: Shown["items"][number]; result: Result }) {
+function Row({ item, result, compact }: { item: Shown["items"][number]; result: Result; compact: boolean }) {
   switch (item.kind) {
     case "text": return <Markdown text={item.text} />;
     case "tool": return <ToolRow item={item} result={result} />;
-    case "edit": return <EditRow item={item} result={result} />;
+    case "edit": return <EditRow item={item} result={result} compact={compact} />;
     case "message":
       return (
         <div class={`msg t-msg${item.redirect ? " redirect" : ""}`}>
@@ -95,15 +96,17 @@ function ToolRow({ item, result }: { item: Extract<TranscriptItem, { kind: "tool
   );
 }
 
-function EditRow({ item, result }: { item: Extract<TranscriptItem, { kind: "edit" }>; result: Result }) {
-  // A small edit shows at once; a whole written file waits to be opened.
-  const [open, setOpen] = useState(item.tool !== "Write");
+function EditRow({ item, result, compact }: { item: Extract<TranscriptItem, { kind: "edit" }>; result: Result; compact: boolean }) {
+  // A small edit shows at once on the session's page; a whole written file, and any edit on a tile, waits to be opened.
+  const [open, setOpen] = useState(!compact && item.tool !== "Write");
+  const counts = useMemo(() => (compact ? diffCounts(item.diff) : null), [compact, item.diff]);
   return (
     <div class={`t-edit ${stateOf(result)}`}>
       <button class="t-head" onClick={() => setOpen(!open)} aria-expanded={open}>
         <span class="t-state" aria-hidden="true" />
         <span class="t-name">{item.tool === "Write" ? "Wrote" : "Edited"}</span>
         <span class="t-target">{item.path}</span>
+        {counts && <span class="t-counts"><span class="add">+{counts.added}</span> <span class="del">−{counts.removed}</span></span>}
       </button>
       {open && (
         <div class="t-body">

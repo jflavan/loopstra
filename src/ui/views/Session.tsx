@@ -6,18 +6,9 @@ import { Steer } from "../parts/Steer";
 import { Transcript } from "../parts/Transcript";
 import { steerOffer } from "../requests";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
-import { addItems, EMPTY, type Shown } from "../transcript";
+import { addItems, EMPTY, lastCost, type Shown } from "../transcript";
 
 type Phase = Extract<SessionMessage, { type: "phase" }>;
-
-/** The cost of a chat turn, which has no change page: what its last result item says. */
-function costOfLastResult(shown: Shown): number | null {
-  for (let k = shown.items.length - 1; k >= 0; k--) {
-    const it = shown.items[k]!;
-    if (it.kind === "result") return it.costUsd;
-  }
-  return null;
-}
 
 // The screen is keyed by session (see app.tsx), so every piece of state here starts over when the person opens another one.
 export function Session({ slug, seq }: { slug: string; seq: number }) {
@@ -115,7 +106,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
             </div>
           )}
           <div class="panel">
-            <Facts phase={phase} live={live} model={card?.model ?? null} detail={detail} chatCost={chat ? costOfLastResult(shown) : null} />
+            <Facts phase={phase} live={live} model={card?.model ?? null} detail={detail} chatCost={chat ? lastCost(shown) : null} />
             {detail && detail.denied.length > 0 && <p class="muted">Not allowed: {detail.denied.join(", ")}</p>}
             {detail && detail.files.length > 0 && <p>{detail.files.map((f) => <a key={f.name} href={f.url} target="_blank" rel="noopener noreferrer" class="chip">{f.name}</a>)}</p>}
           </div>

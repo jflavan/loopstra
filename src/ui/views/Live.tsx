@@ -77,8 +77,8 @@ function AgentCard({ p, t, rate, asks }: { p: RunningPhase; t: number; rate: num
         <span title="Running for">{duration(t - Date.parse(p.started))}</span>
         <span title="An estimate: the real cost is recorded when the step ends">{usd(costSoFar(p.started, t, rate), true)}</span>
         <span class="grow" />
-        {p.steerable && <Link href={`/s/${p.slug}/${p.seq}`} class="link" title="Send this session a message from its page">Message</Link>}
-        <Link href={`/s/${p.slug}/${p.seq}`} class="btn">Watch</Link>
+        {p.steerable && <Link href={`/agents#${p.slug}:${p.seq}:message`} class="link" title="Send this session a message from its tile">Message</Link>}
+        <Link href={`/agents#${p.slug}:${p.seq}`} class="btn">Watch</Link>
       </div>
     </article>
   );
