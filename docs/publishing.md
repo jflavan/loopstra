@@ -59,7 +59,9 @@ run releases the next version) as soon as it is staged and tagged.
 After the workflow stages a version, its run summary says so. The maintainer then:
 
 - on npmjs.com: the `loopstra` package, its staged versions, approve (passkey); or
-- in a terminal of their own (a real one: npm needs a TTY for the browser sign-in):
+- in a terminal of their own (a real one: npm needs a TTY for the browser sign-in). `npm stage` needs
+  npm 11.15 or later; with an older npm (10.x says `Unknown command: "stage"`), put `npx npm@11` in
+  place of `npm`, or upgrade it once with `npm install -g npm@11`:
 
   ```
   npm stage list loopstra
@@ -67,10 +69,12 @@ After the workflow stages a version, its run summary says so. The maintainer the
   npm stage approve <stage-id> --auth-type=web
   ```
 
+A newly staged version first shows as **validating**: npm is scanning it for malware, and it cannot
+be approved until the scan finishes (usually a few minutes). Nothing is wrong; wait, then approve.
+
 Approval asks for 2FA, so an agent cannot do it and must not try: tell the maintainer the version is
 waiting, with the commands above. Once approved, `npm view loopstra version` shows it, and `loopstra
-upgrade` offers it to users. npm scans a staged package for malware first; approval is unavailable
-until that finishes.
+upgrade` offers it to users.
 
 ## Rules for agents
 

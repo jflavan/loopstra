@@ -76,9 +76,10 @@ jobs:
             {
               echo "## loopstra@$VERSION is staged on npm"
               echo
-              echo "It is not installable until a maintainer approves it with 2FA:"
-              echo "on npmjs.com (the loopstra package, its staged versions), or"
-              echo "\`npm stage list loopstra\`, then \`npm stage approve <stage-id> --auth-type=web\`."
+              echo "It is not installable until a maintainer approves it with 2FA, once npm's malware"
+              echo "scan has finished (it shows as validating until then):"
+              echo "on npmjs.com (the loopstra package, its staged versions), or, with npm 11.15 or later"
+              echo "(or \`npx npm@11\`), \`npm stage list loopstra\`, then \`npm stage approve <stage-id> --auth-type=web\`."
               echo "See docs/publishing.md."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
