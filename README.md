@@ -19,6 +19,40 @@ There are two audiences and two surfaces:
 
 Windows, macOS and Linux are all supported; see Platforms.
 
+## Quickstart
+
+**Install** Loopstra once, from npm:
+
+```
+bun add -g loopstra
+loopstra --version
+```
+
+**Set up a repository**, at its top folder, on the branch the loop should work on (usually `main`):
+
+```
+cd your-repo
+loopstra init                 # writes loopstra/config.yaml, the stamp, the owner's guide and the skill
+loopstra setup                # budgets, commands, gates, GitHub, chat, models (init offers it at the end)
+git add -A && git commit -m "Set up Loopstra"
+loopstra start                # runs the loop; watch it with loopstra status or loopstra ui
+```
+
+Then ask for a change: talk it through with `loopstra chat`, or write `intent/<slug>/intent.md` from the template in `intent/README.md` (see Ask for a change).
+
+**Upgrade** to the latest release, in each repository that uses Loopstra, with its loop stopped (Ctrl-C in the loop's terminal):
+
+```
+cd your-repo
+loopstra upgrade --check      # optional: what would change, writing nothing
+loopstra upgrade              # installs the latest Loopstra, then brings this repository up to it
+loopstra start
+```
+
+`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too: the install is already done there, so it only brings that repository up to it. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
+
+**Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start` refuses in such a repository until that is done.
+
 ## Install
 
 Loopstra is installed once, globally, from npm:
