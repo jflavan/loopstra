@@ -5,10 +5,9 @@ import type { About } from "../chat";
 import { duration } from "../format";
 import { route } from "../nav";
 import { AgentTile, ChatTile, QuestionTile, tileId } from "../parts/AgentTile";
-import { changes, loop, meta, now, STALE_MS } from "../store";
+import { changes, loop, meta, now } from "../store";
+import { follow } from "../stream";
 
-/** How long the page waits before opening the agents stream again after the browser gave up on it. */
-const RETRY_MS = 2000;
 /** How long a tile a link pointed at stays highlighted. */
 const FLASH_MS = 1600;
 
@@ -26,9 +25,6 @@ export function Agents() {
 
   useEffect(() => {
     let buffer: AgentMessage[] = [];
-    let source: EventSource | null = null;
-    let retry: ReturnType<typeof setTimeout> | null = null;
-    let last = Date.now();
     const flush = () => {
       if (!buffer.length) return;
       const batch = buffer;
@@ -37,46 +33,21 @@ export function Agents() {
     };
     // Rows arrive in bursts; drawing them ten times a second keeps many sessions smooth.
     const timer = setInterval(flush, 100);
-    const reopen = () => {
-      source?.close();
-      source = null;
-      setDown(true);
-      if (!retry) retry = setTimeout(() => { retry = null; open(); }, RETRY_MS);
-    };
-    const open = () => {
-      // The silence is counted from now, so a new stream gets its own STALE_MS to say something.
-      last = Date.now();
-      const s = new EventSource("/api/agents/stream");
-      source = s;
-      const alive = () => {
-        last = Date.now();
-        setDown(false);
-      };
-      s.onmessage = (ev) => {
-        alive();
+    // A stream opened again sends every running session from its start (see streamAgents), so it resumes from nothing.
+    const stop = follow(() => "/api/agents/stream", {
+      message(data) {
         try {
-          const msg = JSON.parse(ev.data as string) as AgentMessage;
+          const msg = JSON.parse(data) as AgentMessage;
           buffer.push(msg);
           if (msg.type === "sync") setSynced(true);
         } catch { /* a bad frame is skipped */ }
-      };
-      s.addEventListener("ping", alive);
-      s.onerror = () => {
-        if (s !== source) return;
-        setDown(true);
-        // The browser reconnects by itself unless it gave up; then the page opens a new stream.
-        if (s.readyState === EventSource.CLOSED) reopen();
-      };
-    };
-    open();
-    // A connection can die without an error (a laptop that slept): a stream silent for STALE_MS, pings included, is opened again.
-    const watch = setInterval(() => { if (source && Date.now() - last > STALE_MS) reopen(); }, 1000);
+      },
+      live() { setDown(false); },
+      down() { setDown(true); },
+    });
     return () => {
       clearInterval(timer);
-      clearInterval(watch);
-      if (retry) clearTimeout(retry);
-      source?.close();
-      source = null;
+      stop();
     };
   }, []);
 

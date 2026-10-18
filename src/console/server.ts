@@ -16,8 +16,13 @@ import { writes } from "./writes";
 
 /** Host names the console answers to: a page on another name that resolves here (DNS rebinding) gets nothing. */
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" };
-const NOT_FOUND = () => new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+/** Data is read fresh every time: a document or a change read again must not come from the browser's cache. */
+const NO_STORE = { "cache-control": "no-store" };
+const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", ...NO_STORE };
+const NOT_FOUND = () => new Response("Not found", { status: 404, headers: PLAIN_TEXT });
+const json = (body: unknown, status = 200) => Response.json(body, { status, headers: NO_STORE });
+/** The largest body a write may carry: the longest message is 20,000 characters, so anything near this is not the page's. */
+const MAX_BODY_BYTES = 1024 * 1024;
 
 type Timeouts = { timeout(req: Request, seconds: number): void };
 
@@ -41,6 +46,8 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     port,
     hostname: "127.0.0.1",
     development: false,
+    // Bun drops the connection of a request whose body is bigger, before reading it into memory.
+    maxRequestBodySize: MAX_BODY_BYTES,
     routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/c/*": page, "/s/*": page },
     async fetch(req, server) {
       const url = new URL(req.url);
@@ -81,9 +88,9 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
     const slug = decode(change[1]!);
     if (!slug || !SLUG.test(slug)) return null;
     server.timeout(req, JSON_IDLE_SECONDS);
-    if (change[2]) return Response.json(await changeDiff(root, (await config(root))?.main_branch ?? "main", slug));
+    if (change[2]) return json(await changeDiff(root, (await config(root))?.main_branch ?? "main", slug));
     const d = await withTrace(root, (t) => changeDetail(root, t, slug));
-    return d ? Response.json(d) : null;
+    return d ? json(d) : null;
   }
   const session = path.match(/^\/api\/sessions\/([^/]+)\/(\d+)\/stream$/);
   if (session) {
@@ -97,14 +104,14 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
   if (path === "/api/events") {
     server.timeout(req, JSON_IDLE_SECONDS);
     const slug = url.searchParams.get("slug") || undefined;
-    if (slug && !ANY_SLUG.test(slug)) return Response.json({ error: "slug" }, { status: 400 });
+    if (slug && !ANY_SLUG.test(slug)) return json({ error: "slug" }, 400);
     const before = Number(url.searchParams.get("before") ?? 0);
-    return Response.json(await withTrace(root, (t) => eventsPage(t, Number.isFinite(before) && before > 0 ? before : 0, slug, url.searchParams.get("technical") === "1")));
+    return json(await withTrace(root, (t) => eventsPage(t, Number.isFinite(before) && before > 0 ? before : 0, slug, url.searchParams.get("technical") === "1")));
   }
   if (path === "/api/spend") {
     server.timeout(req, JSON_IDLE_SECONDS);
     const cfg = await config(root);
-    return Response.json(await withTrace(root, (t) => spendView(root, t, cfg)));
+    return json(await withTrace(root, (t) => spendView(root, t, cfg)));
   }
   if (path.startsWith("/files/")) {
     const rel = decode(path.slice("/files/".length));

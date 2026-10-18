@@ -6,6 +6,7 @@ import { Steer } from "../parts/Steer";
 import { Transcript } from "../parts/Transcript";
 import { steerOffer } from "../requests";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
+import { follow } from "../stream";
 import { addItems, EMPTY, lastCost, type Shown } from "../transcript";
 
 type Phase = Extract<SessionMessage, { type: "phase" }>;
@@ -15,7 +16,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
   const [shown, setShown] = useState<Shown>(EMPTY);
   const [phase, setPhase] = useState<Phase | null>(null);
   const [ended, setEnded] = useState(false);
-  const [stopped, setStopped] = useState(false);
+  const [down, setDown] = useState(false);
   const [missing, setMissing] = useState(false);
   const [detail, setDetail] = useState<PhaseView | null>(null);
   const chat = slug.startsWith("_");
@@ -31,32 +32,38 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
     };
     // Rows arrive in bursts; drawing them ten times a second keeps a long session smooth.
     const flush = setInterval(flushNow, 100);
-    const source = new EventSource(`/api/sessions/${encodeURIComponent(slug)}/${seq}/stream`);
-    source.onmessage = (ev) => {
-      let m: SessionMessage;
-      try { m = JSON.parse(ev.data as string) as SessionMessage; } catch { return; }
-      if (m.type === "item") {
-        buffer.push(m.item);
-        return;
-      }
-      // A phase or the end settles what is shown at once, so "no transcript" is never said while rows wait in the buffer.
-      flushNow();
-      if (m.type === "phase") {
-        gotPhase = true;
-        setPhase(m);
-      } else if (m.type === "end") {
-        setEnded(true);
-        source.close();
-      }
-    };
-    source.onerror = () => {
-      if (source.readyState !== EventSource.CLOSED) return;
-      if (gotPhase) setStopped(true);
-      else setMissing(true);
-    };
+    // A stream opened again continues from the last row's offset (see follow); each row's id is one.
+    const stop = follow((from) => `/api/sessions/${encodeURIComponent(slug)}/${seq}/stream${from > 0 ? `?from=${from}` : ""}`, {
+      message(data) {
+        let m: SessionMessage;
+        try { m = JSON.parse(data) as SessionMessage; } catch { return; }
+        if (m.type === "item") {
+          buffer.push(m.item);
+          return;
+        }
+        // A phase or the end settles what is shown at once, so "no transcript" is never said while rows wait in the buffer.
+        flushNow();
+        if (m.type === "phase") {
+          gotPhase = true;
+          setPhase(m);
+        } else if (m.type === "end") {
+          setEnded(true);
+          stop();
+        }
+      },
+      live() { setDown(false); },
+      down(why) {
+        // Closed before it said what the step is: there is no such step. (Closed later, it is opened again.)
+        if (why === "closed" && !gotPhase) {
+          setMissing(true);
+          return "stop";
+        }
+        setDown(true);
+      },
+    });
     return () => {
       clearInterval(flush);
-      source.close();
+      stop();
     };
   }, [slug, seq]);
 
@@ -81,9 +88,9 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
   }
   const card = running.value?.now.find((p) => p.slug === slug && p.seq === seq);
   const title = slug === "_chat" ? "Chat" : changes.value?.find((c) => c.slug === slug)?.title ?? slug;
-  const live = phase?.status === "running" && !ended && !stopped;
+  const live = phase?.status === "running" && !ended;
   // What a person may do to the running session; chat's sessions are not a change's, so they are not steered here.
-  const offer = phase && !chat ? steerOffer(phase.name, phase.status, ended || stopped) : null;
+  const offer = phase && !chat ? steerOffer(phase.name, phase.status, ended) : null;
   return (
     <section class="view">
       <div class="view-head">
@@ -94,7 +101,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
         {phase && <span class={`status ${phase.status}`}>{stepWord(phase.status)}</span>}
         {live && <span class="pulse" role="img" aria-label="live" />}
       </div>
-      {stopped && <p class="muted">The stream stopped. Reload to see the rest.</p>}
+      {down && !ended && <p class="muted" role="status">Reconnecting… the transcript may be behind.</p>}
       {offer && <Steer slug={slug} seq={seq} offer={offer} />}
       <div class="session">
         <Transcript shown={shown} live={live} done={ended} />

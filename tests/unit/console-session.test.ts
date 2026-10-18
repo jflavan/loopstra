@@ -267,3 +267,52 @@ describe("a session's stream", () => {
     }
   });
 });
+
+describe("a session stream's pings", () => {
+  test("pings while nothing else is sent, and not once the stream has ended", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    let stop: (() => void) | null = null;
+    try {
+      const seq = trace.phaseStart("one", "build", "agent");
+      writeFileSync(raw(t.path, "one", seq, "build"), lines(START));
+      const p = page();
+      stop = streamSession(t.path, "one", seq, 0, p.send, p.close, 20, 30);
+      const pings = () => parseFrames(p.frames.join("")).filter((f) => f.event === "ping").length;
+      await until(() => pings() >= 2);
+      trace.phaseEnd("one", seq, { status: "success", costUsd: 0.1 });
+      await until(() => p.closed);
+      const after = pings();
+      await Bun.sleep(120);
+      expect(pings()).toBe(after);
+    } finally {
+      stop?.();
+      trace.close();
+      t.cleanup();
+    }
+  });
+
+  test("a page that cannot take a ping ends the stream", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    let stop: (() => void) | null = null;
+    try {
+      const seq = trace.phaseStart("one", "build", "agent");
+      writeFileSync(raw(t.path, "one", seq, "build"), lines(START));
+      let gone = false;
+      let sent = 0;
+      let closed = false;
+      stop = streamSession(t.path, "one", seq, 0, (f) => { if (f.startsWith("event: ping")) gone = true; sent++; return !gone; }, () => { closed = true; }, 20, 30);
+      await until(() => gone);
+      const seen = sent;
+      await Bun.sleep(120);
+      // Nothing more is sent to a page that is gone, and the stream was stopped without closing a page that is not there.
+      expect(sent).toBe(seen);
+      expect(closed).toBe(false);
+    } finally {
+      stop?.();
+      trace.close();
+      t.cleanup();
+    }
+  });
+});

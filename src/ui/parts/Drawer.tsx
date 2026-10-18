@@ -38,7 +38,9 @@ export function Drawer() {
         <span class="muted about">{d.about ? `About ${d.about.title}` : "Ask how things are going, or talk through a new change."}</span>
         <button class="ghost" onClick={close} aria-label="Close"><Icon name="close" /></button>
       </header>
-      {meta.value && !meta.value.chat ? <p class="pad muted">Chat is off in this console: it was started with --no-chat.</p> : <Chat about={d.about} />}
+      {meta.value === null ? <p class="pad muted">Connecting…</p>
+        : !meta.value.chat ? <p class="pad muted">Chat is off in this console: it was started with --no-chat.</p>
+        : <Chat about={d.about} />}
     </aside>
   );
 }
