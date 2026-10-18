@@ -51,13 +51,14 @@ export function markHealthPending(root: string, slug: string): void {
  * Whether main_health should run now, from what is on disk and in the trace (no process state):
  * a merge asked for it, or the newest check is older than the interval, or there never was one.
  * After a check that errored (an install that failed, say), the merged changes stay pending, but
- * the next try waits for the interval, unless another merge asked since.
+ * the next try waits for the interval, unless another merge asked since. With no record of when a
+ * merge asked (from before it was kept, or a stop between the two files), it waits for the interval.
  */
 export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: boolean; afterSlugs: string[] } {
   const last = trace.lastSignal(SIGNAL);
   const intervalPassed = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
   if (existsSync(pendingPath(root))) {
-    const askedSince = (at: string) => { try { return Number(readFileSync(askedPath(root), "utf8")) >= Date.parse(at); } catch { return true; } };
+    const askedSince = (at: string) => { try { return Number(readFileSync(askedPath(root), "utf8")) >= Date.parse(at); } catch { return false; } };
     const waiting = last?.result === "error" && !intervalPassed && !askedSince(last.ts);
     return { due: !waiting, afterSlugs: pendingSlugs(root) };
   }

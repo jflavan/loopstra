@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
@@ -146,6 +146,18 @@ describe("main_health", () => {
     const early = new Date(Date.parse(trace.lastSignal("main_health")!.ts) - 5);
     utimesSync(join(repo.path, ".loopstra", "health-pending"), early, early);
     expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: true, afterSlugs: ["a", "b"] });
+    trace.close(); repo.cleanup();
+  });
+
+  test("after a check that errored, a missing record of when a merge asked waits for the interval", async () => {
+    const { repo, trace } = await setup("  test: echo ok\n");
+    markHealthPending(repo.path, "a");
+    const broken = await recommit(repo.path, "  test: echo ok\n  install: exit 3\n");
+    expect(await runMainHealth(repo.path, broken, trace, ["a"])).toBe("error");
+    // An upgrade from before health-asked, or a kill between writing health-pending and it.
+    rmSync(join(repo.path, ".loopstra", "health-asked"));
+    expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: false, afterSlugs: ["a"] });
+    expect(mainHealthDue(repo.path, { ...broken, signals: { main_health: { every_minutes: 0 } } }, trace)).toEqual({ due: true, afterSlugs: ["a"] });
     trace.close(); repo.cleanup();
   });
 });
