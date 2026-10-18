@@ -14,6 +14,8 @@ export interface FileResult {
   outcome: FileOutcome;
   /** The file's stamp entry afterwards. */
   entry: StampEntry;
+  /** The text written to the file (or, with `write` false, that would be); absent when it is left as it is. */
+  text?: string;
 }
 
 /** Gets the shipped text whose textSha is `sha`, or null. */
@@ -50,14 +52,17 @@ export async function mergeText(theirs: string, base: string, next: string): Pro
 
 /**
  * Applies the managed-file rules (spec: "Rules for a managed file") to one file. `entry` is its
- * stamp entry (undefined: Loopstra never wrote it). With `write` false it only says what it would do.
+ * stamp entry (undefined: Loopstra never wrote it). With `write` false it only says what it would do
+ * (and gives the text it would write, for a caller that writes later).
  */
 export async function upgradeFile(root: string, file: ManagedFile, entry: StampEntry | undefined, baseFor: BaseFor, opts: { write: boolean }): Promise<FileResult> {
   const target = join(root, file.path);
   const next = readFileSync(file.shipped, "utf8");
   const nextSha = textSha(next);
-  const done = (outcome: FileOutcome, e: StampEntry): FileResult => ({ path: file.path, outcome, entry: e });
+  let written: string | undefined;
+  const done = (outcome: FileOutcome, e: StampEntry): FileResult => ({ path: file.path, outcome, entry: e, ...(written === undefined ? {} : { text: written }) });
   const put = (text: string) => {
+    written = text;
     if (opts.write) writeFileAtomic(target, text);
   };
 

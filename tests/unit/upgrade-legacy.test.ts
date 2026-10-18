@@ -62,6 +62,19 @@ describe("adoptLegacy", () => {
     } finally { t.cleanup(); }
   });
 
+  test("with write false, apply makes the writes later, once", async () => {
+    const t = legacyRepo();
+    try {
+      const dry = await adoptLegacy(t.path, INDEX, fetchText, { write: false });
+      expect(existsSync(join(t.path, "loopstra", "prompts", "review.md"))).toBe(true);
+      dry.apply();
+      dry.apply();
+      expect(existsSync(join(t.path, "loopstra", "prompts", "review.md"))).toBe(false);
+      expect(existsSync(join(t.path, ".claude", "hooks", "loopstra-protect-tests.ts"))).toBe(false);
+      expect(JSON.parse(readFileSync(join(t.path, ".claude", "settings.json"), "utf8"))).toEqual({ model: "x" });
+    } finally { t.cleanup(); }
+  });
+
   test("the hooks folder stays when it holds other files", async () => {
     const t = legacyRepo();
     try {

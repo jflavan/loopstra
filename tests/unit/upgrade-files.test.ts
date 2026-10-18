@@ -22,7 +22,7 @@ describe("upgradeFile", () => {
     const { t, file } = setup(BASE);
     try {
       const r = await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => BASE, { write: true });
-      expect(r).toEqual({ path: "REVIEW.md", outcome: "replaced", entry: { base: textSha(NEW) } });
+      expect(r).toEqual({ path: "REVIEW.md", outcome: "replaced", entry: { base: textSha(NEW) }, text: NEW });
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(NEW);
     } finally { t.cleanup(); }
   });
@@ -69,7 +69,7 @@ describe("upgradeFile", () => {
       expect((await upgradeFile(t.path, file, { base: "x", deleted: true }, async () => null, { write: true })).outcome).toBe("deleted");
       expect(existsSync(join(t.path, "REVIEW.md"))).toBe(false);
       const fresh = await upgradeFile(t.path, file, undefined, async () => null, { write: true });
-      expect(fresh).toEqual({ path: "REVIEW.md", outcome: "added", entry: { base: textSha(NEW) } });
+      expect(fresh).toEqual({ path: "REVIEW.md", outcome: "added", entry: { base: textSha(NEW) }, text: NEW });
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(NEW);
     } finally { t.cleanup(); }
     const again = setup(null);
@@ -82,7 +82,10 @@ describe("upgradeFile", () => {
   test("with write false nothing is written", async () => {
     const { t, file } = setup(BASE);
     try {
-      expect((await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => BASE, { write: false })).outcome).toBe("replaced");
+      const r = await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => BASE, { write: false });
+      expect(r.outcome).toBe("replaced");
+      // The text it would write, for a caller that writes once everything is worked out.
+      expect(r.text).toBe(NEW);
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(BASE);
     } finally { t.cleanup(); }
   });
@@ -99,7 +102,7 @@ describe("upgradeFile", () => {
     const { t, file } = setup(BASE.replace(/\n/g, "\r\n"));
     try {
       const r = await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => null, { write: true });
-      expect(r).toEqual({ path: "REVIEW.md", outcome: "replaced", entry: { base: textSha(NEW) } });
+      expect(r).toEqual({ path: "REVIEW.md", outcome: "replaced", entry: { base: textSha(NEW) }, text: NEW.replace(/\n/g, "\r\n") });
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(NEW.replace(/\n/g, "\r\n"));
     } finally { t.cleanup(); }
   });

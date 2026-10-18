@@ -21,6 +21,8 @@ export interface Adopted {
   changed: string[];
   /** One sentence per edited managed file, naming the base it is merged from, and per thing left for a person. */
   notes: string[];
+  /** Makes the deletions and edits above (done already with `write` true), for a caller that writes once everything else is worked out too. */
+  apply: () => void;
 }
 
 /** The settings with the old hook's entry taken out: their new text, or null when nothing else is left in them. */
@@ -56,8 +58,14 @@ function settingsWithOldHook(path: string): Record<string, unknown> | null | "in
  * today's text as its base would mean never merging what changed since its real one.
  */
 export async function adoptLegacy(root: string, index: ShippedIndex, fetchText: FetchText, opts: { write: boolean }): Promise<Adopted> {
-  const out: Adopted = { stamp: { loopstra: "", files: {} }, removed: [], changed: [], notes: [] };
   const writes: Array<() => void> = [];
+  let applied = false;
+  const apply = () => {
+    if (applied) return;
+    applied = true;
+    for (const w of writes) w();
+  };
+  const out: Adopted = { stamp: { loopstra: "", files: {} }, removed: [], changed: [], notes: [], apply };
   for (const file of managedFiles(root)) {
     const path = join(root, file.path);
     if (!existsSync(path)) continue;
@@ -107,6 +115,6 @@ export async function adoptLegacy(root: string, index: ShippedIndex, fetchText: 
     }
   }
 
-  if (opts.write) for (const w of writes) w();
+  if (opts.write) apply();
   return out;
 }
