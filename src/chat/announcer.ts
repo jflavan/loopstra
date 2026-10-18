@@ -1,6 +1,6 @@
 import { appendFileSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { attention } from "../attention";
+import { attention, type AttentionItem } from "../attention";
 import { loadConfig, type Config } from "../config";
 import { pidAlive } from "../heartbeat";
 import { inMain, scanRepo, type Status } from "../intents";
@@ -125,7 +125,7 @@ export async function announce(root: string, log = new AnnouncementLog(root)): P
   const out: Announcement[] = [];
   try {
     const items = await attention(root, config, trace);
-    const keyOf = (i: { kind: string; slug: string | null; what: string }) => `${i.kind}|${i.slug ?? ""}|${i.what}`;
+    const keyOf = (i: AttentionItem) => `${i.kind}|${i.slug ?? ""}|${i.key ?? i.what}`;
     const was = new Set(prev?.active ?? []);
     for (const i of items) {
       if (was.has(keyOf(i))) continue;

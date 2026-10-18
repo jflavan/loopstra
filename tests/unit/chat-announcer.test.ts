@@ -7,6 +7,7 @@ import { chatDir, writeJson } from "../../src/chat/threads";
 import { readIntent, writeIntent } from "../../src/intents";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { tempDir } from "../helpers";
+import { Trace } from "../../src/trace";
 
 function bot(name: string, from: "now" | "kept"): Transport & { announced: string[] } {
   const announced: string[] = [];
@@ -58,6 +59,25 @@ describe("announcements", () => {
       expect(await announce(r.root, log)).toEqual([]);
       expect(log.all().filter((a) => a.text.startsWith("Merged:"))).toHaveLength(1);
     } finally { r.cleanup(); }
+  });
+
+  test("a red main is announced once while it lasts, though its time since the check changes", async () => {
+    const r = await chatRepo({ intents: { going: INTENT("reviewing", "going one") } });
+    const trace = Trace.open(r.root, () => {});
+    try {
+      const log = new AnnouncementLog(r.root);
+      await announce(r.root, log);
+      trace.signal("main_health", "pass", "ok");
+      trace.signal("main_health", "fail", "1 test failed");
+      expect((await announce(r.root, log)).map((a) => a.text)).toEqual([expect.stringContaining("Main branch: Main branch. The tests on main are failing (checked ")]);
+      await Bun.sleep(1100); // "checked 0s ago" becomes "1s ago"
+      expect(await announce(r.root, log)).toEqual([]);
+      // Gone, then back: news again.
+      trace.signal("main_health", "pass", "ok");
+      expect(await announce(r.root, log)).toEqual([]);
+      trace.signal("main_health", "fail", "1 test failed");
+      expect((await announce(r.root, log)).map((a) => a.text)).toEqual([expect.stringContaining("The tests on main are failing")]);
+    } finally { trace.close(); r.cleanup(); }
   });
 
   test("only the lock holder writes; a dead holder's lock is taken over", () => {
