@@ -43,8 +43,20 @@ export async function run(cmd: string[], cwd: string): Promise<{ code: number; o
   return { code, out, err };
 }
 
+/**
+ * A fresh repository with one commit (README and a .gitignore for .loopstra/). The first call builds
+ * it with git; later calls copy that one (a copy costs a fraction of five git processes, which
+ * matters on Windows runners), so every repository starts from the same commit.
+ */
 export async function tempGitRepo(): Promise<{ path: string; cleanup: () => void }> {
-  const t = tempDir("loopstra-repo-");
+  baseRepo ??= buildBaseRepo();
+  return copyRepo(await baseRepo);
+}
+
+let baseRepo: Promise<string> | undefined;
+async function buildBaseRepo(): Promise<string> {
+  const t = tempDir("loopstra-base-");
+  process.on("exit", t.cleanup);
   await run(["git", "init", "-q", "-b", "main"], t.path);
   await run(["git", "config", "user.email", "loopstra-test@example.com"], t.path);
   await run(["git", "config", "user.name", "Loopstra Test"], t.path);
@@ -55,7 +67,7 @@ export async function tempGitRepo(): Promise<{ path: string; cleanup: () => void
   await Bun.write(join(t.path, ".gitignore"), ".loopstra/\n");
   await run(["git", "add", "-A"], t.path);
   await run(["git", "commit", "-q", "-m", "init"], t.path);
-  return t;
+  return t.path;
 }
 
 /**
