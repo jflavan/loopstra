@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, REQUEST_KINDS, resultText, retryOptions, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { conversationPath, readConversation, withEntry, type ConversationEntry } from "./conversation";
 import { Git } from "./git";
+import { asAtHead, fileHash, matchesHead } from "./headfiles";
 import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { onCheckout } from "./lanes";
@@ -239,15 +239,6 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
   return kept;
 }
 
-/** A file as it is at HEAD, or gone when HEAD has none. Under the checkout lock. */
-async function asAtHead(git: Git, root: string, path: string): Promise<void> {
-  if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code === 0) await git.run(["checkout", "HEAD", "--", path]);
-  else {
-    await git.run(["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
-    rmSync(join(root, path), { force: true });
-  }
-}
-
 /** True for an undo that takes back a send back (not an approve). */
 function undoesSendBack(req: Request): boolean {
   return req.kind === "undo" && SEND_BACK_TO[req.to] === req.expect;
@@ -345,11 +336,6 @@ function byWhom(req: Request): string {
   return `${oneLine(req.byName, 80)} from ${oneLine(req.via, 40)}`;
 }
 
-/** The sha256 (hex) of a file as it is on disk, or null when it cannot be read. */
-function fileHash(path: string): string | null {
-  try { return createHash("sha256").update(readFileSync(path)).digest("hex"); } catch { return null; }
-}
-
 /** The sha256 (hex) of a change's intent.md as it is on disk, or null when it cannot be read. */
 function intentHash(root: string, slug: string): string | null {
   return fileHash(join(root, "intent", slug, "intent.md"));
@@ -393,14 +379,6 @@ function markWritten(root: string, req: Request, slug: string, own = true): void
 async function ownBefore(root: string, req: Request, slug: string): Promise<boolean> {
   if ((req.written ?? []).includes(slug)) return stillOurs(root, req, slug);
   return matchesHead(root, `intent/${slug}/intent.md`);
-}
-
-/** True when a file (relative to the root) on disk is just what HEAD has: no uncommitted edit, and no uncommitted file where HEAD has none. */
-async function matchesHead(root: string, path: string): Promise<boolean> {
-  const git = new Git(root);
-  // A file main does not have is someone's own when it is on disk already (an uncommitted draft).
-  if ((await git.run(["cat-file", "-e", `HEAD:${path}`], true)).code !== 0) return !existsSync(join(root, path));
-  return (await git.run(["diff", "--quiet", "HEAD", "--", path], true)).code === 0;
 }
 
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {

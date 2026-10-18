@@ -271,11 +271,28 @@ describe("questions", () => {
       const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
       expect(e).toBeInstanceOf(Error);
       expect(existsSync(questionPath(repo.path))).toBe(false);
+      // What it wrote is put back, so the next commit (a block, say) never commits an open question without question.json.
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.question).toBe("");
+      expect(readConversation(repo.path, SLUG)).toBe("");
+      expect((await new Git(repo.path).run(["status", "--porcelain", "--", "intent"])).out.trim()).toBe("");
       rmSync(join(repo.path, ".git", "refs", "heads", `${ctx.cfg.main_branch}.lock`));
       await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS });
       expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: { text: "Archived too?", sessionId: "s1" } });
-      // The failed try left its entry on disk: the second try does not add it again.
       expect(readConversation(repo.path, SLUG).match(/design asks/g)).toHaveLength(1);
+    } finally { trace.close(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a question whose commit fails leaves a person's uncommitted edit as it is", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    try {
+      const path = join(repo.path, "intent", SLUG, "intent.md");
+      writeFileSync(path, `${readFileSync(path, "utf8")}\nA line a person added.\n`);
+      writeFileSync(join(repo.path, ".git", "refs", "heads", `${ctx.cfg.main_branch}.lock`), "");
+      const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(Error);
+      expect(readFileSync(path, "utf8")).toContain("A line a person added.");
+      // conversation.md held nothing of the person's: it is put back.
+      expect(readConversation(repo.path, SLUG)).toBe("");
     } finally { trace.close(); repo.cleanup(); }
   }, 90_000);
 
