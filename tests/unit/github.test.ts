@@ -37,6 +37,39 @@ describe("GitHub", () => {
     t.cleanup();
   });
 
+  test("without a branch rule requiring reviews, an approval from someone with a say in the repository counts", async () => {
+    const t = tempDir();
+    try {
+      const statePath = join(t.path, "gh.json");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath } });
+      await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" });
+      const approvedWith = async (reviewDecision: string, latestReviews: object[]) => {
+        const s = JSON.parse(await Bun.file(statePath).text());
+        Object.assign(s.prs["intent/x"], { reviewDecision, latestReviews });
+        await Bun.write(statePath, JSON.stringify(s));
+        return (await gh.prForBranch("intent/x"))?.approved;
+      };
+      const member = { author: { login: "ann" }, authorAssociation: "MEMBER", state: "APPROVED" };
+      // GitHub's own decision is empty when no rule requires reviews (a rule requiring 0 approvals too).
+      expect(await approvedWith("", [])).toBe(false);
+      expect(await approvedWith("", [member])).toBe(true);
+      expect(await approvedWith("", [{ ...member, authorAssociation: "OWNER" }])).toBe(true);
+      expect(await approvedWith("", [{ ...member, authorAssociation: "COLLABORATOR" }])).toBe(true);
+      // Anyone can approve on a public repository: a stranger's approval does not count.
+      expect(await approvedWith("", [{ ...member, authorAssociation: "NONE" }])).toBe(false);
+      expect(await approvedWith("", [{ ...member, authorAssociation: "CONTRIBUTOR" }])).toBe(false);
+      // A request for changes from anyone holds it back.
+      expect(await approvedWith("", [member, { author: { login: "bob" }, authorAssociation: "NONE", state: "CHANGES_REQUESTED" }])).toBe(false);
+      expect(await approvedWith("", [member, { author: { login: "cat" }, authorAssociation: "MEMBER", state: "COMMENTED" }])).toBe(true);
+      // Without authorAssociation, any approval but the pull request's author's own counts.
+      expect(await approvedWith("", [{ author: { login: "ann" }, state: "APPROVED" }])).toBe(true);
+      expect(await approvedWith("", [{ author: { login: "loopstra-bot" }, state: "APPROVED" }])).toBe(false);
+      // When GitHub decides, its decision stands.
+      expect(await approvedWith("REVIEW_REQUIRED", [member])).toBe(false);
+      expect(await approvedWith("APPROVED", [])).toBe(true);
+    } finally { t.cleanup(); }
+  });
+
   test("checks read the states gh prints, since gh pr checks --json exits 0 whatever they are", async () => {
     const t = tempDir();
     try {

@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // `checksHead`: when set, `checks` are those of that head only; on any other head they still run (pending).
-type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending" | "none"; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
+// `latestReviews`: each reviewer's latest review, as gh prints them; the author is "loopstra-bot".
+type Review = { author?: { login: string }; authorAssociation?: string; state: string };
+type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED"; latestReviews?: Review[]; checks: "pass" | "fail" | "pending" | "none"; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
 // `old`: pull requests a newer one for the same branch replaced, still found by number.
 type State = { prs: Record<string, Pr>; next: number; old?: Pr[] };
 
@@ -68,7 +70,7 @@ if (cmd === "view") {
   const pr = /^\d+$/.test(ref) ? [...Object.values(state.prs), ...(state.old ?? [])].find((p) => p.number === Number(ref)) : state.prs[ref];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
   const branch = /^\d+$/.test(ref) ? Object.entries(state.prs).find(([, p]) => p === pr)?.[0] : ref;
-  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}`, headRefOid: headOf(branch) }));
+  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, latestReviews: pr.latestReviews ?? [], author: { login: "loopstra-bot" }, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}`, headRefOid: headOf(branch) }));
 } else if (cmd === "create") {
   const branch = flag("--head")!;
   const pr: Pr = { number: state.next++, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, createdAt: new Date().toISOString(), title: flag("--title"), body: await body(), comments: [] };

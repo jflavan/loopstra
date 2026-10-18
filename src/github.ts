@@ -28,6 +28,28 @@ export function checksFromRows(rows: { state?: string; bucket?: string }[]): Che
   return "pass";
 }
 
+type PrJson = {
+  reviewDecision?: string | null;
+  latestReviews?: { author?: { login?: string } | null; authorAssociation?: string; state?: string }[] | null;
+  author?: { login?: string } | null;
+};
+
+/** Who has a say in the repository; on a public one anybody else can leave an approving review too. */
+const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * GitHub's reviewDecision when it gives one. It gives none unless a branch rule requires reviews (one
+ * requiring 0 approvals too), and then the latest reviews decide: approved by someone with a say in the
+ * repository (when gh gives no authorAssociation, by anyone but the pull request's author), and no
+ * request for changes.
+ */
+function approved(j: PrJson): boolean {
+  if (j.reviewDecision) return j.reviewDecision === "APPROVED";
+  const reviews = j.latestReviews ?? [];
+  const counts = (r: (typeof reviews)[number]) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login;
+  return reviews.some((r) => r.state === "APPROVED" && counts(r)) && !reviews.some((r) => r.state === "CHANGES_REQUESTED");
+}
+
 export class GitHub {
   private readonly exe: string | null;
   private readonly env: Record<string, string>;
@@ -67,14 +89,14 @@ export class GitHub {
    * and `{ error }` when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
   async lookupPr(branchOrNumber: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,mergedAt,mergeCommit,url,createdAt,headRefOid"]);
+    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,latestReviews,author,mergedAt,mergeCommit,url,createdAt,headRefOid"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };
     }
     try {
-      const j = JSON.parse(r.out) as { number: number; state: PrInfo["state"]; reviewDecision: string; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string };
-      return { pr: { number: j.number, state: j.state, approved: j.reviewDecision === "APPROVED", merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null } };
+      const j = JSON.parse(r.out) as PrJson & { number: number; state: PrInfo["state"]; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string };
+      return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null } };
     } catch { return { error: "gh pr view printed something that is not JSON" }; }
   }
 
