@@ -1,12 +1,12 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { lanesFor, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
+import { lanesFor, loopDayNote, roomBeside, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
-import { claim, release } from "./lanes";
+import { claim, release, runsNoCommands } from "./lanes";
 import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
@@ -62,7 +62,8 @@ export interface LaneStep { slug: string; result?: StepResult; durationMs: numbe
 interface LaneProblem { slug: string; error: unknown }
 
 /** What the lanes of one tick share: the changes taken this tick, whether to start no more steps, and the problems met. */
-interface TickLanes { taken: Set<string>; halt: boolean; problems: LaneProblem[] }
+/** What one tick's lanes share. `lanesRunning`: how many of its lanes have not ended. */
+interface TickLanes { taken: Set<string>; halt: boolean; problems: LaneProblem[]; lanesRunning: number }
 
 export async function tick(root: string): Promise<TickResult> {
   let cfg: Config;
@@ -167,24 +168,32 @@ export async function tick(root: string): Promise<TickResult> {
     // tick waits for every lane. A change whose depends_on names one not merged yet waits, so it is
     // never built on a main without it, and so does one waiting for another to merge the same files.
     // With a remote, the changes watching their pull requests are the watcher's, beside the lanes.
+    // With speed.think_ahead, design and plan steps also run beside the lanes (see thinkAhead), so
+    // the lanes take the steps that may run the project's commands first.
     const human = humanGates(cfg);
-    const candidates = ordered.filter((i) => forLane(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
+    const runnable = ordered.filter((i) => forLane(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
+    const candidates = cfg.speed.think_ahead
+      ? [...runnable.filter((i) => !thinkingStep(i, cfg)), ...runnable.filter((i) => thinkingStep(i, cfg))]
+      : runnable;
     const lanes = lanesFor(cfg, trace);
     traceLanes(trace, cfg, lanes);
-    const shared: TickLanes = { taken: new Set(), halt: false, problems: [] };
+    const shared: TickLanes = { taken: new Set(), halt: false, problems: [], lanesRunning: 0 };
     const started = Date.now();
     // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
     const running = Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    // Started after the lanes, which take their changes at once: the thinker gets what they left.
+    const thinker = cfg.speed.think_ahead ? thinkAhead(root, cfg, trace, shared, human, hasRemote, running) : Promise.resolve([]);
     const watcher = hasRemote ? watchPullRequests(root, cfg, trace, shared, human, running) : Promise.resolve([]);
-    const [settled, [watched]] = await Promise.all([running, Promise.allSettled([watcher])]);
+    const [settled, [thought, watched]] = await Promise.all([running, Promise.allSettled([thinker, watcher])]);
     const perLane = settled.map((s) => laneSteps(s, shared));
+    const thoughtSteps = laneSteps(thought, shared);
     const watchedSteps = laneSteps(watched, shared);
-    out.steps = [...perLane.flat(), ...watchedSteps];
+    out.steps = [...perLane.flat(), ...thoughtSteps, ...watchedSteps];
     // As with one change at a time before: the step that did real work, or the last one that only looked.
-    const firstStep = perLane.find((l) => l.length)?.at(-1) ?? watchedSteps.at(-1);
+    const firstStep = perLane.find((l) => l.length)?.at(-1) ?? thoughtSteps.at(-1) ?? watchedSteps.at(-1);
     out.picked = firstStep?.slug ?? null;
     out.result = firstStep?.result;
-    if (lanes > 1 && out.steps.length) {
+    if ((lanes > 1 || thoughtSteps.length) && out.steps.length) {
       trace.event("_loop", "command", {
         command: "changes worked on together", lanes, steps: out.steps.map((s) => s.slug),
         durationMs: Date.now() - started, busyMs: out.steps.reduce((sum, s) => sum + s.durationMs, 0),
@@ -219,13 +228,19 @@ export async function tick(root: string): Promise<TickResult> {
  * disk, a database held too long); see laneSteps.
  */
 async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
-  for (;;) {
-    // A pause a person set during the tick lets running steps finish and starts nothing more.
-    if (shared.halt || stopRequested() || readLoopHold(root)) return [];
-    const next = candidates.find((i) => takeChange(shared, i.slug));
-    if (!next) return [];
-    const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
-    if (ran) return [ran];
+  // Counted from the moment the lane is started until it ends (see thinkAhead).
+  shared.lanesRunning++;
+  try {
+    for (;;) {
+      // A pause a person set during the tick lets running steps finish and starts nothing more.
+      if (shared.halt || stopRequested() || readLoopHold(root)) return [];
+      const next = candidates.find((i) => takeChange(shared, i.slug));
+      if (!next) return [];
+      const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
+      if (ran) return [ran];
+    }
+  } finally {
+    shared.lanesRunning--;
   }
 }
 
@@ -254,6 +269,7 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
   try {
     const fresh = await readFresh(root, trace, slug);
     if (!fresh || !runs(fresh)) return null;
+    if (thinkingStep(fresh, cfg)) runsNoCommands(slug);
     const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
     return { slug, result, durationMs: Date.now() - t0 };
   } catch (e) {
@@ -262,6 +278,55 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
     release(slug);
     heartbeatDoneWith(root, slug);
   }
+}
+
+/** The design and plan statuses, and the stage whose step each runs. */
+const THINKING: ReadonlyMap<string, "design" | "plan"> = new Map([
+  ["accepted", "design"], ["designing", "design"], ["spec-review", "design"],
+  ["spec-approved", "plan"], ["planning", "plan"], ["plan-review", "plan"],
+]);
+
+/**
+ * The change's step is a design or plan step that runs none of the project's commands: its sessions
+ * only read a snapshot of main, and its stage has no `before` or `after` commands.
+ */
+export function thinkingStep(i: Intent, cfg: Config): boolean {
+  const stage = THINKING.get(i.file.frontmatter.status);
+  return !!stage && !cfg.stages[stage].before.length && !cfg.stages[stage].after.length;
+}
+
+/**
+ * With speed.think_ahead, beside the lanes: design and plan steps (see thinkingStep), one at a time
+ * and in queue order, while any lane runs a step, so a change accepted during another's build is
+ * designed and planned by the time the build ends. They run none of the project's commands, so they
+ * do not count against speed.max_parallel_changes. It scans the intents afresh at each look, so a
+ * change it designed is planned next; a change it ran is taken again only once its status moved, so
+ * a step that only looked is not run over and over. With nothing to take it looks again every
+ * poll_seconds, and once every lane has ended it starts nothing more (the next tick's lanes take
+ * over). It starts a step only with room in the day's budget for its session beside the others
+ * running (roomBeside). A stop, an outage or the day's budget ends it like a lane (see laneProblem).
+ */
+async function thinkAhead(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, hasRemote: boolean, lanesDone: Promise<unknown>): Promise<LaneStep[]> {
+  const steps: LaneStep[] = [];
+  const ranAt = new Map<string, string>();
+  const thinks = (i: Intent) => forLane(i, human, hasRemote) && thinkingStep(i, cfg);
+  const goOn = () => shared.lanesRunning > 0 && !shared.halt && !stopRequested() && !readLoopHold(root);
+  while (goOn()) {
+    const ordered = orderQueue((await scanRepo(root)).intents);
+    // Asked again after the scan: a lane may have ended meanwhile.
+    const next = goOn() ? ordered.find((i) =>
+      thinks(i) && ranAt.get(i.slug) !== i.file.frontmatter.status && !waitingOn(i, ordered).length && roomBeside(cfg, trace, i.slug, 1) && claim(i.slug)) : undefined;
+    if (!next) {
+      await sleepUnlessStopped(cfg.poll_seconds * 1000, lanesDone);
+      continue;
+    }
+    ranAt.set(next.slug, next.file.frontmatter.status);
+    const step = await runClaimed(root, cfg, trace, shared, next.slug, thinks);
+    if (!step) continue;
+    steps.push(step);
+    if (!step.result) break;
+  }
+  return steps;
 }
 
 /**

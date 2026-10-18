@@ -71,6 +71,19 @@ const CANDIDATE = /<[\s/​-‍⁠﻿]*[a-z​-‍⁠﻿]+/gi;
  * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they
  * go from that tag only: elsewhere they join emoji and words, as in Persian).
  */
+/**
+ * How the loop takes changes, in words, so the orchestrator can say why a change waits without
+ * guessing: how many run a step at once, and whether design and plan steps run beside them.
+ */
+export function loopRules(cfg: Config): string {
+  const n = cfg.speed.max_parallel_changes;
+  const lanes = n === 1 ? "one change runs a step at a time" : `up to ${n} changes run a step at the same time`;
+  const beside = cfg.speed.think_ahead
+    ? `; beside ${n === 1 ? "it" : "them"}, design and plan steps run one at a time (speed.think_ahead), but only while another step runs, and not for a stage with before or after commands`
+    : "; design and plan steps take their turn like any other";
+  return `${lanes} (speed.max_parallel_changes)${beside}. A change also waits for the changes in its depends_on to merge, and for one in progress that changes the same files; queue.md names those waits. Between rounds the loop waits up to ${cfg.poll_seconds} seconds.`;
+}
+
 export function untagged(s: string): string {
   return s.replace(CANDIDATE, (x) => {
     const bare = x.replace(INVISIBLE, "");
@@ -228,6 +241,11 @@ export class Orchestrator {
     else if (turn.action) await this.proposeAction(cfg, trace, t, m, turn.action, say);
   }
 
+  /** The loop line, as `loopstra status` and the console show it ("Running — working on ..."). */
+  private loopNow(cfg: Config): string {
+    return heartbeatState(readHeartbeat(this.root), cfg.poll_seconds, new Date(), { pause: readPause(this.root), hold: readLoopHold(this.root) }).text;
+  }
+
   /** The context Loopstra vouches for, then the person's own words, delimited. */
   private async messageBlock(cfg: Config, t: ThreadState, m: IncomingMessage, declined: string | null, upTo: number): Promise<string> {
     const remote = await new Git(this.root).remoteName().catch(() => null);
@@ -242,6 +260,8 @@ export class Orchestrator {
       `Where: ${m.via}`,
       `Today: ${localDate()}`,
       `Main branch: ${cfg.main_branch}; ${remote ? "intents are added through a pull request" : "no GitHub remote, so intents are added to the queue directly"}`,
+      `Loop now: ${this.loopNow(cfg)}`,
+      `How the loop takes changes: ${loopRules(cfg)}`,
       `Handed off from this conversation so far:${handoffs.length ? `\n${handoffs.join("\n")}` : " nothing yet"}`,
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,

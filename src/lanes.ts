@@ -149,7 +149,7 @@ export function assertNoCheckoutLock(where: string): void {
   if ([...heldLocks().keys()].some((n) => n.startsWith("checkout:"))) throw new Error(`${where} ran while holding a checkout lock, a programming error.`);
 }
 
-/** The changes running a step now (a lane's, or the pull request watcher's). */
+/** The changes running a step now (a lane's, the thinker's, or the pull request watcher's). */
 const claimed = new Set<string>();
 
 /** Claims a change for one step: false when it is claimed already. */
@@ -159,12 +159,26 @@ export function claim(slug: string): boolean {
   return true;
 }
 
+/** The claimed changes whose step runs none of the project's commands (a design or plan step). */
+const noCommands = new Set<string>();
+
+/** Marks a claimed change's step as one that runs none of the project's commands, until it is released. */
+export function runsNoCommands(slug: string): void {
+  if (claimed.has(slug)) noCommands.add(slug);
+}
+
 /** Releases a change's claim once its step has ended. */
 export function release(slug: string): void {
   claimed.delete(slug);
+  noCommands.delete(slug);
 }
 
 /** How many claimed changes there are besides this one. */
 export function othersRunning(slug: string): number {
   return claimed.size - (claimed.has(slug) ? 1 : 0);
+}
+
+/** How many claimed changes besides this one may run the project's commands (see runsNoCommands). */
+export function othersRunningCommands(slug: string): number {
+  return [...claimed].filter((s) => s !== slug && !noCommands.has(s)).length;
 }
