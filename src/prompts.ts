@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { templatePath } from "./package";
+
 /**
  * Every variable a prompt template may use. A variable with no value renders as `(none)`.
  * `slug`, `main_branch` and `commands` (the shell commands the session may run) are always set.
@@ -17,4 +21,15 @@ export function renderPrompt(template: string, vars: PromptVars): string {
     const value = (vars as Record<string, string | undefined>)[name];
     return value === undefined || value === "" ? "(none)" : value;
   });
+}
+
+/**
+ * The prompt template a phase uses: the repository's override in loopstra/prompts/<name>.md when
+ * there is one, else the one shipped in the package, else null (a broken install).
+ */
+export function promptPath(root: string, name: string): string | null {
+  const own = join(root, "loopstra", "prompts", `${name}.md`);
+  if (existsSync(own)) return own;
+  const shipped = templatePath("prompts", `${name}.md`);
+  return existsSync(shipped) ? shipped : null;
 }

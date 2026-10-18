@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config";
 import { checkConsistency, parseIntentFile, scanRepo, SLUG, type Intent, type Status } from "../intents";
+import { templatePath } from "../package";
 import { localDate } from "../signals";
 import type { Trace } from "../trace";
 import { chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
@@ -108,7 +109,7 @@ export async function writeIntents(o: {
   const updateTexts = updateFiles.map(([s, text]) => `### ${s}\n\n${text}`);
   const old = new Map(updateFiles.map(([s, text]) => [s, parseIntentFile(text).frontmatter] as const));
   const guidePath = join(o.root, "intent", "README.md");
-  const template = existsSync(guidePath) ? await Bun.file(guidePath).text() : await Bun.file(join(import.meta.dir, "..", "..", "templates", "intent-README.md")).text();
+  const template = existsSync(guidePath) ? await Bun.file(guidePath).text() : await Bun.file(templatePath("intent-README.md")).text();
   const base = await chatTemplate(o.root, "write-intent");
   let problems = "";
   let cost = 0;

@@ -53,15 +53,12 @@ describe("agentPhase", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("a missing prompt file is a plain failure", async () => {
+  test("a phase with no prompt of the repository's own uses the shipped one", async () => {
     const { repo, ctx, trace } = await setup();
-    const r = await agentPhase(ctx, { name: "design", model: "strong", permissionMode: "default", tools: "read", vars: {} });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.reason).toBe("missing-prompt");
-      expect(r.note).toBe("A prompt file for this step is missing. An engineer needs to restore it.");
-    }
-    expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("loopstra/prompts/design.md"))).toBe(true);
+    rmSync(join(repo.path, "loopstra", "prompts", "intake.md"), { force: true });
+    const r = await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(await Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", "1-intake", "prompt.md")).text()).toContain("You are the intake step");
     trace.close(); repo.cleanup();
   });
 

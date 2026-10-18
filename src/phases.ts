@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
@@ -8,7 +8,7 @@ import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
-import { renderPrompt, type PromptVars } from "./prompts";
+import { promptPath, renderPrompt, type PromptVars } from "./prompts";
 import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
@@ -164,38 +164,33 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
 
 /**
- * The prompt a phase would be sent, or null when its prompt file is missing. A work session (see
- * steerable) gets conversation.md as {{conversation}}; a repository prompt older than that variable
- * gets the record at its end instead, when there is one.
+ * The prompt a phase would be sent, or null when neither the repository nor the package has its
+ * prompt. A work session (see steerable) gets conversation.md as {{conversation}}; a repository's
+ * override that leaves that variable out gets the record at its end instead, when there is one.
  */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
-  const promptPath = promptFile(ctx, spec.name);
-  if (!existsSync(promptPath)) return null;
+  const path = promptPath(ctx.root, spec.name);
+  if (path === null) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
   const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
-  const template = await Bun.file(promptPath).text();
+  const template = await Bun.file(path).text();
   let rendered = skillsLine + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
   return withContract(rendered);
 }
 
-/** The repository's prompt file for a phase. */
-function promptFile(ctx: StepContext, name: string): string {
-  return join(ctx.root, "loopstra", "prompts", `${name}.md`);
-}
-
 /**
  * The phase's rendered prompt (see phasePrompt), with `text` added at its end when there is a `note`
- * and the prompt file has no `{{variable}}` to carry it: a repository's own prompt file may be older
- * than that variable (init never upgrades one).
+ * and the prompt file has no `{{variable}}` to carry it: an override may leave the variable out.
  */
 export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable: string, note: string, text: string): Promise<string | null> {
   const prompt = await phasePrompt(ctx, spec);
   if (prompt === null || !note) return prompt;
+  const path = promptPath(ctx.root, spec.name);
   let template = "";
-  try { template = await Bun.file(promptFile(ctx, spec.name)).text(); } catch { /* gone since: add the note */ }
+  try { template = path ? await Bun.file(path).text() : ""; } catch { /* gone since: add the note */ }
   return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
 }
 
@@ -232,7 +227,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   const render = typeof rendered === "function" ? rendered : rendered === undefined ? () => phasePrompt(ctx, spec) : null;
   const prompt = render ? await render() : (rendered as string | null);
   if (prompt === null) {
-    ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
+    ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `the prompt ${spec.name}.md is missing from the repository and the package; reinstall Loopstra` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
   }
 

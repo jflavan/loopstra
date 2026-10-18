@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
 import { claim, release } from "../../src/lanes";
+import { templatePath } from "../../src/package";
 import type { AgentPhaseSpec } from "../../src/phases";
 import { AssistantUnavailable, requestStop, resetStop, StopRequested } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -75,12 +77,11 @@ describe("runJudge off, or not applicable", () => {
     });
   }
 
-  test("a missing prompt file gives today's failure and no cheaper session starts", async () => {
-    await withRepo(SHADOW, {}, async ({ repo, ctx, trace, fake }) => {
+  test("with no repository prompt, the judge uses the shipped one and its sha", async () => {
+    await withRepo(SHADOW, {}, async ({ repo, ctx }) => {
       rmSync(join(repo.path, "loopstra", "prompts", "spec-check.md"));
-      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: false, reason: "missing-prompt", decidedBy: "strong" });
-      expect(fake.models()).toEqual([]);
-      expect(trace.judgeRows()).toEqual([]);
+      expect(templateSha(repo.path, "spec-check")).toBe(createHash("sha256").update(readFileSync(templatePath("prompts", "spec-check.md"), "utf8")).digest("hex"));
+      expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true });
     });
   });
 });
