@@ -93,7 +93,11 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
   try {
     r = await withDetachedWorktree(ctx.git, dir, ctx.cfg.main_branch, async (cwd) => {
       const install = ctx.cfg.commands.install;
-      if (install) await projectCommand(ctx, install, cwd, { where: "done-check copy of main" });
+      if (install) {
+        // A judge without the project's dependencies would find criteria unmet that are not.
+        const i = await projectCommand(ctx, install, cwd, { where: "done-check copy of main" });
+        if (i.code !== 0) throw new Error(`install failed: ${i.lastLine || `exit ${i.code}`}`);
+      }
       return agentPhase(ctx, {
         name: "done-check", model: "strong", permissionMode: "default", tools: "read+commands", cwd,
         vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review },

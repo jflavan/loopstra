@@ -10,8 +10,8 @@ import { AssistantUnavailable } from "../../src/stop";
 import type { PhaseRow, Trace } from "../../src/trace";
 import { setEnv, setupRepo, tempDir, withEnv } from "../helpers";
 
-async function merged(opts: { config?: string; doneCheck?: string } = {}) {
-  const s = await setupRepo("merged", { config: opts.config });
+async function merged(opts: { config?: string; doneCheck?: string; commands?: Record<string, string> } = {}) {
+  const s = await setupRepo("merged", { config: opts.config, commands: opts.commands });
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "spec.md"), "# Spec\n");
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "plan.md"), "# Plan\n");
   await Bun.write(join(s.repo.path, "intent", "add-numbers", "review.md"), "# Review\n");
@@ -300,6 +300,17 @@ describe("verify stage", () => {
     expect(i.file.frontmatter.note).toBe("The final check could not be completed; an engineer should look. When that is sorted out, set status to merged to try again.");
     expect(i.file.frontmatter.resume_from).toBe("merged");
     expect(i.artifacts.has("outcome.md")).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("an install that fails in the done-check's copy blocks as a failed check and never runs the judge", async () => {
+    const { repo, ctx, trace } = await merged({ commands: { test: "echo ok", install: "echo no network && exit 3" } });
+    await runVerifyStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toStartWith("The final check could not be completed; an engineer should look.");
+    expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("install failed: no network"))).toBe(true);
+    expect(trace.phases("add-numbers").some((p) => p.name === "done-check")).toBe(false);
     trace.close(); repo.cleanup();
   });
 
