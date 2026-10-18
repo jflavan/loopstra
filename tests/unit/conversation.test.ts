@@ -12,6 +12,7 @@ describe("conversation.md", () => {
     expect(conversationEntry({ kind: "later", who: "John", via: "the dashboard", text: "Also zero.", at })).toBe("## 2026-10-17 14:02 · John (the dashboard) → the next session\nAlso zero.\n");
     expect(conversationEntry({ kind: "redirect", who: "John", via: "the dashboard", phase: "plan", text: "Use two steps.", at })).toBe("## 2026-10-17 14:02 · John (the dashboard) redirects plan\nUse two steps.\n");
     expect(conversationEntry({ kind: "sent-back", who: "John", via: "the dashboard", text: "Split step 3.", at })).toBe("## 2026-10-17 14:02 · John (the dashboard) sent it back\nSplit step 3.\n");
+    expect(conversationEntry({ kind: "took-back", who: "John", via: "the dashboard", at })).toBe("## 2026-10-17 14:02 · John (the dashboard) took back the send back\nThe note above no longer stands.\n");
   });
 
   test("appending makes the file with its heading, adds after what is there, and commits it", async () => {

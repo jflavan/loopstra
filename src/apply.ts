@@ -224,7 +224,7 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
       // Off main, HEAD is another branch's: what it holds is not what this request overwrote.
       if ((await git.currentBranch()) !== main) throw new Error(`the checkout is not on ${main}`);
       for (const slug of slugs.filter((s) => !kept.includes(s))) await asAtHead(git, root, `intent/${slug}/intent.md`);
-      if ((req.kind === "send-back" || req.kind === "answer") && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
+      if (writesRecord(req) && "slug" in req && slugs.includes(req.slug)) await asAtHead(git, root, `intent/${req.slug}/conversation.md`);
     });
   } catch (e) {
     if (e instanceof StopRequested) throw e;
@@ -247,9 +247,19 @@ async function asAtHead(git: Git, root: string, path: string): Promise<void> {
   }
 }
 
+/** True for an undo that takes back a send back (not an approve). */
+function undoesSendBack(req: Request): boolean {
+  return req.kind === "undo" && SEND_BACK_TO[req.to] === req.expect;
+}
+
+/** True for a request that writes a conversation.md entry: a send back, an answer, an undo of a send back. */
+function writesRecord(req: Request): boolean {
+  return req.kind === "send-back" || req.kind === "answer" || undoesSendBack(req);
+}
+
 /**
- * A send back that never landed takes its conversation.md entry back: the record as main has it.
- * A problem is traced: the entry then stays until a person removes it.
+ * A send back (or an undo of one) that never landed takes its conversation.md entry back: the record
+ * as main has it. A problem is traced: the entry then stays until a person removes it.
  */
 async function putBackConversation(root: string, main: string, trace: Trace, req: StatusRequest): Promise<void> {
   try {
@@ -460,13 +470,12 @@ function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Tra
 /**
  * A status request whose change moved on. A send back whose write landed before a failed commit
  * kept its note in the run folder (see writeSentBack) and wrote its conversation.md entry: both go
- * too, or they would steer the next session though the send back never happened.
+ * too, or they would steer the next session though the send back never happened. An undo of a send
+ * back takes its entry back likewise.
  */
 async function movedOn(root: string, main: string, trace: Trace, req: StatusRequest, status: Status): Promise<Outcome> {
-  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) {
-    dropSentBack(root, req.slug);
-    await putBackConversation(root, main, trace, req);
-  }
+  if (req.kind === "send-back" && (req.written ?? []).includes(req.slug)) dropSentBack(root, req.slug);
+  if (writesRecord(req) && (req.written ?? []).includes(req.slug)) await putBackConversation(root, main, trace, req);
   traced(trace, req, "moved-on", { status });
   return { ok: false, status, text: `${req.slug} moved on to ${status}; nothing changed.` };
 }
@@ -509,6 +518,11 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
       // Its first write only: a later try commits the entry already on disk, never adds it twice.
       if (req.kind === "send-back") {
         const entry = { kind: "sent-back" as const, who: req.byName, via: req.via, text: req.note.trim(), at: new Date() };
+        await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), entry));
+      }
+      // The send back's note no longer stands: said in the record every work session reads.
+      if (undoesSendBack(req)) {
+        const entry = { kind: "took-back" as const, who: req.byName, via: req.via, at: new Date() };
         await Bun.write(conversationPath(root, req.slug), withEntry(readConversation(root, req.slug), entry));
       }
     }

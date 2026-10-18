@@ -14,7 +14,9 @@ export type ConversationEntry =
   | { kind: "question"; phase: string; text: string; why: string; options: string[]; at: Date }
   | { kind: "answer"; who: string; via: string; text: string; at: Date }
   | { kind: "later"; who: string; via: string; text: string; at: Date }
-  | { kind: "sent-back"; who: string; via: string; text: string; at: Date };
+  | { kind: "sent-back"; who: string; via: string; text: string; at: Date }
+  /** An undo of a send back: the note it was sent back with no longer steers anything. */
+  | { kind: "took-back"; who: string; via: string; at: Date };
 
 export function conversationPath(root: string, slug: string): string {
   return join(root, "intent", slug, "conversation.md");
@@ -53,6 +55,7 @@ export function conversationEntry(e: ConversationEntry): string {
     case "later": return `## ${at} · ${one(e.who)} (${one(e.via)}) → the next session\n${body(e.text)}\n`;
     case "answer": return `## ${at} · ${one(e.who)} (${one(e.via)}) answers\n${body(e.text)}\n`;
     case "sent-back": return `## ${at} · ${one(e.who)} (${one(e.via)}) sent it back\n${body(e.text)}\n`;
+    case "took-back": return `## ${at} · ${one(e.who)} (${one(e.via)}) took back the send back\nThe note above no longer stands.\n`;
     case "question": {
       const lines = [`## ${at} · ${one(e.phase)} asks`, body(e.text)];
       if (e.why.trim()) lines.push(`Why: ${one(e.why)}`);

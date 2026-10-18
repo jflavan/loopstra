@@ -112,6 +112,28 @@ describe("applying requests", () => {
     }
   });
 
+  test("undo of a send back says in conversation.md, in the undo's own commit, that its note no longer stands", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x"), b: INTENT("plan-review", "y") }, config: PEOPLE });
+    try {
+      submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      submitRequest(r.root, { ...by, kind: "approve", slug: "b", expect: "plan-review" });
+      await apply(r.root);
+      submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "spec-approved", to: "plan-review", note: "" });
+      submitRequest(r.root, { ...by, kind: "undo", slug: "b", expect: "plan-approved", to: "plan-review", note: "" });
+      await apply(r.root);
+      const show = (path: string) => run(["git", "show", `HEAD~1:${path}`], r.root);
+      // The undo of a's send back is the commit before b's undo.
+      expect((await run(["git", "log", "-1", "--format=%s", "HEAD~1"], r.root)).out).toContain("loopstra(a): undone, back to plan-review by John from the dashboard");
+      expect((await show("intent/a/intent.md")).out).toContain("status: plan-review");
+      expect((await show("intent/a/conversation.md")).out).toMatch(/sent it back\nSplit step 3\.\n\n## \d{4}-\d\d-\d\d \d\d:\d\d · John \(the dashboard\) took back the send back\nThe note above no longer stands\.\n$/);
+      expect((await run(["git", "status", "--short"], r.root)).out.trim()).toBe("");
+      // An approve's undo has nothing to take back.
+      expect(existsSync(join(r.root, "intent", "b", "conversation.md"))).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("undo of an approve takes resume_from back to the approved status before the review", async () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x"), m: INTENT("merge-review", "y") }, config: PEOPLE });
     try {
