@@ -85,6 +85,15 @@ describe("adoptLegacy", () => {
     } finally { t.cleanup(); }
   });
 
+  test("the prompts folder goes when every copy in it was unedited", async () => {
+    const t = legacyRepo();
+    try {
+      writeFileSync(join(t.path, "loopstra", "prompts", "plan.md"), OLD_PLAN);
+      await adoptLegacy(t.path, INDEX, fetchText, { write: true });
+      expect(existsSync(join(t.path, "loopstra", "prompts"))).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
   test("settings that are not JSON are left alone, with a note", async () => {
     const t = legacyRepo();
     try {

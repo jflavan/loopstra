@@ -72,7 +72,12 @@ export async function adoptLegacy(root: string, index: ShippedIndex, fetchText: 
     const text = readFileSync(path, "utf8");
     if (wasShipped(index, file.template, text)) {
       if (file.path.startsWith("loopstra/prompts/")) {
-        writes.push(() => rmSync(path));
+        writes.push(() => {
+          rmSync(path);
+          // No overrides left: the folder goes too (customize makes it again).
+          const dir = join(root, "loopstra", "prompts");
+          if (readdirSync(dir).length === 0) rmdirSync(dir);
+        });
         out.removed.push(file.path);
       } else {
         out.stamp.files[file.path] = { base: textSha(text) };
