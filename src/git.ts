@@ -222,9 +222,13 @@ export class Git {
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
   async worktreePrune(): Promise<void> { await worktreeAdmin(this, () => this.run(["worktree", "prune"])); }
 
-  /** Always prunes first, so a worktree whose directory was deleted by hand does not block the add. */
+  /**
+   * Always prunes first, unlocking the path before, so a worktree whose directory was deleted by hand,
+   * or a killed add's "initializing" lock on it (a prune never takes a locked entry), does not block the add.
+   */
   async worktreeAdd(path: string, branch: string): Promise<void> {
     await worktreeAdmin(this, async () => {
+      await this.run(["worktree", "unlock", path], true);
       await this.run(["worktree", "prune"]);
       await this.run(["worktree", "add", path, branch]);
     });

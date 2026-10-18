@@ -464,6 +464,23 @@ describe("Git and the locks", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("a change's worktree whose folder is gone but whose entry is still locked 'initializing' can be ensured again", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.run(["worktree", "add", wt, "intent/x"]);
+      await git.run(["worktree", "lock", "--reason", "initializing", wt]);
+      rmSync(wt, { recursive: true, force: true });
+      // A prune never takes a locked entry, so the add used to fail the same way on every try.
+      await git.ensureWorktree(wt, "intent/x");
+      expect(existsSync(join(wt, "README.md"))).toBe(true);
+      expect(await new Git(wt).currentBranch()).toBe("intent/x");
+      await removeWorktree(git, wt);
+    } finally { repo.cleanup(); }
+  });
+
   test("ensureWorktree replaces a worktree whose add was cut short, so no file is committed as deleted", async () => {
     const repo = await tempGitRepo();
     try {
