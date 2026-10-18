@@ -403,7 +403,7 @@ export const MERGED: ReadonlySet<Status> = new Set(["merged", "verifying", "done
  * A change's code is in main: it is merged or later, or it was blocked or closed after it merged
  * (for example at verify; `resume_from` then still says merged).
  */
-function inMain(fm: Frontmatter): boolean {
+export function inMain(fm: Frontmatter): boolean {
   if (MERGED.has(fm.status)) return true;
   return (fm.status === "blocked" || fm.status === "closed") && fm.resume_from !== undefined && MERGED.has(fm.resume_from);
 }

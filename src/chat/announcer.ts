@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { attention } from "../attention";
 import { loadConfig, type Config } from "../config";
 import { pidAlive } from "../heartbeat";
-import { scanRepo, type Status } from "../intents";
+import { inMain, scanRepo, type Status } from "../intents";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
 import { chatDir, readJson, writeJson } from "./threads";
@@ -58,6 +58,11 @@ interface AnnouncerState {
   active: string[];
   /** Each change's status at the last poll, to notice merges and finished changes. */
   statuses: Record<string, Status>;
+  /**
+   * The changes whose code was in main at the last poll (see inMain): one blocked after it merged
+   * still is, so its retry is no new merge. Missing in a state written before this was kept.
+   */
+  inMain?: string[];
 }
 
 /** How long a lock holder may go without polling before another process takes over. */
@@ -128,17 +133,20 @@ export async function announce(root: string, log = new AnnouncementLog(root)): P
     }
     const scan = await scanRepo(root);
     const statuses: Record<string, Status> = {};
+    const merged: string[] = [];
     for (const i of scan.intents) {
       const now = i.file.frontmatter.status;
       statuses[i.slug] = now;
+      if (inMain(i.file.frontmatter)) merged.push(i.slug);
       const before = prev?.statuses[i.slug];
       // Nothing to compare on the first poll: what was already merged is not news.
       if (!prev || before === undefined || before === now) continue;
       const title = i.file.title || i.slug;
+      const wasInMain = prev.inMain ? prev.inMain.includes(i.slug) : IN_MAIN.has(before);
       if (now === "done") out.push(log.append(`Done: ${title}. It is finished and checked.`, i.slug));
-      else if (IN_MAIN.has(now) && !IN_MAIN.has(before)) out.push(log.append(`Merged: ${title}. It is in the main code now.`, i.slug));
+      else if (IN_MAIN.has(now) && !wasInMain) out.push(log.append(`Merged: ${title}. It is in the main code now.`, i.slug));
     }
-    writeJson(statePath, { active: items.map(keyOf), statuses } satisfies AnnouncerState);
+    writeJson(statePath, { active: items.map(keyOf), statuses, inMain: merged } satisfies AnnouncerState);
   } finally {
     trace.close();
   }

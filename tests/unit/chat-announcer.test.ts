@@ -41,6 +41,25 @@ describe("announcements", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a change blocked after it merged, then tried again, is not announced as merged a second time", async () => {
+    const r = await chatRepo({ intents: { going: INTENT("reviewing", "going one") } });
+    try {
+      const log = new AnnouncementLog(r.root);
+      await announce(r.root, log);
+      const going = await readIntent(r.root, "going");
+      await writeIntent(going, { status: "merged" });
+      await announce(r.root, log);
+      await writeIntent(going, { status: "verifying" });
+      await announce(r.root, log);
+      // The done-check blocks it; its code stays in main (resume_from says so), and a person retries.
+      await writeIntent(going, { status: "blocked", resume_from: "merged", note: "Not done yet. When that is sorted out, set status to merged." });
+      expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Blocked: going one. Not done yet. When that is sorted out, set status to merged."]);
+      await writeIntent(going, { status: "verifying", note: "" });
+      expect(await announce(r.root, log)).toEqual([]);
+      expect(log.all().filter((a) => a.text.startsWith("Merged:"))).toHaveLength(1);
+    } finally { r.cleanup(); }
+  });
+
   test("only the lock holder writes; a dead holder's lock is taken over", () => {
     const t = tempDir();
     try {
