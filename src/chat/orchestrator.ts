@@ -60,9 +60,15 @@ function plainName(s: string): string {
   return s.replace(/[\s<>"]+/g, " ").trim() || "someone";
 }
 
-/** Text with any tag that could end the context or message block, or open another, made harmless. */
-function untagged(s: string): string {
-  return s.replace(/<\/?(message|context)\b/gi, (x) => x.replace("<", "&lt;"));
+/** Characters that show as nothing (U+200B-U+200D, U+2060, U+FEFF): one inside a tag would hide it from a plain match. */
+const INVISIBLE = /[​-‍⁠﻿]/g;
+
+/**
+ * Text with any tag that could end the context or message block, or open another, made harmless, and
+ * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they go).
+ */
+export function untagged(s: string): string {
+  return s.replace(INVISIBLE, "").replace(/<\s*\/?\s*(message|context)\b/gi, (x) => `&lt;${x.slice(1)}`);
 }
 
 export class Orchestrator {
