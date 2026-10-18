@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
@@ -142,6 +142,9 @@ describe("main_health", () => {
     expect(await runMainHealth(repo.path, broken, trace, ["a"])).toBe("error");
     expect(mainHealthDue(repo.path, broken, trace).due).toBe(false);
     markHealthPending(repo.path, "b");
+    // A file time is coarser than the trace's clock and can read earlier than the error was recorded.
+    const early = new Date(Date.parse(trace.lastSignal("main_health")!.ts) - 5);
+    utimesSync(join(repo.path, ".loopstra", "health-pending"), early, early);
     expect(mainHealthDue(repo.path, broken, trace)).toEqual({ due: true, afterSlugs: ["a", "b"] });
     trace.close(); repo.cleanup();
   });

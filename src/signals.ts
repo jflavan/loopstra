@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { commitRecord } from "./context";
@@ -21,6 +21,14 @@ function pendingPath(root: string): string {
   return join(root, ".loopstra", "health-pending");
 }
 
+/**
+ * Beside health-pending: when a merge last asked for a check, as Date.now(). It is compared with
+ * the trace's times, which come from the same clock; the file's mtime is coarser and can read earlier.
+ */
+function askedPath(root: string): string {
+  return join(root, ".loopstra", "health-asked");
+}
+
 /** The changes waiting for a main_health check (empty when none is asked for). */
 function pendingSlugs(root: string): string[] {
   try {
@@ -36,6 +44,7 @@ export function markHealthPending(root: string, slug: string): void {
   const slugs = pendingSlugs(root);
   if (!slugs.includes(slug)) slugs.push(slug);
   writeFileSync(pendingPath(root), slugs.join("\n"));
+  writeFileSync(askedPath(root), String(Date.now()));
 }
 
 /**
@@ -48,7 +57,7 @@ export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: b
   const last = trace.lastSignal(SIGNAL);
   const intervalPassed = !last || Date.now() - Date.parse(last.ts) >= cfg.signals.main_health.every_minutes * 60_000;
   if (existsSync(pendingPath(root))) {
-    const askedSince = (at: string) => { try { return statSync(pendingPath(root)).mtimeMs >= Date.parse(at); } catch { return true; } };
+    const askedSince = (at: string) => { try { return Number(readFileSync(askedPath(root), "utf8")) >= Date.parse(at); } catch { return true; } };
     const waiting = last?.result === "error" && !intervalPassed && !askedSince(last.ts);
     return { due: !waiting, afterSlugs: pendingSlugs(root) };
   }
@@ -85,7 +94,10 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   const baseline = trace.lastSignal(SIGNAL, { excludeErrors: true });
   trace.signal(SIGNAL, result, output);
   // An error says nothing about the merged changes: they stay pending for the next try.
-  if (result !== "error") rmSync(pendingPath(root), { force: true });
+  if (result !== "error") {
+    rmSync(pendingPath(root), { force: true });
+    rmSync(askedPath(root), { force: true });
+  }
   if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, cfg.main_branch, trace, afterSlugs, output);
   return result;
 }
