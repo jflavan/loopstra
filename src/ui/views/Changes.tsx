@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import type { ChangeSummary, Stage } from "../../console/types";
+import { splitFinished } from "../board";
 import { usd } from "../format";
 import { fuzzyScore } from "../palette";
 import { Link } from "../parts/Link";
@@ -27,8 +28,9 @@ export function Changes() {
     setView(v);
     try { localStorage.setItem(VIEW_KEY, v); } catch { /* kept for this visit only */ }
   };
-  const blocked = shown.filter((c) => c.stage === "blocked");
-  const closed = shown.filter((c) => c.stage === "closed");
+  const { open, earlier, closed } = splitFinished(shown, Date.now());
+  const blocked = open.filter((c) => c.stage === "blocked");
+  const folded = [...earlier, ...closed];
   return (
     <section class="view" style={{ maxWidth: "none" }}>
       <div class="view-head"><h1>Changes</h1><span class="muted">{all.length} in all</span></div>
@@ -40,14 +42,14 @@ export function Changes() {
       </div>
       {view === "board" ? (
         <div class="board">
-          {COLUMNS.map((col) => <Column key={col.stage} label={col.label} items={shown.filter((c) => c.stage === col.stage)} />)}
+          {COLUMNS.map((col) => <Column key={col.stage} label={col.label} items={open.filter((c) => c.stage === col.stage)} />)}
           {blocked.length > 0 && <Column label="Blocked" items={blocked} bad />}
         </div>
-      ) : <ListView items={shown.filter((c) => c.stage !== "closed")} />}
-      {closed.length > 0 && (
+      ) : <ListView items={open} />}
+      {folded.length > 0 && (
         <details class="folded">
-          <summary>{closed.length} closed</summary>
-          <ListView items={closed} />
+          <summary>{[earlier.length && `${earlier.length} finished over a week ago`, closed.length && `${closed.length} closed`].filter(Boolean).join(" · ")}</summary>
+          <ListView items={folded} />
         </details>
       )}
     </section>
