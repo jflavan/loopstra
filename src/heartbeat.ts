@@ -266,11 +266,11 @@ export function clockText(d: Date): string {
 
 /**
  * A phase of change `slug` got through to the assistant on `model`, so the pause and its back-off end.
- * When the pause names another model, it stays as it is, with only `model` added to `gotThrough`: that
- * model may still be out (the strong model's limit, say, while the cheap intake gets through). When it names another change as its
- * cause, its cause and repeat count stay: that change's own phase may keep failing with words that
- * look like an outage, and it must still reach the probe (see PROBE_AFTER in the scheduler) while
- * other changes get through in between. Without `slug`, or with no cause recorded, the pause is
+ * When the pause names another model, it stays as it is, with only `model` added to `gotThrough`:
+ * that model may still be out (the strong model's limit, say, while the cheap intake gets through).
+ * When it names another change as its cause, its cause and repeat count stay: that change's own
+ * phase may keep failing with words that look like an outage, and it must still reach the probe (see
+ * PROBE_AFTER in the scheduler) while other changes get through in between. Without `slug`, or with no cause recorded, the pause is
  * removed completely. Never throws.
  */
 export function clearPause(root: string, slug?: string, now: Date = new Date(), model?: string): void {

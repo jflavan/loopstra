@@ -137,8 +137,8 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 /**
  * Shares main, pushes the branch, and makes sure it has an open pull request (title `<slug>: <title>`, a body
  * naming the artifacts and the review summary): this build's own (see ownPr), or a new one. When a
- * person closed this build's pull request, nothing is pushed or opened: the failure says so. The review goes on it as a comment when the pull
- * request is new or `newReview` says a review just passed. The number and link go to the trace.
+ * person closed this build's pull request, nothing is pushed or opened: the failure says so. The
+ * review goes on it as a comment when the pull request is new or `newReview` says a review just passed. The number and link go to the trace.
  * The push overwrites only the commit recorded in PR_LEASE; a branch someone changed on GitHub is
  * left alone, and the change blocked in plain words. GitHub is asked for its copy first (see
  * settleLease): a branch it no longer has (a person deleted it) must still be missing when the push
@@ -321,8 +321,8 @@ type Freshness = "up to date" | "taken" | "main ahead" | "not pushed" | "remote 
 /**
  * Another change may have merged since this pull request's checks ran (the watcher merges beside
  * the lanes, also at one change at a time), so its checks never saw the two together. Under the
- * merge lock: sync main, fetch, and merge on GitHub only when the pull request's branch there is the branch here and neither main
- * here nor the remote's main gained code it lacks. When only the remote's main did (the sync could
+ * merge lock: sync main, fetch, and merge on GitHub only when the pull request's branch there is
+ * the branch here and neither main here nor the remote's main gained code it lacks. When only the remote's main did (the sync could
  * not bring it in; the `main_sync` signal says why), wait (traced once). When main here did, or the
  * branch here was brought up to date but not pushed, bring it up to date outside the lock (the merge
  * checks again, then a push that keeps the pull request open) and wait for GitHub's checks again.
@@ -441,9 +441,9 @@ async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolea
 }
 
 /**
- * Merges the pull request on GitHub, only at `pr.head`, the head GitHub had when its checks were read
- * after it: commits pushed since are not merged untested. GitHub refusing because the branch moved
- * on waits, and the next look reads the checks of the new head.
+ * Merges the pull request on GitHub, only at `pr.head`, the head GitHub named before its checks were
+ * read: commits pushed since are not merged untested. When GitHub refuses because the branch moved
+ * on, the step waits, and the next look reads the checks of the new head.
  */
 async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
   const merged = await codePhase(ctx, "merge", async () => {
