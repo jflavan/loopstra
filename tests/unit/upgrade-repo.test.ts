@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { init } from "../../src/init";
 import { writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
@@ -315,6 +315,106 @@ describe("upgradeRepo", () => {
       expect(existsSync(join(repo.path, "loopstra", "stamp.json"))).toBe(false);
       expect(await status(repo.path)).toBe("");
       expect(await head(repo.path)).toBe(at);
+    } finally { repo.cleanup(); }
+  });
+
+  test("with a stamp, the person's own settings are not watched: uncommitted, they do not stop the upgrade", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      mkdirSync(join(repo.path, ".claude"), { recursive: true });
+      writeFileSync(join(repo.path, ".claude", "settings.json"), JSON.stringify({ model: "mine" }));
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.ok).toBe(true);
+      expect(r.committed).toBe(true);
+      expect(await status(repo.path)).toBe("?? .claude/settings.json");
+    } finally { repo.cleanup(); }
+  });
+
+  test("with no stamp, settings adoption would change must be committed first", async () => {
+    const repo = await setUpRepo();
+    try {
+      const hooked = { hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "bun loopstra-protect-tests.ts" }] }] } };
+      writeFileSync(join(repo.path, ".claude", "settings.json"), JSON.stringify(hooked));
+      rmSync(join(repo.path, "loopstra", "stamp.json"));
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-qm", "legacy"], repo.path);
+      writeFileSync(join(repo.path, ".claude", "settings.json"), JSON.stringify({ model: "x", ...hooked }));
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.refusal).toBe("These files have changes that are not committed: .claude/settings.json. Commit or undo them, then run loopstra upgrade again.");
+      expect(existsSync(join(repo.path, "loopstra", "stamp.json"))).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a repository from before the stamp, init run again, is still adopted by upgrade", async () => {
+    const repo = await setUpRepo();
+    try {
+      const promptText = readFileSync(templatePath("prompts", "review.md"), "utf8");
+      mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
+      writeFileSync(join(repo.path, "loopstra", "prompts", "review.md"), promptText);
+      mkdirSync(join(repo.path, ".claude", "hooks"), { recursive: true });
+      writeFileSync(join(repo.path, ".claude", "hooks", "loopstra-protect-tests.ts"), "// hook");
+      rmSync(join(repo.path, "loopstra", "stamp.json"));
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-qm", "legacy"], repo.path);
+      await init(repo.path);
+      expect(existsSync(join(repo.path, "loopstra", "stamp.json"))).toBe(false);
+      const index: ShippedIndex = { "templates/prompts/review.md": [{ sha: textSha(promptText), commit: "c" }] };
+      const r = await upgradeRepo(repo.path, { check: false }, deps(index));
+      expect(r.ok).toBe(true);
+      expect(r.removed).toEqual(["loopstra/prompts/review.md", ".claude/hooks/loopstra-protect-tests.ts"]);
+      expect(existsSync(join(repo.path, "loopstra", "prompts", "review.md"))).toBe(false);
+      expect(readStamp(repo.path)!.loopstra).toBe("0.9.0");
+      expect(await status(repo.path)).toBe("");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a merge under way on main is refused; --check says so and goes on", async () => {
+    const repo = await setUpRepo();
+    try {
+      await run(["git", "checkout", "-q", "-b", "side"], repo.path);
+      writeFileSync(join(repo.path, "README.md"), "side\n");
+      await run(["git", "commit", "-qam", "side"], repo.path);
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      writeFileSync(join(repo.path, "README.md"), "main\n");
+      await run(["git", "commit", "-qam", "main"], repo.path);
+      await run(["git", "merge", "-q", "side"], repo.path);
+      const merging = "A merge is in progress on main. Finish or abort it, then run loopstra upgrade again.";
+      expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(merging);
+      const check = await upgradeRepo(repo.path, { check: true }, deps());
+      expect(check.ok).toBe(true);
+      expect(check.warnings).toEqual([merging]);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a commit git refuses after the writes is reported in plain words", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      // prepare-commit-msg runs even with --no-verify.
+      const hook = join(repo.path, ".git", "hooks", "prepare-commit-msg");
+      writeFileSync(hook, "#!/bin/sh\necho 'no commits today' >&2\nexit 1\n");
+      chmodSync(hook, 0o755);
+      const at = await head(repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, deps());
+      expect(r.ok).toBe(false);
+      expect(r.committed).toBe(false);
+      expect(r.refusal).toBe("The files were brought up to date but could not be committed (git said: no commits today). Commit them by hand.");
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(readFileSync(templatePath("skill", "SKILL.md"), "utf8"));
+      expect(await head(repo.path)).toBe(at);
+    } finally { repo.cleanup(); }
+  });
+
+  test("an index that cannot be read is refused in plain words; release notes that cannot be read are left out", async () => {
+    const repo = await setUpRepo();
+    try {
+      await olderSkill(repo.path);
+      const r = await upgradeRepo(repo.path, { check: false }, { ...deps(), index: async () => { throw new Error("shipped.json is not valid JSON"); } });
+      expect(r.refusal).toBe("Loopstra's list of shipped files could not be read: shipped.json is not valid JSON");
+      expect(readFileSync(join(repo.path, SKILL), "utf8")).toBe(OLD_SKILL);
+      const ok = await upgradeRepo(repo.path, { check: false }, { ...deps(), notes: async () => { throw new Error("offline"); } });
+      expect(ok.committed).toBe(true);
+      expect((await run(["git", "log", "-1", "--format=%B"], repo.path)).out.trim()).toBe("loopstra: upgrade to 0.9.0 (from 0.8.0)");
     } finally { repo.cleanup(); }
   });
 });

@@ -96,6 +96,26 @@ describe("init", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("a repository set up by an older Loopstra gets no stamp, and is pointed to upgrade", async () => {
+    const older = "This repository was set up by an older Loopstra: run `loopstra upgrade` to bring it up to date.";
+    for (const leftover of ["loopstra/config.yaml", "loopstra/prompts/review.md", ".claude/hooks/loopstra-protect-tests.ts"]) {
+      const repo = await tempGitRepo();
+      try {
+        mkdirSync(join(repo.path, leftover, ".."), { recursive: true });
+        writeFileSync(join(repo.path, leftover), leftover.endsWith(".yaml") ? "version: 1\ncommands:\n  test: bun test\n" : "old\n");
+        const r = await init(repo.path);
+        expect(existsSync(join(repo.path, "loopstra", "stamp.json"))).toBe(false);
+        expect(r.written).not.toContain("loopstra/stamp.json");
+        expect(r.next[0]).toBe(older);
+      } finally { repo.cleanup(); }
+    }
+    // A fresh repository is not pointed there.
+    const fresh = await tempGitRepo();
+    try {
+      expect((await init(fresh.path)).next).not.toContain(older);
+    } finally { fresh.cleanup(); }
+  });
+
   test("uncommittedSetup asks for the config, the stamp and overrides only", async () => {
     const repo = await tempGitRepo();
     try {

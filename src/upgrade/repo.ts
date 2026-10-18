@@ -3,22 +3,28 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { configPath, NOT_SET_UP, validateConfig } from "../config";
 import { writeFileAtomic } from "../fsutil";
-import { Git } from "../git";
+import { Git, GitError } from "../git";
 import { heartbeatState, readHeartbeat } from "../heartbeat";
 import { onCheckout } from "../lanes";
 import { DEV_VERSION, stampVersion } from "../package";
-import { errorText } from "../shell";
+import { errorText, lastLine } from "../shell";
 import { closestBase, fetchShipped, loadShippedIndex, type FetchText, type ShippedIndex } from "../shipped";
 import { managedFiles, readStamp, STAMP_FILE, textSha, writeStamp, type Stamp } from "../stamp";
 import { upgradeFile, type FileResult } from "./files";
-import { adoptLegacy, OLD_HOOK_FILE, type Adopted } from "./legacy";
+import { adoptLegacy, type Adopted } from "./legacy";
 import { migrateConfig, MIGRATIONS, type Migration } from "./migrations";
 
 /** What upgrade says when the loop is running in the repository. */
 export const LOOP_RUNNING = "The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.";
 
 const CONFIG = "loopstra/config.yaml";
-const SETTINGS = ".claude/settings.json";
+
+/** Operations a commit cannot be made in the middle of, by the ref git keeps while one is under way. */
+const IN_PROGRESS: ReadonlyArray<{ ref: string; what: string }> = [
+  { ref: "MERGE_HEAD", what: "A merge" },
+  { ref: "CHERRY_PICK_HEAD", what: "A cherry-pick" },
+  { ref: "REVERT_HEAD", what: "A revert" },
+];
 
 /** What the repository step needs from outside, injectable for tests. */
 export interface RepoDeps {
@@ -40,7 +46,7 @@ export const REAL_DEPS: RepoDeps = { index: loadShippedIndex, fetchText: fetchSh
 /** What the repository step did, or would do (`check`), or why it did nothing. */
 export interface RepoResult {
   ok: boolean;
-  /** Why nothing was done, in plain words. */
+  /** Why nothing was done (or, when the commit failed after the writes, what is left to do), in plain words. */
   refusal?: string;
   /** The version the stamp named; null when the repository had no stamp. */
   from: string | null;
@@ -90,11 +96,13 @@ const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VER
 
 /**
  * Brings the repository at `root` up to the installed Loopstra (spec: "loopstra upgrade", steps 2-6):
- * refuses when the loop is running, the checkout is not on main, or a managed file, the stamp or the
- * config has uncommitted changes; then works out every file's outcome and the config migration, and
+ * refuses when the loop is running, the checkout is not on main, a merge (or cherry-pick, or revert)
+ * is under way, or a managed file, the stamp, the config or a file adoption would remove or change
+ * has uncommitted changes; then works out every file's outcome and the config migration, and
  * only when all of that succeeded writes them and the stamp and commits them as the runtime, in one
  * commit (files left with conflict markers stay out of it). `check`: say what would happen and write
- * nothing; a running loop or uncommitted files are then listed in `warnings` instead of refused.
+ * nothing; a running loop, an operation under way or uncommitted files are then listed in `warnings`
+ * instead of refused.
  */
 export async function upgradeRepo(root: string, opts: { check: boolean }, deps: RepoDeps = REAL_DEPS): Promise<RepoResult> {
   const to = await deps.version();
@@ -121,28 +129,42 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
     const refused = stop(LOOP_RUNNING);
     if (refused) return refused;
   }
-  const watched = [...new Set([CONFIG, STAMP_FILE, SETTINGS, OLD_HOOK_FILE, ...managedFiles(root, stamp).map((f) => f.path)])];
+  for (const op of IN_PROGRESS) {
+    if ((await git.run(["rev-parse", "-q", "--verify", op.ref], true)).code !== 0) continue;
+    const refused = stop(`${op.what} is in progress on ${main}. Finish or abort it, then run loopstra upgrade again.`);
+    if (refused) return refused;
+  }
+
+  // Work everything out, writing nothing.
+  let index: ShippedIndex;
+  try {
+    index = await deps.index();
+  } catch (e) {
+    return refuse(`Loopstra's list of shipped files could not be read: ${errorText(e)}`);
+  }
+  let adopted: Adopted | null = null;
+  if (!stamp) {
+    try {
+      adopted = await adoptLegacy(root, index, deps.fetchText, { write: false });
+    } catch (e) {
+      return refuse(errorText(e));
+    }
+    result.removed.push(...adopted.removed);
+    result.changed.push(...adopted.changed);
+    result.notes.push(...adopted.notes);
+  }
+  // Watched: what upgrade writes, and what adoption would remove or change (the old hook, settings
+  // holding its entry). A person's own settings are not upgrade's business.
+  const watched = [...new Set([CONFIG, STAMP_FILE, ...managedFiles(root, stamp).map((f) => f.path), ...result.removed, ...result.changed])];
   const dirty = statusPaths((await git.run(["status", "--porcelain", "-z", "--", ...watched])).out);
   if (dirty.length) {
     const refused = stop(`These files have changes that are not committed: ${dirty.join(", ")}. Commit or undo them, then run loopstra upgrade again.`);
     if (refused) return refused;
   }
 
-  // Work everything out, writing nothing.
-  const index = await deps.index();
-  let adopted: Adopted | null = null;
-  let base: Stamp;
+  const base: Stamp = stamp ? { loopstra: stamp.loopstra, files: { ...stamp.files } } : adopted!.stamp;
   let migrated: { text: string };
   try {
-    if (stamp) {
-      base = { loopstra: stamp.loopstra, files: { ...stamp.files } };
-    } else {
-      adopted = await adoptLegacy(root, index, deps.fetchText, { write: false });
-      base = adopted.stamp;
-      result.removed.push(...adopted.removed);
-      result.changed.push(...adopted.changed);
-      result.notes.push(...adopted.notes);
-    }
     const removed = new Set(result.removed);
     // A managed file with no stamp entry (an override made by hand): its base is the shipped version
     // it is, else the closest one. With no shipped version known, today's text (nothing is merged into
@@ -180,26 +202,33 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
   result.ok = true;
   if (opts.check) return result;
 
+  // The commit's paths and message, worked out before anything is written.
+  const conflicted = new Set(result.files.filter((f) => f.outcome === "conflict").map((f) => f.path));
+  const paths = [...new Set([STAMP_FILE, ...result.removed, ...result.changed, ...result.files.map((f) => f.path)])].filter((p) => !conflicted.has(p));
+  // Notes only between two releases: a first upgrade, or one from a development checkout, would list every release.
+  const notes = released(result.from) && released(to) ? await deps.notes(result.from, to).catch(() => "") : "";
+  const subject = `loopstra: upgrade to ${to}${result.from && result.from !== to ? ` (from ${result.from})` : ""}`;
+  const message = notes ? `${subject}\n\n${notes}` : subject;
+
   // Write, then commit.
   adopted?.apply();
   for (const r of result.files) if (r.text !== undefined) writeFileAtomic(join(root, r.path), r.text);
   if (migrated.text !== cfgText) writeFileAtomic(configPath(root), migrated.text);
   writeStamp(root, next);
 
-  const conflicted = new Set(result.files.filter((f) => f.outcome === "conflict").map((f) => f.path));
-  const paths = [...new Set([STAMP_FILE, ...result.removed, ...result.changed, ...result.files.map((f) => f.path)])].filter((p) => !conflicted.has(p));
-  // Notes only between two releases: a first upgrade, or one from a development checkout, would list every release.
-  const notes = released(result.from) && released(to) ? await deps.notes(result.from, to) : "";
-  const subject = `loopstra: upgrade to ${to}${result.from && result.from !== to ? ` (from ${result.from})` : ""}`;
-  const message = notes ? `${subject}\n\n${notes}` : subject;
-  result.committed = await onCheckout(root, async () => {
-    // One path at a time: `add -A` stages a deleted file's removal, and errors on a path git has never seen (a settings file that never existed).
-    for (const p of paths) await git.run(["add", "-A", "--", p], true);
-    const staged = (await git.run(["diff", "--cached", "--name-only", "--", ...paths])).out.split(/\r?\n/).filter(Boolean);
-    if (!staged.length) return false;
-    // Only these paths: anything else a person has staged stays staged and out of the commit.
-    await git.runtime("commit", ["-q", "-m", message, "--", ...staged]);
-    return true;
-  });
+  try {
+    result.committed = await onCheckout(root, async () => {
+      // One path at a time: `add -A` stages a deleted file's removal, and errors on a path git has never seen (a settings file that never existed).
+      for (const p of paths) await git.run(["add", "-A", "--", p], true);
+      const staged = (await git.run(["diff", "--cached", "--name-only", "--", ...paths])).out.split(/\r?\n/).filter(Boolean);
+      if (!staged.length) return false;
+      // Only these paths: anything else a person has staged stays staged and out of the commit.
+      await git.runtime("commit", ["-q", "-m", message, "--", ...staged]);
+      return true;
+    });
+  } catch (e) {
+    const said = e instanceof GitError ? lastLine(e.stderr, /^warning:/i) || lastLine(e.stdout, /^warning:/i) || e.message : errorText(e);
+    return { ...result, ok: false, refusal: `The files were brought up to date but could not be committed (git said: ${said}). Commit them by hand.` };
+  }
   return result;
 }
