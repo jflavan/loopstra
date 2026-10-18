@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
@@ -180,22 +180,37 @@ export function loopLockPath(root: string): string {
 
 interface LoopLock { pid: number; host?: string; startedAt?: string }
 
+/** Links `existing` to `path`; `linkSync`, unless a test passes its own. */
+export type LinkFile = (existing: string, path: string) => void;
+
 /**
  * Makes the lock for this process: written to a temp file, then hard-linked into place, which fails
- * when the lock is there. A reader never sees it half-written. False when it was already there.
+ * when the lock is there, so a reader never sees it half-written ("linked"). Where hard links are
+ * not available (FAT, some network shares) it is an exclusive create, then the write ("created"):
+ * a reader in between sees an empty lock, which counts as held while it is young (see
+ * LOCK_WRITE_MS). False when the lock was already there.
  */
-function createLoopLock(path: string): boolean {
+function createLoopLock(path: string, link: LinkFile): "linked" | "created" | false {
+  const text = JSON.stringify({ pid: process.pid, host: thisHost(), startedAt: new Date().toISOString() });
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify({ pid: process.pid, host: thisHost(), startedAt: new Date().toISOString() }));
-    linkSync(tmp, path);
-    return true;
+    writeFileSync(tmp, text);
+    link(tmp, path);
+    return "linked";
   } catch (e) {
     if ((e as { code?: string })?.code === "EEXIST") return false;
-    throw e;
   } finally {
     rmSync(tmp, { force: true });
   }
+  let fd: number;
+  try {
+    fd = openSync(path, "wx");
+  } catch (e) {
+    if ((e as { code?: string })?.code === "EEXIST") return false;
+    throw e;
+  }
+  try { writeSync(fd, text); } finally { closeSync(fd); }
+  return "created";
 }
 
 /** The lock file's text, or null when there is none. */
@@ -203,7 +218,7 @@ function lockText(path: string): string | null {
   try { return readFileSync(path, "utf8"); } catch { return null; }
 }
 
-/** The lock in `text`, or null when it cannot be read (a damaged file). */
+/** The lock in `text`, or null when it cannot be read (a damaged file, or one still being written). */
 function parseLock(text: string | null): LoopLock | null {
   try {
     const lock = JSON.parse(text ?? "") as LoopLock;
@@ -213,32 +228,48 @@ function parseLock(text: string | null): LoopLock | null {
   }
 }
 
-/** How long a start that took over a lock waits before reading it back. */
+/** How long a lock that cannot be read counts as one still being written (see createLoopLock). */
+const LOCK_WRITE_MS = 5_000;
+
+/** True when the file was changed within the last LOCK_WRITE_MS. */
+function young(path: string): boolean {
+  try { return Date.now() - statSync(path).mtimeMs < LOCK_WRITE_MS; } catch { return false; }
+}
+
+/** How long a start that took over a lock, or made it without a hard link, waits before reading it back. */
 const TAKEOVER_SETTLE_MS = 50;
 
 /**
  * Takes the loop's lock for this process. Returns null when it has it, or the refusal. A live
- * process on this machine holding it refuses. A lock left behind is taken over: its process is
- * gone (on this machine), it cannot be read, or it is from another machine whose loop the heartbeat
- * says is not running (`pollSeconds` judges that). Two starts taking over the same lock can each
- * remove it and link their own, so a takeover reads the lock back after a moment and keeps it only
- * when it still names this process. A problem making the file refuses in plain words.
+ * process on this machine holding it refuses, and so does one that cannot be read yet (see
+ * LOCK_WRITE_MS). A lock left behind is taken over: its process is gone (on this machine), it is
+ * damaged, or it is from another machine whose loop the heartbeat says is not running
+ * (`pollSeconds` judges that). Two starts taking over the same lock can each remove it and make
+ * their own, and so can two that make it without a hard link, so then the lock is read back after a
+ * moment and kept only when it still names this process. Only a problem making the file at all
+ * refuses with that problem. `link` is for tests.
  */
-export async function takeLoopLock(root: string, pollSeconds = 60): Promise<string | null> {
+export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync): Promise<string | null> {
   const path = loopLockPath(root);
   try {
     mkdirSync(join(root, ".loopstra"), { recursive: true });
-    if (createLoopLock(path)) return null;
-    const seen = lockText(path);
-    const lock = parseLock(seen);
-    if (lock) {
-      const here = (lock.host ?? thisHost()) === thisHost();
-      if (here ? pidAlive(lock.pid) : runningLoopPid(root, pollSeconds) !== null) return loopAlreadyRunning(lock.pid);
+    let made = createLoopLock(path, link);
+    if (made === "linked") return null;
+    if (!made) {
+      const seen = lockText(path);
+      const lock = parseLock(seen);
+      if (lock) {
+        const here = (lock.host ?? thisHost()) === thisHost();
+        if (here ? pidAlive(lock.pid) : runningLoopPid(root, pollSeconds) !== null) return loopAlreadyRunning(lock.pid);
+      } else if (young(path)) {
+        return loopAlreadyRunning(null);
+      }
+      // Another start may have taken it over since it was read.
+      if (lockText(path) !== seen) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
+      rmSync(path, { force: true });
+      made = createLoopLock(path, link);
+      if (!made) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
     }
-    // Another start may have taken it over since it was read.
-    if (lockText(path) !== seen) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
-    rmSync(path, { force: true });
-    if (!createLoopLock(path)) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
     await Bun.sleep(TAKEOVER_SETTLE_MS);
     const mine = parseLock(lockText(path));
     if (mine?.pid === process.pid && mine.host === thisHost()) return null;

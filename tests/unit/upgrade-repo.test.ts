@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { init } from "../../src/init";
-import { writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
+import { thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { readStamp, textSha, writeStamp } from "../../src/stamp";
 import { templatePath } from "../../src/package";
 import type { Migration } from "../../src/upgrade/migrations";
@@ -151,6 +151,14 @@ describe("upgradeRepo", () => {
       expect(LOOP_RUNNING).toBe("The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.");
       // Not responding, but its process is alive: it may still be running.
       writeHeartbeat(repo.path, beat({ lastBeatAt: new Date(Date.now() - 3_600_000).toISOString() }));
+      expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(LOOP_RUNNING);
+      // Fresh, but written on this machine by a process that is gone (its window closed, say): no loop runs.
+      const dead = Bun.spawn({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      await dead.exited;
+      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: thisHost() }));
+      expect((await upgradeRepo(repo.path, { check: true }, deps())).warnings).not.toContain(LOOP_RUNNING);
+      // Fresh from another machine sharing the folder: its process id says nothing here.
+      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: "elsewhere" }));
       expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(LOOP_RUNNING);
       writeHeartbeat(repo.path, beat({ stopped: true }));
 

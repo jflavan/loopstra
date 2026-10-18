@@ -385,8 +385,47 @@ describe("the loop lock", () => {
         expect(await takeLoopLock(t.path)).toBeNull();
         expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
       }
+      // Damaged, and not changed for a while.
       writeFileSync(loopLockPath(t.path), "not json");
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(loopLockPath(t.path), old, old);
       expect(await takeLoopLock(t.path)).toBeNull();
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a lock that cannot be read yet counts as held: it may be another start's, still being written", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      writeFileSync(loopLockPath(t.path), "");
+      expect(await takeLoopLock(t.path)).toBe(loopAlreadyRunning(null));
+      expect(loopAlreadyRunning(null)).toStartWith("A loop is already running in this repository. Stop it");
+      expect(readFileSync(loopLockPath(t.path), "utf8")).toBe("");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("where hard links are not available, the lock is made with an exclusive create", async () => {
+    const t = tempDir();
+    try {
+      for (const code of ["EPERM", "ENOTSUP", "ENOSYS", "EXDEV"]) {
+        const noLinks = () => { throw Object.assign(new Error(`${code}: no hard links here`), { code }); };
+        expect(await takeLoopLock(t.path, 60, noLinks)).toBeNull();
+        expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8"))).toMatchObject({ pid: process.pid, host: thisHost() });
+        // No temp file is left beside it.
+        expect(readdirSync(join(t.path, ".loopstra"))).toEqual(["loop.lock"]);
+        expect(await takeLoopLock(t.path, 60, noLinks)).toBe(loopAlreadyRunning(process.pid));
+        dropLoopLock(t.path);
+        expect(existsSync(loopLockPath(t.path))).toBe(false);
+      }
+      // A lock left behind is taken over the same way.
+      writeLock(t.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      expect(await takeLoopLock(t.path, 60, () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); })).toBeNull();
       expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
       dropLoopLock(t.path);
     } finally {
@@ -434,19 +473,21 @@ describe("the loop lock", () => {
     }
   });
 
-  test("starts in separate processes at the same moment: exactly one gets the lock, fresh or taken over", async () => {
-    const dirs = Array.from({ length: 6 }, () => tempDir());
+  test("starts in separate processes at the same moment: exactly one gets the lock, fresh or taken over, with hard links or without", async () => {
+    const dirs = Array.from({ length: 8 }, () => tempDir());
     try {
-      // Three rounds on a fresh folder, three on a lock left by a process that is gone.
-      for (const d of dirs.slice(3)) writeLock(d.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      // Fresh folders, and locks left by a process that is gone; the last four without hard links.
+      for (const d of [dirs[2]!, dirs[3]!, dirs[6]!, dirs[7]!]) writeLock(d.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
       const go = String(Date.now() + 4000);
       // Each winner holds on past the others' tries: with its process gone, the lock would be fair game.
       const code = `const { takeLoopLock } = await import(${JSON.stringify(HEARTBEAT_SRC)});
+        const noLinks = () => { throw Object.assign(new Error("no hard links here"), { code: "EPERM" }); };
         await Bun.sleep(Math.max(0, Number(process.env.LOCK_GO) - Date.now()));
-        const r = await takeLoopLock(process.env.LOCK_ROOT);
+        const r = await takeLoopLock(process.env.LOCK_ROOT, 60, process.env.LOCK_NO_LINKS ? noLinks : undefined);
         console.log(r === null ? "won" : r.startsWith("A loop is already running") ? "refused" : r);
         await Bun.sleep(1500);`;
-      const rounds = await Promise.all(dirs.map((d) => Promise.all(Array.from({ length: 4 }, () => child(code, { LOCK_ROOT: d.path, LOCK_GO: go })))));
+      const rounds = await Promise.all(dirs.map((d, i) => Promise.all(Array.from({ length: 4 }, () =>
+        child(code, { LOCK_ROOT: d.path, LOCK_GO: go, ...(i >= 4 ? { LOCK_NO_LINKS: "1" } : {}) })))));
       for (const [i, round] of rounds.entries()) {
         const said = round.map((r) => r.out).sort();
         expect({ round: i, said }).toEqual({ round: i, said: ["refused", "refused", "refused", "won"] });
