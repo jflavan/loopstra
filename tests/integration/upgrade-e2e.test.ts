@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
@@ -43,15 +43,23 @@ describe("upgrade end to end", () => {
       const tgz = await pack(work.path, "0.9.0");
       const bunHome = join(work.path, "bun");
       const env: Record<string, string | undefined> = { ...process.env, BUN_INSTALL: bunHome };
-      for (const k of Object.keys(env)) if (k.startsWith("LOOPSTRA_")) delete env[k];
+      // Nothing inherited may point the install, or Loopstra, anywhere else.
+      for (const k of Object.keys(env)) if (k.startsWith("LOOPSTRA_") || k === "BUN_INSTALL_BIN" || k === "BUN_INSTALL_GLOBAL_DIR") delete env[k];
       const add = await exec([process.execPath, "add", "-g", tgz], work.path, env);
       expect({ code: add.code, err: add.code ? add.err : "" }).toEqual({ code: 0, err: "" });
       const bin = join(bunHome, "bin", process.platform === "win32" ? "loopstra.exe" : "loopstra");
       expect(existsSync(bin)).toBe(true);
 
-      // The old layout: every prompt copied, the hook and its settings entry.
-      mkdirSync(join(repo.path, "loopstra"), { recursive: true });
-      cpSync(join(ROOT, "templates", "prompts"), join(repo.path, "loopstra", "prompts"), { recursive: true });
+      // The old layout: every prompt copied, the hook and its settings entry. The copies are the
+      // committed prompts, the ones shipped.json knows, even while the working tree has edits.
+      mkdirSync(join(repo.path, "loopstra", "prompts"), { recursive: true });
+      const prompts = (await run(["git", "ls-tree", "--name-only", "HEAD", "templates/prompts/"], ROOT)).out.split("\n").map((l) => l.trim()).filter(Boolean);
+      expect(prompts.length).toBeGreaterThan(0);
+      for (const path of prompts) {
+        const shown = await run(["git", "show", `HEAD:${path}`], ROOT);
+        expect(shown.code).toBe(0);
+        writeFileSync(join(repo.path, "loopstra", "prompts", basename(path)), shown.out);
+      }
       const config = readFileSync(join(ROOT, "templates", "config.yaml"), "utf8").replace("__MAIN_BRANCH__", "main").replace("__COMMANDS__", '  test: "bun test"');
       writeFileSync(join(repo.path, "loopstra", "config.yaml"), config);
       mkdirSync(join(repo.path, ".claude", "hooks"), { recursive: true });

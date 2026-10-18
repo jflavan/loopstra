@@ -36,11 +36,14 @@ describe("release", () => {
       await run(["git", "tag", "v0.1.0"], repo.path);
       expect((await plan(repo.path)).ship).toBe(false);
       // A manual run asks for a release, but this commit is the release already.
-      expect((await plan(repo.path, "patch")).ship).toBe(false);
+      expect((await plan(repo.path, "patch", true)).ship).toBe(false);
+      expect((await plan(repo.path, undefined, true)).ship).toBe(false);
 
       await commit("docs/a.md", "docs: a note");
       expect(await plan(repo.path)).toEqual({ version: "0.1.1", ship: false, previous: "0.1.0" });
-      expect(await plan(repo.path, "minor")).toEqual({ version: "0.2.0", ship: true, previous: "0.1.0" });
+      // A manual run releases anyway, with or without a bump.
+      expect(await plan(repo.path, undefined, true)).toEqual({ version: "0.1.1", ship: true, previous: "0.1.0" });
+      expect(await plan(repo.path, "minor", true)).toEqual({ version: "0.2.0", ship: true, previous: "0.1.0" });
 
       await commit("src/cli.ts", "feat!: a new start");
       expect(await plan(repo.path)).toEqual({ version: "0.2.0", ship: true, previous: "0.1.0" });
@@ -49,6 +52,7 @@ describe("release", () => {
       await run(["git", "tag", "v0.2.0"], repo.path);
       await run(["git", "checkout", "-q", "HEAD~1"], repo.path);
       expect((await plan(repo.path)).ship).toBe(false);
+      expect((await plan(repo.path, undefined, true)).ship).toBe(false);
     } finally {
       repo.cleanup();
     }

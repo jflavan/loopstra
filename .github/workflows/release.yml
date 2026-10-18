@@ -45,29 +45,52 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@latest
+      - run: npm install -g npm@^11.5.1
       - run: bun install --frozen-lockfile
       - id: plan
         env:
           BUMP: ${{ inputs.bump }}
-        # $BUMP unquoted: empty (a workflow_run, or no bump chosen) passes no argument.
-        run: bun scripts/release.ts plan $BUMP >> "$GITHUB_OUTPUT"
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' && '--manual' || '' }}
+        # Unquoted: an empty one (a workflow_run, or no bump chosen) passes no argument.
+        run: bun scripts/release.ts plan $MANUAL $BUMP >> "$GITHUB_OUTPUT"
       - if: steps.plan.outputs.ship != 'true'
         run: echo "Nothing to release since v${{ steps.plan.outputs.previous }}."
       - if: steps.plan.outputs.ship == 'true'
         run: npm version "${{ steps.plan.outputs.version }}" --no-git-tag-version
       - if: steps.plan.outputs.ship == 'true'
         run: bun scripts/shipped.ts shipped.json
+      # Each of the last three steps tolerates having been done already, so a run that failed half way
+      # (or a first release published by hand) can be run again.
       - if: steps.plan.outputs.ship == 'true'
-        run: npm publish --provenance --access public
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          if npm view "loopstra@$VERSION" version >/dev/null 2>&1; then
+            echo "loopstra@$VERSION is already published."
+          else
+            npm publish --provenance --access public
+          fi
+      - if: steps.plan.outputs.ship == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          if tagged=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
+            if [ "$tagged" != "$(git rev-parse HEAD)" ]; then echo "v$VERSION already tags another commit." >&2; exit 1; fi
+            echo "v$VERSION is already tagged."
+          else
+            git tag "v$VERSION"
+          fi
+          git push origin "refs/tags/v$VERSION"
       - if: steps.plan.outputs.ship == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIOUS: ${{ steps.plan.outputs.previous }}
           VERSION: ${{ steps.plan.outputs.version }}
         run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "The release v$VERSION exists already."
+            exit 0
+          fi
           if [ -n "$PREVIOUS" ]; then range="v$PREVIOUS..v$VERSION"; else range="v$VERSION"; fi
           git log --format='- %s' --no-merges "$range" > notes.md
           gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md

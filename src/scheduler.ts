@@ -835,7 +835,8 @@ function stepText(r: StepResult): string {
   return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
 }
 
-function log(line: string): void {
+/** Prints a line of the loop's console output, after the time. */
+export function log(line: string): void {
   console.log(`${new Date().toISOString()} ${line}`);
 }
 

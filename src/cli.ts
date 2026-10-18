@@ -56,10 +56,10 @@ async function notice(): Promise<string | null> {
   }
 }
 
-/** Prints the notice once it is ready; status waits for it after its own output. */
-async function printNotice(pending: Promise<string | null>): Promise<void> {
+/** Prints the notice (through `print`) once it is ready. */
+async function printNotice(pending: Promise<string | null>, print: (line: string) => void = console.log): Promise<void> {
   const line = await pending;
-  if (line) console.log(line);
+  if (line) print(line);
 }
 
 async function main(): Promise<number> {
@@ -101,12 +101,12 @@ async function main(): Promise<number> {
       return 0;
     }
     case "start": {
-      const { preflight, start } = await import("./scheduler");
+      const { log, preflight, start } = await import("./scheduler");
       const pending = notice();
       const refusal = await preflight(root);
       if (refusal) { console.error(refusal); return 1; }
-      // Printed whenever it arrives: a slow registry never holds up the loop.
-      pending.then((line) => { if (line) console.log(line); }, () => {});
+      // Printed whenever it arrives, as a line of the loop's output: a slow registry never holds up the loop.
+      printNotice(pending, log).catch(() => {});
       await start(root, { once: rest.includes("--once") });
       return 0;
     }
