@@ -10,9 +10,11 @@ import { answerQuestion, askedAt, closeStaleQuestion, closeUnusedAnswer, readQue
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
 import { runDesignStep } from "../../src/stages/design";
-import { QuestionAsked } from "../../src/stop";
+import { writeChangeStop } from "../../src/inbox";
+import { QuestionAsked, SessionStopped } from "../../src/stop";
 import type { Trace } from "../../src/trace";
-import { fixture, fixtureDir, setupRepo, withEnv } from "../helpers";
+import { until } from "../console-helpers";
+import { fixture, fixtureDir, setupRepo, tempDir, withEnv } from "../helpers";
 
 const SLUG = "add-numbers";
 const ASKS = { text: "Archived too?", why: "The list hides them.", options: ["yes", "no"] };
@@ -407,5 +409,27 @@ describe("questions", () => {
       expect(trace.phases(SLUG).map((p) => [p.name, p.status])).toEqual([["plan", "fail"]]);
       expect(questionEvents(trace)).toEqual([]);
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a question asked by a session that ends as the change is stopped is still recorded; the stop ends the step", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const t = tempDir();
+    const gate = join(t.path, "go").replaceAll("\\", "/");
+    const [init, ...rest] = asking("design", ASKS).split("\n");
+    const fixtures = fixtureDir({ design: [init, JSON.stringify({ type: "fake_action", wait_for: gate }), ...rest].join("\n") });
+    try {
+      const e = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
+        const run = design(ctx).then(() => null, (err: unknown) => err);
+        await until(() => trace.phases(SLUG).some((p) => p.name === "design" && p.status === "running"));
+        writeChangeStop(repo.path, SLUG, "John");
+        writeFileSync(gate, "");
+        return run;
+      });
+      expect(e).toBeInstanceOf(SessionStopped);
+      expect(trace.phases(SLUG).at(-1)).toMatchObject({ name: "design", status: "asked" });
+      expect(readQuestion(repo.path, SLUG)).toMatchObject({ count: 1, open: { phase: "design", text: "Archived too?" } });
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.question).toBe("open");
+      expect(readConversation(repo.path, SLUG)).toContain("· design asks\nArchived too?\n");
+    } finally { trace.close(); fixtures.cleanup(); t.cleanup(); repo.cleanup(); }
   }, 90_000);
 });

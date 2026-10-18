@@ -263,10 +263,10 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     r = await tries(prompt, spec.resume, true);
   }
   if (!r.ok) return r;
-  const { asked, traceName: endedAs, ...ok } = r as Asking<N>;
-  if (!asked) return ok;
-  await recordQuestion(ctx, { phase: spec.name, traceName: endedAs, seq: ok.seq!, sessionId: ok.sessionId, ...asked });
-  throw new QuestionAsked(spec.name, asked.text);
+  const { asked, ...ok } = r as Asking<N>;
+  // Recorded already, as its session ended (see attempt).
+  if (asked) throw new QuestionAsked(spec.name, asked.text);
+  return ok;
 }
 
 /** The phases whose sessions may ask a person a question (see src/questions.ts). */
@@ -278,8 +278,8 @@ export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", 
  */
 type AskRule = { refuse?: string };
 
-/** A successful attempt, with the trace name its row ended under and, when it asked one, its question. */
-type Asking<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: true }> & { traceName: string; asked?: Question };
+/** A successful attempt, with its question when it asked one (recorded already: see attempt). */
+type Asking<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: true }> & { asked?: Question };
 /** One attempt's result (see attempt). */
 type Attempted<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: false }> | Asking<N>;
 
@@ -483,6 +483,10 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail }), note: `${r.reason}: ${r.detail}` }
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
+  // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
+  // its row already ended asked (see tracedSession).
+  const question = out.ok ? (asked as Question | null) : null;
+  if (question) await recordQuestion(ctx, { phase: spec.name, traceName, seq, sessionId: out.sessionId, ...question });
   // A person stopped the change while this session ran: the step ends here, whatever the session did.
   throwIfChangeStopped(ctx);
   if (!out.ok) {
@@ -492,7 +496,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx);
-  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, traceName, ...(asked ? { asked } : {}) };
+  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, ...(question ? { asked: question } : {}) };
 }
 
 /**
