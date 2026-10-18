@@ -1,8 +1,29 @@
 import { lastLine, spawnBounded } from "./shell";
 import { StopRequested } from "./stop";
+import type { Trace } from "./trace";
 
 export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
+
+/** Whether GitHub answered the pull request watcher's last look: `fail` with gh's error, or `pass`. */
+export const GITHUB_SIGNAL = "github";
+/** How long GitHub may go unanswered before a person is told (see attention). */
+export const GITHUB_SILENT_MS = 15 * 60_000;
+
+/**
+ * Records a look at GitHub (`error`: gh's error, or null when it answered) as the `github` signal,
+ * only when that differs from the last one: a lasting problem (a token GitHub no longer takes) is
+ * one line in the trace, not one per look.
+ */
+export function recordGitHub(trace: Trace, error: string | null): void {
+  const last = trace.lastSignal(GITHUB_SIGNAL);
+  if (error === null) {
+    if (last?.result === "fail") trace.signal(GITHUB_SIGNAL, "pass", "GitHub answers again.");
+    return;
+  }
+  if (last?.result === "fail" && last.output === error) return;
+  trace.signal(GITHUB_SIGNAL, "fail", error);
+}
 
 /**
  * `mergeCommit`: the commit the merge made on the base branch (null until merged, or when gh does not say).

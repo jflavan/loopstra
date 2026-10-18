@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { attention } from "../../src/attention";
 import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git, GitTimeout } from "../../src/git";
@@ -492,6 +493,37 @@ describe("the loop with a GitHub remote", () => {
       await s.setPr({ checks: "none" });
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merged");
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("GitHub not answering is one signal, not a line per look; after 15 minutes it is in Needs attention, until GitHub answers", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      const cfg = await loadConfig(s.repo);
+      const github = () => inTrace(s.repo, (t) => t.signals(500).filter((x) => x.name === "github"));
+      const needs = async (minutes: number) => {
+        const t = Trace.open(s.repo);
+        try { return await attention(s.repo, cfg, t, new Date(Date.now() + minutes * 60_000)); } finally { t.close(); }
+      };
+      const AUTH = "HTTP 401: Bad credentials (https://api.github.com/graphql)";
+      await withEnv({ LOOPSTRA_FAKE_GH_FAIL: "1" }, async () => {
+        await tick(s.repo);
+        await tick(s.repo);
+      });
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect(github().map((x) => [x.result, x.output])).toEqual([["fail", AUTH]]);
+      expect(inTrace(s.repo, (t) => t.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("Bad credentials")))).toEqual([]);
+      expect((await needs(0)).filter((i) => i.title === "GitHub")).toEqual([]);
+      expect((await needs(20)).filter((i) => i.title === "GitHub")).toEqual([
+        { kind: "sync", label: "GitHub", slug: null, title: "GitHub", what: `GitHub hasn't answered for 15 minutes: ${AUTH}` },
+      ]);
+      await tick(s.repo);
+      expect(github().map((x) => x.result)).toEqual(["pass", "fail"]);
+      expect((await needs(20)).filter((i) => i.title === "GitHub")).toEqual([]);
     });
     s.cleanup();
   }, 180_000);

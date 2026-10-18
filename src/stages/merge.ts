@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
-import { GitHub, type PrInfo } from "../github";
+import { GitHub, recordGitHub, type PrInfo } from "../github";
 import { onCheckout, oneMerge, othersRunning } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
@@ -258,13 +258,21 @@ async function headOnGitHub(ctx: StepContext): Promise<string | null> {
  * Closed → block. A person on the status line who has not set merge-approved, checks pending (or
  * not reported yet on a new pull request whose branch has workflows), gh not answering, or
  * (merge.human pr) not approved yet → wait, changing nothing. Checks failed → block. Otherwise
- * merge through gh.
+ * merge through gh. Whether GitHub answered the look (the pull request, its checks) is recorded once
+ * it is over, as the `github` signal (see recordGitHub), not traced on every look.
  */
 async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const gh = new GitHub(ctx.root);
+  let unanswered: string | null = null;
+  const r = await watchPullRequest(ctx, gh, (error) => { unanswered ??= error; });
+  recordGitHub(ctx.trace, unanswered);
+  return r;
+}
+
+async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error: string) => void): Promise<StepResult> {
   const found = await ownPr(ctx, gh);
   if ("error" in found) {
-    ctx.trace.event(ctx.slug, "error", { where: "pull request", error: found.error, note: "will look again on the next tick" });
+    unanswered(found.error);
     return { ok: true, waiting: true };
   }
   const pr = found.pr;
@@ -286,7 +294,7 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const status = ctx.intent.file.frontmatter.status;
   // A person decides on the status line and has not yet: only a merge or close on GitHub counts.
   if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return { ok: true, waiting: true };
-  const checks = await gh.checks(pr.number, (error) => ctx.trace.event(ctx.slug, "error", { where: "pull request checks", error, note: "will look again on the next tick" }));
+  const checks = await gh.checks(pr.number, unanswered);
   if (checks === "pending" || checks === "unknown") return { ok: true, waiting: true };
   if (checks === "none" && (await checksMayStillStart(ctx, pr))) return { ok: true, waiting: true };
   const where = `pull request #${pr.number} ${pr.url}`;

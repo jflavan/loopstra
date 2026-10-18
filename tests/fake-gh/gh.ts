@@ -62,6 +62,8 @@ if (group === "auth" && cmd === "status") {
   if (process.env.LOOPSTRA_FAKE_GH_SIGNED_OUT === "1") { console.error("You are not logged into any GitHub hosts. To log in, run: gh auth login"); process.exit(1); }
   console.log("github.com: Logged in (fake)"); process.exit(0);
 }
+// Test knob: LOOPSTRA_FAKE_GH_FAIL=1 behaves like a gh whose token GitHub no longer takes.
+if (group === "pr" && process.env.LOOPSTRA_FAKE_GH_FAIL === "1") { console.error("HTTP 401: Bad credentials (https://api.github.com/graphql)"); process.exit(1); }
 if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); process.exit(1); }
 
 if (cmd === "view") {

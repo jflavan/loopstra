@@ -37,6 +37,9 @@ describe("events in plain words", () => {
     expect(describeEvent(row("command", { command: "bun test", code: 1, lastLine: "x" }))).toBe("Ran bun test: exit code 1.");
     expect(describeEvent(row("command", { command: "bun test", note: new Cancelled().message }))).toBe("Stopped bun test.");
     expect(describeEvent(row("signal", { name: "main_health", result: "fail", output: "" }, { slug: "_signals" }))).toBe("The tests on main fail.");
+    expect(describeEvent(row("signal", { name: "github", result: "fail", output: "HTTP 401: Bad credentials (https://api.github.com/graphql)" }, { slug: "_signals" })))
+      .toBe("GitHub did not answer about pull requests: HTTP 401: Bad credentials (https://api.github.com/graphql).");
+    expect(describeEvent(row("signal", { name: "github", result: "pass", output: "GitHub answers again." }, { slug: "_signals" }))).toBe("GitHub answers again.");
     expect(describeEvent(row("error", { where: "scan", problem: "The status line is wrong" }))).toBe("Problem (scan): The status line is wrong.");
     expect(describeEvent(row("pause", { reason: "The assistant is unavailable." }))).toBe("Paused: The assistant is unavailable.");
     expect(describeEvent(row("chat-request", { kind: "accept", by: "ana", result: "accepted" }))).toBe("ana accepted it from chat.");
