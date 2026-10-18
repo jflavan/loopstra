@@ -380,7 +380,7 @@ Tests run the whole loop in a temporary git repo against a fake `claude` executa
 
 **Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) releases when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), publishes to npm with provenance, tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A version already on npm is not published again; the run still adds the tag and the GitHub Release if they are missing. Run the workflow by hand on `main` to release without such a change; a manual run always releases, and `bump` (`patch` or `minor`) chooses the step. Neither kind of run releases a commit that is already part of a release (the latest `v*` tag, or older).
 
-**One-time setup.** The package has no license yet (`"license": "UNLICENSED"`, and no LICENSE file): choose one before the first publish. npm trusted publishing can only be set up for a package that exists, so the first release is published by hand, signed in to npm (`npm login`), from a clean checkout of `main`:
+**One-time setup.** npm trusted publishing can only be set up for a package that exists, so the first release is published by hand, signed in to npm (`npm login`), from a clean checkout of `main`:
 
 ```
 npm version 0.1.0 --no-git-tag-version
@@ -392,3 +392,7 @@ git checkout package.json && rm shipped.json
 ```
 
 This publish has no provenance; the workflow's publishes have it. The tag tells the workflow that 0.1.0 is out, so its next run releases 0.1.1. Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, repository `jflavan/loopstra`, workflow `release.yml`. From then on the workflow publishes with no token stored.
+
+## License
+
+MIT. See `LICENSE`.
