@@ -7,6 +7,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { hookSettings } from "../../src/package";
 import { onCheckout, oneMerge, realPathKey } from "../../src/lanes";
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -238,6 +239,15 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(true);
     const recorded = await Bun.file(argsFile).json();
     expect(recorded.env.LOOPSTRA_PHASE).toBe("intake");
+    trace.close(); repo.cleanup();
+  });
+
+  test("every agent phase session gets the test hook through --settings", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
+    expect(args[args.indexOf("--settings") + 1]).toBe(hookSettings());
     trace.close(); repo.cleanup();
   });
 

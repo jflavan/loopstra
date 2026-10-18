@@ -16,6 +16,7 @@ import { assertNoCheckoutLock, assertNoLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
+import { hookSettings } from "./package";
 import { steerable } from "./console/steerable";
 import { deliverInbox } from "./steering";
 import { changeStoppedBy } from "./inbox";
@@ -449,6 +450,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       permissionMode: spec.permissionMode,
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
+      // The test-protection hook, from the installed package; it acts only in a fix session.
+      settings: hookSettings(),
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: capUsd,
       resume: spec.resume,

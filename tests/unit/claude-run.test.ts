@@ -190,6 +190,18 @@ describe("runPhase", () => {
     t.cleanup();
   });
 
+  test("passes settings to claude as --settings", async () => {
+    const t = tempDir();
+    try {
+      const argsFile = join(t.path, "args.json");
+      const settings = '{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"bun \\"C:/a b/hook.ts\\""}]}]}}';
+      await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+        allowedTools: [], settings, timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+      const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
+      expect(args[args.indexOf("--settings") + 1]).toBe(settings);
+    } finally { t.cleanup(); }
+  });
+
   test("sessions run with background tasks turned off", async () => {
     const t = tempDir();
     const argsFile = join(t.path, "args.json");
