@@ -1,4 +1,4 @@
-import { closeSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
@@ -146,15 +146,17 @@ export function loopAlreadyRunning(pid: number | null): string {
 /**
  * This machine, as the heartbeat and the loop's lock record it, so a process id is only checked
  * where it means something. The platform is part of it: WSL takes the Windows machine's name, and
- * a folder both share would otherwise look like one machine. On Linux the machine id tells WSL
- * distributions (and containers) on one machine apart.
+ * a folder both share would otherwise look like one machine. On Linux the machine id and the
+ * process id namespace (`pid:[4026531836]`) tell WSL distributions and containers on one machine
+ * apart: each sees the others' processes as gone.
  */
 export function thisHost(): string {
-  let id = "";
+  const parts = [process.platform, hostname()];
   if (process.platform === "linux") {
-    try { id = readFileSync("/etc/machine-id", "utf8").trim().slice(0, 12); } catch { /* none: the name alone */ }
+    try { parts.push(readFileSync("/etc/machine-id", "utf8").trim().slice(0, 12)); } catch { /* none */ }
+    try { parts.push(readlinkSync("/proc/self/ns/pid")); } catch { /* none */ }
   }
-  return [process.platform, hostname(), id].filter(Boolean).join("/");
+  return parts.filter(Boolean).join("/");
 }
 
 /**
@@ -185,22 +187,23 @@ export type LinkFile = (existing: string, path: string) => void;
 
 /**
  * Makes the lock for this process: written to a temp file, then hard-linked into place, which fails
- * when the lock is there, so a reader never sees it half-written ("linked"). Where hard links are
- * not available (FAT, some network shares) it is an exclusive create, then the write ("created"):
- * a reader in between sees an empty lock, which counts as held while it is young (see
- * LOCK_WRITE_MS). False when the lock was already there.
+ * when the lock is there, so a reader never sees it half-written. Where hard links are not
+ * available (FAT, some network shares) it is an exclusive create, then the write: a reader in
+ * between sees an empty lock, which counts as held while it is young (see LOCK_WRITE_MS). False
+ * when the lock was already there.
  */
-function createLoopLock(path: string, link: LinkFile): "linked" | "created" | false {
+function createLoopLock(path: string, link: LinkFile): boolean {
   const text = JSON.stringify({ pid: process.pid, host: thisHost(), startedAt: new Date().toISOString() });
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     writeFileSync(tmp, text);
     link(tmp, path);
-    return "linked";
+    return true;
   } catch (e) {
     if ((e as { code?: string })?.code === "EEXIST") return false;
   } finally {
-    rmSync(tmp, { force: true });
+    // On Windows a virus scanner or the indexer can hold it a moment; it must not undo a lock that was made.
+    try { rmSync(tmp, { force: true }); } catch { /* a leftover temp file is harmless */ }
   }
   let fd: number;
   try {
@@ -210,7 +213,7 @@ function createLoopLock(path: string, link: LinkFile): "linked" | "created" | fa
     throw e;
   }
   try { writeSync(fd, text); } finally { closeSync(fd); }
-  return "created";
+  return true;
 }
 
 /** The lock file's text, or null when there is none. */
@@ -236,7 +239,7 @@ function young(path: string): boolean {
   try { return Date.now() - statSync(path).mtimeMs < LOCK_WRITE_MS; } catch { return false; }
 }
 
-/** How long a start that took over a lock, or made it without a hard link, waits before reading it back. */
+/** How long a start that made the lock waits before reading it back. */
 const TAKEOVER_SETTLE_MS = 50;
 
 /**
@@ -245,17 +248,16 @@ const TAKEOVER_SETTLE_MS = 50;
  * LOCK_WRITE_MS). A lock left behind is taken over: its process is gone (on this machine), it is
  * damaged, or it is from another machine whose loop the heartbeat says is not running
  * (`pollSeconds` judges that). Two starts taking over the same lock can each remove it and make
- * their own, and so can two that make it without a hard link, so then the lock is read back after a
- * moment and kept only when it still names this process. Only a problem making the file at all
- * refuses with that problem. `link` is for tests.
+ * their own (one of them may even remove a lock a third start just made), and two that make it
+ * without a hard link can both think they did, so the lock is always read back after a moment and
+ * kept only when it still names this process. Only a problem making the file at all refuses with
+ * that problem. `link` is for tests.
  */
 export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync): Promise<string | null> {
   const path = loopLockPath(root);
   try {
     mkdirSync(join(root, ".loopstra"), { recursive: true });
-    let made = createLoopLock(path, link);
-    if (made === "linked") return null;
-    if (!made) {
+    if (!createLoopLock(path, link)) {
       const seen = lockText(path);
       const lock = parseLock(seen);
       if (lock) {
@@ -267,9 +269,9 @@ export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFil
       // Another start may have taken it over since it was read.
       if (lockText(path) !== seen) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
       rmSync(path, { force: true });
-      made = createLoopLock(path, link);
-      if (!made) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
+      if (!createLoopLock(path, link)) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
     }
+    // Even a lock made fresh: a start that read the one left behind earlier may still remove it.
     await Bun.sleep(TAKEOVER_SETTLE_MS);
     const mine = parseLock(lockText(path));
     if (mine?.pid === process.pid && mine.host === thisHost()) return null;

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, runningLoopPid, startHeartbeat, takeLoopLock, thisHost, writeHeartbeat, type Heartbeat,
+  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, runningLoopPid, startHeartbeat, takeLoopLock, thisHost, writeHeartbeat, type Heartbeat, type LinkFile,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -475,27 +475,56 @@ describe("the loop lock", () => {
 
   test("starts in separate processes at the same moment: exactly one gets the lock, fresh or taken over, with hard links or without", async () => {
     const dirs = Array.from({ length: 8 }, () => tempDir());
+    const results = tempDir();
+    const release = join(results.path, "release");
     try {
       // Fresh folders, and locks left by a process that is gone; the last four without hard links.
       for (const d of [dirs[2]!, dirs[3]!, dirs[6]!, dirs[7]!]) writeLock(d.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
       const go = String(Date.now() + 4000);
-      // Each winner holds on past the others' tries: with its process gone, the lock would be fair game.
-      const code = `const { takeLoopLock } = await import(${JSON.stringify(HEARTBEAT_SRC)});
+      // Each child says how it did in a file, then holds on until every child has: a winner gone
+      // early would leave a lock that a slow child could take over, fairly.
+      const code = `const { existsSync, writeFileSync } = await import("node:fs");
+        const { takeLoopLock } = await import(${JSON.stringify(HEARTBEAT_SRC)});
         const noLinks = () => { throw Object.assign(new Error("no hard links here"), { code: "EPERM" }); };
         await Bun.sleep(Math.max(0, Number(process.env.LOCK_GO) - Date.now()));
         const r = await takeLoopLock(process.env.LOCK_ROOT, 60, process.env.LOCK_NO_LINKS ? noLinks : undefined);
-        console.log(r === null ? "won" : r.startsWith("A loop is already running") ? "refused" : r);
-        await Bun.sleep(1500);`;
-      const rounds = await Promise.all(dirs.map((d, i) => Promise.all(Array.from({ length: 4 }, () =>
-        child(code, { LOCK_ROOT: d.path, LOCK_GO: go, ...(i >= 4 ? { LOCK_NO_LINKS: "1" } : {}) })))));
+        const said = r === null ? "won" : r.startsWith("A loop is already running") ? "refused" : r;
+        writeFileSync(process.env.LOCK_OUT, said);
+        console.log(said);
+        const until = Date.now() + 55_000;
+        while (!existsSync(process.env.LOCK_RELEASE) && Date.now() < until) await Bun.sleep(50);`;
+      const outs = dirs.map((_, i) => Array.from({ length: 4 }, (_, j) => join(results.path, `${i}-${j}`)));
+      const running = dirs.map((d, i) => Promise.all(outs[i]!.map((out) =>
+        child(code, { LOCK_ROOT: d.path, LOCK_GO: go, LOCK_OUT: out, LOCK_RELEASE: release, ...(i >= 4 ? { LOCK_NO_LINKS: "1" } : {}) }))));
+      const until = Date.now() + 50_000;
+      while (!outs.flat().every((o) => existsSync(o)) && Date.now() < until) await Bun.sleep(100);
+      writeFileSync(release, "");
+      const rounds = await Promise.all(running);
       for (const [i, round] of rounds.entries()) {
         const said = round.map((r) => r.out).sort();
         expect({ round: i, said }).toEqual({ round: i, said: ["refused", "refused", "refused", "won"] });
       }
     } finally {
-      for (const d of dirs) d.cleanup();
+      writeFileSync(release, "");
+      for (const d of [...dirs, results]) d.cleanup();
     }
   }, 60_000);
+
+  test("a start keeps a lock it made only while the lock still names it", async () => {
+    const t = tempDir();
+    try {
+      // A stalled start, which read a lock left behind earlier, removes this one just made and makes its own.
+      const replaced: LinkFile = (existing, path) => {
+        linkSync(existing, path);
+        rmSync(path);
+        writeFileSync(path, JSON.stringify({ pid: DEAD_PID, host: thisHost(), startedAt: ago(0) }));
+      };
+      expect(await takeLoopLock(t.path, 60, replaced)).toBe(loopAlreadyRunning(DEAD_PID));
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(DEAD_PID);
+    } finally {
+      t.cleanup();
+    }
+  });
 });
 
 describe("runningLoopPid", () => {
