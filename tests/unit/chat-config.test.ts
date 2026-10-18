@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CHAT_PROMPT_VARS, chatTemplate, renderChatPrompt } from "../../src/chat/agents";
 import { configPath, loadConfig } from "../../src/config";
 import { init } from "../../src/init";
+import { templatePath } from "../../src/package";
+import { promptPath } from "../../src/prompts";
 import { chatRepo, turn } from "../chat-helpers";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
@@ -69,11 +71,12 @@ describe("the chat prompts", () => {
     } finally { t.cleanup(); }
   });
 
-  test("init stamps them with the others", async () => {
+  test("they come from the package with the others: init copies none", async () => {
     const repo = await tempGitRepo();
     try {
       await init(repo.path);
-      expect(readdirSync(join(repo.path, "loopstra", "prompts"))).toEqual(expect.arrayContaining(["orchestrator.md", "write-intent.md"]));
+      expect(existsSync(join(repo.path, "loopstra", "prompts"))).toBe(false);
+      for (const name of ["orchestrator", "write-intent"]) expect(promptPath(repo.path, name)).toBe(templatePath("prompts", `${name}.md`));
     } finally { repo.cleanup(); }
   });
 });
