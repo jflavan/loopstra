@@ -168,11 +168,16 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
   const max = ctx.cfg.stages.build.max_fix_loops;
   const wt = new Git(ctx.worktreeDir);
   for (let i = 1; ; i++) {
-    const failure = await runChecks(ctx, `${prefix}-${i}`);
-    // New files are the commands' output (a coverage folder, a junit xml): every caller commits its
-    // work before the loop, and each fix is committed below. Removed, so neither a fix's commit nor a
-    // later look for unsaved work (review start, the merge checks) commits them.
-    await wt.run(["clean", "-f", "-d", "-q"], true);
+    let failure: CommandResult | null;
+    try {
+      failure = await runChecks(ctx, `${prefix}-${i}`);
+    } finally {
+      // New files are the commands' output (a coverage folder, a junit xml): every caller commits its
+      // work before the loop, and each fix is committed below. Removed, so neither a fix's commit nor a
+      // later look for unsaved work (review start, the merge checks) commits them; also when a stop cut
+      // the run short.
+      await wt.run(["clean", "-f", "-d", "-q"], { allowFail: true, cleanup: true });
+    }
     if (!failure) {
       // The merge checks need not run them again on the same code (see checkMerge).
       writeMarker(ctx, TESTED, testedMarker(ctx, await wt.headSha()));
