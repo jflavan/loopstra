@@ -229,7 +229,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   const prompt = render ? await render() : (rendered as string | null);
   if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `the prompt ${spec.name}.md is missing from the repository and the package; reinstall Loopstra` });
-    return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
+    return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to reinstall Loopstra.`, sessionId: null };
   }
 
   const traceName = spec.traceName ?? spec.name;

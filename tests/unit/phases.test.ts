@@ -63,6 +63,15 @@ describe("agentPhase", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("every agent phase session gets the test hook through --settings", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
+    expect(args[args.indexOf("--settings") + 1]).toBe(hookSettings());
+    trace.close(); repo.cleanup();
+  });
+
   test("an envelope that fails validation is a failure with the phase recorded as fail", async () => {
     const { repo, ctx, trace } = await setup();
     await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "x FIXTURE:intake");
@@ -232,6 +241,21 @@ describe("conversation.md in the prompt", () => {
 });
 
 describe("agentPhase failures", () => {
+  test("a prompt missing from the repository and the package fails the phase and says to reinstall", async () => {
+    const { repo, ctx, trace } = await setup();
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} }, null);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("missing-prompt");
+      expect(r.note).toContain("An engineer needs to reinstall Loopstra.");
+    }
+    const errors = trace.events("x").filter((e) => e.type === "error").map((e) => JSON.parse(e.payload) as { reason: string; detail: string });
+    expect(errors).toEqual([expect.objectContaining({ reason: "missing-prompt" })]);
+    expect(errors[0]!.detail).toContain("reinstall Loopstra");
+    expect(trace.phases("x")).toEqual([]);
+    trace.close(); repo.cleanup();
+  });
+
   test("passes LOOPSTRA_PHASE and LOOPSTRA_SLUG to the session", async () => {
     const { repo, ctx, trace } = await setup();
     const argsFile = join(repo.path, "args.json");
@@ -239,15 +263,6 @@ describe("agentPhase failures", () => {
     expect(r.ok).toBe(true);
     const recorded = await Bun.file(argsFile).json();
     expect(recorded.env.LOOPSTRA_PHASE).toBe("intake");
-    trace.close(); repo.cleanup();
-  });
-
-  test("every agent phase session gets the test hook through --settings", async () => {
-    const { repo, ctx, trace } = await setup();
-    const argsFile = join(repo.path, "args.json");
-    await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
-    const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
-    expect(args[args.indexOf("--settings") + 1]).toBe(hookSettings());
     trace.close(); repo.cleanup();
   });
 

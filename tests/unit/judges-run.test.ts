@@ -78,10 +78,13 @@ describe("runJudge off, or not applicable", () => {
   }
 
   test("with no repository prompt, the judge uses the shipped one and its sha", async () => {
-    await withRepo(SHADOW, {}, async ({ repo, ctx }) => {
+    await withRepo(SHADOW, {}, async ({ repo, ctx, trace }) => {
       rmSync(join(repo.path, "loopstra", "prompts", "spec-check.md"));
       expect(templateSha(repo.path, "spec-check")).toBe(createHash("sha256").update(readFileSync(templatePath("prompts", "spec-check.md"), "utf8")).digest("hex"));
       expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true });
+      const rows = trace.judgeRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.template_sha).toBe(templateSha(repo.path, "spec-check")!);
     });
   });
 });
