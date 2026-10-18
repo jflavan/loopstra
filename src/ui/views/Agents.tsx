@@ -3,6 +3,7 @@ import type { AgentMessage } from "../../console/types";
 import { apply, parseTarget, prune, slots, type Tile } from "../agents";
 import type { About } from "../chat";
 import { duration } from "../format";
+import { route } from "../nav";
 import { AgentTile, ChatTile, QuestionTile, tileId } from "../parts/AgentTile";
 import { changes, loop, meta, now } from "../store";
 
@@ -15,8 +16,11 @@ export function Agents() {
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [down, setDown] = useState(false);
   const [about, setAbout] = useState<{ about: About; label: string } | null>(null);
-  // The tile a link pointed at, until it has been shown (it may arrive after the page opens).
-  const target = useRef(parseTarget(location.hash));
+  // The tile a link pointed at, until it has been shown (it may arrive after the page opens). Read again
+  // on every navigation, since the palette can point at another tile while this screen is open.
+  const target = useRef<ReturnType<typeof parseTarget>>(null);
+  const r = route.value;
+  useEffect(() => { target.current = parseTarget(location.hash); }, [r]);
 
   useEffect(() => {
     let buffer: AgentMessage[] = [];
@@ -71,7 +75,7 @@ export function Agents() {
     el.classList.add("flash");
     setTimeout(() => el.classList.remove("flash"), FLASH_MS);
     if (want.message) el.querySelector<HTMLInputElement>(".steer input")?.focus();
-  }, [tiles]);
+  }, [tiles, r]);
 
   const ask = (tile: Tile) => () => {
     const a = tile.agent;
