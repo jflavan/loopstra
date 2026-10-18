@@ -4,6 +4,7 @@ import { loopStatusLine } from "../heartbeat";
 import { effectivePriority, orderQueue, plainStatus, scanRepo, shownNote } from "../intents";
 import { Trace } from "../trace";
 import { errorText } from "../shell";
+import { openQuestions } from "../questions";
 
 function pad(s: string, n: number): string { return s.length >= n ? s : s + " ".repeat(n - s.length); }
 
@@ -40,11 +41,12 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
   const scan = await scanRepo(root);
   const intents = orderQueue(scan.intents);
   if (!intents.length && !scan.unreadable.length) return "No intents yet. Create intent/<slug>/intent.md, or ask the loopstra skill to draft one.\n";
+  const questions = openQuestions(root, intents);
   const rows = intents.map((i) => {
     const s = trace.intentSummary(i.slug);
     const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus})` : "-";
     const cost = `$${(s?.costUsd ?? 0).toFixed(2)}`;
-    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents)];
+    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents, undefined, questions.get(i.slug))];
   });
   // An intent.md that cannot be read still shows, with what to fix.
   for (const u of scan.unreadable) rows.push([u.slug, "-", plainStatus("blocked"), "-", "-", u.problem]);

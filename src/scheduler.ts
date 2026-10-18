@@ -11,7 +11,8 @@ import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbea
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
+import { openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
@@ -130,7 +131,7 @@ export async function tick(root: string): Promise<TickResult> {
     const ordered = orderQueue(scan.intents);
     // With more than one change at a time, a change that would build into another's files waits.
     const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
+    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
     await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
@@ -230,12 +231,15 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
 
 /** True when a change is a lane's to run now: runnable, not held, and (with a remote) not watching its pull request. */
 function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
-  return isRunnable(i, human, hasRemote) && !held(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
+  return isRunnable(i, human, hasRemote) && !waiting(i) && !(hasRemote && WATCHING_PR.has(i.file.frontmatter.status));
 }
 
-/** A person (or chat) has put the change on hold (`hold:` in intent.md): no step starts for it. */
-function held(i: Intent): boolean {
-  return i.file.frontmatter.hold.trim() !== "";
+/**
+ * The change waits for a person, so no step starts for it: they (or chat) put it on hold (`hold:` in
+ * intent.md), or an agent's question waits for their answer (`question:`; see src/questions.ts).
+ */
+function waiting(i: Intent): boolean {
+  return i.file.frontmatter.hold.trim() !== "" || hasQuestion(i);
 }
 
 /**
@@ -288,7 +292,7 @@ async function watchPullRequests(root: string, cfg: Config, trace: Trace, shared
  * which is looked at again on the next tick. False once a stop or a problem ended it.
  */
 async function watchOnce(root: string, cfg: Config, trace: Trace, shared: TickLanes, human: HumanGates, steps: LaneStep[]): Promise<boolean> {
-  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !held(i);
+  const watching = (i: Intent) => WATCHING_PR.has(i.file.frontmatter.status) && isRunnable(i, human, true) && !waiting(i);
   const didWork = (slug: string) => steps.some((s) => s.slug === slug && !(s.result?.ok && s.result.waiting));
   const ordered = orderQueue((await scanRepo(root)).intents);
   for (const i of ordered) {
@@ -449,7 +453,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
       const holds = await sameFileHolds(cfg.speed.max_parallel_changes, ordered);
-      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds));
+      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     }
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {

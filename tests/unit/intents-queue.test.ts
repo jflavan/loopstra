@@ -188,6 +188,22 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("a change with an open question needs a person, and its note starts with the question", async () => {
+    const t = tempDir();
+    await mk(t.path, "asks", "status: designing\nquestion: open\nnote: Spec in progress.");
+    await mk(t.path, "lost", "status: planning\nquestion: open", { "spec.md": "s" });
+    await mk(t.path, "busy", "status: designing");
+    const md = renderQueue(orderQueue((await scanRepo(t.path)).intents), [], undefined, undefined, new Map([["asks", "Archived too?"]]));
+    const section = (name: string) => md.slice(md.indexOf(`## ${name}`)).split("\n## ")[0]!;
+    const needs = section("Needs a person");
+    expect(needs).toContain("| asks | normal | designing | Has a question: Archived too? Spec in progress. |");
+    // Without question.json's text, the note sends a person to conversation.md.
+    expect(needs).toContain("| lost | normal | planning | Has a question. Read conversation.md. |");
+    expect(section("In progress, in order")).toContain("| busy |");
+    expect(needs).not.toContain("| busy |");
+    t.cleanup();
+  });
+
   test("renderQueue collapses a multi-line note into a single table row", async () => {
     const t = tempDir();
     await mk(t.path, "stuck", "status: blocked\nnote: |\n  Need an answer about adjusters.\n  Waiting since Monday.");

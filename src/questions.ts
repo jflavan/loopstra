@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { readJson, writeJson } from "./chat/threads";
 import { commitRecord, type StepContext } from "./context";
 import { conversationPath, readConversation, withEntry } from "./conversation";
-import { readIntent, writeIntent, type Status } from "./intents";
+import { hasQuestion, readIntent, writeIntent, type Intent, type Status } from "./intents";
 
 /**
  * Questions an agent asks a person. The asking session's id, the phase, the question and the step's
@@ -81,6 +81,16 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
     ctx.intent.file = fresh.file;
     await Bun.write(conversationPath(ctx.root, ctx.slug), withEntry(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
   });
+}
+
+/** The text of each open question, by change, for the changes whose intent.md says `question: open` (see renderQueue). */
+export function openQuestions(root: string, intents: Intent[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const i of intents) {
+    const text = hasQuestion(i) ? readQuestion(root, i.slug)?.open?.text : undefined;
+    if (text) out.set(i.slug, text);
+  }
+  return out;
 }
 
 /** Stores the answer for the session that asked (the `answer` request does this, with the record; see src/apply.ts). */

@@ -461,6 +461,24 @@ describe("holds", () => {
     }
   });
 
+  test("a change with an open question gets no step; once the line is gone, it runs again", async () => {
+    const { repo, trace } = await setupRepo("designing");
+    try {
+      const path = join(repo.path, "intent", SLUG, "intent.md");
+      await Bun.write(path, (await Bun.file(path).text()).replace("status: designing", "status: designing\nquestion: open"));
+      await run(["git", "commit", "-qam", "ask"], repo.path);
+      const r = await tick(repo.path);
+      expect(r.steps ?? []).toEqual([]);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
+      await Bun.write(path, (await Bun.file(path).text()).replace("question: open\n", ""));
+      await run(["git", "commit", "-qam", "answered"], repo.path);
+      const again = await tick(repo.path);
+      expect(again.picked).toBe(SLUG);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("while a person has paused the loop, the tick starts no step and says so", async () => {
     const { repo, trace } = await setupRepo("accepted");
     try {
