@@ -148,14 +148,21 @@ export function commitRecord(root: string, main: string, slug: string, what: str
 
 /**
  * Writes frontmatter keys for the runtime (inside commitRecord), re-read from disk right before
- * writing, never over a status a person set while the step ran (throws PersonChangedStatus instead).
+ * writing, never over a status a person set while the step ran, nor into a change a person deleted
+ * meanwhile (throws PersonChangedStatus instead).
  */
 export async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
   const expected = ctx.intent.file.frontmatter.status;
   if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }))) {
+    throwIfDeleted(ctx);
     const found = (await readIntent(ctx.root, ctx.slug)).file.frontmatter.status;
     throw new PersonChangedStatus(expected, found);
   }
+}
+
+/** Throws PersonChangedStatus when the change's intent.md is gone: a person deleted the change while the step ran. */
+function throwIfDeleted(ctx: StepContext): void {
+  if (!existsSync(join(ctx.intent.dir, "intent.md"))) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, "deleted");
 }
 
 /**
@@ -276,9 +283,10 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
   return existsSync(p) ? await Bun.file(p).text() : null;
 }
 
-/** Writes an artifact on main and commits it (see commitRecord). */
+/** Writes an artifact on main and commits it (see commitRecord); never into a change a person deleted (PersonChangedStatus). */
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `write ${name}`, async () => {
+    throwIfDeleted(ctx);
     await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
     ctx.intent.artifacts.add(name);
   });

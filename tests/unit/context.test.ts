@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
-  StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker,
+  StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker, PersonChangedStatus,
   readArtifact, setStatus, statusPatch, writeArtifact, writeIntentPriority, loadSessions, saveSession,
 } from "../../src/context";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -117,6 +117,18 @@ describe("StepContext", () => {
     expect(await new Git(repo.path).isDirty()).toBe(false);
     expect(await new Git(repo.path).headSha()).toBe(head);
     trace.close(); repo.cleanup();
+  });
+
+  test("a change folder a person deleted while the step ran is not brought back", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      rmSync(join(repo.path, "intent", "x"), { recursive: true, force: true });
+      const head = await new Git(repo.path).headSha();
+      await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(PersonChangedStatus);
+      await expect(writeArtifact(ctx, "spec.md", "# Spec\n")).rejects.toBeInstanceOf(PersonChangedStatus);
+      expect(existsSync(join(repo.path, "intent", "x"))).toBe(false);
+      expect(await new Git(repo.path).headSha()).toBe(head);
+    } finally { trace.close(); repo.cleanup(); }
   });
 
   test("block on a moved main checkout commits nothing, returns the plain note, and traces why", async () => {

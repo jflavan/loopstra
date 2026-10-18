@@ -299,12 +299,14 @@ function patched(text: string, patch: Record<string, string>, remove: readonly s
  * Writes frontmatter keys into intent.md. The file is read from disk right before writing and only
  * the given keys change (see patchFrontmatter), so a person's edits made meanwhile are kept. With
  * `expectStatus`, nothing is written when the status on disk is a different one (a person changed
- * it); the return value says whether it wrote. With `remove`, those keys' lines are taken out.
+ * it), and nothing when intent.md is gone (a person deleted the change: it is not brought back);
+ * the return value says whether it wrote. With `remove`, those keys' lines are taken out.
  * `intent.file` is refreshed from what was written.
  */
 export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> } = {}): Promise<boolean> {
   const path = join(intent.dir, "intent.md");
-  const onDisk = existsSync(path) ? await Bun.file(path).text() : serializeIntentFile(intent.file);
+  if (!existsSync(path)) return false;
+  const onDisk = await Bun.file(path).text();
   if (opts.expectStatus !== undefined && parseIntentFile(onDisk).frontmatter.status !== opts.expectStatus) return false;
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries(patch)) if (v !== undefined) values[k] = String(v);

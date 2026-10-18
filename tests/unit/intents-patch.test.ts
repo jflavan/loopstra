@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
 import { tempDir } from "../helpers";
@@ -85,6 +85,10 @@ describe("removing a line", () => {
       expect(await writeIntent(i, {}, { expectStatus: "building", remove: ["hold"] })).toBe(true);
       expect(await Bun.file(join(t.path, "intent", "a", "intent.md")).text()).toBe("---\nstatus: building\n---\n# Intent: a\n");
       expect(i.file.frontmatter.hold).toBe("");
+      // A deleted change is not written back.
+      rmSync(join(t.path, "intent", "a"), { recursive: true });
+      expect(await writeIntent(i, { status: "closed" })).toBe(false);
+      expect(existsSync(join(t.path, "intent", "a"))).toBe(false);
     } finally {
       t.cleanup();
     }
