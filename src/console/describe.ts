@@ -108,7 +108,9 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
       const why = firstLine(first(p.reason, p.note));
       return why ? sentence(`Paused: ${why}`) : "Paused.";
     }
-    case "person-changed-status": return `A person set the status to ${plain(p.to)} while a step ran, so the step wrote nothing.`;
+    case "person-changed-status":
+      if (p.to === "deleted") return "A person deleted the change while a step ran, so the step wrote nothing.";
+      return `A person set the status to ${plain(p.to)} while a step ran, so the step wrote nothing.`;
     case "stale-lock-removed": return "Removed a lock a stopped process left behind.";
     case "chat-message": return `${str(p.from) || "Someone"} wrote in chat.`;
     case "chat-request":

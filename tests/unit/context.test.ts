@@ -126,6 +126,7 @@ describe("StepContext", () => {
       const head = await new Git(repo.path).headSha();
       await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(PersonChangedStatus);
       await expect(writeArtifact(ctx, "spec.md", "# Spec\n")).rejects.toBeInstanceOf(PersonChangedStatus);
+      await expect(writeIntentPriority(ctx, "high")).rejects.toBeInstanceOf(PersonChangedStatus);
       expect(existsSync(join(repo.path, "intent", "x"))).toBe(false);
       expect(await new Git(repo.path).headSha()).toBe(head);
     } finally { trace.close(); repo.cleanup(); }

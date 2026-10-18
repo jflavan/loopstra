@@ -348,7 +348,8 @@ export function dropSentBack(root: string, slug: string): void {
  */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, "record priority", async () => {
-    // The owner may have stated one while the step ran: read what the file says now.
+    // The owner may have stated one while the step ran: read what the file says now, if it is still there.
+    throwIfDeleted(ctx);
     const now = await readIntent(ctx.root, ctx.slug);
     if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
     if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return false; }

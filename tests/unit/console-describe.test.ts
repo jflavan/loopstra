@@ -21,6 +21,8 @@ describe("events in plain words", () => {
       .toBe("Design asked: Round half up or to even?");
     expect(describeEvent(row("stop", { by: "John", note: "the session was stopped by John; the change keeps its status" }))).toBe("John stopped the session; the change keeps its status.");
     expect(describeEvent(row("stop", { note: "stopped by request" }))).toBe("The loop is stopping.");
+    expect(describeEvent(row("person-changed-status", { from: "designing", to: "closed" }))).toBe("A person set the status to closed while a step ran, so the step wrote nothing.");
+    expect(describeEvent(row("person-changed-status", { from: "designing", to: "deleted" }))).toBe("A person deleted the change while a step ran, so the step wrote nothing.");
     // A person steering a running session, named by its seq in the payload.
     const named = (slug: string, seq: number) => (slug === "csv-export" && seq === 4 ? "design" : undefined);
     expect(describeEvent(row("steer", { kind: "message", by: "flava", via: "the dashboard", seq: 4, text: "Cover\nnegatives" }), named))
