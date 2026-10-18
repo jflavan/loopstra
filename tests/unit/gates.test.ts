@@ -75,12 +75,21 @@ describe("checks", () => {
       "- **src/b.ts**: why",
       "- __src/c.ts__",
       "- **`src/d.ts`** (new)",
+      "- __init__.py",
+      "- __main__.py (new)",
+      "- tests/__snapshots__",
+      "- **src/__init__.py**: why",
+      "- ``src/e.ts``",
+      "- `` `src/f.ts` ``: a code span holding back-quotes",
+      "- *`src/g.ts`*",
       "", "## Order of work", "1. x", "",
     ].join("\n");
     expect(parsePlanFiles(plan)).toEqual([
       { path: "src/pkg/__init__.py", new: true }, { path: "src/__tests__/a.test.ts", new: false },
       { path: "docs/my file.md", new: false }, { path: "src/b.ts", new: false }, { path: "src/c.ts", new: false },
       { path: "src/d.ts", new: true },
+      { path: "__init__.py", new: false }, { path: "__main__.py", new: true }, { path: "tests/__snapshots__", new: false },
+      { path: "src/__init__.py", new: false }, { path: "src/e.ts", new: false }, { path: "src/f.ts", new: false }, { path: "src/g.ts", new: false },
     ]);
   });
 
