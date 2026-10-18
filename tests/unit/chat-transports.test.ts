@@ -372,9 +372,12 @@ describe("Discord", () => {
     const stub = discordStub(4000);
     const { discord } = await startDiscord(stub, r.root);
     try {
-      // Tries at 0, 1 and 3 seconds, not every second.
-      await Bun.sleep(2_500);
-      expect(stub.identifies()).toBe(2);
+      // Tries at 0, 1 and 3 seconds, not every second: the wait before the third is 2 seconds. Timed
+      // from the second try, not from the start, so a slow runner cannot make it look otherwise.
+      await until(() => stub.identifies() >= 2);
+      const second = Date.now();
+      await until(() => stub.identifies() >= 3);
+      expect(Date.now() - second).toBeGreaterThanOrEqual(1_500);
     } finally {
       await discord.stop();
       stub.server.stop(true);

@@ -1,3 +1,4 @@
+import { GITHUB_SIGNAL } from "../github";
 import { plainStatus, STATUSES, type Status } from "../intents";
 import { Cancelled } from "../stop";
 import type { EventRow, Trace } from "../trace";
@@ -102,10 +103,10 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
     case "signal":
       if (p.name === "main_health") return `The tests on main ${HEALTH[str(p.result)] ?? str(p.result)}.`;
       // gh's own words when GitHub did not answer.
-      if (p.name === "github" && p.result === "fail") return sentence(`GitHub did not answer about pull requests: ${firstLine(p.output)}`);
+      if (p.name === GITHUB_SIGNAL && p.result === "fail") return sentence(`GitHub did not answer about pull requests: ${firstLine(p.output)}`);
       return p.output ? firstLine(p.output) : `${str(p.name)}: ${str(p.result)}.`;
     case "steer": return steerText(e, p, phaseName);
-    case "stop": return p.by ?`${str(p.by)} stopped the session; the change keeps its status.` : "The loop is stopping.";
+    case "stop": return p.by ? `${str(p.by)} stopped the session; the change keeps its status.` : "The loop is stopping.";
     case "pause": {
       const why = firstLine(first(p.reason, p.note));
       return why ? sentence(`Paused: ${why}`) : "Paused.";

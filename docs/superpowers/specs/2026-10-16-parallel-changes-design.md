@@ -426,7 +426,9 @@ have passed (and approval, where needed), and just before `mergeOnGitHub`, this 
    (a person deleted it after the pull request was closed), the push leases on it still having
    none (`--force-with-lease=<branch>:`), never on a stale remote-tracking ref. If the branch here
    is part of that copy, it is
-   fast-forwarded to it in the worktree (traced as "take pull request commits"), and the marker
+   fast-forwarded to it in the worktree (traced as "take pull request commits"; changed by the
+   review fixes of 2026-10-18: moved with `git reset --keep`, which also takes a copy GitHub
+   rewrote), and the marker
    moves to it, so the checks and the next push include the person's work. If the branch here
    changed too, the change is blocked with a plain note for an engineer, and nothing is
    overwritten. If the branch here did not change but the workspace cannot take the person's
