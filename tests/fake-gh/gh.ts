@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED"; checks: "pass" | "fail" | "pending" | "none"; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
-type State = { prs: Record<string, Pr>; next: number };
+// `old`: pull requests a newer one for the same branch replaced, still found by number.
+type State = { prs: Record<string, Pr>; next: number; old?: Pr[] };
 
 // Test knob: behave like a gh that never answers.
 if (process.env.LOOPSTRA_FAKE_GH_HANG === "1") await new Promise(() => setInterval(() => {}, 1_000));
@@ -50,12 +51,14 @@ if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); p
 if (cmd === "view") {
   // Like gh: a pull request by number, or by its branch.
   const ref = args[2]!;
-  const pr = /^\d+$/.test(ref) ? Object.values(state.prs).find((p) => p.number === Number(ref)) : state.prs[ref];
+  const pr = /^\d+$/.test(ref) ? [...Object.values(state.prs), ...(state.old ?? [])].find((p) => p.number === Number(ref)) : state.prs[ref];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
   console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}` }));
 } else if (cmd === "create") {
   const branch = flag("--head")!;
   const pr: Pr = { number: state.next++, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, createdAt: new Date().toISOString(), title: flag("--title"), body: await body(), comments: [] };
+  // By branch, like gh, the newest pull request is the one found; an older one is still there by number.
+  if (state.prs[branch]) (state.old ??= []).push(state.prs[branch]);
   state.prs[branch] = pr;
   await save();
   console.log(`https://example.test/pr/${pr.number}`);

@@ -5,7 +5,7 @@ import { agentPhase, alongside, codePhase, mayOverlap, projectCommand, withNote,
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_PUSHING, RECONCILED_PLAN, REMOTE_AHEAD, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, RECONCILED_PLAN, REMOTE_AHEAD, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -16,6 +16,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, REMOTE_AHEAD); // nor waiting like an earlier build's pull request
   clearMarker(ctx, PR_LEASE); // nor tied to what was pushed for it (a person may have deleted that branch on GitHub)
   clearMarker(ctx, PR_PUSHING); // nor an earlier build's push that was cut short
+  writeMarker(ctx, PR_NUMBER, ""); // nor an earlier build's pull request, closed or merged (see ownPr)
 
   const branch = await codePhase(ctx, "branch", async () => {
     // Branches and worktrees take no lock (see Git.run): another change's commits and checkouts go on meanwhile.

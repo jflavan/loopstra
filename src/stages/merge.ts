@@ -11,7 +11,7 @@ import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_NUMBER, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -129,7 +129,8 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 
 /**
  * Shares main, pushes the branch, and makes sure it has an open pull request (title `<slug>: <title>`, a body
- * naming the artifacts and the review summary). The review goes on it as a comment when the pull
+ * naming the artifacts and the review summary): this build's own (see ownPr), or a new one. When a
+ * person closed this build's pull request, nothing is pushed or opened: the failure says so. The review goes on it as a comment when the pull
  * request is new or `newReview` says a review just passed. The number and link go to the trace.
  * The push overwrites only the commit recorded in PR_LEASE; a branch someone changed on GitHub is
  * left alone, and the change blocked in plain words. GitHub is asked for its copy first (see
@@ -139,7 +140,15 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
  */
 async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ ok: true } | Failure> {
   let moved = false;
-  const r = await codePhase(ctx, "pull-request", async () => {
+  const r = await codePhase<{ closed: PrInfo | null }>(ctx, "pull-request", async () => {
+    // This build's pull request first: one a person closed is not replaced by a new one, and one
+    // merged meanwhile needs no push (the merge step records it on its next look).
+    const gh = new GitHub(ctx.root);
+    const found = await ownPr(ctx, gh);
+    if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
+    if (found.pr?.merged) return { ok: true as const, closed: null };
+    if (found.pr?.state === "CLOSED") return { ok: true as const, closed: found.pr };
+    let pr: { number: number; url: string } | null = found.pr;
     // Main first, so the pull request's diff against it shows only the change, not the records.
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const head = (await ctx.git.run(["rev-parse", `refs/heads/${ctx.branch}`])).out.trim();
@@ -156,10 +165,6 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     writeMarker(ctx, PR_LEASE, head);
     clearMarker(ctx, PR_PUSHING);
     writeMarker(ctx, PR_PUSHED, new Date().toISOString());
-    const gh = new GitHub(ctx.root);
-    const found = await gh.lookupPr(ctx.branch);
-    if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
-    let pr: { number: number; url: string } | null = found.pr?.state === "OPEN" ? found.pr : null;
     const created = !pr;
     if (!pr) {
       const dir = `intent/${ctx.slug}`;
@@ -177,14 +182,16 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
       ].join("\n");
       pr = await gh.createPr({ head: ctx.branch, base: ctx.cfg.main_branch, title: `${ctx.slug}: ${ctx.intent.file.title || ctx.slug}`, body });
     }
+    writeMarker(ctx, PR_NUMBER, String(pr.number));
     const review = await readArtifact(ctx, "review.md");
     if (review && (created || newReview)) {
       // The comment is a courtesy: a failure is traced and does not stop the pull request.
       try { await gh.comment(pr.number, review); } catch (e) { passOn(e); ctx.trace.event(ctx.slug, "error", { where: "pull request comment", error: errorText(e) }); }
     }
     ctx.trace.event(ctx.slug, "command", { command: "pull request", number: pr.number, url: pr.url, created });
-    return { ok: true as const };
+    return { ok: true as const, closed: null };
   });
+  if (r.ok && r.closed) return { ok: false, note: PR_CLOSED_NOTE, detail: `pull request #${r.closed.number} ${r.closed.url} was closed without merging` };
   if (r.ok) return { ok: true };
   if (moved) return { ok: false, note: PR_BRANCH_MOVED_NOTE, detail: r.detail, retryFrom: mergeRetry(ctx) };
   return {
@@ -217,6 +224,19 @@ async function settleLease(ctx: StepContext, theirs: string): Promise<void> {
   if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim() && (await ctx.git.isAncestor(theirs, ctx.branch))) writeMarker(ctx, PR_LEASE, theirs);
 }
 
+/**
+ * This build's pull request (see PR_NUMBER): by its number once it has one. While it has none (""),
+ * only an open one for the branch counts, since a closed or merged one is an earlier build's. A
+ * change built before the marker existed has none: the branch's pull request, whatever its state.
+ */
+async function ownPr(ctx: StepContext, gh: GitHub): Promise<{ pr: PrInfo | null } | { error: string }> {
+  const mine = readMarker(ctx, PR_NUMBER)?.trim();
+  if (mine) return gh.lookupPr(mine);
+  const found = await gh.lookupPr(ctx.branch);
+  if (mine === "" && "pr" in found && found.pr?.state !== "OPEN") return { pr: null };
+  return found;
+}
+
 /** The head of the pull request's branch on GitHub, asked of GitHub: "" when it has none, null when it cannot be asked. */
 async function headOnGitHub(ctx: StepContext): Promise<string | null> {
   const remote = await ctx.git.remoteName();
@@ -235,7 +255,7 @@ async function headOnGitHub(ctx: StepContext): Promise<string | null> {
  */
 async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const gh = new GitHub(ctx.root);
-  const found = await gh.lookupPr(ctx.branch);
+  const found = await ownPr(ctx, gh);
   if ("error" in found) {
     ctx.trace.event(ctx.slug, "error", { where: "pull request", error: found.error, note: "will look again on the next tick" });
     return { ok: true, waiting: true };
@@ -407,7 +427,8 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
   });
   // Asked again either way: gh can report a problem after the merge went through, and the merged
   // pull request names the commit main must have before the merge is recorded.
-  const after = await gh.prForBranch(ctx.branch);
+  const again = await gh.lookupPr(String(pr.number));
+  const after = "pr" in again ? again.pr : null;
   if (!after?.merged) {
     if (!merged.ok) return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
     // gh accepted the merge but it has not happened yet (a merge queue, or GitHub not answering):

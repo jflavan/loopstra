@@ -9,7 +9,7 @@ import { tick } from "../../src/scheduler";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, run, TEMPLATES, tempDir, tempGitRepo, withEnv } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
@@ -489,6 +489,71 @@ describe("the loop with a GitHub remote", () => {
       expect((await run(["git", "rev-parse", BRANCH], s.remote)).out.trim()).toBe((await run(["git", "rev-parse", BRANCH], s.repo)).out.trim());
       expect((await s.pr()).state).toBe("OPEN");
     });
+    s.cleanup();
+  }, 180_000);
+
+  test("an owner who closes the pull request while the change is reviewed again is not overridden by a new one", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      // The owner closes it while the change goes round the review once more (as anotherRound sends it).
+      await s.setPr({ state: "CLOSED" });
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "reviewing" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "blocked" });
+      expect((await intentOf(s.repo)).note).toContain("The pull request was closed without merging.");
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(1);
+      expect((await Bun.file(join(s.remote, "fake-gh.json")).json()).next).toBe(2);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a rebuild after its pull request merged is not taken for merged by that old pull request", async () => {
+    const s = await remoteSetup();
+    // The rebuild changes the code again, so it has something of its own to merge.
+    const build = fixture("build").replace("  return a + b;", "  // checked again\\n  return a + b;");
+    const fixtures = fixtureDir({ "build-2": build });
+    await withEnv({ ...s.env, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("1");
+      // #1 merges on GitHub, and the loop records it.
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      const mergeCommit = (await run(["git", "rev-parse", "HEAD"], other.path)).out.trim();
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true, mergeCommit });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+
+      // A person asks for a rebuild. Its review passes while GitHub cannot be reached, so no pull request opens.
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "plan-approved", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: rebuild");
+      await tick(s.repo); // build again
+      expect((await intentOf(s.repo)).status).toBe("reviewing");
+      await run(["git", "remote", "set-url", "origin", join(s.remote, "gone")], s.repo);
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("blocked");
+
+      // GitHub is back and the person retries the merge: #1 is not this build's, so a new pull request opens.
+      await run(["git", "remote", "set-url", "origin", s.remote], s.repo);
+      const j = await readIntent(s.repo, SLUG);
+      await writeIntent(j, { status: "merge-review", note: "" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(2);
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("2");
+      expect(await s.pr()).toMatchObject({ number: 2, state: "OPEN" });
+    });
+    fixtures.cleanup();
     s.cleanup();
   }, 180_000);
 

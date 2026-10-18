@@ -182,6 +182,12 @@ export const PR_LEASE = "pr-lease";
  */
 export const PR_PUSHING = "pr-pushing";
 
+/**
+ * Run-folder marker: the number of this build's pull request, or "" while it has none (each build
+ * starts with ""). An earlier build's pull request, closed or merged, is not this build's own.
+ */
+export const PR_NUMBER = "pr-number";
+
 /** The review round in progress, kept in the run folder so a restart continues it. Null when none. */
 export function readRound(ctx: StepContext): number | null {
   const n = Number.parseInt(readMarker(ctx, REVIEW_ROUND) ?? "", 10);
