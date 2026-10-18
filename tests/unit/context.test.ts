@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git, GitError } from "../../src/git";
@@ -224,6 +224,53 @@ describe("StepContext", () => {
       expect(await Bun.file(intentMd).text()).toContain("status: designing");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(await lastCommit(repo.path)).toContain("a note");
+    } finally {
+      Git.prototype.commitPaths = commitPaths;
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a record whose commit failed while HEAD cannot be read is left written: it may have landed", async () => {
+    const { repo, ctx, trace } = await setup();
+    const commitPaths = Git.prototype.commitPaths;
+    const headFile = join(repo.path, ".git", "HEAD");
+    const head = readFileSync(headFile, "utf8");
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      Git.prototype.commitPaths = async function () {
+        writeFileSync(headFile, "not a ref\n");
+        throw new GitError(["commit"], "", "", 124, "git commit timed out");
+      };
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+      })).rejects.toBeInstanceOf(GitError);
+      expect(await Bun.file(intentMd).text()).toContain("status: designing");
+    } finally {
+      Git.prototype.commitPaths = commitPaths;
+      writeFileSync(headFile, head);
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a record whose commit failed while a person committed in the main checkout is put back: only its own commit counts as landed", async () => {
+    const { repo, ctx, trace } = await setup();
+    const commitPaths = Git.prototype.commitPaths;
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      Git.prototype.commitPaths = async function () {
+        writeFileSync(join(repo.path, "notes.txt"), "the person's\n");
+        await run(["git", "add", "notes.txt"], repo.path);
+        await run(["git", "commit", "-q", "-m", "the person's commit"], repo.path);
+        throw new GitError(["commit"], "", "", 128, "fatal: Unable to create '.git/index.lock': File exists.");
+      };
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+      })).rejects.toBeInstanceOf(GitError);
+      expect(await Bun.file(intentMd).text()).toBe(before);
+      expect(await lastCommit(repo.path)).toContain("the person's commit");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
     } finally {
       Git.prototype.commitPaths = commitPaths;
       trace.close(); repo.cleanup();

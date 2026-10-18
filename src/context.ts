@@ -149,17 +149,28 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     const head = await git.headSha();
     if ((await write()) === false) return false;
     const written = filesUnder(root, paths);
+    const message = bookkeeping(`loopstra(${slug}): ${what}`);
     try {
-      return await git.commitPaths(paths, bookkeeping(`loopstra(${slug}): ${what}`), { finish: true });
+      return await git.commitPaths(paths, message, { finish: true });
     } catch (e) {
-      // A commit that landed before its error (git's time limit cut in after it) is kept: putting the
-      // files back would leave main's checkout behind its own HEAD.
-      const now = await git.run(["rev-parse", "HEAD"], { allowFail: true, cleanup: true }).catch(() => null);
-      const landed = now?.code === 0 && now.out.trim() !== head;
-      if (!landed) await putBackRecord(git, root, paths, before, written);
+      if (await nothingLanded(git, head, message)) await putBackRecord(git, root, paths, before, written);
       throw e;
     }
   });
+}
+
+/**
+ * True when a failed commit of `message` on `head` left nothing of its own in HEAD, so its record
+ * can be put back: HEAD is still `head`, or moved on by someone else's commit (a person's, in the
+ * main checkout meanwhile). False when its own commit landed before its error (git's time limit cut
+ * in after it), since putting the files back would leave main's checkout behind its own HEAD, and
+ * when HEAD cannot be read: the files are then left written, which loses nothing.
+ */
+async function nothingLanded(git: Git, head: string, message: string): Promise<boolean> {
+  const now = await git.run(["log", "-1", "--format=%H%n%P%n%s", "HEAD"], { allowFail: true, cleanup: true }).catch(() => null);
+  if (now?.code !== 0) return false;
+  const [sha, parents, subject] = now.out.trim().split("\n");
+  return sha === head || parents !== head || subject !== message;
 }
 
 /** The files under these paths (each a file or a folder, relative to `root`), with what each holds, by path relative to `root`. */
