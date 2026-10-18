@@ -6,7 +6,9 @@ import { readConversation } from "../../src/conversation";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside } from "../../src/phases";
-import { answerQuestion, closeStaleQuestion, readQuestion, recordQuestion } from "../../src/questions";
+import { answerQuestion, closeStaleQuestion, closeUnusedAnswer, readQuestion, recordQuestion } from "../../src/questions";
+import { runStepGuarded } from "../../src/scheduler";
+import { runBuildStep } from "../../src/stages/build";
 import { runDesignStep } from "../../src/stages/design";
 import { QuestionAsked } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -139,7 +141,7 @@ describe("questions", () => {
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 
-  test("an answer resumes only the step's first session, and only one of the same kind: otherwise it is closed and every session starts fresh", async () => {
+  test("an answer waits for the step's first session of the asking kind: a build before it skips it, and a later fix starts fresh", async () => {
     const { repo, ctx, trace } = await setupRepo("building");
     const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS), fix: fixture("fix"), build: fixture("build") });
     const calls = join(fixtures.path, "calls.jsonl");
@@ -148,19 +150,82 @@ describe("questions", () => {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
         expect(await fix(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
         expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
-        // The next step starts with a build: another kind of phase. The answer is closed, not given to it.
+        // The next step starts with a build: another kind of phase. It neither takes the answer nor closes it.
         const step = await nextStep(ctx);
         expect((await build(step)).ok).toBe(true);
-        expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
-        // The step's later fix is of the asking kind, but not its first session: it starts fresh, with its own failure.
+        expect(readQuestion(repo.path, SLUG)!.open?.answer?.text).toBe("No.");
+        // The step's first fix resumes the asking session with the answer.
         expect((await fix(step, 1)).ok).toBe(true);
+        expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+        // A later fix of the same step starts fresh, with its own failure.
+        expect((await fix(step, 2)).ok).toBe(true);
       });
-      for (const args of logLines<string[]>(calls).slice(1)) expect(args).not.toContain("--resume");
-      const sent = logLines<{ prompt: string }>(prompts).map((p) => p.prompt);
-      expect(sent.some((p) => p.includes("answered your question"))).toBe(false);
-      expect(sent.at(-1)).toContain("failure 1");
+      const sent = logLines<{ phase: string; args: string[]; prompt: string }>(prompts);
+      expect(sent.map((p) => p.phase)).toEqual(["fix", "build", "fix", "fix"]);
+      expect(sent[1]!.prompt).not.toContain("answered your question");
+      expect(sent[2]!.prompt).toBe("John answered your question: No.\n\nCarry on.");
+      expect(sent[2]!.args).toContain("--resume");
+      expect(sent[3]!.prompt).toContain("failure 2");
+      expect(sent[3]!.prompt).not.toContain("answered your question");
       // A fresh session still reads the question and its answer, in conversation.md.
-      expect(sent.at(-1)).toContain("Archived too?");
+      expect(sent[3]!.prompt).toContain("Archived too?");
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("design that asked resumes when the next design step runs: intake before it skips the answer", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const fixtures = fixtureDir({ "design-1": asking("design", ASKS), design: fixture("design") });
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await runDesignStep(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        expect((await runDesignStep(await nextStep(ctx))).ok).toBe(true);
+      });
+      const designs = logLines<{ phase: string; args: string[]; prompt: string }>(prompts).filter((p) => p.phase === "design");
+      expect(designs).toHaveLength(2);
+      expect(designs[1]!.args[designs[1]!.args.indexOf("--resume") + 1]).toBe("fake-design");
+      expect(designs[1]!.prompt).toBe("John answered your question: No.\n\nCarry on.");
+      expect(trace.phases(SLUG).map((p) => [p.name, p.status]).slice(0, 4)).toEqual([["intake", "success"], ["design", "asked"], ["intake", "success"], ["design", "success"]]);
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a fix that asked during the test loop resumes as the next step's first fix, after the build", async () => {
+    const { repo, ctx, trace } = await setupRepo("plan-approved", { commands: { test: "exit 1" }, config: "stages:\n  build:\n    max_fix_loops: 1\n" });
+    await Bun.write(join(repo.path, "intent", SLUG, "spec.md"), "# Spec\n\n## Summary\ns\n");
+    await Bun.write(join(repo.path, "intent", SLUG, "plan.md"), "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n");
+    await new Git(repo.path).commitAll("artifacts");
+    await ctx.reload();
+    // The asking fix has its own session id, so its resume is told apart from fix's usual resume of the build.
+    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS).replaceAll("fake-build", "fake-fix-asked"), fix: fixture("fix") });
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await runBuildStep(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        await runBuildStep(await nextStep(ctx));
+      });
+      const fixes = logLines<{ phase: string; args: string[]; prompt: string }>(prompts).filter((p) => p.phase === "fix");
+      expect(fixes).toHaveLength(2);
+      expect(fixes[1]!.args[fixes[1]!.args.indexOf("--resume") + 1]).toBe("fake-fix-asked");
+      expect(fixes[1]!.prompt).toBe("John answered your question: No.\n\nCarry on.");
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("an answered question nothing in the step used is closed when the step ends; one the step asked stays open", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const fixtures = fixtureDir({ "design-1": asking("design", ASKS), "intake-2": fixture("agent-fail") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
+        expect(await runStepGuarded(ctx)).toEqual({ ok: true, asked: true });
+        expect(readQuestion(repo.path, SLUG)!.open).toMatchObject({ phase: "design", text: "Archived too?" });
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        // Intake fails before design runs: the step ends without using the answer.
+        expect((await runStepGuarded(await nextStep(ctx))).ok).toBe(false);
+      });
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 
@@ -174,7 +239,10 @@ describe("questions", () => {
         expect(await design(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
         expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
         await setStatus(await nextStep(ctx), "planning");
-        expect((await plan(await nextStep(ctx))).ok).toBe(true);
+        const step = await nextStep(ctx);
+        expect((await plan(step)).ok).toBe(true);
+        // Not used: it is closed as the step ends.
+        closeUnusedAnswer(step);
       });
       expect(logLines<string[]>(calls).at(-1)).not.toContain("--resume");
       expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).not.toContain("answered your question");
@@ -193,7 +261,9 @@ describe("questions", () => {
         expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
         await setStatus(await nextStep(ctx), "spec-review");
         await setStatus(await nextStep(ctx), "designing");
-        expect((await design(await nextStep(ctx))).ok).toBe(true);
+        const step = await nextStep(ctx);
+        expect((await design(step)).ok).toBe(true);
+        closeUnusedAnswer(step);
       });
       expect(logLines<string[]>(calls).at(-1)).not.toContain("--resume");
       expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).not.toContain("answered your question");

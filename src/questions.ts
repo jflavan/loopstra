@@ -9,7 +9,6 @@ import { asAtHead, fileHash, matchesHead } from "./headfiles";
 import { hasQuestion, type Intent, type Status } from "./intents";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
-import type { Trace } from "./trace";
 
 /**
  * Questions an agent asks a person. The asking session's id, the phase, the question and the step's
@@ -62,11 +61,7 @@ export function readQuestion(root: string, slug: string): QuestionState | null {
 
 /** The change's present stay at its status: the status, and the id of the trace's newest status change (0: none). */
 export function stayAt(ctx: StepContext): { status: Status; since: number } {
-  return { status: ctx.intent.file.frontmatter.status, since: newestStatusChange(ctx.trace, ctx.slug) };
-}
-
-function newestStatusChange(trace: Trace, slug: string): number {
-  return trace.lastEvent(slug, "status_change")?.id ?? 0;
+  return { status: ctx.intent.file.frontmatter.status, since: ctx.trace.lastEvent(ctx.slug, "status_change")?.id ?? 0 };
 }
 
 /** True when the state belongs to the change's present stay at its status (see stayAt). */
@@ -173,27 +168,50 @@ export function answerPrompt(a: Asked): string {
   return `${a.answer!.by} answered your question: ${a.answer!.text.trim()}\n\nCarry on.`;
 }
 
-/** The answered question is done with: the count stays for this step's limit. */
-export function closeQuestion(root: string, slug: string): void {
+/**
+ * The question is done with: the count stays for this step's limit. With `which`, only when the open
+ * question is still that one (a session resumed with its answer may have asked another since).
+ */
+export function closeQuestion(root: string, slug: string, which?: Asked): void {
   const s = readQuestion(root, slug);
-  if (s?.open) writeState(root, slug, { ...s, open: null });
+  if (!s?.open) return;
+  if (which && (s.open.at !== which.at || s.open.seq !== which.seq)) return;
+  writeState(root, slug, { ...s, open: null });
 }
 
 /**
- * The answered question a session of `phase` resumes with, or null. Decided as the step's first agent
- * session starts: the question resumes only that session, only when the change is still in the stay at
- * its status the question was asked in (no status change since: not moved on, sent back or retried), and
- * only for a session of the same kind of phase (fix-2 and fix-1 are both fix). Otherwise the answered
- * question is closed without resuming anything: the answer is in conversation.md, so a fresh session
- * still reads it. `mayResume`: false for a session that may not ask (work run alongside).
+ * The answered question a session of `phase` resumes with, or null. It waits for the step's first
+ * session of the kind of phase that asked (fix-2 and fix-1 are both fix), so the sessions of other kinds
+ * that run before it (intake before design, build before fix, the review judge before revise) neither
+ * take it nor close it. That first session resumes the asking session, when the change is still in the
+ * stay at its status the question was asked in (no status change since: not moved on, sent back or
+ * retried); later sessions of that kind in the step never do. The caller closes the question once it
+ * resumed (see agentPhase); one nothing in the step used is closed when the step ends (see
+ * closeUnusedAnswer). `mayResume`: false for a session that may not ask (a judge, work run alongside):
+ * it skips the question, and does not count as the first of its kind.
  */
 export function answerFor(ctx: StepContext, phase: string, mayResume: boolean): Asked | null {
-  if (ctx.agentSessionsStarted > 0) return null;
+  if (!mayResume) return null;
+  const kind = phaseKind(phase);
+  if (ctx.kindsStarted.has(kind)) return null;
+  ctx.kindsStarted.add(kind);
   const s = readQuestion(ctx.root, ctx.slug);
   if (!s?.open?.answer) return null;
-  if (mayResume && inStay(s, stayAt(ctx)) && phaseKind(s.open.phase) === phaseKind(phase)) return s.open;
-  closeQuestion(ctx.root, ctx.slug);
-  return null;
+  return inStay(s, stayAt(ctx)) && phaseKind(s.open.phase) === kind ? s.open : null;
+}
+
+/**
+ * At a step's end: an answered question asked before the step began that nothing in the step used is
+ * closed (one this step asked is left for its answer). Its answer is in conversation.md, so the sessions
+ * to come still read it. Never fails: a problem is traced, and the next step's end tries again.
+ */
+export function closeUnusedAnswer(ctx: StepContext): void {
+  try {
+    const s = readQuestion(ctx.root, ctx.slug);
+    if (s?.open?.answer && Date.parse(s.open.at) < ctx.startedAt) closeQuestion(ctx.root, ctx.slug);
+  } catch (e) {
+    ctx.trace.event(ctx.slug, "error", { where: "question", error: errorText(e) });
+  }
 }
 
 /**

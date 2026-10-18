@@ -12,7 +12,7 @@ import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
-import { closeStaleQuestion, openQuestions } from "./questions";
+import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
@@ -597,9 +597,12 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
  * stopped, or a question an agent asked, ends the step quietly: the change keeps its status. First,
  * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come,
  * a question from another stay at a status is closed (see closeStaleQuestion), and a stop of the change
- * is cleared: the step it was for has ended (see writeChangeStop in src/inbox.ts).
+ * is cleared: the step it was for has ended (see writeChangeStop in src/inbox.ts). Once it ends, an
+ * answered question nothing in it used is closed (see closeUnusedAnswer), unless a stop request, an
+ * outage or the day's budget cut it short: the change then does the step again, and that step may use it.
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
+  let cutShort = false;
   try {
     try {
       clearChangeStop(ctx.root, ctx.slug);
@@ -616,11 +619,15 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
       return { ok: true, stoppedBy: e.by };
     }
     if (e instanceof QuestionAsked) return { ok: true, asked: true };
-    if (notTheStepsFault(e)) throw e;
+    if (notTheStepsFault(e)) {
+      cutShort = true;
+      throw e;
+    }
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
     return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
   } finally {
+    if (!cutShort) closeUnusedAnswer(ctx);
     await dropSnapshot(ctx);
   }
 }

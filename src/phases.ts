@@ -222,9 +222,9 @@ export function renderedThen(first: string | null, render: () => Promise<string 
  * else phasePrompt; never a prompt given as text), so it has what people told the crashed attempt.
  *
  * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
- * ends quietly and the change waits. Once it is answered, the step's first agent session resumes the asking
- * session with the answer, when it is of the same kind of phase and the change has not changed status since
- * (see answerFor; one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS asked
+ * ends quietly and the change waits. Once it is answered, the step's first session of the kind of phase that
+ * asked resumes the asking session with the answer, when the change has not changed status since (see
+ * answerFor; one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS asked
  * in this stay at the status the prompt says no more may be, and one more fails the phase. Work run alongside never
  * asks: a question fails it, and that work is just not used.
  */
@@ -258,7 +258,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     // The answer goes to the session that asked; one that cannot be resumed starts fresh with the normal prompt.
     r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId, false) : await tries(prompt, spec.resume, true);
     if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined, true);
-    closeQuestion(ctx.root, ctx.slug);
+    closeQuestion(ctx.root, ctx.slug, answered);
   } else {
     r = await tries(prompt, spec.resume, true);
   }
@@ -438,7 +438,6 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
-  ctx.agentSessionsStarted++;
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");

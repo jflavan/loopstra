@@ -18,8 +18,10 @@ export class StepContext {
   private reading: Promise<string> | null = null;
   /** The step's snapshot, once asked for (see snapshot). */
   private made: Promise<string> | null = null;
-  /** How many agent sessions the step has started (see attempt in src/phases.ts): only its first may resume an answered question. */
-  agentSessionsStarted = 0;
+  /** The kinds of phase (see phaseKind) whose first session of the step has started: only that one may resume an answered question (see answerFor). */
+  readonly kindsStarted = new Set<string>();
+  /** When the step began (ms since the epoch): a question asked before it and not used is closed when it ends (see closeUnusedAnswer). */
+  readonly startedAt = Date.now();
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
