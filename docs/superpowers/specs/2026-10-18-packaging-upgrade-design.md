@@ -1,6 +1,6 @@
 # Packaging and upgrade: one command brings a repo up to the latest Loopstra
 
-Date: 2026-10-18. Status: designed. One plan, one pull request.
+Date: 2026-10-18. Status: built (plan: docs/superpowers/plans/2026-10-18-packaging-upgrade.md). One plan, one pull request.
 
 Choices made with the user: publish Loopstra as the public npm package `loopstra`, released
 automatically from every green merge to `main`; defaults (prompts, the test hook) live in the
