@@ -86,8 +86,12 @@ it, and can steer: tell a running agent something, stop it, redirect it, or answ
 | `/activity` | Activity | A feed in plain words across all changes and chat; filters by change and kind; a "technical" switch shows raw events. Pages back with `?before=<event id>`. |
 | `/spend` | Spend | Today, this week, all time; per change; per phase name; by hour for the last two days; the cheaper judges' record (what `loopstra judges` shows). |
 
-**Throughout.** The theme follows the system, with a toggle; dark is designed first. System fonts for
-text, `ui-monospace` for code; no web fonts to fetch. A soft pulse marks anything live. Opt-in browser
+**Throughout.** The theme follows the system, with a toggle (the page cross-fades between them); dark is
+designed first. System fonts for text, `ui-monospace` for code; no web fonts to fetch. A soft pulse marks
+anything live. The look follows Apple's interfaces (see "The console's look" in `docs/decisions.md`):
+one set of tokens in `theme.css` for colour, materials, shapes, type and motion; translucent chrome and
+floating surfaces; feedback on press; surfaces that arrive on a critically damped spring; and the
+system's reduced-motion, reduced-transparency and more-contrast settings honoured. Opt-in browser
 notifications for a new question, a new block, and a review waiting. The tab title carries the inbox
 count ("(3) Loopstra") and the favicon gets a dot. Keys: `g l`, `g i`, `g c`, `g a`, `g s` go to the
 screens; Ctrl/⌘ K the palette (jump to a change or session, run any action the current screen

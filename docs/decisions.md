@@ -518,6 +518,18 @@ What the reviews changed:
 
 Checked against the real CLI (2.1.302, haiku, $0.10 cap) at the end: a live `runPhase` took a message written during its tool call, answered BANANA, and exited 0 after 9 s for $0.009.
 
+## The console's look (2026-10-18)
+
+The console was restyled after Apple's interfaces, following the `apple-design` skill (emilkowalski/skills). Only the look changed: every screen, region and control keeps its place and size, and no markup or behaviour changed apart from the theme switch.
+
+- **One design language, all in tokens.** Every colour, surface, material, radius, shadow, type size, tracking and motion curve is a custom property on `:root` in `src/ui/theme.css`, and its header says how they combine. Each kind of thing has one treatment: capsules for chips, statuses, pills and counts; 8 px corners for controls, fields and small rows; 12 px for cards and panels; 16 px for floating surfaces; bubbles for messages.
+- **Apple's system colours,** in the accessible variants where text needs them: every text colour reaches 4.5:1 on the page and the cards in both themes. One blue accent marks what is interactive or current; green, orange and red mark only state. White text goes only on the deeper solid fills (`--accent-fill` #0071e3, `--bad-fill`), never on the bright tints.
+- **Materials.** The top bar, the drawer, the palette, help, toasts, the "Reconnecting…" bar and "Jump to live" are translucent and blurred (`backdrop-filter`). The thicker the surface, the stronger the blur and the deeper the shadow. The sidebar is a heavier, solid tint. The palette and help dim the page behind them; the drawer works beside the page, so it has no scrim.
+- **Type.** The system font. Sizes sit on one scale in `rem` (the root is 87.5%, 14 px at the default), so the browser's text-size setting scales the text. Tracking tightens as type grows (titles −0.022em) and loosens a little on small capitals. Numbers that change are tabular.
+- **Motion.** A control answers on press (`:active` scales it to 0.97; cards to 0.985), and there is no tap delay. Surfaces arrive on a critically damped spring (response 0.35 s, sampled into CSS `linear()`) without bounce, since nothing here is thrown. They come from where they belong: the drawer from its edge, the palette and help from the top, toasts from the bottom. Leaving is instant, as before, because a component that is unmounted cannot animate out. Changing the theme cross-fades the page through `document.startViewTransition` where the browser has it.
+- **Accessibility settings.** Reduced motion keeps the arrivals as plain fades and drops the press, the slides and the pulses. Reduced transparency makes every material solid. More contrast firms the lines, raises the quietest text to the secondary colour, and makes materials solid.
+- **Small fixes on the way.** The change page's tab row overflowed by 1 px, which showed a scrollbar beside it. Its line is now drawn inside the row. A selected inbox item keeps the coloured edge that says why it is there.
+
 ## Review fixes (2026-10-18)
 
 - **CLI 2.x limits are outages.** The 2.x CLI words a limit "You've hit your session limit · resets 8:10pm", "You've reached your Fable limit", "<model> requires usage credits", "You've hit your team's shared budget", "You're out of usage credits", "Credit balance is too low" or "OAuth token refresh failed", which no `ENVIRONMENT_PATTERNS` entry matched, so a limit blocked the change as a crash. The patterns now match those words, and an error result's `api_error_status` (read only when present) of 401, 403, 429 or 5xx counts as the environment's too, so a later rewording still pauses instead of blocking. The fixtures keep both the old and the 2.x wording.
