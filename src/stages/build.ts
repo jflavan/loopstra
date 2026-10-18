@@ -121,7 +121,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 /**
  * Whether round 1's review runs alongside the verifier: when the judges may overlap (mayOverlap),
  * unless commands must run between the two (after the build stage, or before the review stage), or
- * the checks left files in the worktree (review start commits them, so the early review would judge
+ * the checks rewrote files in the worktree (review start commits them, so the early review would judge
  * another commit and go unused). Only a speed-up: when git cannot say, verify runs alone.
  */
 async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
@@ -169,6 +169,10 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
   const wt = new Git(ctx.worktreeDir);
   for (let i = 1; ; i++) {
     const failure = await runChecks(ctx, `${prefix}-${i}`);
+    // New files are the commands' output (a coverage folder, a junit xml): every caller commits its
+    // work before the loop, and each fix is committed below. Removed, so neither a fix's commit nor a
+    // later look for unsaved work (review start, the merge checks) commits them.
+    await wt.run(["clean", "-f", "-d", "-q"], true);
     if (!failure) {
       // The merge checks need not run them again on the same code (see checkMerge).
       writeMarker(ctx, TESTED, testedMarker(ctx, await wt.headSha()));

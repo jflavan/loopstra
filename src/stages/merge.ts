@@ -108,9 +108,6 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
-        // New files are the commands' output (a coverage folder, a junit xml): the worktree had none
-        // before the checks. Removed, so no later look takes them for unsaved work and commits them.
-        await wt.run(["clean", "-f", "-d", "-q"], true);
         // Files a command rewrote (a lint --fix, a formatter): kept on the branch, so they go to review
         // with the rest, and no later rebase or merge meets them unsaved. Files last changed by such a
         // commit and rewritten again, with nothing new brought in by a rebase, change on every run (a
