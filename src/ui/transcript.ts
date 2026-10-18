@@ -28,3 +28,12 @@ export function addItems(s: Shown, more: TranscriptItem[]): Shown {
   }
   return { items, results, todos };
 }
+
+/** The cost the newest result row names, or null when there is none (a chat turn has no change page to read it from). */
+export function lastCost(shown: Shown): number | null {
+  for (let k = shown.items.length - 1; k >= 0; k--) {
+    const it = shown.items[k]!;
+    if (it.kind === "result") return it.costUsd;
+  }
+  return null;
+}

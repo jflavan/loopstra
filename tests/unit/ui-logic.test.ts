@@ -1,5 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
+import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
@@ -7,7 +7,8 @@ import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
-import { addItems, EMPTY } from "../../src/ui/transcript";
+import { addItems, EMPTY, lastCost } from "../../src/ui/transcript";
+import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
@@ -568,5 +569,57 @@ describe("requests from the page", () => {
 
   test("an action that could not be sent says so plainly, without the error itself", () => {
     expect(unsentText("Approve the plan, a")).toBe("Approve the plan, a: it could not be sent. Try again.");
+  });
+});
+
+describe("the agents screen's tiles", () => {
+  const agent = (slug: string, seq: number): RunningPhase => ({ slug, title: `T ${slug}`, seq, name: "build", model: null, started: "2026-10-18T10:00:00.000Z", now: "", strip: [], steerable: true });
+  const open = (slug: string, seq: number): AgentMessage => ({ type: "open", agent: agent(slug, seq) });
+  const text = (key: string, t: string): AgentMessage => ({ type: "item", key, item: { kind: "text", text: t } });
+  const keys = (tiles: Tile[]) => tiles.map((x) => x.key);
+
+  test("open adds a tile at the end; rows go to their tile; open again starts the tile over in its place", () => {
+    let tiles = apply([], [open("a", 1), text("a:1", "x"), open("b", 2), text("b:2", "y"), text("a:1", "z")], 0);
+    expect(keys(tiles)).toEqual(["a:1", "b:2"]);
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "x" }, { kind: "text", text: "z" }]);
+    expect(tiles[1]!.shown.items).toEqual([{ kind: "text", text: "y" }]);
+    tiles = apply(tiles, [open("a", 1), text("a:1", "again")], 5);
+    expect(keys(tiles)).toEqual(["a:1", "b:2"]);
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "again" }]);
+    // Rows for a session the page never saw opened are dropped, and nothing else changes.
+    expect(apply(tiles, [text("c:9", "?")], 6)).toBe(tiles);
+  });
+
+  test("a phase message is kept; end marks the tile ended; it stays FADE_MS, then goes", () => {
+    const tiles = apply([], [open("a", 1), text("a:1", "last"), { type: "phase", key: "a:1", name: "build", status: "success", started: "s", ended: "e" }, { type: "end", key: "a:1" }], 1000);
+    expect(tiles[0]!.phase).toEqual({ type: "phase", name: "build", status: "success", started: "s", ended: "e" });
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "last" }]);
+    expect(tiles[0]!.endedAt).toBe(1000);
+    expect(prune(tiles, 1000 + FADE_MS - 1)).toBe(tiles);
+    expect(prune(tiles, 1000 + FADE_MS)).toEqual([]);
+  });
+
+  test("sync ends the running tiles it does not name", () => {
+    const tiles = apply([], [open("a", 1), open("b", 2), { type: "sync", keys: ["b:2"] }], 7);
+    expect(tiles.map((x) => [x.key, x.endedAt])).toEqual([["a:1", 7], ["b:2", null]]);
+  });
+
+  test("slots: questions first, then tiles as they came, then the orchestrator; a change with a question shows no finished tile", () => {
+    const tiles = apply([], [open("a", 1), open("b", 2), { type: "end", key: "a:1" }], 0);
+    const changes = [{ slug: "b", question: null }, { slug: "a", question: { text: "?", why: "", options: [], phase: "build", at: "t" } }] as unknown as ChangeSummary[];
+    const names = (s: ReturnType<typeof slots>) => s.map((x) => (x.kind === "agent" ? x.tile.key : x.kind === "question" ? `q:${x.change.slug}` : "chat"));
+    expect(names(slots(tiles, changes, true))).toEqual(["q:a", "b:2", "chat"]);
+    expect(names(slots(tiles, null, false))).toEqual(["a:1", "b:2"]);
+  });
+
+  test("a link's target: a session, and whether to put the cursor in its box", () => {
+    expect(parseTarget("#one:3")).toEqual({ key: "one:3", message: false });
+    expect(parseTarget("#one:3:message")).toEqual({ key: "one:3", message: true });
+    for (const bad of ["", "#", "#one", "#One:3", "#one:x", "#one:3:other"]) expect(parseTarget(bad)).toBeNull();
+  });
+
+  test("the cost a transcript's last result names", () => {
+    expect(lastCost(EMPTY)).toBeNull();
+    expect(lastCost(addItems(EMPTY, [{ kind: "result", ok: true, summary: "", costUsd: 0.5 }, { kind: "text", text: "after" }]))).toBe(0.5);
   });
 });
