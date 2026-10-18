@@ -258,8 +258,10 @@ describe("Slack", () => {
 function discordStub(closeOnIdentify?: number) {
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | null; auth: string }> = [];
   const frames: Array<{ op: number; d: unknown }> = [];
-  let socket: { send: (s: string) => void } | null = null;
+  let socket: { send: (s: string) => void; close: (code?: number) => void } | null = null;
   let threadN = 100;
+  /** What GET /gateway/bot answers: 200, or 401 for a token Discord does not accept. */
+  let gatewayStatus = 200;
   const server: ReturnType<typeof Bun.serve> = Bun.serve({
     port: 0,
     async fetch(req, srv): Promise<Response | undefined> {
@@ -268,7 +270,7 @@ function discordStub(closeOnIdentify?: number) {
       const body = req.method === "POST" ? await req.json().catch(() => null) as Record<string, unknown> | null : null;
       const path = url.pathname.replace("/api", "");
       calls.push({ method: req.method, path, body, auth: req.headers.get("authorization") ?? "" });
-      if (path === "/gateway/bot") return Response.json({ url: `ws://127.0.0.1:${server.port}/gw` });
+      if (path === "/gateway/bot") return gatewayStatus === 200 ? Response.json({ url: `ws://127.0.0.1:${server.port}/gw` }) : Response.json({ message: "401: Unauthorized", code: 0 }, { status: gatewayStatus });
       if (/\/threads$/.test(path)) return Response.json({ id: String(threadN++) });
       return Response.json({ id: "m" });
     },
@@ -283,7 +285,14 @@ function discordStub(closeOnIdentify?: number) {
     },
   });
   const message = (d: Record<string, unknown>) => socket!.send(JSON.stringify({ op: 0, s: 2, t: "MESSAGE_CREATE", d }));
-  return { server, calls, frames, message, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length };
+  return {
+    server, calls, frames, message, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length,
+    /** From now on the token is refused: GET /gateway/bot answers `status`. */
+    refuseToken: (status = 401) => { gatewayStatus = status; },
+    /** The gateway drops the connection, as it does now and then. */
+    drop: () => socket!.close(4000),
+    gatewayLooks: () => calls.filter((c) => c.path === "/gateway/bot").length,
+  };
 }
 
 /** A Discord transport on `stub`, started; its log lines are kept. */
@@ -365,6 +374,38 @@ describe("Discord", () => {
       await Bun.sleep(1_500);
       expect(stub.identifies()).toBe(1);
       expect(logged).toEqual(["Discord refused the bot (4014): the Message Content intent is off. Turn it on for the bot in the Discord Developer Portal (Bot, Privileged Gateway Intents). Trying again every 5 minutes."]);
+    } finally {
+      await discord.stop();
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a token Discord refuses at start is a plain error naming its variable", async () => {
+    const r = await chatRepo();
+    const stub = discordStub();
+    stub.refuseToken();
+    try {
+      await expect(startDiscord(stub, r.root)).rejects.toThrow(/^Discord refused the bot \(HTTP 401\): the bot token was not accepted\. Check the token in TOKEN\.$/);
+    } finally {
+      stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a token revoked while the bot runs says what to fix, once, and is tried again only every 5 minutes", async () => {
+    const r = await chatRepo();
+    const stub = discordStub();
+    const { discord, logged } = await startDiscord(stub, r.root);
+    try {
+      await until(() => stub.ready());
+      await Bun.sleep(200);
+      stub.refuseToken(403);
+      stub.drop();
+      // The first try is a second after the drop; without the slow wait, more would follow at 3 seconds.
+      await Bun.sleep(3_500);
+      expect(stub.gatewayLooks()).toBe(2);
+      expect(logged).toEqual(["Discord refused the bot (HTTP 403): the bot token was not accepted. Check the token in TOKEN. Trying again every 5 minutes."]);
     } finally {
       await discord.stop();
       stub.server.stop(true);

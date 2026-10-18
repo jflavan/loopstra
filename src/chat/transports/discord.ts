@@ -21,6 +21,11 @@ function refusal(code: number, tokenEnv: string): string | null {
   return null;
 }
 
+/** A REST call Discord answered with an error, and its HTTP status. */
+class DiscordHttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 interface DiscordMessage { id: string; channel_id: string; content?: string; author?: { id: string; username?: string; global_name?: string | null; bot?: boolean } }
 interface GatewayFrame { op: number; d?: unknown; s?: number | null; t?: string | null }
 
@@ -44,8 +49,8 @@ export class DiscordTransport implements Transport {
   private readonly reconnect: Reconnector;
   private readonly access: LiveAccess;
   private warnedEmpty = false;
-  /** The refusal last logged (a gateway close code), so a lasting one is one line. */
-  private refusedCode: number | null = null;
+  /** The refusal last logged (a gateway close code, or an HTTP status), so a lasting one is one line. */
+  private refusedCode: number | string | null = null;
 
   constructor(private readonly cfg: DiscordTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void }) {
     this.api = (opts.env ?? process.env)[DISCORD_API_ENV] ?? "https://discord.com/api/v10";
@@ -76,7 +81,7 @@ export class DiscordTransport implements Transport {
         await Bun.sleep(Math.min(30, j.retry_after ?? 1) * 1000);
         continue;
       }
-      if (!res.ok) throw new Error(`Discord ${method} ${path} failed: HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+      if (!res.ok) throw new DiscordHttpError(`Discord ${method} ${path} failed: HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`, res.status);
       return await res.json().catch(() => ({})) as Record<string, unknown>;
     }
   }
@@ -85,12 +90,25 @@ export class DiscordTransport implements Transport {
     this.token = (this.opts.env ?? process.env)[this.cfg.token_env] ?? "";
     if (!this.token) throw new Error(`Discord needs its bot token in the environment variable ${this.cfg.token_env}.`);
     this.onMessage = onMessage;
-    await this.connect();
+    await this.connect(true);
   }
 
-  private async connect(): Promise<void> {
+  /** `starting`: a token Discord refuses is an error for start to throw, not a refusal to wait out. */
+  private async connect(starting = false): Promise<void> {
     if (!this.onMessage) return;
-    const gw = await this.call("GET", "/gateway/bot");
+    let gw: Record<string, unknown>;
+    try {
+      gw = await this.call("GET", "/gateway/bot");
+    } catch (e) {
+      // A bad or revoked token is refused here, before the gateway could close with 4004.
+      if (!(e instanceof DiscordHttpError) || (e.status !== 401 && e.status !== 403)) throw e;
+      const code = `HTTP ${e.status}`;
+      const why = refusal(4004, this.cfg.token_env)!;
+      if (starting) throw new Error(`Discord refused the bot (${code}): ${why}.`);
+      this.refused(code, why);
+      this.reconnect.schedule();
+      return;
+    }
     const ws = new WebSocket(`${String(gw.url)}/?v=10&encoding=json`);
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
@@ -102,13 +120,16 @@ export class DiscordTransport implements Transport {
       if (this.ws !== ws) return;
       this.stopBeat();
       const refused = refusal(ev.code, this.cfg.token_env);
-      if (refused) {
-        if (this.refusedCode !== ev.code) this.log(`Discord refused the bot (${ev.code}): ${refused}. Trying again every 5 minutes.`);
-        this.refusedCode = ev.code;
-        this.reconnect.slowly();
-      }
+      if (refused) this.refused(ev.code, refused);
       if (this.onMessage) this.reconnect.schedule();
     });
+  }
+
+  /** A refusal a retry cannot fix: said once while it lasts, and tried again only every 5 minutes. */
+  private refused(code: number | string, why: string): void {
+    if (this.refusedCode !== code) this.log(`Discord refused the bot (${code}): ${why}. Trying again every 5 minutes.`);
+    this.refusedCode = code;
+    this.reconnect.slowly();
   }
 
   private stopBeat(): void {
