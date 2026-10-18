@@ -15,6 +15,7 @@ function commands(): Command[] {
     { id: "inbox", title: "Go to Inbox", hint: "g i", run: () => navigate("/inbox") },
     { id: "changes", title: "Go to Changes", hint: "g c", run: () => navigate("/changes") },
     { id: "activity", title: "Go to Activity", hint: "g a", run: () => navigate("/activity") },
+    { id: "agents", title: "Go to Agents", hint: "g w", run: () => navigate("/agents") },
     { id: "spend", title: "Go to Spend", hint: "g s", run: () => navigate("/spend") },
     { id: "ask", title: "Ask the orchestrator", hint: keyLabel("mod+j", onMac), run: () => openDrawer() },
     { id: "theme", title: "Change the theme", run: cycleTheme },
@@ -34,7 +35,7 @@ function commands(): Command[] {
       },
     },
   ];
-  for (const p of running.value?.now ?? []) list.push({ id: `s:${p.slug}:${p.seq}`, title: `Watch ${p.title}: ${p.name}`, hint: "running", run: () => navigate(`/s/${p.slug}/${p.seq}`) });
+  for (const p of running.value?.now ?? []) list.push({ id: `s:${p.slug}:${p.seq}`, title: `Watch ${p.title}: ${p.name}`, hint: "running", run: () => navigate(`/agents#${p.slug}:${p.seq}`) });
   for (const c of changes.value ?? []) list.push({ id: `c:${c.slug}`, title: `Open ${c.title}`, hint: c.plain, run: () => navigate(`/c/${c.slug}`) });
   return list;
 }

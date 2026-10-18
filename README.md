@@ -146,6 +146,7 @@ The console is one local web app that updates live over one stream from the serv
 - **Inbox:** everything that needs a person, the same list as `status`. <kbd>J</kbd> and <kbd>K</kbd> move through it, <kbd>O</kbd> opens a change.
 - **Changes:** a board with a column per stage (or a list), and a page per change: its note and intent, its documents (rendered, read-only), a timeline of its steps with what each cost and any commands it was refused, its code (the branch's diff against main), and its gate results with their evidence.
 - **Activity:** what happened, in plain words, or the trace's technical events.
+- **Agents:** every active agent at once, a tile each: its live transcript (scroll up to read back; edits show as counts), and a one-line box to message, redirect or stop it without leaving the grid. Agents waiting on your answer come first, with Answer. A session that finished stays a minute, greyed, so it does not vanish while you type to it. The orchestrator has a tile too, and the speech button on an agent's tile asks it about that agent. Live's Watch and Message open the agent's tile, and the tile's corner button opens its full session page. One stream carries every tile, however many agents run. <kbd>G</kbd> <kbd>W</kbd> goes there.
 - **Spend:** today, this week and all time, by change, by kind of step and by hour, and the cheaper judges' record.
 
 The orchestrator is a drawer on every screen (Ctrl J; see Chat); opened from a change or an inbox item, it is told what it is about. Ctrl K searches changes, agents and commands; `?` lists the keys. The tab's title counts what needs you (the icon shows a dot), and the palette can turn on browser notifications, which come only for what a person must act on (blocked or waiting) and only when the tab is in the background. If the connection drops, the page reconnects and catches up on what it missed; after 20 seconds of silence it says "Reconnecting…". The console listens only on 127.0.0.1 and answers only to 127.0.0.1, localhost and [::1]; the page carries a Content-Security-Policy with no inline script, and Markdown shows only http(s) and relative links. `queue.md` in `intent/` is a generated view of the same queue; its "Needs a person" list matches. The console follows the system's light or dark theme (the moon button switches it), its text scales with the browser's text size, and it respects the system's settings for reduced motion, reduced transparency and more contrast.
@@ -154,7 +155,7 @@ The orchestrator is a drawer on every screen (Ctrl J; see Chat); opened from a c
 
 ## Steering
 
-You can steer an agent while it works. Open its session (from Live, or a change's timeline). Above the transcript is a box with three buttons:
+You can steer an agent while it works, from its tile on Agents or from its session page (open it from a tile, or a change's timeline). Each has a box with three buttons (shorter on a tile, where Enter sends):
 
 - **Send message.** The agent reads it at its next step, between two tool calls, and carries on. Ctrl+Enter (⌘+Enter on a Mac) sends it too.
 - **Redirect.** The session stops what it was doing and starts again your way. It is the same session, so it keeps what it knew, and messages it had not read yet go along.

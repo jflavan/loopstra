@@ -135,6 +135,20 @@ export type SessionMessage =
   | { type: "item"; item: TranscriptItem }
   | { type: "end" };
 
+/** A running session's key on the Agents screen. */
+export const agentKey = (slug: string, seq: number): string => `${slug}:${seq}`;
+
+/**
+ * A message on /api/agents/stream: `open` when it starts following a running session, then that
+ * session's own messages (see SessionMessage) with its key. `sync`, sent once after the first look,
+ * names every session it follows, so a page that reconnected can tell which of its tiles ended
+ * while it was away.
+ */
+export type AgentMessage =
+  | { type: "open"; agent: RunningPhase }
+  | { type: "sync"; keys: string[] }
+  | (SessionMessage & { key: string });
+
 export interface DiffView {
   /** False when the change has no branch (not built yet, or merged and cleaned up), or main cannot be found. */
   exists: boolean;

@@ -1,13 +1,14 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { ActivityItem, ChangeSummary, Sections, StreamMessage } from "../../src/console/types";
-import { parseDiff } from "../../src/ui/diff";
+import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
+import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
 import { parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
-import { addItems, EMPTY } from "../../src/ui/transcript";
+import { addItems, EMPTY, lastCost } from "../../src/ui/transcript";
+import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
@@ -53,13 +54,14 @@ describe("routes", () => {
   test("paths become screens and back", () => {
     expect(parseRoute("/")).toEqual({ name: "live" });
     expect(parseRoute("/inbox")).toEqual({ name: "inbox" });
+    expect(parseRoute("/agents")).toEqual({ name: "agents" });
     expect(parseRoute("/c/csv-export")).toEqual({ name: "change", slug: "csv-export", tab: "overview" });
     expect(parseRoute("/c/csv-export/code")).toEqual({ name: "change", slug: "csv-export", tab: "code" });
     expect(parseRoute("/s/csv-export/12")).toEqual({ name: "session", slug: "csv-export", seq: 12 });
     expect(parseRoute("/s/_chat/3")).toEqual({ name: "session", slug: "_chat", seq: 3 });
     for (const bad of ["/c/Bad", "/c/one/nope", "/s/one/x", "/nope", "/c/one/code/more", "/c/%E0%A4%A"]) expect(parseRoute(bad)).toEqual({ name: "missing", path: bad });
     const all: Route[] = [
-      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "spend" },
+      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "agents" }, { name: "spend" },
       { name: "change", slug: "a", tab: "overview" }, { name: "change", slug: "a", tab: "gates" }, { name: "session", slug: "a", seq: 4 },
     ];
     for (const r of all) expect(parseRoute(routePath(r))).toEqual(r);
@@ -133,6 +135,11 @@ describe("the command palette's matching", () => {
 });
 
 describe("diffs", () => {
+  test("an edit's added and removed lines, as counts", () => {
+    expect(diffCounts("--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n")).toEqual({ added: 2, removed: 1 });
+    expect(diffCounts("")).toEqual({ added: 0, removed: 0 });
+  });
+
   test("git's diffs and an edit's diff become rows; a deleted line that looks like a header stays a line", () => {
     const git = "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n--- sql comment\n\\ No newline at end of file\n";
     expect(parseDiff(git)).toEqual([
@@ -568,5 +575,57 @@ describe("requests from the page", () => {
 
   test("an action that could not be sent says so plainly, without the error itself", () => {
     expect(unsentText("Approve the plan, a")).toBe("Approve the plan, a: it could not be sent. Try again.");
+  });
+});
+
+describe("the agents screen's tiles", () => {
+  const agent = (slug: string, seq: number): RunningPhase => ({ slug, title: `T ${slug}`, seq, name: "build", model: null, started: "2026-10-18T10:00:00.000Z", now: "", strip: [], steerable: true });
+  const open = (slug: string, seq: number): AgentMessage => ({ type: "open", agent: agent(slug, seq) });
+  const text = (key: string, t: string): AgentMessage => ({ type: "item", key, item: { kind: "text", text: t } });
+  const keys = (tiles: Tile[]) => tiles.map((x) => x.key);
+
+  test("open adds a tile at the end; rows go to their tile; open again starts the tile over in its place", () => {
+    let tiles = apply([], [open("a", 1), text("a:1", "x"), open("b", 2), text("b:2", "y"), text("a:1", "z")], 0);
+    expect(keys(tiles)).toEqual(["a:1", "b:2"]);
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "x" }, { kind: "text", text: "z" }]);
+    expect(tiles[1]!.shown.items).toEqual([{ kind: "text", text: "y" }]);
+    tiles = apply(tiles, [open("a", 1), text("a:1", "again")], 5);
+    expect(keys(tiles)).toEqual(["a:1", "b:2"]);
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "again" }]);
+    // Rows for a session the page never saw opened are dropped, and nothing else changes.
+    expect(apply(tiles, [text("c:9", "?")], 6)).toBe(tiles);
+  });
+
+  test("a phase message is kept; end marks the tile ended; it stays FADE_MS, then goes", () => {
+    const tiles = apply([], [open("a", 1), text("a:1", "last"), { type: "phase", key: "a:1", name: "build", status: "success", started: "s", ended: "e" }, { type: "end", key: "a:1" }], 1000);
+    expect(tiles[0]!.phase).toEqual({ type: "phase", name: "build", status: "success", started: "s", ended: "e" });
+    expect(tiles[0]!.shown.items).toEqual([{ kind: "text", text: "last" }]);
+    expect(tiles[0]!.endedAt).toBe(1000);
+    expect(prune(tiles, 1000 + FADE_MS - 1)).toBe(tiles);
+    expect(prune(tiles, 1000 + FADE_MS)).toEqual([]);
+  });
+
+  test("sync ends the running tiles it does not name", () => {
+    const tiles = apply([], [open("a", 1), open("b", 2), { type: "sync", keys: ["b:2"] }], 7);
+    expect(tiles.map((x) => [x.key, x.endedAt])).toEqual([["a:1", 7], ["b:2", null]]);
+  });
+
+  test("slots: questions first, then tiles as they came, then the orchestrator; a change with a question shows no finished tile", () => {
+    const tiles = apply([], [open("a", 1), open("b", 2), { type: "end", key: "a:1" }], 0);
+    const changes = [{ slug: "b", question: null }, { slug: "a", question: { text: "?", why: "", options: [], phase: "build", at: "t" } }] as unknown as ChangeSummary[];
+    const names = (s: ReturnType<typeof slots>) => s.map((x) => (x.kind === "agent" ? x.tile.key : x.kind === "question" ? `q:${x.change.slug}` : "chat"));
+    expect(names(slots(tiles, changes, true))).toEqual(["q:a", "b:2", "chat"]);
+    expect(names(slots(tiles, null, false))).toEqual(["a:1", "b:2"]);
+  });
+
+  test("a link's target: a session, and whether to put the cursor in its box", () => {
+    expect(parseTarget("#one:3")).toEqual({ key: "one:3", message: false });
+    expect(parseTarget("#one:3:message")).toEqual({ key: "one:3", message: true });
+    for (const bad of ["", "#", "#one", "#One:3", "#one:x", "#one:3:other"]) expect(parseTarget(bad)).toBeNull();
+  });
+
+  test("the cost a transcript's last result names", () => {
+    expect(lastCost(EMPTY)).toBeNull();
+    expect(lastCost(addItems(EMPTY, [{ kind: "result", ok: true, summary: "", costUsd: 0.5 }, { kind: "text", text: "after" }]))).toBe(0.5);
   });
 });

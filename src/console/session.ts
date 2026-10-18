@@ -13,15 +13,26 @@ function sizeOf(path: string): number {
   try { return statSync(path).size; } catch { return -1; }
 }
 
+/** What a follower is told: one message, with an item's resume offset; false once whoever reads it is gone (it then stops). */
+export type Emit = (msg: SessionMessage, offset?: number) => boolean;
+
 /**
- * Streams one phase's transcript from byte `from`: first the phase, then each item with an offset
- * as its id (see TranscriptReader.read), so a page that reconnects continues there. Checks the file
- * every `intervalMs` (watching a growing file is unreliable on Windows). Once the phase has ended
- * and its file is read to the end, sends the phase again and `end`, then closes. If anything goes
- * wrong it closes too, and never throws. Gives the function that stops it, or null when there is
- * no such phase (or the trace or the phase cannot be read).
+ * Streams one phase's transcript to a page (see followSession), each item with its offset as the
+ * frame's id, so a page that reconnects continues there.
  */
 export function streamSession(root: string, slug: string, seq: number, from: number, send: Send, close: () => void, intervalMs = 250): (() => void) | null {
+  return followSession(root, slug, seq, from, (msg, offset) => send(frame(msg, offset)), close, intervalMs);
+}
+
+/**
+ * Follows one phase's transcript from byte `from`: first the phase, then each item with its offset
+ * (see TranscriptReader.read). Checks the file every `intervalMs` (watching a growing file is
+ * unreliable on Windows). Once the phase has ended and its file is read to the end, emits the phase
+ * again and `end`, then closes. If anything goes wrong it closes too, and never throws. Gives the
+ * function that stops it, or null when there is no such phase (or the trace or the phase cannot be
+ * read).
+ */
+export function followSession(root: string, slug: string, seq: number, from: number, emit: Emit, close: () => void, intervalMs = 250): (() => void) | null {
   let trace: Trace;
   try { trace = Trace.open(root); } catch { return null; }
   let first: PhaseRow | null = null;
@@ -48,7 +59,7 @@ export function streamSession(root: string, slug: string, seq: number, from: num
   /** Sends items; false once the page is gone (the stream is then stopped). */
   const sent = (items: ReturnType<TranscriptReader["read"]>): boolean => {
     for (const { item, offset } of items) {
-      if (!send(frame({ type: "item", item } satisfies SessionMessage, offset))) {
+      if (!emit({ type: "item", item }, offset)) {
         stop();
         return false;
       }
@@ -70,8 +81,8 @@ export function streamSession(root: string, slug: string, seq: number, from: num
       return;
     }
     if (!sent(reader.read(undefined, { final: true })) || !reader.atEnd()) return;
-    send(frame(phaseMessage(p)));
-    send(frame({ type: "end" } satisfies SessionMessage));
+    emit(phaseMessage(p));
+    emit({ type: "end" });
     finish();
   };
   /** Runs part of the stream; whatever it throws (an unreadable file, a broken connection) ends the stream instead. */
@@ -79,7 +90,7 @@ export function streamSession(root: string, slug: string, seq: number, from: num
     if (done) return;
     try { fn(); } catch { finish(); }
   };
-  run(() => { send(frame(phaseMessage(first))); });
+  run(() => { emit(phaseMessage(first)); });
   if (!done) timer = setInterval(() => run(step), intervalMs);
   run(step);
   return stop;
