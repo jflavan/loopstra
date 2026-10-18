@@ -402,9 +402,11 @@ export function sentBackNote(ctx: StepContext): string {
   return note ? `A person sent the earlier version back with this note:\n${note}` : "";
 }
 
-/** Drops a kept sent-back note (its send back was undone). */
-export function dropSentBack(root: string, slug: string): void {
-  rmSync(join(root, ".loopstra", "runs", slug, SENT_BACK), { force: true });
+/** Drops a kept sent-back note (its send back was undone, or never landed); with `only`, only when it is that note. */
+export function dropSentBack(root: string, slug: string, only?: string): void {
+  const path = join(root, ".loopstra", "runs", slug, SENT_BACK);
+  if (only !== undefined && (!existsSync(path) || readFileSync(path, "utf8") !== only)) return;
+  rmSync(path, { force: true });
 }
 
 

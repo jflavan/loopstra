@@ -5,6 +5,7 @@ import { Orchestrator } from "../../src/chat/orchestrator";
 import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { ChatService, type OnMessage, type Transport } from "../../src/chat/service";
 import { Git } from "../../src/git";
+import { fileHash } from "../../src/headfiles";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -111,8 +112,10 @@ describe("chat with the loop", () => {
       // As if the loop was killed after an earlier tick wrote both files, before it committed them.
       await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
       await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
-      writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"] });
-      writeJson(join(requestsDir(r.root), `${added.id}.json`), { ...added, written: ["c"] });
+      // Each with the hash of what it wrote, as markWritten keeps it: only a file that still holds that is the request's own.
+      const hash = (slug: string) => ({ [slug]: fileHash(join(r.root, "intent", slug, "intent.md"))! });
+      writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"], writtenHash: hash("a") });
+      writeJson(join(requestsDir(r.root), `${added.id}.json`), { ...added, written: ["c"], writtenHash: hash("c") });
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
         "Started a. I will say here when it needs anyone, and when it is done.",
