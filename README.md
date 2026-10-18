@@ -342,17 +342,17 @@ To use the checkout as your global `loopstra`, run `bun link` in it (and `bun un
 
 Tests run the whole loop in a temporary git repo against a fake `claude` executable (and a fake `gh` with a bare repository as the remote), so they do not call Claude or GitHub. The fake `claude` can answer a phase differently on each call (`<phase>-<n>.jsonl` in `LOOPSTRA_FAKE_FIXTURE_DIR`), which the chat tests use for conversations. The Slack and Discord bots are tested against stub servers, through `LOOPSTRA_SLACK_API` and `LOOPSTRA_DISCORD_API`.
 
-**Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) publishes when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), publishes to npm with provenance, tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A commit that is already part of a release is never released again. To release without such a change, run the workflow by hand on `main` with `bump` set to `patch` or `minor`.
+**Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) releases when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), publishes to npm with provenance, tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A version already on npm is not published again; the run still adds the tag and the GitHub Release if they are missing. Run the workflow by hand on `main` to release without such a change; a manual run always releases, and `bump` (`patch` or `minor`) chooses the step. Neither kind of run releases a commit that is already part of a release (the latest `v*` tag, or older).
 
 **One-time setup.** The package has no license yet (`"license": "UNLICENSED"`, and no LICENSE file): choose one before the first publish. npm trusted publishing can only be set up for a package that exists, so the first release is published by hand, signed in to npm (`npm login`), from a clean checkout of `main`:
 
 ```
 npm version 0.1.0 --no-git-tag-version
 bun scripts/shipped.ts shipped.json
-npm publish --access public --provenance=false
+npm publish --access public
 git tag v0.1.0
 git push origin v0.1.0
 git checkout package.json && rm shipped.json
 ```
 
-The tag tells the workflow that 0.1.0 is out, so its first release is the next one. Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, repository `jflavan/loopstra`, workflow `release.yml`. From then on the workflow publishes with no token stored.
+This publish has no provenance; the workflow's publishes have it. The tag tells the workflow that 0.1.0 is out, so its next run releases 0.1.1. Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, repository `jflavan/loopstra`, workflow `release.yml`. From then on the workflow publishes with no token stored.
