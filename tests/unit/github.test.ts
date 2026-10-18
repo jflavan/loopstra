@@ -59,8 +59,10 @@ describe("GitHub", () => {
       // Anyone can approve on a public repository: a stranger's approval does not count.
       expect(await approvedWith("", [{ ...member, authorAssociation: "NONE" }])).toBe(false);
       expect(await approvedWith("", [{ ...member, authorAssociation: "CONTRIBUTOR" }])).toBe(false);
-      // A request for changes from anyone holds it back.
-      expect(await approvedWith("", [member, { author: { login: "bob" }, authorAssociation: "NONE", state: "CHANGES_REQUESTED" }])).toBe(false);
+      // A request for changes from someone with a say holds it back; a stranger's does not, as with approvals.
+      expect(await approvedWith("", [member, { author: { login: "bob" }, authorAssociation: "COLLABORATOR", state: "CHANGES_REQUESTED" }])).toBe(false);
+      expect(await approvedWith("", [member, { author: { login: "bob" }, authorAssociation: "NONE", state: "CHANGES_REQUESTED" }])).toBe(true);
+      expect(await approvedWith("", [member, { author: { login: "bob" }, state: "CHANGES_REQUESTED" }])).toBe(false);
       expect(await approvedWith("", [member, { author: { login: "cat" }, authorAssociation: "MEMBER", state: "COMMENTED" }])).toBe(true);
       // Without authorAssociation, any approval but the pull request's author's own counts.
       expect(await approvedWith("", [{ author: { login: "ann" }, state: "APPROVED" }])).toBe(true);

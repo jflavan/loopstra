@@ -66,20 +66,22 @@ type PrJson = {
   author?: { login?: string } | null;
 };
 
-/** Who has a say in the repository; on a public one anybody else can leave an approving review too. */
+/**
+ * Who has a say in the repository; on a public one anybody else can leave a review too. Broader than
+ * GitHub's own rule (write access): a collaborator with read access counts.
+ */
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 /**
  * GitHub's reviewDecision when it gives one. It gives none unless a branch rule requires reviews (one
- * requiring 0 approvals too), and then the latest reviews decide: approved by someone with a say in the
- * repository (when gh gives no authorAssociation, by anyone but the pull request's author), and no
- * request for changes.
+ * requiring 0 approvals too), and then the latest reviews of those with a say in the repository (when
+ * gh gives no authorAssociation, of anyone but the pull request's author) decide: one approves, and
+ * none asks for changes.
  */
 function approved(j: PrJson): boolean {
   if (j.reviewDecision) return j.reviewDecision === "APPROVED";
-  const reviews = j.latestReviews ?? [];
-  const counts = (r: (typeof reviews)[number]) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login;
-  return reviews.some((r) => r.state === "APPROVED" && counts(r)) && !reviews.some((r) => r.state === "CHANGES_REQUESTED");
+  const reviews = (j.latestReviews ?? []).filter((r) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login);
+  return reviews.some((r) => r.state === "APPROVED") && !reviews.some((r) => r.state === "CHANGES_REQUESTED");
 }
 
 export class GitHub {
