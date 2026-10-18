@@ -208,6 +208,28 @@ describe("StepContext", () => {
     }
   });
 
+  test("a record whose commit landed before its error (git's time limit after the commit) is kept, not put back behind HEAD", async () => {
+    const { repo, ctx, trace } = await setup();
+    const commitPaths = Git.prototype.commitPaths;
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      Git.prototype.commitPaths = async function (this: Git, ...args: Parameters<Git["commitPaths"]>) {
+        await commitPaths.apply(this, args);
+        throw new GitError(["commit"], "", "", 124, "git commit timed out");
+      };
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+      })).rejects.toBeInstanceOf(GitError);
+      expect(await Bun.file(intentMd).text()).toContain("status: designing");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect(await lastCommit(repo.path)).toContain("a note");
+    } finally {
+      Git.prototype.commitPaths = commitPaths;
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("a record whose commit meets a held index lock goes back to what was there, a person's uncommitted edit included", async () => {
     const { repo, ctx, trace } = await setup();
     const lock = join(repo.path, ".git", "index.lock");

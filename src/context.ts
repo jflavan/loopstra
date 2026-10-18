@@ -146,12 +146,17 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     throwIfStopping();
     const paths = [`intent/${slug}`, "intent/queue.md"];
     const before = filesUnder(root, paths);
+    const head = await git.headSha();
     if ((await write()) === false) return false;
     const written = filesUnder(root, paths);
     try {
       return await git.commitPaths(paths, bookkeeping(`loopstra(${slug}): ${what}`), { finish: true });
     } catch (e) {
-      await putBackRecord(git, root, paths, before, written);
+      // A commit that landed before its error (git's time limit cut in after it) is kept: putting the
+      // files back would leave main's checkout behind its own HEAD.
+      const now = await git.run(["rev-parse", "HEAD"], { allowFail: true, cleanup: true }).catch(() => null);
+      const landed = now?.code === 0 && now.out.trim() !== head;
+      if (!landed) await putBackRecord(git, root, paths, before, written);
       throw e;
     }
   });
