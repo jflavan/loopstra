@@ -226,7 +226,7 @@ publish` from a clean checkout of main with the version and `shipped.json` set a
 
 | Situation | What happens |
 |---|---|
-| The registry cannot be reached | Says so, and offers the repo step for the installed version (`--repo`). |
+| The registry cannot be reached | Says so, and runs the repo step with the installed version. |
 | The global install fails | Runs the repo step through `bunx`, prints the install command. |
 | Not on main, or managed files or the config have uncommitted changes | Refuses, names them, writes nothing. |
 | A merge conflicts | Markers stay in that file, it is listed and left out of the commit. |
