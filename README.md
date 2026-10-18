@@ -52,7 +52,7 @@ loopstra upgrade              # installs the latest Loopstra, then brings this r
 loopstra start
 ```
 
-`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too: the install is already done there, so it only brings that repository up to it. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
+`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too, with their loops stopped as well: the install is already done there, so it only brings that repository up to it. A loop left running in another repository would go on with its old code but the new prompts until it is restarted. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
 
 **Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start`, `chat` and `ui` refuse in such a repository until that is done.
 
@@ -350,7 +350,9 @@ It prints what happened to each file. Nothing is written until every check has p
 - a merge, cherry-pick or revert is in progress;
 - the repository is on a newer release than the one installed (a teammate upgraded it). It says which version to install instead of bringing older texts back.
 
-A newer release installed first stays installed; only the repository is left as it was. Loops in other repositories keep the code they loaded until they are restarted.
+A newer release installed first stays installed; only the repository is left as it was.
+
+There is one install per machine, so an upgrade reaches loops already running in your other repositories too. Such a loop keeps the code it loaded when it started, but reads its prompts and the test hook from the install each time a phase starts, so until it is restarted it runs the old code with the new prompts. Stop those loops, run `loopstra upgrade` in their repositories, and start them again.
 
 `--check` installs and writes nothing. It prints the installed and latest versions, what is new between them, and what would happen to each file. What would make a real upgrade refuse (the loop running, an operation in progress, uncommitted files) is listed as a note; a folder that is not set up, a checkout not on `main_branch`, or a stamp that cannot be read is still refused. When a newer release is out, the files are what the installed one would do (the newer one may do more).
 
