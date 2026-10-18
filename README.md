@@ -375,7 +375,7 @@ git clone https://github.com/jflavan/loopstra.git
 cd loopstra
 bun install
 bun src/cli.ts <command>   # run the checkout, in place of loopstra <command>
-bun run test               # the suite in four parallel shards; bun run test:serial runs it in one process
+bun run test               # the suite, one process per file, four at a time (see scripts/test.ts); bun run test:serial runs it in one process
 bun run typecheck
 ```
 
