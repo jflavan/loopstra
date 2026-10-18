@@ -154,7 +154,7 @@ The orchestrator is a drawer on every screen (Ctrl J; see Chat); opened from a c
 
 ## Steering
 
-You can steer an agent while it works. Open its session (from Live, or a change's timeline). Under the transcript is a box with three buttons:
+You can steer an agent while it works. Open its session (from Live, or a change's timeline). Above the transcript is a box with three buttons:
 
 - **Send message.** The agent reads it at its next step, between two tool calls, and carries on. Ctrl+Enter (⌘+Enter on a Mac) sends it too.
 - **Redirect.** The session stops what it was doing and starts again your way. It is the same session, so it keeps what it knew, and messages it had not read yet go along.

@@ -327,9 +327,11 @@ and that it must never claim one happened before the result comes back.
 > step's first session of the kind of phase that asked, and only while the change is in the same stay
 > at its status (otherwise a fresh session reads it in conversation.md); the 3 questions are counted
 > per stay at a status rather than per step; a stop also leaves a change-level stop, checked
-> before and after each phase, so it ends the step in a code phase too; and `fix` and `reconcile`
+> before and after each phase, so it ends the step in a code phase too; `fix` and `reconcile`
 > never ask: they carry on the build's session, which can ask already, and one that asked made the
-> next step run the whole build again before resuming it.
+> next step run the whole build again before resuming it; and a message a killed loop left goes to
+> conversation.md as "the next session", and is never written to a session twice (the failure
+> handling below says a second copy would say it may repeat an earlier message).
 
 ## Sessions keep stdin open
 

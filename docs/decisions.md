@@ -515,3 +515,5 @@ What the reviews changed:
 - **Older prompts learn to answer.** A repository prompt whose "Acting on a change" section never mentions `answer` gets the shipped sentence on answering added to that section.
 - **An answer names its question.** The `answer` request carries `question`, the open question's `at`; the console's form and chat's proposal send it, and the loop (and the console, at once) refuses one naming another question: "<slug>'s question changed since; nothing changed. Read the new one." Chat's confirmation quotes the question. A request without it applies as before.
 - **Fix and reconcile never ask.** They carry on the build session, which can ask already. When one asked, the next step ran the whole build again before resuming it: a full build's cost, on code that had moved on. Their envelopes lost `question`, their prompts the asking paragraph, and `ASKERS` is intake, design, plan, build and revise.
+
+Checked against the real CLI (2.1.302, haiku, $0.10 cap) at the end: a live `runPhase` took a message written during its tool call, answered BANANA, and exited 0 after 9 s for $0.009.
