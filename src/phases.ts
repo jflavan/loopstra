@@ -18,6 +18,7 @@ import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE
 import { readConversation } from "./conversation";
 import { steerable } from "./console/steerable";
 import { deliverInbox } from "./steering";
+import { changeStoppedBy } from "./inbox";
 import { toolTarget } from "./tools";
 
 /**
@@ -434,6 +435,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfStopping();
   const signal = cancelSignal();
   throwIfCancelled(signal);
+  throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   ctx.agentSessionsStarted++;
@@ -482,6 +484,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail }), note: `${r.reason}: ${r.detail}` }
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
+  // A person stopped the change while this session ran: the step ends here, whatever the session did.
+  throwIfChangeStopped(ctx);
   if (!out.ok) {
     if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
     const reason = out.reason as BlockingReason;
@@ -490,6 +494,15 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   }
   if (spec.endsPause !== false) assistantReached(ctx);
   return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, traceName, ...(asked ? { asked } : {}) };
+}
+
+/**
+ * Throws SessionStopped when a person stopped the change (see writeChangeStop in src/inbox.ts): checked
+ * before each phase starts and once it ends, so a stop ends the step whichever phase it came in.
+ */
+export function throwIfChangeStopped(ctx: StepContext): void {
+  const by = changeStoppedBy(ctx.root, ctx.slug);
+  if (by !== null) throw new SessionStopped(by);
 }
 
 /** The test files the protect-tests hook refused during a phase, once each, in the order refused. */
@@ -579,14 +592,15 @@ export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: strin
 /**
  * Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop
  * request (or a cancel, or a session inside that a person stopped or that asked a question) is marked
- * interrupted and passed on.
+ * interrupted and passed on. A change a person stopped (see throwIfChangeStopped) does not start it,
+ * and once it ended, success or failure, ends the step.
  */
 export async function codePhase<T extends object>(ctx: StepContext, name: string, fn: (seq: number) => Promise<{ ok: true } & T>): Promise<CodePhaseResult<T>> {
+  throwIfChangeStopped(ctx);
   const seq = ctx.trace.phaseStart(ctx.slug, name, "code");
+  let r: { ok: true } & T;
   try {
-    const r = await fn(seq);
-    ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
-    return r;
+    r = await fn(seq);
   } catch (e) {
     if (e instanceof StopRequested || e instanceof Cancelled || endsStepQuietly(e)) {
       ctx.trace.phaseEnd(ctx.slug, seq, { status: "interrupted", error: e instanceof StopRequested ? STOPPED_NOTE : e.message });
@@ -596,6 +610,10 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     ctx.trace.phaseEnd(ctx.slug, seq, { status: "fail", error: msg });
     // A hung git command is reported the same way wherever it happens (see the scheduler).
     if (e instanceof GitTimeout) throw e;
+    throwIfChangeStopped(ctx);
     return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0]}` };
   }
+  ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
+  throwIfChangeStopped(ctx);
+  return r;
 }

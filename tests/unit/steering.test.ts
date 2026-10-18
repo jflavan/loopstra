@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readConversation } from "../../src/conversation";
-import { inboxDir, inboxFor, sendToSession, type InboxMessage } from "../../src/inbox";
+import { changeStoppedBy, inboxDir, inboxFor, sendToSession, writeChangeStop, type InboxMessage } from "../../src/inbox";
 import { agentPhase } from "../../src/phases";
 import { runStepGuarded } from "../../src/scheduler";
 import { runDesignStep } from "../../src/stages/design";
@@ -318,6 +318,40 @@ describe("steering a running session", () => {
       trace.close(); repo.cleanup();
     }
   }, 30_000);
+
+  test("a change stopped while a code phase runs ends its step before the next phase", async () => {
+    const t = tempDir();
+    const gate = join(t.path, "go").replaceAll("\\", "/");
+    const script = join(t.path, "wait.ts").replaceAll("\\", "/");
+    writeFileSync(script, "while (!(await Bun.file(process.argv[2]!).exists())) await Bun.sleep(50);\n");
+    const { repo, ctx, trace } = await setupRepo("plan-approved", { commands: { install: `bun "${script}" "${gate}"`, test: "echo ok" } });
+    try {
+      await Bun.write(join(repo.path, "intent", SLUG, "spec.md"), "# Spec\n");
+      await Bun.write(join(repo.path, "intent", SLUG, "plan.md"), "# Plan\n");
+      const run = runStepGuarded(ctx);
+      await until(() => running(trace, "branch") !== null);
+      writeChangeStop(repo.path, SLUG, "John");
+      writeFileSync(gate, "");
+      expect(await run).toEqual({ ok: true, stoppedBy: "John" });
+      expect(trace.phases(SLUG).map((p) => p.name)).toEqual(["branch"]);
+      expect(trace.phases(SLUG)[0]!.status).toBe("success");
+    } finally {
+      trace.close(); t.cleanup(); repo.cleanup();
+    }
+  }, 90_000);
+
+  test("a change's stop is cleared at its next step's start: the step it was for has ended", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      writeChangeStop(repo.path, SLUG, "John");
+      const r = await runStepGuarded(ctx);
+      expect(r).toEqual({ ok: true });
+      expect(changeStoppedBy(repo.path, SLUG)).toBeNull();
+      expect(trace.phases(SLUG).map((p) => p.name)).toContain("design");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
 
   test("a retry after a crash renders its prompt again, so it has what people told the crashed attempt", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");

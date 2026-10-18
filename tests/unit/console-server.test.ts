@@ -8,7 +8,7 @@ import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server"
 import type { SessionMessage } from "../../src/console/types";
 import { localUser } from "../../src/chat/transports/shared";
 import { readLoopHold, writeHeartbeat } from "../../src/heartbeat";
-import { inboxFor } from "../../src/inbox";
+import { changeStoppedBy, inboxFor } from "../../src/inbox";
 import { pendingRequests } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { wakeStamp } from "../../src/wake";
@@ -377,6 +377,7 @@ describe("steering", () => {
       expect((await post(base, `/api/sessions/d/${design}/message`, { kind: "redirect", text: "Use two steps." })).status).toBe(202);
       expect(inboxFor(root, "d", design).map((m) => m.kind)).toEqual(["message", "redirect"]);
       expect(holds(root)).toEqual([]);
+      expect(changeStoppedBy(root, "d")).toBeNull();
     });
   }, 30_000);
 
@@ -406,6 +407,8 @@ describe("steering", () => {
       expect(r.status).toBe(202);
       expect(inboxFor(root, "d", check)).toEqual([expect.objectContaining({ kind: "stop", text: "", by: localUser(), via: "the dashboard" })]);
       expect(holds(root)).toEqual([expect.objectContaining({ kind: "hold", slug: "d", expect: "designing", reason: "Stopped from the dashboard", via: "the dashboard", transport: "console" })]);
+      // The change's stop too, so a stop that crosses into the next phase still lands.
+      expect(changeStoppedBy(root, "d")).toBe(localUser());
     });
   }, 30_000);
 
@@ -417,10 +420,13 @@ describe("steering", () => {
       expect(inboxFor(root, "d", design).map((m) => m.kind)).toEqual(["stop"]);
       expect(inboxFor(root, "d", check).map((m) => m.kind)).toEqual(["stop"]);
       expect(holds(root)).toHaveLength(1);
+      // Code phases read no inbox: the change's stop ends the step at its next phase.
+      expect(changeStoppedBy(root, "d")).toBe(localUser());
       const idle = await post(base, "/api/changes/a/stop", {});
       expect(idle.status).toBe(409);
       expect((await idle.json() as { error: string }).error).toBe("Nothing of a is running.");
       expect((await post(base, "/api/changes/nope/stop", {})).status).toBe(404);
+      expect(changeStoppedBy(root, "a")).toBeNull();
     });
   }, 30_000);
 

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig } from "../config";
 import { readIntent, SLUG } from "../intents";
-import { sendToSession, type InboxMessage } from "../inbox";
+import { sendToSession, writeChangeStop, type InboxMessage } from "../inbox";
 import { CONSOLE, submitRequest } from "../requests";
 import { Trace, type PhaseRow } from "../trace";
 import type { Hub } from "./hub";
@@ -24,8 +24,9 @@ const refuse = (error: string, status = 409) => json({ error }, status);
 /**
  * The console's steering writes (null for any other path):
  * - `POST /api/sessions/<slug>/<seq>/message` with `{ kind: "message" | "redirect" | "stop", text }`:
- *   leaves it in the running session's inbox (see src/inbox.ts); a stop also leaves a hold request.
- * - `POST /api/changes/<slug>/stop`: a stop for every running session of the change, and one hold.
+ *   leaves it in the running session's inbox (see src/inbox.ts); a stop also leaves the change's stop
+ *   (see writeChangeStop) and a hold request.
+ * - `POST /api/changes/<slug>/stop`: a stop for every running session of the change, the change's stop, and one hold.
  * Each needs the page's own Origin and a JSON body, as the other writes (see writes.ts).
  */
 export async function steerRoutes(root: string, hub: Hub, req: Request, url: URL): Promise<Response | null> {
@@ -55,7 +56,11 @@ async function toSession(root: string, slug: string, seq: number, body: Record<s
   if (!row) return refuse("That session is not running.");
   if (kind !== "stop" && !steerable(row.name)) return refuse("Checks cannot be messaged. Approve or send back instead.");
   const sent = send(root, slug, seq, kind, text);
-  if (kind === "stop") await hold(root, slug);
+  if (kind === "stop") {
+    // The change's stop too: a stop that crosses into the next phase (design to design-retry) still lands.
+    writeChangeStop(root, slug, localUser());
+    await hold(root, slug);
+  }
   return json({ id: sent.id }, 202);
 }
 
@@ -64,6 +69,8 @@ async function stopChange(root: string, slug: string): Promise<Response> {
   const rows = await running(root, slug);
   if (!rows.length) return refuse(`Nothing of ${slug} is running.`);
   for (const p of rows) send(root, slug, p.seq, "stop", "");
+  // Code phases read no inbox: the change's stop ends the step at its next phase.
+  writeChangeStop(root, slug, localUser());
   await hold(root, slug);
   return json({ stopped: rows.length }, 202);
 }

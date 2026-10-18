@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeJson } from "./chat/threads";
 
@@ -45,6 +45,34 @@ export function waitingIn(root: string, slug: string): InboxMessage[] {
 /** The messages waiting for one session (a phase's seq), oldest first. */
 export function inboxFor(root: string, slug: string, seq: number): InboxMessage[] {
   return waitingIn(root, slug).filter((m) => m.seq === seq);
+}
+
+/**
+ * `.loopstra/runs/<slug>/stop.json` (`{ by, at }`): a person stopped the change. Only agent sessions
+ * read their inbox, so a stop also leaves this, which every phase reads before it starts and once it
+ * ends (see agentPhase and codePhase): a code phase, or a stop that crosses into the next phase, still
+ * ends the step. The next step's start clears it; the hold left with it keeps the change from starting.
+ */
+function changeStopPath(root: string, slug: string): string {
+  return join(root, ".loopstra", "runs", slug, "stop.json");
+}
+
+/** Leaves the change's stop (see changeStopPath). */
+export function writeChangeStop(root: string, slug: string, by: string): void {
+  writeJson(changeStopPath(root, slug), { by, at: new Date().toISOString() });
+}
+
+/** Who stopped the change, while its stop stands; null when none does. */
+export function changeStoppedBy(root: string, slug: string): string | null {
+  const path = changeStopPath(root, slug);
+  if (!existsSync(path)) return null;
+  const s = readJson<{ by?: unknown }>(path);
+  return typeof s?.by === "string" && s.by.trim() ? s.by : "a person";
+}
+
+/** Clears the change's stop: the step it was for has ended. */
+export function clearChangeStop(root: string, slug: string): void {
+  rmSync(changeStopPath(root, slug), { force: true });
 }
 
 /** Moves a message to delivered/ with how it ended; false when it was gone already (done by someone else). */
