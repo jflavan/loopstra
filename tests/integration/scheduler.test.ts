@@ -530,6 +530,10 @@ describe("sleeping between ticks", () => {
       expect(await sleepBetweenTicks(t.path, 60_000, now, 20)).toBe("woken");
       expect(Date.now() - t0).toBeLessThan(5_000);
       expect(await sleepBetweenTicks(t.path, 30, wakeStamp(t.path), 10)).toBe("timeout");
+      // A wait longer than a timer can hold (poll_seconds of 2,147,484 and up) is not cut to 1 ms.
+      const before = wakeStamp(t.path);
+      setTimeout(() => touchWake(t.path), 100);
+      expect(await sleepBetweenTicks(t.path, 2_147_484_000, before, 20)).toBe("woken");
     } finally {
       t.cleanup();
     }

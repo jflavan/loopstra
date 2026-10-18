@@ -10,7 +10,7 @@ import { claim, release } from "./lanes";
 import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
-import { errorText } from "./shell";
+import { errorText, timerMs } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
@@ -800,7 +800,7 @@ async function sleepUnlessStopped(ms: number, until?: Promise<unknown>): Promise
   let timer: ReturnType<typeof setTimeout> | undefined;
   const ended = until ? [until.then(() => {}, () => {})] : [];
   try {
-    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); }), stopPromise(), ...ended]);
+    await Promise.race([new Promise<void>((resolve) => { timer = setTimeout(resolve, timerMs(ms)); }), stopPromise(), ...ended]);
   } finally {
     clearTimeout(timer);
   }
@@ -817,7 +817,7 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
   let check: ReturnType<typeof setInterval> | undefined;
   try {
     return await Promise.race([
-      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), ms); }),
+      new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), timerMs(ms)); }),
       stopPromise().then(() => "stop" as const),
       new Promise<"woken">((resolve) => { check = setInterval(() => { if (wakeStamp(root) !== seen) resolve("woken"); }, checkMs); }),
     ]);

@@ -1,10 +1,18 @@
 import { delimiter, dirname } from "node:path";
 import { Cancelled, onStop, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
-/** Resolves to the promise's value, or to `fallback` once `ms` pass. Never waits longer than `ms`. */
+/** The longest delay a timer can hold (2^31-1 ms, about 24.8 days); setTimeout fires a longer one after 1 ms. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** `ms` as a timer can hold it: a longer wait (a huge configured timeout) is the longest a timer can, not 1 ms. */
+export function timerMs(ms: number): number {
+  return Math.min(ms, MAX_TIMER_MS);
+}
+
+/** Resolves to the promise's value, or to `fallback` once `ms` pass (at most MAX_TIMER_MS). Never waits longer than `ms`. */
 export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<F>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  const late = new Promise<F>((resolve) => { timer = setTimeout(() => resolve(fallback), timerMs(ms)); });
   try { return await Promise.race([p, late]); } finally { clearTimeout(timer); }
 }
 

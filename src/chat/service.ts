@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { loadConfig } from "../config";
 import { GitHub } from "../github";
-import { errorText } from "../shell";
+import { errorText, timerMs } from "../shell";
 import { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
@@ -71,7 +71,7 @@ export class ChatService {
         this.polling = null;
         void loadConfig(this.root).then((c) => c.poll_seconds * 1000, () => 60_000).then((d) => this.schedule(this.opts.pollMs ?? d));
       });
-    }, ms);
+    }, timerMs(ms));
   }
 
   private cursorPath(name: string): string { return join(chatDir(this.root), `announced-${name}.json`); }
