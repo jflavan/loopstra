@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { streamSession } from "../../src/console/session";
+import { followSession, streamSession } from "../../src/console/session";
 import { TranscriptReader } from "../../src/console/transcript";
 import type { SessionMessage, TranscriptItem } from "../../src/console/types";
 import { Trace } from "../../src/trace";
@@ -241,6 +241,28 @@ describe("a session's stream", () => {
     try {
       expect(streamSession(t.path, "one", 99, 0, () => true, () => {})).toBeNull();
     } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a follower gets the same messages as typed values, with each item's offset", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    let stop: (() => void) | null = null;
+    try {
+      const seq = trace.phaseStart("one", "build", "agent");
+      writeFileSync(raw(t.path, "one", seq, "build"), lines([...START, ...REST]));
+      trace.phaseEnd("one", seq, { status: "success", costUsd: 0.1 });
+      const got: Array<{ msg: SessionMessage; offset?: number }> = [];
+      let closed = false;
+      stop = followSession(t.path, "one", seq, 0, (msg, offset) => { got.push({ msg, offset }); return true; }, () => { closed = true; }, 20);
+      await until(() => closed);
+      expect(got.map((g) => g.msg.type)).toEqual(["phase", "item", "item", "item", "item", "phase", "end"]);
+      expect(got.filter((g) => g.msg.type === "item").every((g) => typeof g.offset === "number")).toBe(true);
+      expect(got[0]!.offset).toBeUndefined();
+    } finally {
+      stop?.();
+      trace.close();
       t.cleanup();
     }
   });
