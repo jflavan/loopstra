@@ -134,6 +134,21 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-now { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .card-foot { display: flex; align-items: center; gap: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; font-size: 13px; }
+/* The Agents screen (see views/Agents.tsx): a grid of tiles, each a session with its transcript and controls. */
+.view.wide { max-width: none; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 14px; align-items: start; }
+.tile { gap: 8px; min-width: 0; }
+.tile .card-head { flex-wrap: wrap; }
+.tile .nowrap { white-space: nowrap; }
+.tile .tabular { font-variant-numeric: tabular-nums; }
+.tile.ended { opacity: 0.6; }
+.tile.asks { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.tile.flash { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
+.tile-question { display: grid; gap: 4px; }
+.tile-note { margin: 0; }
+.chat-tile .chat-log { max-height: 300px; min-height: 120px; padding: 0; }
+.chat-tile .chat-form { padding: 8px 0 0; }
+.chat-tile .chip .ghost { padding: 0 2px; }
 .strip { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
 .strip i { flex: 1; max-width: 6px; border-radius: 2px; background: var(--line-strong); height: 40%; }
 .strip i.tool { background: var(--accent); height: 100%; }
