@@ -1,6 +1,6 @@
 # Loopstra design spec
 
-Date: 2026-09-28. Status: approved for planning. Source of decisions:
+Date: 2026-09-28. Status: built (v1); the later specs in this folder build on it. Source of decisions:
 `docs/decisions.md`. When this spec and that file disagree, fix this spec.
 
 ## 1. What Loopstra is

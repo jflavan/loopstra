@@ -1,6 +1,7 @@
 # The console: see every agent, help them, steer them
 
-Date: 2026-10-17. Status: designed, not built. Replaces the dashboard page of `loopstra ui`
+Date: 2026-10-17. Status: built, all three parts (pull requests #32, #33 and #34); each part's note says
+where the build differs from the text. Replaces the dashboard page of `loopstra ui`
 (`src/ui/index.html`, `/api/state`). Three parts, each with its own plan and pull request:
 
 1. **Console**: a new UI with live streams, read-only apart from chat as it is today.
@@ -26,7 +27,8 @@ it, and can steer: tell a running agent something, stop it, redirect it, or answ
 ## Principles kept
 
 - Only the loop writes and commits in the main checkout. The UI and chat leave requests; the loop
-  applies them (chat already works this way: `src/chat/requests.ts`).
+  applies them (chat already worked this way, through `src/chat/requests.ts`; part 2 made
+  `src/requests.ts` the one way in for both).
 - Everything a person decides is a readable file in git (`intent.md`, and the new `conversation.md`).
   Machine state stays in `.loopstra/`.
 - Plain words for owners. Agent output is untrusted and always escaped.
@@ -35,6 +37,17 @@ it, and can steer: tell a running agent something, stop it, redirect it, or answ
 ---
 
 # Part 1: Console
+
+> **Built** (2026-10-17), from `docs/superpowers/plans/2026-10-17-console-part-1.md`; `docs/decisions.md`
+> ("The console, part 1") records the decisions. These places differ from the text below: long
+> transcripts use `content-visibility: auto` and draw only the newest 1,500 rows until "Show
+> earlier", not a windowed list (it was not needed); the hub rebuilds when a cheap fingerprint changes
+> (the newest event id, the heartbeat, the pause, the config, every intent's files, and a ten-second
+> clock bucket for ages) rather than on mtimes alone; a page that missed more than 500 events is sent a
+> `gap` message and reloads Activity instead of getting the events and a fresh snapshot; browser
+> notifications fire only for blocked and waiting items, and only while the tab is in the background;
+> and the old page's tests (`tests/unit/ui.test.ts`) became `tests/unit/ui-logic.test.ts` and the
+> `console-*` tests.
 
 ## Layout
 
