@@ -53,6 +53,10 @@ The console's buttons (approve, send back, retry, start, hold, release, priority
 
 To hold a change for a while, write a `hold:` line with a reason at the top of `intent.md`, for example `hold: waiting for legal`. The loop starts no step for it until the line is removed. The console's Hold and Release buttons write and remove it.
 
+Sometimes the system needs a decision only a person can make. It then asks a question, and the change waits whatever its status. The `question: open` line at the top of `intent.md` is set by the loop while an agent's question waits, and `queue.md` lists the change under "Needs a person" as "Has a question". Answer it with the console's Answer button, or in the chat. To answer by hand, write your answer under the question in `conversation.md` and remove the `question:` line.
+
+`conversation.md` is the change's record of what people told the system while it worked (messages, answers, notes from sending it back) and of the questions it asked. The system writes it, and the agents that do the work read it. You can read it at any time.
+
 Your changes to `intent.md` are picked up whether or not you commit them; saving the file is enough. The system never writes over what you wrote: if you change the status while it is working on that change, it stops that step and goes with your status.
 
 A finished change also gets `lessons.md`, notes for the engineers; you can leave it to them.
