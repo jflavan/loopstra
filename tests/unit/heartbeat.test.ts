@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopHoldText, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, startHeartbeat, writeHeartbeat, type Heartbeat,
+  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, startHeartbeat, takeLoopLock, writeHeartbeat, type Heartbeat,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -336,11 +336,82 @@ describe("heartbeat file", () => {
   });
 });
 
+describe("the loop lock", () => {
+  test("says, in plain words, which process runs the loop", () => {
+    expect(loopAlreadyRunning(4242)).toBe("A loop is already running in this repository (process 4242). Stop it (Ctrl-C in its terminal) before starting another.");
+  });
+
+  test("a second take is refused while a live process holds it; dropping it frees it", () => {
+    const t = tempDir();
+    try {
+      expect(takeLoopLock(t.path)).toBeNull();
+      const held = JSON.parse(readFileSync(loopLockPath(t.path), "utf8"));
+      expect(held.pid).toBe(process.pid);
+      expect(typeof held.startedAt).toBe("string");
+      expect(takeLoopLock(t.path)).toBe(loopAlreadyRunning(process.pid));
+      dropLoopLock(t.path);
+      expect(existsSync(loopLockPath(t.path))).toBe(false);
+      expect(takeLoopLock(t.path)).toBeNull();
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a lock left by a process that is gone, or one that cannot be read, is taken over", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      writeFileSync(loopLockPath(t.path), JSON.stringify({ pid: DEAD_PID, startedAt: ago(60) }));
+      expect(takeLoopLock(t.path)).toBeNull();
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      writeFileSync(loopLockPath(t.path), "not json");
+      expect(takeLoopLock(t.path)).toBeNull();
+      expect(JSON.parse(readFileSync(loopLockPath(t.path), "utf8")).pid).toBe(process.pid);
+      dropLoopLock(t.path);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("dropping leaves another process's lock alone", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, ".loopstra"), { recursive: true });
+      writeFileSync(loopLockPath(t.path), JSON.stringify({ pid: DEAD_PID, startedAt: ago(60) }));
+      dropLoopLock(t.path);
+      expect(existsSync(loopLockPath(t.path))).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
 describe("the scheduler writes the heartbeat", () => {
-  test("start once leaves a stopped heartbeat with a last check", async () => {
+  test("start refuses while another loop holds the lock, and leaves its heartbeat alone", async () => {
     const { repo, trace } = await setupRepo("draft");
     try {
-      await start(repo.path, { once: true, installSignals: false });
+      writeHeartbeat(repo.path, hb({ lastBeatAt: new Date().toISOString() }));
+      const before = readFileSync(join(repo.path, ".loopstra", "heartbeat.json"), "utf8");
+      expect(takeLoopLock(repo.path)).toBeNull();
+      expect(await start(repo.path, { once: true, installSignals: false })).toBe(loopAlreadyRunning(process.pid));
+      expect(readFileSync(join(repo.path, ".loopstra", "heartbeat.json"), "utf8")).toBe(before);
+      expect(existsSync(loopLockPath(repo.path))).toBe(true);
+      dropLoopLock(repo.path);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("start once leaves a stopped heartbeat with a last check, and no lock", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    try {
+      const exits = process.listenerCount("exit");
+      expect(await start(repo.path, { once: true, installSignals: false })).toBeNull();
+      expect(existsSync(loopLockPath(repo.path))).toBe(false);
+      expect(process.listenerCount("exit")).toBe(exits);
+      // The lock was let go: the next start runs.
+      expect(await start(repo.path, { once: true, installSignals: false })).toBeNull();
       const h = readHeartbeat(repo.path)!;
       expect(h.pid).toBe(process.pid);
       expect(h.stopped).toBe(true);
@@ -359,6 +430,7 @@ describe("the scheduler writes the heartbeat", () => {
       await start(repo.path, { once: false, installSignals: false });
       expect(seen).toMatchObject({ stopping: true, stopped: false });
       expect(readHeartbeat(repo.path)).toMatchObject({ stopping: false, stopped: true });
+      expect(existsSync(loopLockPath(repo.path))).toBe(false);
     } finally {
       trace.close(); repo.cleanup();
     }

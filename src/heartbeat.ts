@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
 import { writeFileAtomic } from "./fsutil";
@@ -133,6 +133,72 @@ export function heartbeatState(
 export async function loopStatusLine(root: string): Promise<string> {
   const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
   return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root), hold: readLoopHold(root) }).text}\n`;
+}
+
+/** What start says when a loop is already running in the repository; `pid` is its process, when known. */
+export function loopAlreadyRunning(pid: number | null): string {
+  return `A loop is already running in this repository${pid === null ? "" : ` (process ${pid})`}. Stop it (Ctrl-C in its terminal) before starting another.`;
+}
+
+/**
+ * The loop's lock, `.loopstra/loop.lock` (`{ pid, startedAt }`): one loop per repository. The
+ * heartbeat says a loop is running, but two starts can both read it before either writes one; the
+ * lock is made with an exclusive create, so only one of them gets it.
+ */
+export function loopLockPath(root: string): string {
+  return join(root, ".loopstra", "loop.lock");
+}
+
+/** Makes the lock for this process; false when the file is already there. */
+function createLoopLock(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "wx");
+  } catch (e) {
+    if ((e as { code?: string })?.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+
+/** The pid in the lock file, or null when there is none or it cannot be read. */
+function loopLockPid(path: string): number | null {
+  try {
+    const pid = (JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown })?.pid;
+    return typeof pid === "number" ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Takes the loop's lock for this process. Returns null when it has it, or the refusal when a live
+ * process holds it. A lock whose process is gone (a crashed loop), or that cannot be read, is
+ * removed and taken once more.
+ */
+export function takeLoopLock(root: string): string | null {
+  const path = loopLockPath(root);
+  mkdirSync(join(root, ".loopstra"), { recursive: true });
+  if (createLoopLock(path)) return null;
+  const pid = loopLockPid(path);
+  if (pid !== null && pidAlive(pid)) return loopAlreadyRunning(pid);
+  rmSync(path, { force: true });
+  if (createLoopLock(path)) return null;
+  // Another start took it in between.
+  return loopAlreadyRunning(loopLockPid(path));
+}
+
+/** Lets go of the loop's lock, when this process holds it. Never throws. */
+export function dropLoopLock(root: string): void {
+  const path = loopLockPath(root);
+  try {
+    if (loopLockPid(path) === process.pid) rmSync(path, { force: true });
+  } catch { /* the next start finds this process gone and takes it over */ }
 }
 
 /**
