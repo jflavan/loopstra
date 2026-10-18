@@ -3,12 +3,13 @@ import { printResult, report, upgradeCommand, type UpgradeIo } from "../../src/c
 import type { RepoResult } from "../../src/upgrade/repo";
 
 /** An io that records what it is asked to do. */
-function io(installed: string, latest: string | null, o: { install?: boolean } = {}) {
+function io(installed: string, latest: string | null, o: { install?: boolean; stamp?: string } = {}) {
   const calls: string[] = [];
   const said: string[] = [];
   const pieces: UpgradeIo = {
     say: (l) => said.push(l),
     installed,
+    stamp: o.stamp ?? installed,
     latest: async () => latest,
     notes: async (from, to) => `## ${to}\n- feat: since ${from}`,
     install: async (v) => { calls.push(`install ${v}`); return o.install ?? true; },
@@ -70,6 +71,18 @@ describe("upgradeCommand", () => {
     const dev = io("0.0.0-dev", "0.5.0");
     await upgradeCommand("/r", ["--check"], dev.pieces);
     expect(dev.said[0]).toContain("development checkout");
+  });
+
+  test("--check, with the repository on a release newer than this one: the newer release would be installed first, so nothing is refused", async () => {
+    const t = io("0.4.0", "0.6.0", { stamp: "0.5.0" });
+    expect(await upgradeCommand("/r", ["--check"], t.pieces)).toBe(0);
+    expect(t.calls).toEqual([]);
+    expect(t.said.at(-1)).toBe("This repository is on Loopstra 0.5.0: loopstra upgrade would install 0.6.0 first, then bring this repository up to it.");
+
+    // The newest release is still older than the stamp: the repository step says why.
+    const behind = io("0.4.0", "0.4.5", { stamp: "0.5.0" });
+    await upgradeCommand("/r", ["--check"], behind.pieces);
+    expect(behind.calls).toEqual(["check"]);
   });
 });
 

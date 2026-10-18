@@ -1,6 +1,7 @@
 import { DEV_VERSION, packageVersion } from "../package";
 import { errorText } from "../shell";
 import type { FileOutcome } from "../upgrade/files";
+import { readStamp } from "../stamp";
 import { REAL_DEPS, upgradeRepo, type RepoResult } from "../upgrade/repo";
 import { compareVersions, installCommand, installedBin, installHint, latestVersion, pathWarning, releaseNotes } from "../upgrade/tool";
 
@@ -9,6 +10,8 @@ export interface UpgradeIo {
   say: (line: string) => void;
   /** The running version. */
   installed: string;
+  /** The version the repository's stamp names; null when it has none (or it cannot be read). */
+  stamp: string | null;
   /** The newest published version; null when the registry cannot be reached. */
   latest: () => Promise<string | null>;
   /** The release notes after `from` up to `to`; "" when there are none or they cannot be read. */
@@ -37,6 +40,7 @@ export function realIo(root: string): UpgradeIo {
   return {
     say,
     installed: packageVersion(),
+    stamp: readStamp(root)?.loopstra ?? null,
     latest: () => latestVersion(),
     notes: (from, to) => releaseNotes(from, to),
     install: async (v) => (await spawnInherit(installCommand(v), root, "The install")) === 0,
@@ -76,6 +80,13 @@ export async function upgradeCommand(root: string, args: string[], io: UpgradeIo
       io.say(`Installed: Loopstra ${io.installed}. Latest: ${latest}. loopstra upgrade would install it first.`);
       const notes = await io.notes(io.installed, latest);
       if (notes) io.say(`\nWhat is new:\n${notes}\n`);
+      // The repository is on a release newer than this one: this version's repository step would
+      // refuse to go back, but the real upgrade installs the newer release first.
+      const stamp = io.stamp;
+      if (stamp && !stamp.startsWith(DEV_VERSION) && compareVersions(stamp, io.installed) > 0 && compareVersions(latest, stamp) >= 0) {
+        io.say(`This repository is on Loopstra ${stamp}: loopstra upgrade would install ${latest} first, then bring this repository up to it.`);
+        return 0;
+      }
       io.say(`What the installed ${io.installed} would do to this repository (${latest} may do more):`);
     }
     return io.repoStep(true);

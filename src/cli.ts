@@ -40,7 +40,7 @@ function setUp(): boolean {
 /**
  * The line to print when a newer Loopstra is out, the repository's stamp names another version, or
  * the repository was set up before the stamp; null otherwise, and outside a set-up folder. Started
- * before a command's own work and awaited after it, so it never delays the command. Never throws.
+ * before a command's own work, so the registry check overlaps it. Never throws.
  */
 async function notice(): Promise<string | null> {
   try {
@@ -56,7 +56,7 @@ async function notice(): Promise<string | null> {
   }
 }
 
-/** Prints the notice once it is ready. */
+/** Prints the notice once it is ready; status waits for it after its own output. */
 async function printNotice(pending: Promise<string | null>): Promise<void> {
   const line = await pending;
   if (line) console.log(line);
@@ -105,7 +105,8 @@ async function main(): Promise<number> {
       const pending = notice();
       const refusal = await preflight(root);
       if (refusal) { console.error(refusal); return 1; }
-      await printNotice(pending);
+      // Printed whenever it arrives: a slow registry never holds up the loop.
+      pending.then((line) => { if (line) console.log(line); }, () => {});
       await start(root, { once: rest.includes("--once") });
       return 0;
     }
