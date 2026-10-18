@@ -136,16 +136,20 @@ input[type="search"], input[type="text"], textarea, select { font: inherit; colo
 .card-foot { display: flex; align-items: center; gap: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; font-size: 13px; }
 /* The Agents screen (see views/Agents.tsx): a grid of tiles, each a session with its transcript and controls. */
 .view.wide { max-width: none; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 14px; align-items: start; }
-.tile { gap: 8px; min-width: 0; }
-.tile .card-head { flex-wrap: wrap; }
-.tile .nowrap { white-space: nowrap; }
-.tile .tabular { font-variant-numeric: tabular-nums; }
-.tile.ended { opacity: 0.6; }
-.tile.asks { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
-.tile.flash { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
-.tile-question { display: grid; gap: 4px; }
-.tile-note { margin: 0; }
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 14px; align-items: start; }
+.agent-tile { gap: 8px; min-width: 0; }
+/* A tile is narrow: its rows wrap or cut off with an ellipsis rather than widen it. */
+.agent-tile .transcript { grid-template-columns: minmax(0, 1fr); }
+.agent-tile .card-head { flex-wrap: wrap; }
+.agent-tile .nowrap { white-space: nowrap; }
+.agent-tile .tabular { font-variant-numeric: tabular-nums; }
+.agent-tile.ended { opacity: 0.6; }
+.agent-tile.asks { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.agent-tile.flash { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
+.agent-tile .question { display: grid; gap: 4px; }
+/* The answer form shows the question again, with its options: the tile's own copy steps aside meanwhile. */
+.agent-tile.asks:has(.control-form) > .question { display: none; }
+.agent-tile .note { margin: 0; }
 .chat-tile .chat-log { max-height: 300px; min-height: 120px; padding: 0; }
 .chat-tile .chat-form { padding: 8px 0 0; }
 .chat-tile .chip .ghost { padding: 0 2px; }
@@ -291,7 +295,7 @@ a.tl-row:hover { background: var(--bg-hover); color: inherit; }
 .steer.compact { margin: 0; padding: 8px; gap: 6px; }
 .steer.compact input[type="text"] { flex: 1 1 100%; min-width: 0; }
 .jump { position: absolute; right: 16px; bottom: 16px; box-shadow: var(--shadow); }
-.transcript-wrap.compact .transcript { height: 300px; max-height: none; padding-bottom: 8px; }
+.transcript-wrap.compact .transcript { height: 300px; max-height: none; padding-bottom: 8px; align-content: start; }
 .transcript-wrap.compact .jump { right: 8px; bottom: 8px; }
 .t-counts { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .t-counts .add { color: var(--ok); }

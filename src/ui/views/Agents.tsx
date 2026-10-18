@@ -95,7 +95,7 @@ export function Agents() {
       {!working && !asking && (
         <div class="empty">No agent is working.{l?.nextCheck ? ` The next check is in ${duration(Math.max(0, Date.parse(l.nextCheck) - t))}.` : ""}</div>
       )}
-      <div class="tiles">
+      <div class="agent-grid">
         {shown.map((s) => (s.kind === "question" ? <QuestionTile key={`q:${s.change.slug}`} change={s.change} />
           : s.kind === "agent" ? <AgentTile key={s.tile.key} tile={s.tile} onAsk={chatOn ? ask(s.tile) : null} />
           : <ChatTile key="chat" about={about?.about ?? null} label={about?.label ?? null} onClear={() => setAbout(null)} />))}

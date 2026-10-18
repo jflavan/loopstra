@@ -30,7 +30,7 @@ export function AgentTile({ tile, onAsk }: { tile: Tile; onAsk: (() => void) | n
   // A running session's cost is an estimate until it ends; then its result row says what it was.
   const cost = ended ? lastCost(tile.shown) : rate === undefined ? null : costSoFar(a.started, t, rate);
   return (
-    <article id={tileId(tile.key)} class={`card tile${ended ? " ended" : " live"}`} aria-label={`${a.title}, ${a.name}`}>
+    <article id={tileId(tile.key)} class={`card agent-tile${ended ? " ended" : " live"}`} aria-label={`${a.title}, ${a.name}`}>
       <div class="card-head">
         <Link href={`/c/${a.slug}`} class="card-title">{a.title}</Link>
         <span class="muted nowrap">› {a.name}{a.model ? ` · ${shortModel(a.model)}` : ""}</span>
@@ -39,10 +39,10 @@ export function AgentTile({ tile, onAsk }: { tile: Tile; onAsk: (() => void) | n
         <Link href={`/s/${a.slug}/${a.seq}`} class="ghost" title="Open the session's page"><Icon name="open" /></Link>
       </div>
       {!tile.shown.items.length && !ended
-        ? <p class="muted tile-note">Starting…</p>
+        ? <p class="muted note">Starting…</p>
         : <Transcript shown={tile.shown} live={!ended} done={ended} compact />}
       {ended ? (
-        <p class="muted tile-note">{status === "running" ? "Ended" : `It ${stepWord(status)}.`}</p>
+        <p class="muted note">{status === "running" ? "Ended" : `It ${stepWord(status)}.`}</p>
       ) : offer && (
         <Steer slug={a.slug} seq={a.seq} offer={offer} compact
           extra={onAsk && <button type="button" class="btn" title="Ask the orchestrator about this agent" aria-label="Ask the orchestrator about this agent" onClick={onAsk}><Icon name="ask" /></button>} />
@@ -55,14 +55,14 @@ export function AgentTile({ tile, onAsk }: { tile: Tile; onAsk: (() => void) | n
 export function QuestionTile({ change }: { change: ChangeSummary }) {
   const q = change.question!;
   return (
-    <article class="card tile asks" aria-label={`${change.title} asks a question`}>
+    <article class="card agent-tile asks" aria-label={`${change.title} asks a question`}>
       <div class="card-head">
         <Link href={`/c/${change.slug}`} class="card-title">{change.title}</Link>
         <span class="muted nowrap">› {q.phase}</span>
         <span class="grow" />
         <span class="badge warn">Asks a question</span>
       </div>
-      <div class="tile-question">
+      <div class="question">
         <b>{q.text}</b>
         {q.why && <span class="muted">{q.why}</span>}
       </div>
@@ -74,7 +74,7 @@ export function QuestionTile({ change }: { change: ChangeSummary }) {
 /** The orchestrator, and what a tile pointed it at (`label`), which the person can clear. */
 export function ChatTile({ about, label, onClear }: { about: About | null; label: string | null; onClear: () => void }) {
   return (
-    <article id="agent-chat" class="card tile chat-tile" aria-label="The orchestrator">
+    <article id="agent-chat" class="card agent-tile chat-tile" aria-label="The orchestrator">
       <div class="card-head">
         <b class="card-title">Orchestrator</b>
         <span class="grow" />
