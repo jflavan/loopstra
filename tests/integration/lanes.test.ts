@@ -919,6 +919,44 @@ describe("more than one change at a time, with a GitHub remote", () => {
     r.cleanup();
   }, 240_000);
 
+  test("a pull request a person updated with rebase on GitHub is taken as it is, not blocked as if the branch here had changed too", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+    });
+    // Main gains code, and a person presses GitHub's "Update with rebase": the branch there is rewritten onto it.
+    await Bun.write(join(r.path, "src", "other.ts"), "export const other = 1;\n");
+    await new Git(r.path).commitAll("other code");
+    await run(["git", "push", "-q", "origin", "main"], r.path);
+    const clone = tempDir("loopstra-person-");
+    try {
+      const git = (args: string[]) => run(["git", ...args], clone.path).then((x) => expect(x.code).toBe(0));
+      await git(["clone", "-q", "-b", "intent/alpha", r.remote, "."]);
+      await git(["-c", "user.name=GitHub", "-c", "user.email=github@example.test", "rebase", "-q", "origin/main"]);
+      await git(["push", "-q", "--force", "origin", "intent/alpha"]);
+    } finally { clone.cleanup(); }
+    await checksPass(r);
+    const onGitHub = async () => (await run(["git", "rev-parse", "intent/alpha"], r.remote)).out.trim();
+    const rebased = await onGitHub();
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      const alpha = (await readIntent(r.path, "alpha")).file.frontmatter;
+      expect(alpha.status).not.toBe("blocked");
+      expect(alpha.note ?? "").not.toContain("the branch here changed too");
+      for (let i = 0; i < 2 && !(await Bun.file(r.state).json()).prs["intent/alpha"].merged; i++) await tick(r.path);
+      expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(true);
+      expect((await run(["git", "cat-file", "-e", "main:src/alpha.ts"], r.remote)).code).toBe(0);
+      // GitHub's rewritten copy was taken as it is, once.
+      inTrace(r.path, (trace) => {
+        const taken = trace.events("alpha").filter((e) => e.payload.includes("\"take pull request commits\""));
+        expect(taken.map((e) => payloadOf<{ head: string }>(e).head)).toEqual([rebased]);
+      });
+    });
+    r.cleanup();
+  }, 240_000);
+
   test("an outage in a lane also ends the pull request watcher: it looks at no further pull request, and the tick pauses once", async () => {
     // Two pull requests with their checks pending, so their steps only look. GitHub answers the
     // watcher's first look only once beta has met the outage in the lane.

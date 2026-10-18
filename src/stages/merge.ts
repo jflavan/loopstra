@@ -381,8 +381,12 @@ async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
   await settleLease(ctx, theirs);
   // GitHub's copy has commits that neither the branch here nor Loopstra's last push has: a person's.
   let took = false;
-  if (theirs && theirs !== readMarker(ctx, PR_LEASE)?.trim()) {
-    if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "both changed";
+  const lease = readMarker(ctx, PR_LEASE)?.trim();
+  if (theirs && theirs !== lease) {
+    // Both changed only when the branch here moved since Loopstra's push and GitHub's copy lacks it: a
+    // copy rewritten on GitHub ("Update with rebase") over a branch here that did not move is taken.
+    const here = (await ctx.git.run(["rev-parse", "--verify", "--quiet", `refs/heads/${ctx.branch}`], true)).out.trim();
+    if (here !== lease && !(await ctx.git.isAncestor(ctx.branch, pushed))) return "both changed";
     const taken = await takePersonCommits(ctx, theirs);
     if (!taken.ok) return taken;
     took = true;
@@ -394,16 +398,17 @@ async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
 }
 
 /**
- * Moves the branch here forward to `sha`, GitHub's copy, which has commits a person added on top of
- * it (in the worktree, so its files follow). From then on the pull request's branch may be pushed
- * over `sha`: the person's work is part of the branch here. A failure to block with when the
- * workspace cannot be prepared, or cannot take them (for example unsaved edits there to the same files).
+ * Moves the branch here to `sha`, GitHub's copy, which has commits a person added on top of it, or
+ * which a person rewrote while the branch here stayed at Loopstra's push (in the worktree, so its
+ * files follow; `reset --keep` keeps unsaved edits and refuses over ones to the same files). From
+ * then on the pull request's branch may be pushed over `sha`: the person's work is part of the branch
+ * here. A failure to block with when the workspace cannot be prepared, or cannot take them.
  */
 async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: true } | Failure> {
   const open = await openBranchWorktree(ctx);
   if (!open.ok) return open;
-  const r = await new Git(ctx.worktreeDir).run([...NO_AUTO_MAINTENANCE, "merge", "--ff-only", "-q", sha], true);
-  if (r.code !== 0) return { ok: false, note: PERSON_COMMITS_NOT_TAKEN_NOTE, detail: `git merge --ff-only ${sha} in ${ctx.branch}'s workspace: ${(r.err || r.out).trim()}` };
+  const r = await new Git(ctx.worktreeDir).run([...NO_AUTO_MAINTENANCE, "reset", "-q", "--keep", sha], true);
+  if (r.code !== 0) return { ok: false, note: PERSON_COMMITS_NOT_TAKEN_NOTE, detail: `git reset --keep ${sha} in ${ctx.branch}'s workspace: ${(r.err || r.out).trim()}` };
   writeMarker(ctx, PR_LEASE, sha);
   ctx.trace.event(ctx.slug, "command", { command: "take pull request commits", note: "Commits someone added to the pull request on GitHub were taken into the branch here.", head: sha });
   return { ok: true };
