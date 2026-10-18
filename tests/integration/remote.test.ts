@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configPath } from "../../src/config";
-import { Git } from "../../src/git";
+import { configPath, loadConfig } from "../../src/config";
+import { StepContext } from "../../src/context";
+import { Git, GitTimeout } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
-import { tick } from "../../src/scheduler";
+import { runStepGuarded, tick } from "../../src/scheduler";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -302,6 +303,35 @@ describe("the loop with a GitHub remote", () => {
       expect(await git.branchExists(BRANCH)).toBe(false);
       expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
       expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "merge")).toHaveLength(1);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("git timing out once the pull request merged waits, and the next look records the merge, not a rebuild", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass" });
+      // Every git command of the step times out once GitHub has merged the pull request.
+      const merged = () => JSON.parse(readFileSync(join(s.remote, "fake-gh.json"), "utf8")).prs[BRANCH].merged === true;
+      const git = new Git(s.repo);
+      git.run = async (args, opts) => {
+        if (merged()) throw new GitTimeout(args, 1);
+        return Git.prototype.run.call(git, args, opts);
+      };
+      const trace = Trace.open(s.repo);
+      try {
+        const ctx = new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG));
+        (ctx as { git: Git }).git = git;
+        expect(await runStepGuarded(ctx)).toEqual({ ok: true, waiting: true });
+        expect(merged()).toBe(true);
+        expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+        expect((await intentOf(s.repo)).note).not.toContain("plan-approved");
+        expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("\"finish merge\""))).toHaveLength(1);
+        expect(await runStepGuarded(new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG)))).toEqual({ ok: true });
+      } finally { trace.close(); }
+      expect((await intentOf(s.repo)).status).toBe("merged");
     });
     s.cleanup();
   }, 180_000);

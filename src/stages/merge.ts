@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { block, clearMarker, onceMarker, readArtifact, readMarker, recordPersonEdits, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { GitHub, type PrInfo } from "../github";
@@ -9,6 +9,7 @@ import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain } from "../remote";
 import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
+import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
 import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_NUMBER, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
@@ -457,9 +458,7 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     // the branch stays, since deleting it would close the pull request, and the next tick looks again.
     return { ok: true, waiting: true };
   }
-  const deleted = await deleteRemoteBranch(ctx.git, ctx.branch);
-  if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
-  return finishRemoteMerge(ctx, after);
+  return finishRemoteMerge(ctx, after, true);
 }
 
 /**
@@ -468,9 +467,27 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  * checkout, GitHub out of reach, a clash; the `main_sync` signal says which), wait and try again
  * later, so the done-check never judges a main without the change. Main has it when it contains
  * the pull request's merge commit, or the branch's changes when gh does not name one. Main only
- * moves forward meanwhile, so once it has them it keeps them.
+ * moves forward meanwhile, so once it has them it keeps them. Right after `gh pr merge`
+ * (`justMerged`), the branch on GitHub is deleted first. Whatever fails from here on, except a stop,
+ * an outage, the day's budget or a person's status change, is traced and waits: the pull request is
+ * merged, so the next look records it (a block would advise building it again).
  */
-async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
+async function finishRemoteMerge(ctx: StepContext, pr: PrInfo, justMerged = false): Promise<StepResult> {
+  try {
+    if (justMerged) {
+      const deleted = await deleteRemoteBranch(ctx.git, ctx.branch);
+      if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
+    }
+    return await recordRemoteMerge(ctx, pr);
+  } catch (e) {
+    if (notTheStepsFault(e) || endsStepQuietly(e) || e instanceof PersonChangedStatus) throw e;
+    ctx.trace.event(ctx.slug, "error", { where: "finish merge", error: errorText(e), note: "the pull request is merged; recording it is tried again on the next look" });
+    return { ok: true, waiting: true };
+  }
+}
+
+/** finishRemoteMerge's body: sync main, then record the merge once main has it. */
+async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
   const main = ctx.cfg.main_branch;
   // A status a person saved without committing would keep the sync from touching main. Off main,
   // the sync is skipped anyway and says so.
