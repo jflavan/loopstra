@@ -151,7 +151,9 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       timeoutMs: o.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: held.heldUsd,
       resume: o.resume ?? undefined,
-      env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG },
+      // It runs in the main checkout: should git run there anyway (git itself is denied, see CHAT_DENIED),
+      // it skips the index refresh `git status` writes, so it never holds the lock the loop commits records with.
+      env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG, GIT_OPTIONAL_LOCKS: "0" },
     },
     read: (output) => {
       const parsed = o.schema.safeParse(output);

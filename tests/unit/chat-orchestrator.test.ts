@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { aboutContext, QUOTED } from "../../src/chat/about";
 import { Orchestrator, isYes, untagged } from "../../src/chat/orchestrator";
@@ -9,6 +9,7 @@ import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
 import { writeJson } from "../../src/chat/threads";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
+import { setEnv } from "../helpers";
 
 /** A person on the plan gate, so approving or sending back a plan is theirs to give. */
 const PLAN_PERSON = "gates:\n  plan: { human: status }\n";
@@ -467,6 +468,18 @@ describe("the orchestrator's guards (review fixes)", () => {
       const p = r.prompts()[0]!.prompt;
       expect(p).toMatch(/Recent changes on main \(newest first\):\n- \d{4}-\d\d-\d\d setup/);
     } finally { r.cleanup(); }
+  });
+
+  test("chat sessions run in the main checkout with git's optional locks off, so nothing they run holds its index", async () => {
+    const r = await chatRepo();
+    const seen = join(r.root, ".loopstra", "fake-args.json");
+    const restore = setEnv({ LOOPSTRA_FAKE_ARGS: seen });
+    try {
+      await r.answer("orchestrator", 1, turn("ok"));
+      await new Orchestrator(r.root).handle(message("hi"), sink().send);
+      const call = JSON.parse(readFileSync(seen, "utf8")) as { env: Record<string, string | null> };
+      expect(call.env.GIT_OPTIONAL_LOCKS).toBe("0");
+    } finally { restore(); r.cleanup(); }
   });
 });
 
