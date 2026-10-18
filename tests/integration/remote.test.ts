@@ -700,6 +700,24 @@ describe("the loop with a GitHub remote", () => {
     s.cleanup();
   }, 180_000);
 
+  test("a change built before Loopstra knew its pull request's number opens a new one when the branch's is closed, as it did then", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      await s.setPr({ state: "CLOSED" });
+      rmSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"));
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "reviewing" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
+      await tick(s.repo);
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(2);
+      expect(readFileSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"), "utf8")).toBe("2");
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a rebuild after its pull request merged is not taken for merged by that old pull request", async () => {
     const s = await remoteSetup();
     // The rebuild changes the code again, so it has something of its own to merge.

@@ -179,8 +179,10 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     const found = await ownPr(ctx, gh);
     if ("error" in found) throw new Error(`gh pr view: ${found.error}`);
     if (found.pr?.merged) return { ok: true as const, closed: null };
-    if (found.pr?.state === "CLOSED") return { ok: true as const, closed: found.pr };
-    let pr: { number: number; url: string } | null = found.pr;
+    // A change built before PR_NUMBER existed (no marker at all) opens a new one, as it did then.
+    const closed = found.pr?.state === "CLOSED";
+    if (closed && readMarker(ctx, PR_NUMBER) !== null) return { ok: true as const, closed: found.pr };
+    let pr: { number: number; url: string } | null = closed ? null : found.pr;
     // Main first, so the pull request's diff against it shows only the change, not the records.
     await shareMain(ctx.root, ctx.cfg, ctx.trace);
     const head = (await ctx.git.run(["rev-parse", `refs/heads/${ctx.branch}`])).out.trim();
