@@ -292,8 +292,8 @@ async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
-  // With one change at a time nothing else merges meanwhile: merge as before.
-  if (ctx.cfg.speed.max_parallel_changes <= 1) return mergeOnGitHub(ctx, gh, pr);
+  // At every speed.max_parallel_changes: the watcher runs beside the lanes even at one, so another
+  // pull request may merge while this one waits, and it is then out of date.
   return mergeWhenUpToDate(ctx, gh, pr);
 }
 
@@ -308,9 +308,9 @@ const BROUGHT_UP_TO_DATE = "Brought up to date with changes merged meanwhile; wa
 type Freshness = "up to date" | "main ahead" | "not pushed" | "remote ahead" | "both changed" | "unreachable";
 
 /**
- * With more than one change at a time, another change may have merged since this pull request's
- * checks ran, so its checks never saw the two together. Under the merge lock: sync main, fetch, and
- * merge on GitHub only when the pull request's branch there is the branch here and neither main
+ * Another change may have merged since this pull request's checks ran (the watcher merges beside
+ * the lanes, also at one change at a time), so its checks never saw the two together. Under the
+ * merge lock: sync main, fetch, and merge on GitHub only when the pull request's branch there is the branch here and neither main
  * here nor the remote's main gained code it lacks. When only the remote's main did (the sync could
  * not bring it in; the `main_sync` signal says why), wait (traced once). When main here did, or the
  * branch here was brought up to date but not pushed, bring it up to date outside the lock (the merge

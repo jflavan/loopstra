@@ -205,6 +205,9 @@ describe("the loop with a GitHub remote", () => {
       await Bun.write(configPath(s.repo), "version: 1\ncommands:\n  test: bun flip-checks.ts\npoll_seconds: 1\n");
       await new Git(s.repo).commitAll("test command");
       await run(["git", "push", "-q", "origin", "main"], s.repo);
+      // The pull request already has that commit, as if checked with it; otherwise it is out of date and brought up to date first.
+      expect(await new Git(join(s.repo, ".loopstra", "worktrees", SLUG)).rebaseOnto("main")).toBe(true);
+      expect((await run(["git", "push", "-q", "--force", "origin", BRANCH], s.repo)).code).toBe(0);
       const r = await tick(s.repo); // other is built, its tests let the checks pass, and add-numbers merges meanwhile
       expect(r.picked).toBe("other");
       expect((await readIntent(s.repo, "other")).file.frontmatter.status).toBe("reviewing");

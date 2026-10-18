@@ -379,8 +379,10 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
 
 /**
  * The same-file waits for this tick (see fileHolds): each waiting change and the change it waits for.
- * None with one change at a time (`lanes` is speed.max_parallel_changes). A plan that cannot be read
- * counts as one with no file list.
+ * None with one change at a time (`lanes` is speed.max_parallel_changes): a cut, since with a remote
+ * the watcher may merge a pull request while the one lane builds on the same files; that change is
+ * then brought up to date before it merges (see mergeWhenUpToDate), and a clash blocks it. A plan that
+ * cannot be read counts as one with no file list.
  */
 export async function sameFileHolds(lanes: number, ordered: Intent[]): Promise<Map<string, string>> {
   if (lanes <= 1) return new Map();
