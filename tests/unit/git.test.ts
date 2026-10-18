@@ -351,6 +351,19 @@ describe("Git across systems", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("putBack puts back hundreds of files, and a name with brackets names only itself", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const names = Array.from({ length: DIFF_CHUNK * 2 + 5 }, (_, i) => `generated-file-number-${String(i).padStart(4, "0")}.txt`);
+      for (const f of [...names, "[id].txt", "i.txt"]) await Bun.write(join(repo.path, f), "first\n");
+      await git.commitAll("files");
+      for (const f of [...names, "[id].txt", "i.txt"]) await Bun.write(join(repo.path, f), "rewritten\n");
+      await git.putBack([...names, "[id].txt"]);
+      expect(await git.changedTrackedFiles()).toEqual(["i.txt"]);
+    } finally { repo.cleanup(); }
+  });
+
   test("containsChanges and changedFilesSince read non-ASCII paths and names with spaces", async () => {
     const repo = await tempGitRepo();
     try {

@@ -12,7 +12,7 @@ import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, MERGING, openBranchWorktree, PR_LEASE, PR_NUMBER, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, KEEP_UNFINISHED, MERGING, openBranchWorktree, PR_LEASE, PR_NUMBER, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -56,22 +56,6 @@ function mergeRetry(ctx: StepContext): Status {
   return ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review";
 }
 
-/** The commit message for files the merge checks' commands rewrote. */
-const CHECKS_KEPT = "chore: keep changes the checks made";
-
-/**
- * Whether each file was last changed on this branch by a commit of files the merge checks rewrote
- * (CHECKS_KEPT). A file a fix or the build changed after that commit holds code the checks have not
- * rewritten yet.
- */
-async function lastKeptFromChecks(ctx: StepContext, wt: Git, files: string[]): Promise<boolean> {
-  for (const f of files) {
-    const last = await wt.run(["log", "-1", "--format=%s", `${ctx.cfg.main_branch}..HEAD`, "--", `:(literal)${f}`]);
-    if (last.out.trim() !== CHECKS_KEPT) return false;
-  }
-  return true;
-}
-
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
 type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fail" } & Failure);
 
@@ -83,18 +67,13 @@ type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fai
 async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
-  // The up-to-date check brought in main's edits, which the checks have not rewritten yet.
-  let rebased = false;
   // A failing check hands back the failure to record; the tests check says whether it committed fixes.
   const checks: Check<Failure | { ok: true; changed: boolean }>[] = [
     {
       name: "up-to-date",
       run: async () => {
         if (await ctx.git.isAncestor(main, ctx.branch)) return { result: "pass", evidence: "branch contains main" };
-        if (await wt.rebaseOnto(main)) {
-          rebased = true;
-          return { result: "pass", evidence: "rebased onto main" };
-        }
+        if (await wt.rebaseOnto(main)) return { result: "pass", evidence: "rebased onto main" };
         return {
           result: "fail", evidence: "rebase onto main hit conflicts",
           payload: { ok: false, note: UPDATE_FAILED_NOTE, detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted` },
@@ -113,19 +92,14 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         const tested = await testLoop(ctx, "merge-test");
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
-        // Files a command rewrote (a lint --fix, a formatter): kept on the branch, so they go to review
-        // with the rest, and no later rebase or merge meets them unsaved. Files last changed by such a
-        // commit and rewritten again, with nothing new brought in by a rebase, change on every run (a
-        // report with a timestamp): they are put back, or each round would bring another.
+        // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back: the
+        // merge checks never keep them, so a file rewritten on every run cannot start one review round
+        // after another, and no later rebase or merge meets them unsaved. The build's own runs keep a
+        // reformat (review start commits it), so it is reviewed. New files were removed after each run.
         const rewritten = await wt.changedTrackedFiles();
         if (rewritten.length) {
-          if (!rebased && await lastKeptFromChecks(ctx, wt, rewritten)) {
-            await wt.run(["checkout", "HEAD", "--", ...rewritten]);
-            ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `put back files the checks rewrite on every run: ${rewritten.join(", ")}` });
-          } else {
-            const kept = await saveWork(ctx, wt, CHECKS_KEPT, { tracked: true });
-            if (!kept.ok) return { result: "fail", evidence: kept.detail, payload: kept };
-          }
+          await wt.putBack(rewritten);
+          ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `left out files the checks' commands rewrote: ${rewritten.join(", ")}` });
         }
         const changed = (await wt.headSha()) !== before;
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
@@ -581,9 +555,10 @@ const REVIEW_AGAIN = "review-again";
 /**
  * The merge gate, one entry point for the review step (a review just passed; `onPass` is
  * passMergeGate) and the merge step (merge-approved, or merge-review with no person; `onPass`
- * merges): its automated checks run, and then `onPass`. Fixes the checks committed, files their
- * commands rewrote, and edits waiting unsaved in the worktree before the checks go back for one
- * more review round (see anotherRound), so nothing reaches main that a review did not see.
+ * merges): its automated checks run, and then `onPass`. Fixes the checks committed, and edits
+ * waiting unsaved in the worktree before the checks, go back for one more review round (see
+ * anotherRound), so nothing reaches main that a review did not see. Files the checks' commands
+ * rewrote are put back (see checkMerge); the same edits back right after they were kept block.
  *
  * Without a remote it holds the merge lock from the checks to the merge: one change at a time is
  * checked and merged, so between its checks and its merge main only gains records under intent/.
@@ -595,7 +570,10 @@ async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): P
   if (await wt.isDirty()) {
     // Edits nobody reviewed (a review after command that rewrote a file, a revision stopped part-way):
     // keep them on the branch and review again rather than merge them unseen, or let them stop the rebase.
-    const kept = await saveWork(ctx, wt, "chore: keep unfinished changes");
+    // Never put back: they could be a person's.
+    const again = await editedAgain(wt);
+    if (again.length) return block(ctx, `These files change every time the review's after command runs: ${again.join(", ")}. Add them to .gitignore or change the command, then set status to reviewing.`);
+    const kept = await saveWork(ctx, wt, KEEP_UNFINISHED);
     if (!kept.ok) return block(ctx, kept.note, kept);
     return anotherRound(ctx);
   }
@@ -606,6 +584,19 @@ async function mergeGate(ctx: StepContext, onPass: () => Promise<StepResult>): P
     return anotherRound(ctx);
   };
   return (await ctx.git.remoteName()) === null ? oneMergeAtATime(ctx, gate) : gate();
+}
+
+/**
+ * Files edited in the worktree that the newest commit on the branch, a keep of unfinished changes,
+ * had just kept: they changed again, so keeping them once more would only start another review
+ * round. None when that commit is something else, or another file is edited too.
+ */
+async function editedAgain(wt: Git): Promise<string[]> {
+  if ((await wt.run(["log", "-1", "--format=%s"])).out.trim() !== KEEP_UNFINISHED) return [];
+  const kept = (await wt.run(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"])).out.split("\0");
+  const added = (await wt.run(["ls-files", "--others", "--exclude-standard", "-z"])).out.split("\0").filter(Boolean);
+  const edited = [...(await wt.changedTrackedFiles()), ...added];
+  return edited.every((f) => kept.includes(f)) ? edited : [];
 }
 
 /**
