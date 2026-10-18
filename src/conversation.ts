@@ -115,17 +115,16 @@ function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): 
 
 /**
  * Appends one entry and commits it ("loopstra(<slug>): conversation"). Under commitRecord's lock, so two
- * entries written at once (a message and an answer) both land. `once`: not added when the record already
- * ends with it (an earlier try whose commit failed after writing it; see withEntryOnce). `id`: the inbox
+ * entries written at once (a message and an answer) both land. `id`: the inbox
  * message the entry is for, whose entry is written once only, wherever it is in the record (see
  * recordedAs): an earlier try whose commit failed wrote it, and a later entry's commit may have taken it
  * along. What is on disk is committed either way.
  */
-export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { once?: boolean; id?: string } = {}): Promise<void> {
+export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string } = {}): Promise<void> {
   await commitRecord(root, main, slug, "conversation", async () => {
     const current = readConversation(root, slug);
     if (opts.id && "text" in e && recordedAs(root, slug, opts.id, e.text, current)) return;
-    await Bun.write(conversationPath(root, slug), opts.once ? withEntryOnce(current, e) : withEntry(current, e));
+    await Bun.write(conversationPath(root, slug), withEntry(current, e));
     if (opts.id) noteRecorded(root, slug, opts.id, e.kind);
   });
 }

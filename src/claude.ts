@@ -172,12 +172,6 @@ export interface SessionControl {
   redirect(text: string, by?: string): boolean;
 }
 
-/** How a message and a redirect wrapped by the runner start, so their echoes read as a person's (not the prompt's). Shared with the page. */
-export { MESSAGE_LEAD, REDIRECT_LEAD } from "./console/steerable";
-
-/** What heads, in a redirect's prompt, the messages the killed process had not taken up yet. */
-export { MEANWHILE_HEADING };
-
 /** A user message as one stream-json input line. */
 export function userLine(text: string): string {
   return `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
