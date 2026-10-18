@@ -63,13 +63,19 @@ function plainName(s: string): string {
 
 /** Characters that show as nothing (U+200B-U+200D, U+2060, U+FEFF): one inside a tag would hide it from a plain match. */
 const INVISIBLE = /[​-‍⁠﻿]/g;
+/** What could be a tag's start: "<", spaces, slashes and invisible characters, then a name that may hold invisible ones. */
+const CANDIDATE = /<[\s/​-‍⁠﻿]*[a-z​-‍⁠﻿]+/gi;
 
 /**
  * Text with any tag that could end the context or message block, or open another, made harmless, and
- * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they go).
+ * its look-alikes too: "< /context", "</ context>", in any case, with invisible characters inside (they
+ * go from that tag only: elsewhere they join emoji and words, as in Persian).
  */
 export function untagged(s: string): string {
-  return s.replace(INVISIBLE, "").replace(/<\s*\/?\s*(message|context)\b/gi, (x) => `&lt;${x.slice(1)}`);
+  return s.replace(CANDIDATE, (x) => {
+    const bare = x.replace(INVISIBLE, "");
+    return /^<\s*\/?\s*(message|context)$/i.test(bare) ? `&lt;${bare.slice(1)}` : x;
+  });
 }
 
 export class Orchestrator {

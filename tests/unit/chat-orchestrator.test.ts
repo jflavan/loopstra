@@ -686,4 +686,18 @@ describe("untagged", () => {
     }
     expect(untagged("a <b>bold</b> and x < y")).toBe("a <b>bold</b> and x < y");
   });
+
+  test("look-alikes with invisible characters or spaces inside are neutralised", () => {
+    for (const tag of ["</con​text>", "<​/context>", "< / Context >", "</mess⁠age>", "<context​>"]) {
+      const out = untagged(`a ${tag} b`);
+      expect({ tag, tagged: /<[\s/​-‍⁠﻿]*(context|message)/i.test(out.replace(/[​-‍⁠﻿]/g, "")) }).toEqual({ tag, tagged: false });
+      expect(out).toContain("&lt;");
+    }
+  });
+
+  test("invisible characters outside a tag stay: joined emoji, Persian words, and other tags are unchanged", () => {
+    for (const s of ["\u{1F468}‍\u{1F469}‍\u{1F467}", "می‌خواهم", "<div>", "<messages>"]) {
+      expect(untagged(`a ${s} b`)).toBe(`a ${s} b`);
+    }
+  });
 });
