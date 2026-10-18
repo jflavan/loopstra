@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Git } from "./git";
+import { Git, samePath } from "./git";
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), "..", "templates");
 
@@ -117,6 +117,17 @@ function commandLines(d: Detected): string {
   ].join("\n");
 }
 
+/**
+ * The top folder of the git repository `root` is in, when `root` is a folder below it; null at the
+ * top or outside a repository. The loop works on a whole repository: its checkouts, sessions and
+ * commands start at the top, and Claude Code reads the settings and hook there.
+ */
+export async function repositoryTop(root: string): Promise<string | null> {
+  const top = await new Git(root).run(["rev-parse", "--show-toplevel"], true);
+  if (top.code !== 0 || samePath(top.out.trim(), root)) return null;
+  return top.out.trim();
+}
+
 export async function init(root: string): Promise<InitReport> {
   const report: InitReport = { written: [], kept: [], warnings: [], next: [] };
   // The loop lives in git (branches, worktrees, commits on main): without a repository, write nothing.
@@ -124,6 +135,12 @@ export async function init(root: string): Promise<InitReport> {
     return { ...report, stopped: true, warnings: ["This folder is not a git repository; run git init first."] };
   }
   const d = await detectCommands(root);
+  const top = await repositoryTop(root);
+  if (top) {
+    const here = (await new Git(root).run(["rev-parse", "--show-prefix"])).out.trim().replace(/\/$/, "");
+    const example = `cd ${here} && ${d.test ?? "<your test command>"}`;
+    return { ...report, stopped: true, warnings: [`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run loopstra init in ${top}, and set its commands to run in this folder (for example ${example}).`] };
+  }
 
   const branch = await defaultBranch(root);
   const cfg = (await template("config.yaml"))

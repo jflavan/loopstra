@@ -45,7 +45,7 @@ cd your-repo
 loopstra init
 ```
 
-`init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands (for a Node project with the package manager its lock file names: bun, pnpm, yarn or npm; a Python project with a `uv.lock` runs `uv run pytest`) and writes:
+`init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing), and runs at its top folder: Loopstra works on a whole repository, so in a folder below the top (a package in a monorepo) `init` names the top and writes nothing, and `start` refuses there too. Set the commands to run in the package instead (for example `cd packages/app && bun test`). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands (for a Node project with the package manager its lock file names: bun, pnpm, yarn or npm; a Python project with a `uv.lock` runs `uv run pytest`) and writes:
 
 - `loopstra/config.yaml` and `loopstra/prompts/*.md` (one prompt per phase, including `orchestrator.md` and `write-intent.md` for chat)
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
@@ -110,7 +110,7 @@ loopstra start          # the loop; one step per tick for each change it runs, s
 loopstra start --once   # one tick, then exit (for cron or a scheduler)
 ```
 
-`start` checks that the folder is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail`, `ui` and `chat` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
+`start` checks that the folder is a repository's top and is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail`, `ui` and `chat` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time, or, with `speed.max_parallel_changes` above 1, up to that many changes at once, each still one step at a time (see How it works).
 

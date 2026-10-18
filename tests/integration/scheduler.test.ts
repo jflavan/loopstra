@@ -433,6 +433,16 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("start refuses a folder below the repository's top, naming the top", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    const sub = join(repo.path, "packages", "app");
+    mkdirSync(join(sub, "loopstra"), { recursive: true });
+    await Bun.write(join(sub, "loopstra", "config.yaml"), await Bun.file(join(repo.path, "loopstra", "config.yaml")).text());
+    const top = (await new Git(repo.path).run(["rev-parse", "--show-toplevel"])).out.trim();
+    expect(await preflight(sub)).toBe(`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run it in ${top}.`);
+    trace.close(); repo.cleanup();
+  });
+
   test("start refuses, listing them, Loopstra's own files that are not committed on main", async () => {
     const repo = await tempGitRepo();
     try {

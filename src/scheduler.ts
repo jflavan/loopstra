@@ -25,7 +25,7 @@ import { RECONCILED_PLAN } from "./stages/shared";
 import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
-import { uncommittedSetup } from "./init";
+import { repositoryTop, uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
@@ -800,6 +800,8 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
  * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const top = await repositoryTop(root);
+  if (top) return `This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run it in ${top}.`;
   if (!existsSync(configPath(root))) return NOT_SET_UP;
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;

@@ -164,6 +164,20 @@ describe("init", () => {
     } finally { t.cleanup(); }
   });
 
+  test("in a folder below the repository's top, refuses, names the top and writes nothing", async () => {
+    const t = await tempGitRepo();
+    try {
+      const sub = join(t.path, "packages", "app");
+      mkdirSync(sub, { recursive: true });
+      await Bun.write(join(sub, "package.json"), JSON.stringify({ name: "app", scripts: { test: "bun test" } }));
+      const top = (await run(["git", "rev-parse", "--show-toplevel"], t.path)).out.trim();
+      const report = await init(sub);
+      expect(report).toMatchObject({ stopped: true, written: [], kept: [], next: [] });
+      expect(report.warnings).toEqual([`This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run loopstra init in ${top}, and set its commands to run in this folder (for example cd packages/app && bun test).`]);
+      expect(existsSync(join(sub, "loopstra"))).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
   test("in a folder that is not a git repository, warns and writes nothing", async () => {
     const t = tempDir();
     try {
