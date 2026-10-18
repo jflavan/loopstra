@@ -2,6 +2,8 @@ name: ci-exp
 
 # Temporary: measures Windows test-time variants side by side. Deleted once a winner is chosen.
 on:
+  push:
+    branches: ["exp/**"]
   workflow_dispatch:
 
 jobs:
