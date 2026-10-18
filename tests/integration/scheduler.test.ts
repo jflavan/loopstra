@@ -455,11 +455,13 @@ describe("scheduler resilience", () => {
       await Bun.write(join(repo.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
       await init(repo.path);
       await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE }, async () => {
-        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: loopstra/config.yaml, loopstra/prompts/, .claude/settings.json, .claude/hooks/loopstra-protect-tests.ts. Commit them, then start again.");
+        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: loopstra/config.yaml, loopstra/stamp.json. Commit them, then start again.");
         const git = new Git(repo.path);
-        await git.run(["add", "loopstra/config.yaml", "loopstra/prompts"]);
+        await git.run(["add", "loopstra/config.yaml"]);
         await git.run(["commit", "-q", "-m", "loopstra config"]);
-        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: .claude/settings.json, .claude/hooks/loopstra-protect-tests.ts. Commit them, then start again.");
+        // A prompt override must be committed too.
+        await Bun.write(join(repo.path, "loopstra", "prompts", "review.md"), "our review prompt");
+        expect(await preflight(repo.path)).toBe("These Loopstra files are not committed on main yet, so the loop's own checkouts would not see them: loopstra/stamp.json, loopstra/prompts/. Commit them, then start again.");
         await git.commitAll("the rest of init");
         expect(await preflight(repo.path)).toBeNull();
       });

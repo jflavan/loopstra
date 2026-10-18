@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { noSessionCap, roomBeside } from "./budget";
 import { modelFor, type Config, type ModelRef } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
 import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { promptPath } from "./prompts";
 import { AssistantUnavailable } from "./stop";
 import { CHEAP, type JudgeRow, type NewJudgeRow } from "./trace";
 
@@ -269,10 +269,10 @@ function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-/** The sha256 of a judge's prompt template (loopstra/prompts/<judge>.md), or null when it is missing. Editing it starts the record over. */
+/** The sha256 of the prompt template a judge uses (the repository's override, else the shipped one), or null when there is none. Changing it starts the record over. */
 export function templateSha(root: string, judge: JudgeName): string | null {
-  const path = join(root, "loopstra", "prompts", `${judge}.md`);
-  return existsSync(path) ? sha256(readFileSync(path, "utf8")) : null;
+  const path = promptPath(root, judge);
+  return path ? sha256(readFileSync(path, "utf8")) : null;
 }
 
 /** What a comparison is keyed on: the judge's key and the sha256 of the question (the whole prompt, and the review's commit). */

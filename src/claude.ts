@@ -144,6 +144,8 @@ export interface RunPhaseInput {
   allowedTools: string[];
   /** Deny rules (--disallowedTools). A bare tool name removes the tool from the session. */
   disallowedTools?: string[];
+  /** Extra Claude Code settings for this session, as JSON (`claude --settings`): the test hook. */
+  settings?: string;
   timeoutMs: number;
   /** The session's spending cap. Absent or Infinity: no --max-budget-usd, and the timeout is the only stop. */
   maxBudgetUsd?: number;
@@ -355,6 +357,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
+  if (input.settings) args.push("--settings", input.settings);
   // Every user message the session takes is echoed, so the runner knows which result answers it.
   if (live) args.push("--input-format", "stream-json", ...(input.live!.replay === false ? [] : ["--replay-user-messages"]));
   const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;

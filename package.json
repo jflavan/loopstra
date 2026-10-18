@@ -1,10 +1,29 @@
 {
   "name": "loopstra",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "description": "Unattended, Claude Code based SDLC loop. Code owns the loop; agents own bounded phases.",
   "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jflavan/loopstra.git"
+  },
+  "homepage": "https://github.com/jflavan/loopstra#readme",
   "bin": {
-    "loopstra": "./src/cli.ts"
+    "loopstra": "src/cli.ts"
+  },
+  "files": [
+    "src/",
+    "templates/",
+    "shipped.json",
+    "README.md",
+    "tsconfig.json"
+  ],
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "test": "bun scripts/test.ts",

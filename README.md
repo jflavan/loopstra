@@ -6,7 +6,7 @@ A product owner writes a plain-language `intent/<slug>/intent.md` and sets its s
 
 There are two audiences and two surfaces:
 
-- **Engineers** configure the machinery once: test command, gates, prompts, limits. All of it is in `loopstra/config.yaml` and `loopstra/prompts/`.
+- **Engineers** configure the machinery once: test command, gates, prompts, limits. All of it is in `loopstra/config.yaml`, plus any prompt they customize in `loopstra/prompts/`.
 - **Product owners** only write plain markdown (the intent) and a status line, or talk to the orchestrator in chat. Notes addressed to them are plain sentences with retry advice, never commands, branch names or raw output.
 
 ## Requirements
@@ -19,24 +19,52 @@ There are two audiences and two surfaces:
 
 Windows, macOS and Linux are all supported; see Platforms.
 
+## Quickstart
+
+**Install** Loopstra once, from npm:
+
+```
+bun add -g loopstra
+loopstra --version
+```
+
+**Set up a repository**, at its top folder, on the branch the loop should work on (usually `main`):
+
+```
+cd your-repo
+loopstra init                 # writes loopstra/config.yaml, the stamp, the owner's guide and the skill
+loopstra setup                # budgets, commands, gates, GitHub, chat, models (init offers it at the end)
+git add -A && git commit -m "Set up Loopstra"
+loopstra start                # runs the loop; watch it with loopstra status or loopstra ui
+```
+
+Then ask for a change: talk it through with `loopstra chat`, or write `intent/<slug>/intent.md` from the template in `intent/README.md` (see Ask for a change).
+
+**Upgrade** to the latest release, in each repository that uses Loopstra, with its loop stopped (Ctrl-C in the loop's terminal):
+
+```
+cd your-repo
+loopstra upgrade --check      # optional: what would change, writing nothing
+loopstra upgrade              # installs the latest Loopstra, then brings this repository up to it
+loopstra start
+```
+
+`upgrade` installs the new release once for the whole machine, and then updates the repository it runs in: Loopstra's files there are updated (your edits merged in), the config is migrated, and it all goes in one commit on `main_branch`, which the next `loopstra start` pushes. Run `loopstra upgrade` in each of your other repositories too: the install is already done there, so it only brings that repository up to it. `loopstra start` and `loopstra status` tell you when a newer release is out. See Upgrade for what it changes and when it refuses.
+
+**Coming from a source checkout** (`bun link`): run `bun unlink` in the checkout, install from npm as above, then run `loopstra upgrade` in each repository. Their first upgrade removes the prompt copies and the hook that older versions of `loopstra init` wrote into them (edited prompts stay, as your own), and `loopstra start`, `chat` and `ui` refuse in such a repository until that is done.
+
 ## Install
 
-Loopstra is installed once, globally, from a clone of this repo:
+Loopstra is installed once, globally, from npm:
 
 ```
-git clone <this repo> loopstra
-cd loopstra
-bun install
-bun link
+bun add -g loopstra
+loopstra --version
 ```
 
-`bun link` puts a `loopstra` command on your PATH (in `~/.bun/bin`; make sure that folder is on PATH). Check it from any other directory:
+`bun add -g` puts a `loopstra` command on your PATH (in `~/.bun/bin`; make sure that folder is on PATH). `npm i -g loopstra` works too, as long as `bun` is on PATH: Loopstra runs on Bun either way. `loopstra upgrade` always installs with `bun add -g`, and says so when another `loopstra` (an npm install, say) comes first on PATH. `loopstra help` lists the commands.
 
-```
-loopstra help
-```
-
-The runtime stays in this checkout; repos only get config, prompts and a skill. To upgrade, pull and run `bun install` again. What `init` wrote into a repository is not updated, since init never overwrites a file: to get a newer copy of a file from `templates/` (the protect-tests hook, for example), copy it over the repository's own, or delete that and run `loopstra init` again.
+The runtime, the prompts and the test-protection hook stay in the installed package; a repository only gets its config, a few files it keeps (see Set up a repo) and any prompt it customizes. To move to a newer release, run `loopstra upgrade` in a project repository (see Upgrade). To work on Loopstra itself, see Develop Loopstra.
 
 ## Set up a repo
 
@@ -47,19 +75,21 @@ loopstra init
 
 `init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing), and runs at its top folder: Loopstra works on a whole repository, so in a folder below the top (a package in a monorepo) `init` names the top and writes nothing, and `start` refuses there too. Set the commands to run in the package instead (for example `cd packages/app && bun test`). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands (for a Node project with the package manager its lock file names: bun, pnpm, yarn or npm; a Python project with a `uv.lock` runs `uv run pytest`) and writes:
 
-- `loopstra/config.yaml` and `loopstra/prompts/*.md` (one prompt per phase, including `orchestrator.md` and `write-intent.md` for chat)
+- `loopstra/config.yaml`
+- `loopstra/stamp.json`: the Loopstra version the repository is on, and the shipped text each file Loopstra keeps up to date came from (see Upgrade)
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
 - `REVIEW.md` (what the reviewer looks for) and a Commands block in `CLAUDE.md`
 - `.claude/skills/loopstra/` (an operator skill for drafting intents, reading status and unblocking)
-- a hook, wired into `.claude/settings.json`, that stops fix sessions editing tests to make them pass. It knows a test by its folder (`tests/`, `Tests/`, `__tests__/`, `spec/`, a .NET `App.Tests/`, `App.Tests.Unit/` or `App.UnitTests/`) or its name (`a.test.ts`, `a.spec.ts`, `add_test.go`, `calc_test.py`, `test_calc.py`, `calc_test.rb`, `calc_spec.rb`, `calc_test.exs`, `calc_test.cc`, `CalcTests.cs`, `CalcTest.java`, `CalcTests.swift`). A source file whose name only mentions a test (`ab-test.ts`, `self-test.ts`, `openapi-spec.yaml`, `ABTest.java`) is not one. Tests the change itself added or changed on its branch stay editable; when a fix is refused an edit, the block note names the file. Claude Code runs it through its own shell (`bun "$CLAUDE_PROJECT_DIR/.claude/hooks/loopstra-protect-tests.ts"`, Git Bash on Windows), so `bun` must be on the PATH Claude Code sees
 - `.loopstra/` in `.gitignore`
+
+It writes no prompts, no hook and no `.claude/settings.json`: the prompts and the test-protection hook come with Loopstra (see Prompts). In a repository set up by an older Loopstra (a config, prompt copies or the old hook, but no stamp), `init` writes no stamp and says to run `loopstra upgrade`, which brings the repository to this layout.
 
 `main_branch` in the config is the branch the repository is on when you run `init` (for a detached checkout, git's `init.defaultBranch`, else `main`).
 
 Then:
 
 1. Run `loopstra setup`. In a terminal, `init` offers it at the end ("Walk through the settings now?"). It goes through every setting, one section at a time (budgets, commands, gates, GitHub, chat, models), showing the current value and a suggestion: Enter takes the suggestion, and `-` leaves an optional answer empty. A command left out with `-` stays out: its `# install:` line stays, and later runs do not suggest the detected command again. It saves `loopstra/config.yaml` once, at the end, keeping its comments; if you quit (Ctrl-D) or the result would not load, it saves nothing. Then it checks what it can for the sections it ran, all at the same time: that `claude` is installed, that `commands.test` passes on main (in a throwaway checkout, after `commands.install`; a program that is not installed fails, naming it), with a git remote, that it answers and `gh` is signed in (every change then goes through a pull request), and that the Slack and Discord tokens work. What is not ok is listed under "To fix", with the `loopstra setup <section>` to run again; it never undoes the save.
-2. Commit everything `init` wrote, with the config as setup left it, on that branch. The loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, prompts (the `.md` files in `loopstra/prompts/`; anything else there is passed over) and hook are committed. Commit the config again whenever setup changes it.
+2. Commit everything `init` wrote, with the config as setup left it, on that branch. The loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, the stamp and any prompt override (the `.md` files in `loopstra/prompts/`; anything else there is passed over) are committed. Commit the config again whenever setup changes it.
 3. Start the loop with `loopstra start` (see Run).
 
 `init` prints the same three steps. After the walkthrough it says what is left: commit and start, or, if setup saved nothing, run it again first.
@@ -69,8 +99,6 @@ Then:
 If every problem in the config is in a setting the sections being run ask about (say `commands.test`, or `gates: none`, which the gates questions replace), setup lists them in a note and the questions go on. An unknown key, or a problem in a setting no question asks about (like `claude.timeout_minutes`), is listed under "Fix these in loopstra/config.yaml first:", and setup asks nothing.
 
 You can also open Claude Code in the repo and ask the `loopstra` skill to help you decide: it explains the choices and tells you which `loopstra setup` section to run. The skill never runs the loop.
-
-If you set the repo up before chat existed, run `loopstra init` again to stamp the two chat prompts (it keeps every file that exists), and commit them. Until then chat uses the shipped copies.
 
 ## Ask for a change
 
@@ -110,7 +138,7 @@ loopstra start          # the loop; one step per tick for each change it runs, s
 loopstra start --once   # one tick, then exit (for cron or a scheduler)
 ```
 
-`start` checks that the folder is a repository's top and is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. `status`, `tail`, `ui` and `chat` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
+`start` checks that the folder is a repository's top and is set up (`loopstra/config.yaml` exists), that git and `claude` are installed, that you are on `main_branch`, that Loopstra's own files are committed, and (with a remote) that `gh` is signed in. It prints a plain message and exits if any is not true. In a folder below the top it names the top to run in. In a repository set up by an older Loopstra it says to run `loopstra upgrade` first, and so do `chat` and `ui` (see Upgrade). `status`, `tail`, `judges`, `ui`, `chat`, `setup`, `upgrade` and `customize` in a folder that is not set up say "This folder is not set up for Loopstra. Run loopstra init first." and create nothing.
 
 The loop never dies on a bad edit or a failed step; the problem is traced and the next tick comes. It runs one change at a time, or, with `speed.max_parallel_changes` above 1, up to that many changes at once, each still one step at a time (see How it works).
 
@@ -190,7 +218,7 @@ Nothing starts until someone accepts a draft. You can still set `status: accepte
 
 It also tells you things without being asked: each new "Needs attention" item (the same words as `status`), a change reaching the main code, a change done, and a chat pull request merged or closed. Bots post these to their `announce_to` channel; the terminal and the console show them while open.
 
-One conversation goes on as long as you like and can hand off many times. Each chat turn and writer run is a Claude Code session on your subscription, traced under `_chat` (`loopstra tail _chat`); their cost counts in the console's totals. Chat has no spending limit unless you set one (`loopstra setup budgets`): then `chat.max_budget_usd_per_day` caps the day, of which one session may hold at most `chat.max_budget_usd_per_session`, so several conversations can run at once. The prompts are `loopstra/prompts/orchestrator.md` and `write-intent.md` (a repository set up before chat existed uses the shipped ones).
+One conversation goes on as long as you like and can hand off many times. Each chat turn and writer run is a Claude Code session on your subscription, traced under `_chat` (`loopstra tail _chat`); their cost counts in the console's totals. Chat has no spending limit unless you set one (`loopstra setup budgets`): then `chat.max_budget_usd_per_day` caps the day, of which one session may hold at most `chat.max_budget_usd_per_session`, so several conversations can run at once. The prompts are `orchestrator.md` and `write-intent.md`, shipped with Loopstra like the others (see Prompts).
 
 **Slack and Discord.** Set them up with `loopstra setup chat`, at any time and in any mix: it writes `chat.transports` in `loopstra/config.yaml`, checks the channel and user ids, and checks that the platform accepts each token. Tokens are read from the environment variables the config names, never from the file; setup always writes those names (`token_env`, and Slack's `bot_token_env`), so the file says which variables to set. A new bot's announcements go to its channel unless you answer `-`. Each top-level message in the channel starts a conversation in its thread. `allow` lists who may chat (empty: anyone in the channel); `acceptors` who may also start drafts and act on changes (empty: nobody from there). Both are read again for each message, so a change counts at once; a change to a token or channel needs `loopstra chat` restarted, and a bot taken out of the config ignores its messages until then. At the terminal and the console, which only listen on this machine, you always may. Put long numeric ids (Discord's) in quotes: as YAML numbers they lose digits, so Loopstra refuses them.
 
@@ -258,7 +286,7 @@ any status -> blocked | closed
 - **More than one change at a time** (`speed.max_parallel_changes` above 1): each tick runs a step for up to that many changes at once, each in its own worktree, and waits for all of them before the next tick. Fewer run when what is left of the day's budget covers fewer whole sessions (`claude.max_budget_usd`); the trace says so. Loopstra's own writes to the main checkout (its records, moving `main`, a local merge) go one at a time, and nothing slower waits with them: checking out a change's worktree and talking to GitHub happen beside them. Changes merge one at a time: without GitHub, a change that merges after another is brought up to date and tested again first; with GitHub, a pull request that another change's merge left out of date is brought up to date and waits for GitHub's checks again. A change whose plan lists a file another change in progress also lists (in its plan, or in the files its build added to the plan) waits until that change has merged, and `queue.md` says so ("Waits for add-numbers to be merged first, because both change the same files."), so the two do not clash when they merge. That wait holds at one change at a time too, since a pull request can wait to merge while the one lane works on the next change. The loop line names every change being worked on ("working on add-numbers and say-goodbye").
 - **Chat** is a separate process (`loopstra chat`, or the console). It never runs a stage or writes the main checkout: what it needs there (starting a draft, acting on a change, or adding written intents when there is no remote) it leaves as a request in `.loopstra/requests/`, as the console does, and the loop applies it at the start of a tick and every 2 seconds beside the running steps.
 
-The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, and how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`; `docs/decisions.md` records why.
+The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`, and packaging and `loopstra upgrade` in `docs/superpowers/specs/2026-10-18-packaging-upgrade-design.md`; `docs/decisions.md` records why.
 
 ## Configuration
 
@@ -279,6 +307,52 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 
 A step that hits `claude.max_budget_usd` blocks with a note naming it. `claude.max_budget_usd_per_day` counts every change's sessions since local midnight, not chat's, including what an interrupted or crashed session cost; a session killed before it reported its cost (at `timeout_minutes`, or by a stop) counts at about $0.20 a minute, never more than it held. Each step holds its share of what is left while it runs; when what has ended reaches the limit, no new step starts until midnight. A session cut short by the day's limit is not the step's fault: the step keeps its status and resumes, the loop line reads "Paused — " with the reason, and `loopstra status` and the console list "The loop has used today's budget" under "Needs attention". A step that runs out partway on two days at the same status, having had (nearly) the whole day to itself both times (at least 90% of the limit spent by that change), would never finish, so it is blocked with a note saying it needs more than the daily budget; one that other changes left less of the day only waits. When the rest of the day is only held by a step still running, the loop waits for it to end, with nothing for a person to do (a hold left by a killed process stops counting after `timeout_minutes` plus 10 minutes).
 
+## Prompts
+
+Every phase's prompt, chat's `orchestrator.md` and `write-intent.md` included, ships with Loopstra. A repository has none of its own until you customize one:
+
+```
+loopstra customize          # list the prompts, marking the ones this repository has its own copy of
+loopstra customize review   # copy the shipped review prompt to loopstra/prompts/review.md
+```
+
+`customize <prompt>` copies the shipped prompt into `loopstra/prompts/` and records it in `loopstra/stamp.json`. Edit it and commit both; the loop uses it from then on. A phase reads `loopstra/prompts/<name>.md` when the repository has one, else the shipped prompt. `loopstra upgrade` merges what changes in the shipped prompt into your copy (see Upgrade). To go back to the shipped prompt, delete your copy and commit that; the next upgrade drops it from the stamp, and `customize` can make it again later. `customize` refuses a prompt the repository already has its own copy of; in a repository set up by an older Loopstra it says to run `loopstra upgrade` first, and when `loopstra/stamp.json` cannot be read (merge conflict markers, say) it says to fix and commit it first.
+
+**The test-protection hook** stops fix sessions editing tests to make them pass. It knows a test by its folder (`tests/`, `Tests/`, `__tests__/`, `spec/`, a .NET `App.Tests/`, `App.Tests.Unit/` or `App.UnitTests/`) or its name (`a.test.ts`, `a.spec.ts`, `add_test.go`, `calc_test.py`, `test_calc.py`, `calc_test.rb`, `calc_spec.rb`, `calc_test.exs`, `calc_test.cc`, `CalcTests.cs`, `CalcTest.java`, `CalcTests.swift`). A source file whose name only mentions a test (`ab-test.ts`, `self-test.ts`, `openapi-spec.yaml`, `ABTest.java`) is not one. Tests the change itself added or changed on its branch stay editable; when a fix is refused an edit, the block note names the file. The hook comes with every session Loopstra starts for a change: it is passed to `claude` with `--settings` and runs from the installed package (`bun "<package>/templates/hooks/loopstra-protect-tests.ts"`). It does nothing outside a fix session, and nothing is written into the repository's `.claude/`. Claude Code runs it through its own shell (Git Bash on Windows), so `bun` must be on the PATH Claude Code sees.
+
+## Upgrade
+
+```
+loopstra upgrade           # install the latest Loopstra, then bring this repository up to it
+loopstra upgrade --check   # change nothing: say what upgrade would do
+loopstra upgrade --repo    # skip the install: bring this repository up to the installed Loopstra
+loopstra --version         # the installed version
+```
+
+Run it in a project repository, with the loop stopped. It asks npm for the latest release. When that is newer than the one installed, it installs it (`bun add -g loopstra@<version>`) and hands over to it, so the new release's own rules bring the repository up to date. If the install fails, it runs the new release through `bun x` for this repository and prints the install command to run by hand. If npm cannot be reached, it says so and brings the repository up to the installed version.
+
+Then, in the repository:
+
+- **The files Loopstra keeps up to date**: `.claude/skills/loopstra/SKILL.md`, `intent/README.md`, `REVIEW.md` and any prompt in `loopstra/prompts/`. One you never edited is replaced with the new text. One you edited gets the new text merged in (`git merge-file`, against the shipped text it came from, which `loopstra/stamp.json` names). When that merge conflicts, the file is left with conflict markers, listed, and kept out of the commit: resolve the markers and commit it yourself. The stamp already counts the new text as merged into it, so if you undo the file instead of resolving it, those shipped changes are not brought in again. When the text it came from cannot be fetched (offline), the file is left as it is and listed. The skill, `intent/README.md` or `REVIEW.md`, deleted, is recorded as removed on purpose and not brought back; a deleted prompt in `loopstra/prompts/` is dropped from the stamp, and the shipped prompt is used.
+- **The config** is migrated when a release renames or removes a setting, keeping its comments, and then checked. If a step fails or the result does not load, nothing is written and the setting is named.
+- **The first upgrade of a repository set up by an older Loopstra** (one with no `loopstra/stamp.json`) also deletes the prompt copies you never edited (Loopstra has them), keeps the ones you edited as your own (merged from the closest shipped version, which the report names), and removes the old hook: `.claude/hooks/loopstra-protect-tests.ts` and its entry in `.claude/settings.json` (the file goes too when nothing else is left in it). It reads the old shipped texts of files you edited from GitHub; offline, it stops and writes nothing. Until that first upgrade, `loopstra start`, `chat` and `ui` refuse in such a repository (its old prompt copies would be used as your own): "This repository was set up by an older Loopstra. Run loopstra upgrade first, then run loopstra start again." (`chat` and `ui` say the same, naming themselves.)
+- **One commit** on `main_branch`, made as Loopstra: `loopstra: upgrade to 0.6.0 (from 0.4.2)`, with the release notes in between in its body. It holds only the upgrade's own files; anything else you have staged stays staged and out of it. The next `loopstra start` shares it with the remote as it shares Loopstra's other commits, or push it yourself.
+
+It prints what happened to each file. Nothing is written until every check has passed. It refuses, names what is wrong and writes nothing when:
+
+- the checkout is not on `main_branch`;
+- `loopstra/stamp.json` cannot be read (for example, it has merge conflict markers): fix it and commit it first (also with `--check`);
+- a file it would write or remove has changes that are not committed: the files above, `loopstra/stamp.json`, the config, and, on a first upgrade, the old hook and `.claude/settings.json`;
+- the loop is running, paused or not responding in this repository: "The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.";
+- a merge, cherry-pick or revert is in progress;
+- the repository is on a newer release than the one installed (a teammate upgraded it). It says which version to install instead of bringing older texts back.
+
+A newer release installed first stays installed; only the repository is left as it was. Loops in other repositories keep the code they loaded until they are restarted.
+
+`--check` installs and writes nothing. It prints the installed and latest versions, what is new between them, and what would happen to each file. What would make a real upgrade refuse (the loop running, an operation in progress, uncommitted files) is listed as a note; a folder that is not set up, a checkout not on `main_branch`, or a stamp that cannot be read is still refused. When a newer release is out, the files are what the installed one would do (the newer one may do more).
+
+`loopstra start` and `loopstra status` print one line when a newer release is out ("Loopstra 0.6.0 is out (you have 0.4.2): run loopstra upgrade."), when the repository's stamp names a different version from the installed one, or (`status` only, since `start` refuses there) when the repository was set up by an older Loopstra. npm is asked at most once a day (the answer is kept in `.loopstra/update-check.json`), and the check never holds up the loop. The loop never upgrades itself.
+
 ## Platforms
 
 Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Requirements are the same everywhere: Bun 1.4.2+, git 2.28+, Claude Code, and `gh` when the repo has a remote.
@@ -289,12 +363,32 @@ Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Re
 - **Ctrl-C**: see Stopping. On Windows, the process trees Loopstra starts are ended with `taskkill /T /F`; on macOS and Linux each child runs in its own process group, which gets SIGTERM, a moment, then SIGKILL, along with anything that left the group.
 - **Network drives.** The trace database uses SQLite's WAL mode. Where the file system cannot do WAL (some network drives), it falls back to the default journal mode and traces a note once; keep the repository on a local disk if you can.
 
-## Development
+## Develop Loopstra
 
 ```
+git clone https://github.com/jflavan/loopstra.git
+cd loopstra
 bun install
-bun run test        # the suite in four parallel shards; bun run test:serial runs it in one process
+bun src/cli.ts <command>   # run the checkout, in place of loopstra <command>
+bun run test               # the suite in four parallel shards; bun run test:serial runs it in one process
 bun run typecheck
 ```
 
+To use the checkout as your global `loopstra`, run `bun link` in it (and `bun unlink` there before installing from npm). Its version is `0.0.0-dev`, so `loopstra upgrade` installs nothing (update the checkout with `git pull`) and only brings the repository up to the checkout's templates, reading their history from the checkout's git instead of `shipped.json`. The stamp then records `0.0.0-dev+<commit>`, and the update notice only says when a repository was set up by an older Loopstra.
+
 Tests run the whole loop in a temporary git repo against a fake `claude` executable (and a fake `gh` with a bare repository as the remote), so they do not call Claude or GitHub. The fake `claude` can answer a phase differently on each call (`<phase>-<n>.jsonl` in `LOOPSTRA_FAKE_FIXTURE_DIR`), which the chat tests use for conversations. The Slack and Discord bots are tested against stub servers, through `LOOPSTRA_SLACK_API` and `LOOPSTRA_DISCORD_API`.
+
+**Releases.** In git, `package.json` says `0.0.0-dev`; the real version exists only in the published package. After CI passes on a push to `main`, the release workflow (`.github/workflows/release.yml`) releases when something under `src/` or `templates/`, or `package.json`, changed since the latest `v*` tag. The version goes up by a patch, or by a minor version when a commit since that tag is breaking (`!` before the colon, as in `feat!:`, or `BREAKING CHANGE` in its body); the first release is 0.1.0. The workflow builds `shipped.json` (every text each template has had, from the whole history), publishes to npm with provenance, tags the commit `v<version>` and creates a GitHub Release whose notes are the commit subjects since the previous one. A version already on npm is not published again; the run still adds the tag and the GitHub Release if they are missing. Run the workflow by hand on `main` to release without such a change; a manual run always releases, and `bump` (`patch` or `minor`) chooses the step. Neither kind of run releases a commit that is already part of a release (the latest `v*` tag, or older).
+
+**One-time setup.** The package has no license yet (`"license": "UNLICENSED"`, and no LICENSE file): choose one before the first publish. npm trusted publishing can only be set up for a package that exists, so the first release is published by hand, signed in to npm (`npm login`), from a clean checkout of `main`:
+
+```
+npm version 0.1.0 --no-git-tag-version
+bun scripts/shipped.ts shipped.json
+npm publish --access public
+git tag v0.1.0
+git push origin v0.1.0
+git checkout package.json && rm shipped.json
+```
+
+This publish has no provenance; the workflow's publishes have it. The tag tells the workflow that 0.1.0 is out, so its next run releases 0.1.1. Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, repository `jflavan/loopstra`, workflow `release.yml`. From then on the workflow publishes with no token stored.

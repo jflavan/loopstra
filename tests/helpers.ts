@@ -8,6 +8,7 @@ import { StepContext } from "../src/context";
 import { Git } from "../src/git";
 import { readIntent } from "../src/intents";
 import { templateSha, type JudgeName } from "../src/judges";
+import { writeStamp } from "../src/stamp";
 import { requestStop } from "../src/stop";
 import { Trace, type NewJudgeRow } from "../src/trace";
 
@@ -57,6 +58,14 @@ export async function tempGitRepo(): Promise<{ path: string; cleanup: () => void
   return t;
 }
 
+/**
+ * Gives a test repository a stamp, as init does: start, chat and ui refuse a set-up repository
+ * without one (it was set up by an older Loopstra).
+ */
+export function writeTestStamp(root: string): void {
+  writeStamp(root, { loopstra: "0.0.0-dev", files: {} });
+}
+
 export interface SetupOptions {
   /** The `commands` block of the config. Defaults to a test command that always passes. */
   commands?: Record<string, string>;
@@ -76,6 +85,7 @@ export async function setupRepo(status: string, opts: SetupOptions = {}) {
   cpSync(TEMPLATES, join(repo.path, "loopstra", "prompts"), { recursive: true });
   const commands = Object.entries(opts.commands ?? { test: "echo ok" }).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}\n`).join("");
   await Bun.write(configPath(repo.path), `version: 1\ncommands:\n${commands}${opts.config ?? ""}`);
+  writeTestStamp(repo.path);
   mkdirSync(join(repo.path, "intent", "add-numbers"), { recursive: true });
   await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
   await new Git(repo.path).commitAll("intent");

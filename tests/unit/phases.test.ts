@@ -7,6 +7,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
+import { hookSettings } from "../../src/package";
 import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lanes";
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -53,15 +54,21 @@ describe("agentPhase", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("a missing prompt file is a plain failure", async () => {
+  test("a phase with no prompt of the repository's own uses the shipped one", async () => {
     const { repo, ctx, trace } = await setup();
-    const r = await agentPhase(ctx, { name: "design", model: "strong", permissionMode: "default", tools: "read", vars: {} });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.reason).toBe("missing-prompt");
-      expect(r.note).toBe("A prompt file for this step is missing. An engineer needs to restore it.");
-    }
-    expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("loopstra/prompts/design.md"))).toBe(true);
+    rmSync(join(repo.path, "loopstra", "prompts", "intake.md"), { force: true });
+    const r = await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {} });
+    expect(r.ok).toBe(true);
+    expect(await Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", "1-intake", "prompt.md")).text()).toContain("You are the intake step");
+    trace.close(); repo.cleanup();
+  });
+
+  test("every agent phase session gets the test hook through --settings", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "strong", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
+    expect(args[args.indexOf("--settings") + 1]).toBe(hookSettings());
     trace.close(); repo.cleanup();
   });
 
@@ -234,6 +241,21 @@ describe("conversation.md in the prompt", () => {
 });
 
 describe("agentPhase failures", () => {
+  test("a prompt missing from the repository and the package fails the phase and says to reinstall", async () => {
+    const { repo, ctx, trace } = await setup();
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} }, null);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("missing-prompt");
+      expect(r.note).toContain("An engineer needs to reinstall Loopstra.");
+    }
+    const errors = trace.events("x").filter((e) => e.type === "error").map((e) => JSON.parse(e.payload) as { reason: string; detail: string });
+    expect(errors).toEqual([expect.objectContaining({ reason: "missing-prompt" })]);
+    expect(errors[0]!.detail).toContain("reinstall Loopstra");
+    expect(trace.phases("x")).toEqual([]);
+    trace.close(); repo.cleanup();
+  });
+
   test("passes LOOPSTRA_PHASE and LOOPSTRA_SLUG to the session", async () => {
     const { repo, ctx, trace } = await setup();
     const argsFile = join(repo.path, "args.json");

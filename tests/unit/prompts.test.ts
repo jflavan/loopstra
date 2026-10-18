@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { renderPrompt } from "../../src/prompts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { templatePath } from "../../src/package";
+import { promptPath, renderPrompt } from "../../src/prompts";
+import { tempDir } from "../helpers";
 
 describe("renderPrompt", () => {
   test("replaces known variables", () => {
@@ -13,5 +17,18 @@ describe("renderPrompt", () => {
   });
   test("does not touch unknown braces", () => {
     expect(renderPrompt("{{ not a var }} {x}", {})).toBe("{{ not a var }} {x}");
+  });
+});
+
+describe("promptPath", () => {
+  test("the repository's override first, else the shipped prompt, else null", () => {
+    const t = tempDir();
+    try {
+      expect(promptPath(t.path, "review")).toBe(templatePath("prompts", "review.md"));
+      mkdirSync(join(t.path, "loopstra", "prompts"), { recursive: true });
+      writeFileSync(join(t.path, "loopstra", "prompts", "review.md"), "mine");
+      expect(promptPath(t.path, "review")).toBe(join(t.path, "loopstra", "prompts", "review.md"));
+      expect(promptPath(t.path, "no-such-phase")).toBeNull();
+    } finally { t.cleanup(); }
   });
 });

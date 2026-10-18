@@ -328,15 +328,47 @@ export class Git {
    * request does not stop it (see GitRunOptions.cleanup).
    */
   async commitPaths(paths: string[], message: string, opts: { finish?: boolean } = {}): Promise<boolean> {
-    // Skip paths that don't exist: `git add -- <missing pathspec>` errors instead of no-op-ing,
-    // and callers (e.g. commitRecord) pass paths, like intent/queue.md, that may not exist yet.
-    const existing = paths.filter((p) => existsSync(join(this.cwd, p)));
-    if (!existing.length) return false;
     const o = { cleanup: opts.finish === true };
-    await this.run(["add", "-A", "--", ...existing], o);
-    const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...existing], o)).out.trim();
+    const names = (out: string) => out.split("\0").filter(Boolean);
+    const covers = (list: string[]) => (p: string) => list.some((l) => l === p || l.startsWith(`${p.replace(/\/$/, "")}/`));
+    // `git add -A -- <pathspec>` errors on a path that matches nothing it can stage, so these are left out:
+    // - one on disk that is ignored and untracked (a repository that ignores .claude/, say);
+    //   check-ignore leaves tracked files out, and exits 1 when nothing is ignored;
+    // - one missing on disk and not in the index: never seen (callers such as commitRecord pass
+    //   paths, like intent/queue.md, that may not exist yet), or its removal already staged (git rm).
+    const present = paths.filter((p) => existsSync(join(this.cwd, p)));
+    const missing = paths.filter((p) => !present.includes(p));
+    let ignored = new Set<string>();
+    if (present.length) {
+      // One path per line, as given (-z needs --stdin); quotepath off so other alphabets are not quoted.
+      const r = await this.run(["-c", "core.quotepath=false", "check-ignore", "--", ...present], { ...o, allowFail: true });
+      if (r.code > 1) throw new GitError(["check-ignore", "--", ...present], r.out, r.err, r.code);
+      ignored = new Set(r.out.split(/\r?\n/).filter(Boolean));
+    }
+    const indexed = names((await this.run(["ls-files", "-z", "--", ...paths], o)).out);
+    const inIndex = covers(indexed);
+    let inHead: (p: string) => boolean = () => false;
+    if (missing.length) {
+      // No HEAD yet (no commit): nothing is in it.
+      const head = await this.run(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...missing], { ...o, allowFail: true });
+      inHead = covers(head.code === 0 ? names(head.out) : []);
+    }
+    const onDisk = (p: string) => present.includes(p) && !ignored.has(p);
+    const toAdd = paths.filter((p) => onDisk(p) || (missing.includes(p) && inIndex(p)));
+    // In HEAD, missing on disk: its removal is committed (also one already staged with git rm). A path
+    // only in the index (staged, never committed) is gone from it after the add: naming it would match nothing.
+    const toCommit = paths.filter((p) => onDisk(p) || (missing.includes(p) && inHead(p)));
+    // A tracked file is staged with -u: -A also looks for new files around it, and fails (after
+    // staging it) when its folder is ignored (a skill force-added in an ignored .claude/, say).
+    const tracked = toAdd.filter((p) => indexed.includes(p));
+    const others = toAdd.filter((p) => !indexed.includes(p));
+    if (tracked.length) await this.run(["add", "-u", "--", ...tracked], o);
+    if (others.length) await this.run(["add", "-A", "--", ...others], o);
+    // Never a commit without paths: that would take everything staged.
+    if (!toCommit.length) return false;
+    const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...toCommit], o)).out.trim();
     if (!staged) return false;
-    await this.runtime("commit", ["-q", "-m", message, "--", ...existing], o);
+    await this.runtime("commit", ["-q", "-m", message, "--", ...toCommit], o);
     return true;
   }
 
