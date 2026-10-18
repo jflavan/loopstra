@@ -1,6 +1,6 @@
 # Agents: every active agent on one screen, each one steerable
 
-Date: 2026-10-18. Status: designed, not built. Builds on the console
+Date: 2026-10-18. Status: built (plan: `docs/superpowers/plans/2026-10-18-agents-view.md`). Builds on the console
 (`2026-10-17-console-design.md`, parts 1-3, merged as #32, #33, #34). One plan, one pull request.
 
 Choices made with the user: a new rail item under Activity; a grid of mini consoles, not a list
@@ -45,7 +45,7 @@ repeat(auto-fill, minmax(420px, 1fr))`): one column on a phone, two or three on 
 | Kind | Comes from | Body | Footer |
 |---|---|---|---|
 | Running session | the agents stream (`open`) | live transcript | message, redirect, stop, 💬 |
-| Waiting on a question | `changes.value[].question` | the question, its options, and a link to the asking session | the Inbox's answer form: the same `answer` request, resuming the agent |
+| Waiting on a question | `changes.value[].question` | the question and why it asks; the change's title links to its page (the summary does not name the asking session) | the Inbox's answer form: the same `answer` request, resuming the agent |
 | Orchestrator | always shown (unless chat is off) | the chat conversation, the drawer's lines | a message box; an "about csv-export › build" tag when a 💬 set one, with × to clear it |
 | Just finished | the agents stream (`end`) | the transcript, greyed | "Finished · $0.61", "Stopped" or "Failed"; only ⤢ stays enabled |
 
@@ -70,7 +70,8 @@ as the drawer's does (`aboutPrefix`, `aboutOf`). Other pages keep opening the dr
 **Live.** Live stays the overview: cards, up next, just finished. A card's **Watch** goes to
 `/agents#<slug>:<seq>`, which scrolls to that tile and highlights it for a moment; **Message** goes
 to the same place and focuses its box. The session page is unchanged and stays the deep view of one
-agent (diffs, todo list, files, refused commands).
+agent (diffs, todo list, files, refused commands). The command palette's "Watch …" commands open
+the tile too.
 
 ## Server: `GET /api/agents/stream`
 
@@ -92,7 +93,10 @@ New module `src/console/agents.ts`, routed in `server.ts` beside the session str
   the key.
 - **Reconnect.** The agents stream sends no event ids. After a reconnect it sends `open` again for
   every session still running, and the page empties that tile and takes the rows again from the
-  start: the same replay the session page does when it opens. Ended sessions are not sent again.
+  start: the same replay the session page does when it opens. Ended sessions are not sent again;
+  instead, after its first look the stream sends `{ type: "sync", keys }` with every session it
+  follows, and the page ends the running tiles that `sync` does not name (they ended while it was
+  away). The stream sends no pings: an EventSource notices a closed connection by itself.
 - **The page goes away**: every follower stops and the trace closes, as the other streams do.
 - Why one stream: the console is HTTP/1.1, and a browser keeps at most six connections to one
   origin. The page already holds `/api/stream`; one EventSource per tile would reach that limit
@@ -108,7 +112,7 @@ New module `src/console/agents.ts`, routed in `server.ts` beside the session str
 | `src/ui/parts/ChatTile.tsx` | The orchestrator tile. |
 | `src/ui/parts/Transcript.tsx` | Gains `compact`: fixed height, its own follow and "↓ live", edits shown as counts. |
 | `src/ui/parts/Steer.tsx` | Gains `compact`: a one-line box, Send / Redirect / Stop with the same confirm, and a slot for 💬. |
-| `src/ui/parts/Drawer.tsx` | Its `Chat` logic moves into a `useChat(about)` hook (thread, polling, send, draft). The drawer and the orchestrator tile both use it, on the same tab thread, so they are one conversation. |
+| `src/ui/parts/Drawer.tsx` | Exports its `Chat` (thread, polling, send, draft) with an `autoFocus` prop. The drawer and the orchestrator tile both show it, on the same tab thread, so they are one conversation. |
 | `src/ui/parts/Actions.tsx` | The answer form is used by question tiles as it is (its "moved on" handling included). |
 | `src/ui/parts/Rail.tsx`, `router.ts`, `app.tsx`, `shortcuts.ts` | The `/agents` route, the rail item and its badge, `g w`. |
 | `src/ui/views/Live.tsx` | Watch and Message point to `/agents#<slug>:<seq>`. |
