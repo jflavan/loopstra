@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendConversation, conversationEntry, readConversation } from "../../src/conversation";
+import { appendConversation, conversationEntry, readConversation, withEntry, withEntryOnce } from "../../src/conversation";
 import { lastCommit } from "../helpers";
 import { chatRepo, INTENT } from "../chat-helpers";
 
@@ -26,6 +26,14 @@ describe("conversation.md", () => {
     } finally {
       r.cleanup();
     }
+  });
+
+  test("an entry the record already ends with, whatever its time, is not added again; any other is", () => {
+    const q = { kind: "question" as const, phase: "design", text: "Archived too?", why: "", options: [] };
+    const once = withEntry("", { ...q, at: new Date(2026, 9, 17, 14, 2) });
+    expect(withEntryOnce(once, { ...q, at: new Date(2026, 9, 17, 14, 5) })).toBe(once);
+    expect(withEntryOnce(once, { ...q, text: "Deleted too?", at: new Date(2026, 9, 17, 14, 5) })).toContain("Deleted too?");
+    expect(withEntryOnce("", { ...q, at: new Date(2026, 9, 17, 14, 5) })).toContain("Archived too?");
   });
 
   test("a person's text cannot add a heading of its own", () => {

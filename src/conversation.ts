@@ -71,6 +71,18 @@ export function withEntry(current: string, e: ConversationEntry): string {
   return `${head}\n${conversationEntry(e)}`;
 }
 
+/** An entry's text without its time (the header's "YYYY-MM-DD HH:MM · "). */
+const timeless = (entry: string) => entry.trim().replace(/^## \S+ \S+ · /, "## ");
+
+/**
+ * The record with one more entry, unless it already ends with that same entry (whatever its time): an
+ * earlier try whose commit failed left it on disk.
+ */
+export function withEntryOnce(current: string, e: ConversationEntry): string {
+  const last = current.trim().split(/\n(?=## )/).at(-1) ?? "";
+  return timeless(last) === timeless(conversationEntry(e)) ? current : withEntry(current, e);
+}
+
 /**
  * Appends one entry and commits it ("loopstra(<slug>): conversation"). Under commitRecord's lock, so two
  * entries written at once (a message and an answer) both land.

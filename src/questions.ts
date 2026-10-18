@@ -2,9 +2,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readJson, writeJson } from "./chat/threads";
 import { phaseKind } from "./console/steerable";
-import { commitRecord, type StepContext } from "./context";
-import { conversationPath, readConversation, withEntry } from "./conversation";
-import { hasQuestion, readIntent, writeIntent, type Intent, type Status } from "./intents";
+import { commitRecord, writeForStep, type StepContext } from "./context";
+import { conversationPath, readConversation, withEntryOnce } from "./conversation";
+import { hasQuestion, type Intent, type Status } from "./intents";
 import { errorText } from "./shell";
 import type { Trace } from "./trace";
 
@@ -91,7 +91,8 @@ export function questionIn(envelope: Record<string, unknown>): Question | null {
 /**
  * Records a question a session asked: `question: open` and the conversation.md entry in one commit,
  * then question.json. Written only once the commit landed, so a failed commit never leaves an open
- * question the change does not say it has. The change then waits (the scheduler skips it). The
+ * question the change does not say it has. A status a person set while the session ran is never
+ * written over: PersonChangedStatus is thrown, as the step's own writes do. The change then waits (the scheduler skips it). The
  * session's row already ended asked, with the question traced as an event of its own (see tracedSession).
  */
 export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "answer">): Promise<void> {
@@ -99,10 +100,10 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
   const at = new Date();
   const count = askedAt(ctx) + 1;
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${a.phase} asks a question`, async () => {
-    const fresh = await readIntent(ctx.root, ctx.slug);
-    await writeIntent(fresh, { question: "open" });
-    ctx.intent.file = fresh.file;
-    await Bun.write(conversationPath(ctx.root, ctx.slug), withEntry(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
+    // Never over a status a person set while the session ran (PersonChangedStatus instead).
+    await writeForStep(ctx, { question: "open" });
+    // An earlier try whose commit failed left the entry on disk: it is not added twice.
+    await Bun.write(conversationPath(ctx.root, ctx.slug), withEntryOnce(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
   });
   writeState(ctx.root, ctx.slug, { ...stay, count, open: { ...a, at: at.toISOString() } });
 }

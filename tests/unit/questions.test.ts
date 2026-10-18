@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { block, setStatus, StepContext } from "../../src/context";
+import { block, PersonChangedStatus, setStatus, StepContext } from "../../src/context";
 import { readConversation } from "../../src/conversation";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
@@ -274,6 +274,22 @@ describe("questions", () => {
       rmSync(join(repo.path, ".git", "refs", "heads", `${ctx.cfg.main_branch}.lock`));
       await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS });
       expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: { text: "Archived too?", sessionId: "s1" } });
+      // The failed try left its entry on disk: the second try does not add it again.
+      expect(readConversation(repo.path, SLUG).match(/design asks/g)).toHaveLength(1);
+    } finally { trace.close(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a question is not recorded over a status a person set while the session ran", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    try {
+      const path = join(repo.path, "intent", SLUG, "intent.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("status: designing", "status: closed"));
+      const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(PersonChangedStatus);
+      const i = await readIntent(repo.path, SLUG);
+      expect(i.file.frontmatter.status).toBe("closed");
+      expect(i.file.frontmatter.question).toBe("");
+      expect(existsSync(questionPath(repo.path))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
   }, 90_000);
 
