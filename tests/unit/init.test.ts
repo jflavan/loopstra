@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
-import { init, uncommittedSetup } from "../../src/init";
+import { detectCommands, init, uncommittedSetup } from "../../src/init";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
 describe("init", () => {
@@ -115,6 +115,23 @@ describe("init", () => {
       expect(readdirSync(t.path)).not.toContain("CLAUDE.md");
       expect(await Bun.file(join(t.path, "claude.md")).text()).toBe("# Mine\n");
     } finally { t.cleanup(); }
+  });
+
+  test("a package manager's lock file picks its commands; a uv project runs pytest through uv", async () => {
+    const scripts = { test: "vitest", lint: "eslint .", build: "tsc", start: "node ." };
+    const detected = async (files: Record<string, string>) => {
+      const t = tempDir();
+      try {
+        for (const [name, text] of Object.entries(files)) await Bun.write(join(t.path, name), text);
+        return await detectCommands(t.path);
+      } finally { t.cleanup(); }
+    };
+    const pkg = JSON.stringify({ name: "x", scripts });
+    expect(await detected({ "package.json": pkg, "pnpm-lock.yaml": "" })).toEqual({ install: "pnpm install", test: "pnpm test", lint: "pnpm run lint", build: "pnpm run build", run: "pnpm run start" });
+    expect(await detected({ "package.json": pkg, "yarn.lock": "" })).toEqual({ install: "yarn install", test: "yarn test", lint: "yarn run lint", build: "yarn run build", run: "yarn run start" });
+    expect(await detected({ "package.json": pkg })).toEqual({ install: "npm install", test: "npm test", lint: "npm run lint", build: "npm run build", run: "npm run start" });
+    expect(await detected({ "pyproject.toml": "", "uv.lock": "" })).toEqual({ install: "uv sync", test: "uv run pytest" });
+    expect(await detected({ "pyproject.toml": "" })).toEqual({ test: "pytest", install: undefined });
   });
 
   test("a committed prompt whose name is not ASCII counts as committed", async () => {

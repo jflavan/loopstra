@@ -25,10 +25,15 @@ export async function detectCommands(root: string): Promise<Detected> {
     try {
       s = (JSON.parse(await Bun.file(pkgPath).text()) as { scripts?: Record<string, string> }).scripts ?? {};
     } catch { /* an unreadable package.json means nothing is detected */ }
-    const bun = existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb")) || /\bbun\b/.test(Object.values(s).join(" "));
-    const runner = bun ? "bun run" : "npm run";
-    const d: Detected = { install: bun ? "bun install" : "npm install" };
-    if (s.test) d.test = bun ? (s.test === "bun test" ? "bun test" : `${runner} test`) : "npm test";
+    // The package manager by its lock file; scripts that call bun mean bun too.
+    const locked = (name: string) => existsSync(join(root, name));
+    const pm = locked("bun.lock") || locked("bun.lockb") ? "bun"
+      : locked("pnpm-lock.yaml") ? "pnpm"
+      : locked("yarn.lock") ? "yarn"
+      : /\bbun\b/.test(Object.values(s).join(" ")) ? "bun" : "npm";
+    const runner = `${pm} run`;
+    const d: Detected = { install: `${pm} install` };
+    if (s.test) d.test = pm === "bun" ? (s.test === "bun test" ? "bun test" : `${runner} test`) : `${pm} test`;
     if (s.lint) d.lint = `${runner} lint`;
     if (s.build) d.build = `${runner} build`;
     if (s.start) d.run = `${runner} start`;
@@ -42,7 +47,11 @@ export async function detectCommands(root: string): Promise<Detected> {
     const has = (t: string) => new RegExp(`^${t}:`, "m").test(mk);
     return { test: has("test") ? "make test" : undefined, lint: has("lint") ? "make lint" : undefined, build: has("build") ? "make build" : undefined, run: has("run") ? "make run" : undefined };
   }
-  if (existsSync(join(root, "pyproject.toml"))) return { test: "pytest", install: existsSync(join(root, "uv.lock")) ? "uv sync" : undefined };
+  if (existsSync(join(root, "pyproject.toml"))) {
+    // A uv project's pytest is in its own environment, not on PATH.
+    const uv = existsSync(join(root, "uv.lock"));
+    return { test: uv ? "uv run pytest" : "pytest", install: uv ? "uv sync" : undefined };
+  }
   if (existsSync(join(root, "Cargo.toml"))) return { test: "cargo test", build: "cargo build" };
   if (existsSync(join(root, "go.mod"))) return { test: "go test ./...", build: "go build ./..." };
   return {};

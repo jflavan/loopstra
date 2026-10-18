@@ -45,7 +45,7 @@ cd your-repo
 loopstra init
 ```
 
-`init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands and writes:
+`init` needs a git repository (outside one it says "This folder is not a git repository; run git init first." and writes nothing). It is deterministic and never overwrites a file that already exists. It detects your test, lint, build and run commands (for a Node project with the package manager its lock file names: bun, pnpm, yarn or npm; a Python project with a `uv.lock` runs `uv run pytest`) and writes:
 
 - `loopstra/config.yaml` and `loopstra/prompts/*.md` (one prompt per phase, including `orchestrator.md` and `write-intent.md` for chat)
 - `intent/README.md` (the owner's guide) and `intent/queue.md`
