@@ -66,6 +66,24 @@ describe("checks", () => {
     ]);
   });
 
+  test("parsePlanFiles keeps a path's own underscores, and a back-quoted path's spaces", () => {
+    const plan = [
+      "# Plan", "", "## Files that change",
+      "- `src/pkg/__init__.py` (new)",
+      "- src/__tests__/a.test.ts",
+      "- `docs/my file.md`: a guide",
+      "- **src/b.ts**: why",
+      "- __src/c.ts__",
+      "- **`src/d.ts`** (new)",
+      "", "## Order of work", "1. x", "",
+    ].join("\n");
+    expect(parsePlanFiles(plan)).toEqual([
+      { path: "src/pkg/__init__.py", new: true }, { path: "src/__tests__/a.test.ts", new: false },
+      { path: "docs/my file.md", new: false }, { path: "src/b.ts", new: false }, { path: "src/c.ts", new: false },
+      { path: "src/d.ts", new: true },
+    ]);
+  });
+
   test("parsePlanFiles returns null when there is no Files that change section", () => {
     expect(parsePlanFiles("# Plan\n\n## Order of work\n1. x\n")).toBeNull();
     expect(parsePlanFiles("# Plan\n\n## Files that change\n\n## Order of work\n")).toEqual([]);
