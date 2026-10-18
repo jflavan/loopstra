@@ -65,16 +65,18 @@ export function throwIfCancelled(signal: AbortSignal | undefined): void {
  * installed). Like a stop, it is not the intent's fault: the step ends, the intent keeps its
  * status, and the loop pauses and tries again later. `detail` is for the trace; `phase` and `line`
  * (the phase that could not reach the assistant, and the text that said so) let the loop notice the
- * same failure repeating.
+ * same failure repeating, and `model` (the model it asked) which model to probe.
  */
 export class AssistantUnavailable extends Error {
   readonly phase: string | null;
   readonly line: string;
-  constructor(public readonly detail: string, where: { phase: string; line: string } | null = null) {
+  readonly model: string | null;
+  constructor(public readonly detail: string, where: { phase: string; line: string; model?: string } | null = null) {
     super(`the assistant is unavailable: ${detail}`);
     this.name = "AssistantUnavailable";
     this.phase = where?.phase ?? null;
     this.line = where?.line ?? detail;
+    this.model = where?.model ?? null;
   }
 }
 
@@ -141,23 +143,26 @@ export function resetStop(): void {
   stopping = new Promise<void>((resolve) => { resolveStop = resolve; });
 }
 
-/** What a signal does: the first asks for a stop, a second exits with 130. */
-export function onStopSignal(exit: (code: number) => void = (code) => process.exit(code), say: (s: string) => void = (s) => console.log(s)): void {
+/** What the first signal says the loop does. */
+const LOOP_STOPPING = "Stopping. The current step is interrupted and resumes on the next start.";
+
+/** What a signal does: the first asks for a stop and says `stopping`, a second exits with 130. */
+export function onStopSignal(exit: (code: number) => void = (code) => process.exit(code), say: (s: string) => void = (s) => console.log(s), stopping = LOOP_STOPPING): void {
   if (requested) {
     say("Stopping now.");
     exit(130);
     return;
   }
   requestStop();
-  say("\nStopping. The current step is interrupted and resumes on the next start. Press Ctrl-C again to exit at once.");
+  say(`\n${stopping} Press Ctrl-C again to exit at once.`);
 }
 
 // SIGHUP (the terminal closed) stops like SIGTERM on POSIX; Windows has no such signal to catch.
 export const STOP_SIGNALS: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 
-/** Installs the stop handlers once. Returns a function that removes them. */
-export function installStopSignals(): () => void {
-  const handler = () => onStopSignal();
+/** Installs the stop handlers once; `stopping` is what the first signal says. Returns a function that removes them. */
+export function installStopSignals(stopping?: string): () => void {
+  const handler = () => onStopSignal(undefined, undefined, stopping);
   for (const s of STOP_SIGNALS) process.on(s, handler);
   return () => { for (const s of STOP_SIGNALS) process.off(s, handler); };
 }

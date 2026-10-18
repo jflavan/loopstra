@@ -284,11 +284,11 @@ type Asking<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: true }> & 
 type Attempted<N extends PhaseName> = Extract<AgentPhaseResult<N>, { ok: false }> | Asking<N>;
 
 /**
- * Two pieces of work running at once (see alongside): whether a session in them succeeded, whether
+ * Two pieces of work running at once (see alongside): the models its sessions got through on, whether
  * it has decided about the pause (both ended), and the group it runs inside of, if any (a judge's
  * shadow inside the early review, or inside spec-check beside the plan written ahead).
  */
-interface Group { succeeded: boolean; decided?: boolean; parent?: Group }
+interface Group { reached: Set<string>; decided?: boolean; parent?: Group }
 
 /**
  * The group the current call runs in, and the signal that cancels its work (none for the main work
@@ -303,15 +303,15 @@ function cancelSignal(): AbortSignal | undefined {
 }
 
 /**
- * A session reached the assistant, so the loop's pause ends; inside a group, alongside decides once
- * both ended. A group that already decided passes it on (a shadow's comparison can end after the work
- * of the group it ran in: see judgeFirst).
+ * A session reached the assistant on `model`, so the loop's pause ends unless another model is out;
+ * inside a group, alongside decides once both ended. A group that already decided passes it on (a
+ * shadow's comparison can end after the work of the group it ran in: see judgeFirst).
  */
-function assistantReached(ctx: StepContext): void {
+function assistantReached(ctx: StepContext, model: string): void {
   let g = inGroup.getStore()?.group;
   while (g?.decided) g = g.parent;
-  if (g) g.succeeded = true;
-  else clearPause(ctx.root, ctx.slug); // the assistant is back: the next outage starts the back-off afresh (see clearPause)
+  if (g) g.reached.add(model);
+  else clearPause(ctx.root, ctx.slug, new Date(), model); // the assistant is back: the next outage starts the back-off afresh (see clearPause)
 }
 
 /**
@@ -377,7 +377,7 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
   // Both pieces would think they hold the lock, so neither would wait for the other.
   assertNoLock(`The ${extra.what} work run alongside`);
   const outer = inGroup.getStore();
-  const group: Group = { succeeded: false, parent: outer?.group };
+  const group: Group = { reached: new Set(), parent: outer?.group };
   const cancel = new AbortController();
   const extraSignal = outer?.signal ? AbortSignal.any([outer.signal, cancel.signal]) : cancel.signal;
   const member = <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> => inGroup.run({ group, signal }, fn);
@@ -392,7 +392,7 @@ function startAlongside<M, E>(ctx: StepContext, main: () => Promise<M>, extra: E
   });
   const both = Promise.allSettled([mainDone, extraDone]).then(([m, x]): [M, E | null] => {
     // Inside another group this marks that group, which decides about the pause once its work ended.
-    if (group.succeeded && !(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) assistantReached(ctx);
+    if (!(m.status === "rejected" && m.reason instanceof AssistantUnavailable)) for (const model of group.reached) assistantReached(ctx, model);
     group.decided = true;
     const stop = [x, m].find((r) => r.status === "rejected" && r.reason instanceof StopRequested);
     if (stop?.status === "rejected") throw stop.reason;
@@ -480,7 +480,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
     // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
     interrupt: (r) => unavailable(r.reason)
-      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail }), note: `${r.reason}: ${r.detail}` }
+      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model: modelFor(ctx.cfg, spec.model) }), note: `${r.reason}: ${r.detail}` }
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
   // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
@@ -495,7 +495,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
-  if (spec.endsPause !== false) assistantReached(ctx);
+  if (spec.endsPause !== false) assistantReached(ctx, modelFor(ctx.cfg, spec.model));
   return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, ...(question ? { asked: question } : {}) };
 }
 
@@ -527,28 +527,34 @@ const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, 
 const PROBE_PROMPT = "This is only a check that you can be reached. Do not use any tools. Answer with ok set to true.";
 /** At most this long, and never longer than a phase may take. */
 const PROBE_TIMEOUT_MS = 2 * 60_000;
+/** What a probe may spend: on the cheap model, and on any other (a stronger model's first answer costs more). */
+const PROBE_CAP_CHEAP_USD = 0.05;
+const PROBE_CAP_USD = 0.25;
 
 /**
- * One tiny session (cheap model, $0.05, no tools, a trivial prompt) to tell an outage from a phase
- * that keeps failing with words that look like one. Traced as a `probe` phase of the change.
- * `reached`: the assistant answered; otherwise `detail` says why not.
+ * One tiny session (no tools, a trivial prompt) to tell an outage from a phase that keeps failing with
+ * words that look like one. On `model`, the one that failed (the cheap model when unknown), at
+ * $0.05 on the cheap model and $0.25 on another. Traced as a `probe` phase of the change.
+ * `reached`: the assistant answered (going over the cap counts: it answered); otherwise `detail` says why not.
  */
-export async function probeAssistant(root: string, cfg: Config, trace: Trace, slug: string): Promise<{ reached: boolean; detail: string }> {
+export async function probeAssistant(root: string, cfg: Config, trace: Trace, slug: string, model: string = modelFor(cfg, "cheap")): Promise<{ reached: boolean; detail: string }> {
   const seq = trace.phaseStart(slug, "probe", "agent");
   let r: Awaited<ReturnType<typeof runPhase>>;
   try {
     r = await runPhase({
-      cwd: root, prompt: PROBE_PROMPT, schema: PROBE_SCHEMA, model: modelFor(cfg, "cheap"), permissionMode: "default",
+      cwd: root, prompt: PROBE_PROMPT, schema: PROBE_SCHEMA, model, permissionMode: "default",
       allowedTools: [], disallowedTools: ["Bash", ...WRITE_TOOLS, ...NO_POWERSHELL],
-      timeoutMs: Math.min(PROBE_TIMEOUT_MS, cfg.claude.timeout_minutes * 60_000), maxBudgetUsd: 0.05,
+      timeoutMs: Math.min(PROBE_TIMEOUT_MS, cfg.claude.timeout_minutes * 60_000),
+      maxBudgetUsd: model === modelFor(cfg, "cheap") ? PROBE_CAP_CHEAP_USD : PROBE_CAP_USD,
       env: { LOOPSTRA_PHASE: "probe", LOOPSTRA_SLUG: slug },
     });
   } catch (e) {
     trace.phaseEnd(slug, seq, { status: e instanceof StopRequested ? "interrupted" : "fail", error: errorText(e) });
     throw e;
   }
-  const reached = r.ok && (r.structuredOutput as { ok?: unknown } | undefined)?.ok === true;
-  const detail = reached ? "the assistant answered the probe" : r.ok ? "the probe's answer was not ok: true" : `${r.reason}: ${r.detail}`;
+  const overCap = !r.ok && r.reason === "budget";
+  const reached = overCap || (r.ok && (r.structuredOutput as { ok?: unknown } | undefined)?.ok === true);
+  const detail = overCap ? "the assistant answered the probe (over its cap)" : reached ? "the assistant answered the probe" : r.ok ? "the probe's answer was not ok: true" : `${r.reason}: ${r.detail}`;
   trace.phaseEnd(slug, seq, { status: reached ? "success" : "fail", costUsd: r.costUsd, sessionId: r.sessionId ?? undefined, error: reached ? undefined : detail });
   return { reached, detail };
 }

@@ -312,6 +312,29 @@ describe("moving main", () => {
     } finally { repo.cleanup(); }
   });
 
+  test.if(process.platform === "win32")("a move refused because a file is held open exclusively is reported, not left as cut short (Windows)", async () => {
+    const { repo, git, from, to } = await twoCommits();
+    const a = join(repo.path, "a.md");
+    // Another program holds a.md with no sharing at all: git can neither write it nor read it.
+    const holder = Bun.spawn({
+      cmd: ["powershell", "-NoProfile", "-Command", `$f=[System.IO.File]::Open('${a}','Open','Read','None'); Write-Output held; [void][Console]::In.ReadLine(); $f.Close()`],
+      stdin: "pipe", stdout: "pipe",
+    });
+    try {
+      await holder.stdout.getReader().read();
+      const r = await moveMain(git, from, to);
+      expect(r.ok).toBe(false);
+      expect(await git.headSha()).toBe(from);
+      expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
+      holder.stdin.end();
+      await holder.exited;
+      expect(await text(a)).toBe("a1\n");
+    } finally {
+      holder.kill();
+      repo.cleanup();
+    }
+  });
+
   test("a move a kill cut short is put back at the next tick's start; a person's file is left alone", async () => {
     const { repo, git, from, to } = await twoCommits();
     const trace = Trace.open(repo.path);
@@ -382,7 +405,10 @@ describe("pushBranch", () => {
       await run(["git", "add", "x.md"], s.repo);
       await run(["git", "commit", "-q", "-m", "first"], s.repo);
       await run(["git", "checkout", "-q", "main"], s.repo);
+      const config = await Bun.file(join(s.repo, ".git", "config")).text();
       expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+      // No upstream is set: writing .git/config while another lane's git reads it can fail that git (Windows).
+      expect(await Bun.file(join(s.repo, ".git", "config")).text()).toBe(config);
 
       // Rewritten here: Loopstra's own last push is overwritten.
       const first = await sha();

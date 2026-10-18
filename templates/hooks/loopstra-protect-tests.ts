@@ -12,7 +12,14 @@ const caseless = process.platform === "win32" || process.platform === "darwin";
 const same = (a: string) => (caseless ? a.toLowerCase() : a);
 let path = slashes(input.tool_input?.file_path ?? input.tool_input?.path ?? "");
 if (root && same(path).startsWith(`${same(root)}/`)) path = path.slice(root.length + 1);
-const isTest = /(^|\/)(tests?|__tests__|spec)\//.test(path) || /\.(test|spec)\.[a-z]+$/.test(path) || /(^|\/)test_[^/]+\.py$/.test(path);
+// A test folder (tests/, Tests/, __tests__/, spec/, a .NET App.Tests/, App.Tests.Unit/ or App.UnitTests/), a test file name
+// (a.test.ts, a.spec.ts; _test and _spec only for the runners that use them: add_test.go, calc_test.py, calc_spec.rb;
+// test_calc.py), or a .NET/JVM class name (CalcTests.cs, CalcTest.java) or XCTest's CalcTests.swift. Class names are
+// case-sensitive and need a small letter or digit before Test, so Latest.java and ABTest.java are not tests.
+const isTest = /(^|\/)(tests?|__tests__|spec|[^/]+\.tests?(\.\w+)?)\//i.test(path)
+  || /(^|\/)[^/]+\.\w*Tests?(\.\w+)?\//.test(path)
+  || /\.(test|spec)s?\.[a-z0-9]+$|_test\.(go|py|rb|exs|cc|cpp|c|rs)$|_spec\.rb$|(^|\/)test_[^/]+\.py$/i.test(path)
+  || /(^|\/)[A-Za-z0-9_]*[a-z0-9](Tests?\.(cs|fs|vb|java|kt|scala)|Tests\.swift)$/.test(path);
 if (isTest && !changedOnBranch().some((f) => same(f) === same(path))) {
   // The runtime names the file in the block note, so a person can make the edit instead of rebuilding.
   if (process.env.LOOPSTRA_PROTECTED_LOG) {

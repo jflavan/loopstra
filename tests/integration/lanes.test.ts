@@ -269,7 +269,8 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       for (const n of [1, 2]) {
         const t = await tick(r.path);
         expect(t.paused).toMatch(/^The assistant is unavailable/);
-        expect(readPause(r.path)).toMatchObject({ slug: "alpha", phase: "intake", repeats: n, failures: 1 });
+        // beta's sessions after its intake ask other models than alpha's intake, so they do not end the back-off.
+        expect(readPause(r.path)).toMatchObject({ slug: "alpha", phase: "intake", model: "haiku", repeats: n, failures: n });
         await expirePause(r.path);
       }
       expect(await statusOf(r.path, "beta")).toBe("plan-approved");
@@ -519,10 +520,10 @@ function ghEnv(env: Record<string, string>, remote: string): Record<string, stri
 }
 
 /** lanesRepo with a bare repository as its GitHub remote, and the fake gh, which merges there for real. */
-async function remoteLanesRepo(n: number, changes: Change[], config = ""): Promise<RemoteRepo> {
+async function remoteLanesRepo(n: number, changes: Change[], config = "", files: Record<string, string> = {}): Promise<RemoteRepo> {
   const remote = tempDir("loopstra-remote-");
   await run(["git", "init", "-q", "--bare", "-b", "main"], remote.path);
-  const r = await lanesRepo(n, changes, config);
+  const r = await lanesRepo(n, changes, config, files);
   await run(["git", "remote", "add", "origin", remote.path], r.path);
   await run(["git", "push", "-q", "-u", "origin", "main"], r.path);
   return { ...r, remote: remote.path, state: join(remote.path, "fake-gh.json"), env: ghEnv(r.env, remote.path), cleanup: () => { r.cleanup(); remote.cleanup(); } };
@@ -582,6 +583,36 @@ async function traceShows(repo: string, done: (t: Trace) => boolean): Promise<vo
 }
 
 describe("more than one change at a time, with a GitHub remote", () => {
+  test("one change at a time: a change that changes the same files as an open pull request waits for it to merge, then builds on main with it", async () => {
+    const r = await remoteLanesRepo(1, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha", 2: "beta" }) } },
+    ], "", { "src/shared.ts": numbered() });
+    const note = "Waits for alpha to be merged first, because both change the same files.";
+    const queueRow = async (slug: string) => (await Bun.file(join(r.path, "intent", "queue.md")).text()).split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      // Alpha's pull request is the watcher's; the one lane is free, but beta waits for it.
+      await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect(await statusOf(r.path, "beta")).toBe("plan-approved");
+      inTrace(r.path, (trace) => expect(trace.phases("beta")).toEqual([]));
+      expect(await queueRow("beta")).toContain(note);
+      await checksPass(r);
+      await tick(r.path); // the watcher merges alpha; beta still waited when the tick began
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      expect(await queueRow("beta")).not.toContain(note);
+      await tick(r.path); // alpha's final check, first in the queue
+      expect(await statusOf(r.path, "alpha")).toBe("done");
+      await tick(r.path); // beta builds on main with alpha
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      expect((await new Git(r.path).run(["show", "intent/beta:src/shared.ts"])).out).toBe(numbered({ 1: "alpha", 2: "beta" }));
+    });
+    r.cleanup();
+  }, 240_000);
+
   test("a change watching its pull request is the watcher's, never a lane's: it merges, once, while another change builds", async () => {
     const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
     await withEnv(r.env, async () => {
@@ -683,6 +714,9 @@ describe("more than one change at a time, with a GitHub remote", () => {
       rmSync(join(c.fixtures, "release-beta-intake"), { force: true }); // the fixtures are shared with the copy before
       const release = holdSession(c, "beta", "intake", "intake-question");
       await commitWithLanes(c, n);
+      // Alpha's pull request already has the commit that set n at a time, as if checked with it.
+      expect(await new Git(join(c.path, ".loopstra", "worktrees", "alpha")).rebaseOnto("main")).toBe(true);
+      expect((await run(["git", "push", "-q", "--force", "origin", "intent/alpha"], c.path)).code).toBe(0);
       await withEnv(c.env, async () => {
         const running = tick(c.path);
         try {
@@ -717,19 +751,31 @@ describe("more than one change at a time, with a GitHub remote", () => {
     });
     const prs = async (repo: RemoteRepo) => (await Bun.file(repo.state).json()).prs as Record<string, { checks: string; merged: boolean }>;
 
-    // One change at a time: both merge in one tick, with no second look.
+    // One change at a time: the watcher still runs beside the lane, so one merge can leave another pull
+    // request out of date. The first merges; the second is brought up to date and waits for its checks again.
     const one = await copyRemoteRepo(r);
     await commitWithLanes(one, 1);
+    for (const slug of ["alpha", "beta"]) {
+      // Both pull requests already have the commit that set one at a time, as if checked with it.
+      expect(await new Git(join(one.path, ".loopstra", "worktrees", slug)).rebaseOnto("main")).toBe(true);
+      expect((await run(["git", "push", "-q", "--force", "origin", `intent/${slug}`], one.path)).code).toBe(0);
+    }
     await withEnv(one.env, async () => {
       await tick(one.path);
-      expect(await statusOf(one.path, "alpha")).toBe("merged");
-      expect(await statusOf(one.path, "beta")).toBe("merged");
+      const merged = Object.entries(await prs(one)).filter(([, p]) => p.merged).map(([branch]) => branch.replace("intent/", ""));
+      expect(merged).toHaveLength(1);
+      const first = merged[0]!;
+      const second = first === "alpha" ? "beta" : "alpha";
+      expect(await statusOf(one.path, first)).toBe("merged");
+      expect(await statusOf(one.path, second)).toBe("merge-review");
+      expect((await run(["git", "cat-file", "-e", `intent/${second}:src/${first}.ts`], one.remote)).code).toBe(0);
       inTrace(one.path, (trace) => {
-        for (const slug of ["alpha", "beta"]) {
-          expect(trace.events(slug).some((e) => e.payload.includes("Brought up to date"))).toBe(false);
-          expect(trace.phases(slug).some((p) => p.name === "merge-test-1")).toBe(false);
-        }
+        expect(trace.events(second).filter((e) => e.payload.includes("Brought up to date"))).toHaveLength(1);
+        expect(trace.phases(second).some((p) => p.name === "merge-test-1")).toBe(true);
       });
+      await checksPass(one);
+      await tick(one.path);
+      expect((await prs(one))[`intent/${second}`]!.merged).toBe(true);
     });
     one.cleanup();
 
@@ -900,6 +946,44 @@ describe("more than one change at a time, with a GitHub remote", () => {
       expect(trace.events("alpha").map((e) => e.payload).join("\n")).not.toContain("each have commits the other lacks");
     });
     expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(false);
+    r.cleanup();
+  }, 240_000);
+
+  test("a pull request a person updated with rebase on GitHub is taken as it is, not blocked as if the branch here had changed too", async () => {
+    const r = await remoteLanesRepo(2, [{ slug: "alpha", status: "plan-approved" }]);
+    await withEnv(r.env, async () => {
+      await tick(r.path); // build
+      await tick(r.path); // review, pull request
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+    });
+    // Main gains code, and a person presses GitHub's "Update with rebase": the branch there is rewritten onto it.
+    await Bun.write(join(r.path, "src", "other.ts"), "export const other = 1;\n");
+    await new Git(r.path).commitAll("other code");
+    await run(["git", "push", "-q", "origin", "main"], r.path);
+    const clone = tempDir("loopstra-person-");
+    try {
+      const git = (args: string[]) => run(["git", ...args], clone.path).then((x) => expect(x.code).toBe(0));
+      await git(["clone", "-q", "-b", "intent/alpha", r.remote, "."]);
+      await git(["-c", "user.name=GitHub", "-c", "user.email=github@example.test", "rebase", "-q", "origin/main"]);
+      await git(["push", "-q", "--force", "origin", "intent/alpha"]);
+    } finally { clone.cleanup(); }
+    await checksPass(r);
+    const onGitHub = async () => (await run(["git", "rev-parse", "intent/alpha"], r.remote)).out.trim();
+    const rebased = await onGitHub();
+    await withEnv(r.env, async () => {
+      await tick(r.path);
+      const alpha = (await readIntent(r.path, "alpha")).file.frontmatter;
+      expect(alpha.status).not.toBe("blocked");
+      expect(alpha.note ?? "").not.toContain("the branch here changed too");
+      for (let i = 0; i < 2 && !(await Bun.file(r.state).json()).prs["intent/alpha"].merged; i++) await tick(r.path);
+      expect((await Bun.file(r.state).json()).prs["intent/alpha"].merged).toBe(true);
+      expect((await run(["git", "cat-file", "-e", "main:src/alpha.ts"], r.remote)).code).toBe(0);
+      // GitHub's rewritten copy was taken as it is, once.
+      inTrace(r.path, (trace) => {
+        const taken = trace.events("alpha").filter((e) => e.payload.includes("\"take pull request commits\""));
+        expect(taken.map((e) => payloadOf<{ head: string }>(e).head)).toEqual([rebased]);
+      });
+    });
     r.cleanup();
   }, 240_000);
 

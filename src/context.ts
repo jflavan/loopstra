@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
-import { effectivePriority, readIntent, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
+import { effectivePriority, readIntent, writeChangeFile, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
@@ -134,28 +134,118 @@ async function assertOnMain(git: Git, main: string): Promise<void> {
  * give false: nothing to commit after all); then they are committed with the generated queue.md,
  * which is never committed on its own. Once writing has begun the commit is not stopped by a stop
  * request (only bounded by git's time limit), so a stop never leaves a record written but not
- * committed. The tick shares main with the remote once, at its end. False when nothing was committed.
+ * committed. All or nothing: when the commit fails (a held index lock, a timeout, a hook), the files
+ * are put back as they were before the write and nothing is left staged (see putBackRecord), then the
+ * error goes on; a record left written but not committed would hold up every sync and local merge.
+ * The tick shares main with the remote once, at its end. False when nothing was committed.
  */
 export function commitRecord(root: string, main: string, slug: string, what: string, write: () => Promise<boolean | void> = async () => {}): Promise<boolean> {
   return onCheckout(root, async () => {
     const git = new Git(root);
     await assertOnMain(git, main);
     throwIfStopping();
+    const paths = [`intent/${slug}`, "intent/queue.md"];
+    const before = filesUnder(root, paths);
+    const head = await git.headSha();
     if ((await write()) === false) return false;
-    return git.commitPaths([`intent/${slug}`, "intent/queue.md"], bookkeeping(`loopstra(${slug}): ${what}`), { finish: true });
+    const written = filesUnder(root, paths);
+    const message = bookkeeping(`loopstra(${slug}): ${what}`);
+    try {
+      return await git.commitPaths(paths, message, { finish: true });
+    } catch (e) {
+      if (await nothingLanded(git, head, message)) await putBackRecord(git, root, paths, before, written);
+      throw e;
+    }
   });
 }
 
 /**
+ * True when a failed commit of `message` on `head` left nothing of its own in HEAD, so its record
+ * can be put back: HEAD is still `head`, or moved on by someone else's commit (a person's, in the
+ * main checkout meanwhile). False when its own commit landed before its error (git's time limit cut
+ * in after it), since putting the files back would leave main's checkout behind its own HEAD, and
+ * when HEAD cannot be read: the files are then left written, which loses nothing.
+ */
+async function nothingLanded(git: Git, head: string, message: string): Promise<boolean> {
+  const now = await git.run(["log", "-1", "--format=%H%n%P%n%s", "HEAD"], { allowFail: true, cleanup: true }).catch(() => null);
+  if (now?.code !== 0) return false;
+  const [sha, parents, subject] = now.out.trim().split("\n");
+  return sha === head || parents !== head || subject !== message;
+}
+
+/** The files under these paths (each a file or a folder, relative to `root`), with what each holds, by path relative to `root`. */
+function filesUnder(root: string, paths: string[]): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  const visit = (rel: string) => {
+    const abs = join(root, rel);
+    if (!existsSync(abs)) return;
+    if (statSync(abs).isDirectory()) for (const name of readdirSync(abs)) visit(`${rel}/${name}`);
+    else out.set(rel, readFileSync(abs));
+  };
+  for (const p of paths) visit(p);
+  return out;
+}
+
+/**
+ * Puts a record whose commit failed back as it was before the write: each file the write changed
+ * gets its old content back, one it made goes, one it removed comes back. A file that changed again
+ * since the write (a person's edit) is left as it is. Then the paths are unstaged. The unstage runs
+ * even after a stop request, like the commit it undoes, and a failure of it is left: the files are
+ * already back, and an index git could not write still has what HEAD has for them.
+ */
+async function putBackRecord(git: Git, root: string, paths: string[], before: Map<string, Buffer>, written: Map<string, Buffer>): Promise<void> {
+  for (const [rel, text] of written) {
+    const abs = join(root, rel);
+    const was = before.get(rel);
+    if (was?.equals(text) || !existsSync(abs) || !readFileSync(abs).equals(text)) continue;
+    if (was) writeFileSync(abs, was);
+    else rmSync(abs, { force: true });
+  }
+  for (const [rel, was] of before) {
+    const abs = join(root, rel);
+    if (!written.has(rel) && !existsSync(abs)) { mkdirSync(dirname(abs), { recursive: true }); writeFileSync(abs, was); }
+  }
+  try {
+    await git.run(["reset", "-q", "--", ...paths], { allowFail: true, cleanup: true });
+  } catch { /* a timeout: the commit's own error is the one to report */ }
+}
+
+/**
+ * commitRecord for a step's own change. When it fails, the step's intent goes back to what it was
+ * before the write: the write already changed it in memory, and commitRecord put the file back, so a
+ * block that follows starts from the status saved, not from one never saved (which it would take for
+ * a person's). Not read again from the file: a status a person set meanwhile, which commitRecord
+ * leaves, must still meet the block as theirs (PersonChangedStatus), not be blocked over.
+ */
+export async function commitForStep(ctx: StepContext, what: string, write: () => Promise<boolean | void>): Promise<boolean> {
+  const { file, artifacts } = ctx.intent;
+  const known = new Set(artifacts);
+  try {
+    return await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, what, write);
+  } catch (e) {
+    ctx.intent.file = file;
+    ctx.intent.artifacts = known;
+    throw e;
+  }
+}
+
+/**
  * Writes frontmatter keys for the runtime (inside commitRecord), re-read from disk right before
- * writing, never over a status a person set while the step ran (throws PersonChangedStatus instead).
+ * writing, never over a status a person set while the step ran, nor into a change a person deleted
+ * meanwhile (throws PersonChangedStatus instead).
  */
 export async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>): Promise<void> {
   const expected = ctx.intent.file.frontmatter.status;
   if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }))) {
+    throwIfDeleted(ctx);
     const found = (await readIntent(ctx.root, ctx.slug)).file.frontmatter.status;
     throw new PersonChangedStatus(expected, found);
   }
+}
+
+/** Throws PersonChangedStatus when the change's intent.md is gone: a person deleted the change while the step ran. */
+function throwIfDeleted(ctx: StepContext): void {
+  if (!existsSync(join(ctx.intent.dir, "intent.md"))) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, "deleted");
 }
 
 /**
@@ -175,7 +265,7 @@ export function statusPatch(from: Status, to: Status, note: string): Partial<Fro
 export async function setStatus(ctx: StepContext, status: Status, note = "", extra: Record<string, unknown> = {}): Promise<void> {
   const from = ctx.intent.file.frontmatter.status;
   const patch = statusPatch(from, status, note);
-  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${from} → ${status}`, async () => {
+  await commitForStep(ctx, `${from} → ${status}`, async () => {
     await writeForStep(ctx, patch);
     ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));
     ctx.trace.statusChange(ctx.slug, from, status, note, extra);
@@ -276,10 +366,11 @@ export async function readArtifact(ctx: StepContext, name: string): Promise<stri
   return existsSync(p) ? await Bun.file(p).text() : null;
 }
 
-/** Writes an artifact on main and commits it (see commitRecord). */
+/** Writes an artifact whole on main and commits it (see commitRecord); never into a change a person deleted (PersonChangedStatus). */
 export async function writeArtifact(ctx: StepContext, name: string, text: string): Promise<void> {
-  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `write ${name}`, async () => {
-    await Bun.write(join(ctx.intent.dir, name), text.endsWith("\n") ? text : text + "\n");
+  await commitForStep(ctx, `write ${name}`, async () => {
+    throwIfDeleted(ctx);
+    writeChangeFile(ctx.intent, name, text.endsWith("\n") ? text : text + "\n");
     ctx.intent.artifacts.add(name);
   });
 }
@@ -327,9 +418,11 @@ export function sentBackNote(ctx: StepContext): string {
   return note ? `A person sent the earlier version back with this note:\n${note}` : "";
 }
 
-/** Drops a kept sent-back note (its send back was undone). */
-export function dropSentBack(root: string, slug: string): void {
-  rmSync(join(root, ".loopstra", "runs", slug, SENT_BACK), { force: true });
+/** Drops a kept sent-back note (its send back was undone, or never landed); with `only`, only when it is that note. */
+export function dropSentBack(root: string, slug: string, only?: string): void {
+  const path = join(root, ".loopstra", "runs", slug, SENT_BACK);
+  if (only !== undefined && (!existsSync(path) || readFileSync(path, "utf8") !== only)) return;
+  rmSync(path, { force: true });
 }
 
 
@@ -339,8 +432,9 @@ export function dropSentBack(root: string, slug: string): void {
  * hold up a sync or a merge (main would have unsaved changes).
  */
 export async function writeIntentPriority(ctx: StepContext, priority: Priority): Promise<void> {
-  await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, "record priority", async () => {
-    // The owner may have stated one while the step ran: read what the file says now.
+  await commitForStep(ctx, "record priority", async () => {
+    // The owner may have stated one while the step ran: read what the file says now, if it is still there.
+    throwIfDeleted(ctx);
     const now = await readIntent(ctx.root, ctx.slug);
     if (now.file.frontmatter.status !== ctx.intent.file.frontmatter.status) throw new PersonChangedStatus(ctx.intent.file.frontmatter.status, now.file.frontmatter.status);
     if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return false; }

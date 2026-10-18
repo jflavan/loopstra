@@ -61,7 +61,8 @@ changes at `merge-review` and `merge-approved`, which the lanes no longer take.
 - **What one look does.** It runs the merge step of each such change, in queue order, under that
   change's claim, so it never runs a change a lane is running.
 - **Bringing a pull request up to date.** A look may bring a pull request up to date (the merge
-  checks again: rebase, tests, fixes; `speed.max_parallel_changes` above 1 only) only while no more
+  checks again: rebase, tests, fixes; `speed.max_parallel_changes` above 1 only, changed by the review
+  fixes of 2026-10-18 to every value) only while no more
   than `speed.max_parallel_changes` changes run a step, counting this one. Otherwise it waits for a
   later look; the one after the last lane ends always has room.
 - **Problems.** A stop, an outage or the day's budget in a watched step is handled like a lane's:

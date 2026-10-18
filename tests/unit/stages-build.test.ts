@@ -14,6 +14,7 @@ import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
 import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { requestStop, resetStop, StopRequested } from "../../src/stop";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -419,12 +420,49 @@ describe("the first review alongside the verifier", () => {
     again.trace.close(); repo.cleanup();
   });
 
-  test("no review runs ahead on a worktree the checks left files in: review start commits them, so it could not be used", async () => {
+  test("no review runs ahead on a worktree whose files the checks rewrote: review start commits them, so it could not be used", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test", lint: "echo x > lint-report.txt" });
+    await Bun.write(join(repo.path, "lint-report.txt"), "tracked\n");
+    await new Git(repo.path).commitAll("a tracked lint report");
     await runBuildStep(ctx);
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
     expect(earlyReviews(trace)).toEqual([]);
     trace.close(); repo.cleanup();
+  });
+
+  test("new files the test runs write are removed, so neither a fix's commit nor review start commits them", async () => {
+    // A test command that writes a report on every run; the broken build fails the first run.
+    const { repo, ctx, trace } = await planned({ test: "bun report.ts && bun test" });
+    await Bun.write(join(repo.path, "report.ts"), 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync("out", { recursive: true });\nwriteFileSync("out/report.txt", `run ${Date.now()}\\n`);\n');
+    await Bun.write(join(repo.path, "loopstra", "prompts", "build.md"), "{{plan}} FIXTURE:build-broken");
+    await new Git(repo.path).commitAll("a test command that writes a report");
+    await runBuildStep(ctx);
+    expect(withoutEarlyReview(trace)).toContain("fix-1");
+    const files = async (ref: string) => (await new Git(repo.path).run(["ls-tree", "-r", "--name-only", ref])).out.split("\n");
+    expect(await files("intent/add-numbers")).not.toContain("out/report.txt");
+    expect(existsSync(join(ctx.worktreeDir, "out", "report.txt"))).toBe(false);
+    await runMergeStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("merged");
+    expect(await files("main")).toContain("src/add.ts");
+    expect(await files("main")).not.toContain("out/report.txt");
+    trace.close(); repo.cleanup();
+  });
+
+  test("new files a test run wrote are removed even when a stop cuts the run short", async () => {
+    // A test command that writes a report, then runs on until it is stopped.
+    const { repo, ctx, trace } = await planned({ test: "bun report.ts" });
+    await Bun.write(join(repo.path, "report.ts"), 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync("out", { recursive: true });\nwriteFileSync("out/report.txt", "partial\\n");\nawait Bun.sleep(60_000);\n');
+    await new Git(repo.path).commitAll("a test command that writes a report");
+    const report = join(ctx.worktreeDir, "out", "report.txt");
+    let seen = false;
+    const watch = setInterval(() => { if (existsSync(report)) { seen = true; requestStop(); } }, 20);
+    try {
+      await expect(runBuildStep(ctx)).rejects.toBeInstanceOf(StopRequested);
+      expect(seen).toBe(true);
+      expect(existsSync(report)).toBe(false);
+    } finally {
+      clearInterval(watch); resetStop(); trace.close(); repo.cleanup();
+    }
   });
 
   test("a review asked about other code, or with another prompt, is not used: round 1 runs again", async () => {

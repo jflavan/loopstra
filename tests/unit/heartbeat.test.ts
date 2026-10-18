@@ -143,6 +143,48 @@ describe("pause after the assistant was unavailable", () => {
     }
   });
 
+  test("the pause names the model that failed; a success on another model leaves it as it is", () => {
+    const t = tempDir();
+    try {
+      const cause = { slug: "add-numbers", phase: "design", line: "API Error: 529 Overloaded", model: "opus" };
+      pauseAfterUnavailable(t.path, NOW, cause);
+      const before = pauseAfterUnavailable(t.path, NOW, cause);
+      expect(before).toMatchObject({ ...cause, repeats: 2, failures: 2 });
+      // The change's cheap intake got through, or another change's: opus may still be out.
+      clearPause(t.path, "add-numbers", NOW, "haiku");
+      expect(readPause(t.path)).toEqual({ ...before, gotThrough: ["haiku"] });
+      clearPause(t.path, "say-goodbye", NOW, "haiku");
+      expect(readPause(t.path)).toEqual({ ...before, gotThrough: ["haiku"] });
+      // The same words from another model start the count again.
+      expect(pauseAfterUnavailable(t.path, NOW, { ...cause, model: "sonnet" })).toMatchObject({ model: "sonnet", repeats: 1, failures: 3 });
+      // A success on the model that failed ends the pause as before.
+      clearPause(t.path, "add-numbers", NOW, "sonnet");
+      expect(readPause(t.path)).toBeNull();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a model that got through while another's pause stayed starts its own outage at one minute", () => {
+    const t = tempDir();
+    try {
+      const opus = { slug: "add-numbers", phase: "design", line: "You've reached your Fable limit", model: "opus" };
+      for (let i = 0; i < 4; i++) pauseAfterUnavailable(t.path, NOW, opus);
+      // opus never runs again (its change was dropped); haiku keeps getting through, then has an outage of its own.
+      clearPause(t.path, "say-goodbye", NOW, "haiku");
+      const haiku = { slug: "say-goodbye", phase: "intake", line: "API Error: 529 Overloaded", model: "haiku" };
+      const p = pauseAfterUnavailable(t.path, NOW, haiku);
+      expect(p).toMatchObject({ model: "haiku", failures: 1, repeats: 1 });
+      expect(p.gotThrough).toBeUndefined();
+      expect((Date.parse(p.until) - NOW.getTime()) / 60_000).toBe(1);
+      // Models that fail in turn with nothing getting through between (the network is down) keep backing off.
+      expect(pauseAfterUnavailable(t.path, NOW, opus)).toMatchObject({ model: "opus", failures: 2 });
+      expect(pauseAfterUnavailable(t.path, NOW, haiku)).toMatchObject({ model: "haiku", failures: 3 });
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("another change getting through ends the wait and the back-off, but keeps the cause and its repeats", () => {
     const t = tempDir();
     try {

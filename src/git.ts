@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded } from "./shell";
@@ -117,12 +117,15 @@ function hasOwnSshCommand(cwd: string): boolean {
 /**
  * The environment of every git call: it never waits for a person to type a password or confirm a
  * key, and it speaks English (the C locale) whatever the machine's language, since some of its
- * messages are read (conflicts, a missing session, the last line of an error).
+ * messages are read (conflicts, a missing session, the last line of an error). An author or committer
+ * named in the environment is dropped: it would win over RUNTIME_COMMIT_CONFIG's identity, and every
+ * commit this git makes is the runtime's (a replayed commit keeps the author it recorded).
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" };
   delete env.SSH_ASKPASS;
   delete env.LANGUAGE;
+  for (const who of ["AUTHOR", "COMMITTER"]) { delete env[`GIT_${who}_NAME`]; delete env[`GIT_${who}_EMAIL`]; }
   if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !hasOwnSshCommand(cwd)) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
   return env;
 }
@@ -209,15 +212,26 @@ export class Git {
     const top = await this.run(["rev-parse", "--show-toplevel"], true);
     return top.code === 0 && samePath(top.out.trim(), this.cwd);
   }
+  /** False when this worktree's `git worktree add` never finished: git's "initializing" lock is still on it, or it has no index yet. */
+  async addFinished(): Promise<boolean> {
+    const gitPath = async (name: string) => resolve(this.cwd, (await this.run(["rev-parse", "--git-path", name])).out.trim());
+    const lock = await gitPath("locked");
+    if (existsSync(lock) && readFileSync(lock, "utf8").trim() === "initializing") return false;
+    return existsSync(await gitPath("index"));
+  }
   async headSha(): Promise<string> { return (await this.run(["rev-parse", "HEAD"])).out.trim(); }
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
   async worktreePrune(): Promise<void> { await worktreeAdmin(this, () => this.run(["worktree", "prune"])); }
 
-  /** Always prunes first, so a worktree whose directory was deleted by hand does not block the add. */
+  /**
+   * Always prunes first, unlocking the path before, so a worktree whose directory was deleted by hand,
+   * or a killed add's "initializing" lock on it (a prune never takes a locked entry), does not block the add.
+   */
   async worktreeAdd(path: string, branch: string): Promise<void> {
     await worktreeAdmin(this, async () => {
+      await this.run(["worktree", "unlock", path], true);
       await this.run(["worktree", "prune"]);
       await this.run(["worktree", "add", path, branch]);
     });
@@ -226,13 +240,14 @@ export class Git {
   /**
    * Makes `dir` a worktree of this repository checked out on `branch`. An existing directory is
    * reused only if it is itself a worktree root (not just a folder inside the main checkout) on
-   * `branch`; anything else is removed and the worktree is added again. No lock: git keeps another
-   * change's prune off a worktree it is still adding (it marks it "initializing").
+   * `branch` whose add finished (a killed add leaves files missing, and the next save would commit
+   * them as deleted); anything else is removed and the worktree is added again. No lock: git keeps
+   * another change's prune off a worktree it is still adding (it marks it "initializing").
    */
   async ensureWorktree(dir: string, branch: string): Promise<void> {
     if (existsSync(dir)) {
       const there = new Git(dir);
-      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch) return;
+      if ((await there.isWorktreeRoot()) && (await there.currentBranch()) === branch && (await there.addFinished())) return;
       await removeWorktree(this, dir);
     }
     await this.worktreeAdd(dir, branch);
@@ -270,9 +285,10 @@ export class Git {
    */
   async containsChanges(target: string, branch: string, ignore: string[] = []): Promise<boolean> {
     if (await this.isAncestor(branch, target)) return true;
-    const changed = await this.run(["diff", "--name-only", `${target}...${branch}`], true);
+    // -z: the names as they are; without it git quotes a non-ASCII name, and a quoted name matches no file.
+    const changed = await this.run(["diff", "--name-only", "-z", `${target}...${branch}`], true);
     if (changed.code !== 0) return false;
-    const files = changed.out.split(/\r?\n/).map((l) => l.trim()).filter((f) => f && !ignore.some((p) => f.startsWith(p)));
+    const files = changed.out.split("\0").filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
     for (const chunk of chunks(files, DIFF_CHUNK)) {
@@ -293,6 +309,17 @@ export class Git {
     if ((await this.run(["diff", "--cached", "--quiet"], true)).code === 0) return false;
     await this.runtime("commit", ["-q", "-m", message]);
     return true;
+  }
+
+  /** Tracked files changed in the checkout and not committed (staged or not). New files are left out. */
+  async changedTrackedFiles(): Promise<string[]> {
+    return (await this.run(["diff", "--name-only", "-z", "HEAD"])).out.split("\0").filter(Boolean);
+  }
+
+  /** Puts tracked files back as HEAD has them, staged and unstaged edits alike. */
+  async putBack(files: string[]): Promise<void> {
+    // In chunks, as in containsChanges; each name literal, so one with * or [ in it names only itself.
+    for (const chunk of chunks(files, DIFF_CHUNK)) await this.run(["checkout", "HEAD", "--", ...chunk.map((f) => `:(literal)${f}`)]);
   }
 
   /**
@@ -320,7 +347,7 @@ export class Git {
   }
 
   async changedFilesSince(base: string): Promise<string[]> {
-    return (await this.run(["diff", "--name-only", `${base}...HEAD`])).out.trim().split("\n").filter(Boolean);
+    return (await this.run(["diff", "--name-only", "-z", `${base}...HEAD`])).out.split("\0").filter(Boolean);
   }
 
   /** True when a rebase is in progress in this checkout. */
@@ -442,12 +469,17 @@ function worktreeAdmin<T>(git: Git, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** Runs `fn` in a throwaway detached worktree of `ref` at `dir` (see addDetachedWorktree), and always removes it afterwards. */
-export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` in a throwaway detached worktree of `ref` at `dir` (see addDetachedWorktree), and always
+ * tries to remove it afterwards. A removal that fails is given to `teardownFailed` (to trace it).
+ */
+export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>, teardownFailed?: (e: unknown) => void): Promise<T> {
   await addDetachedWorktree(git, dir, ref);
   try {
     return await fn(dir);
   } finally {
-    await removeWorktree(git, dir);
+    // Best effort: a folder Windows still holds (a process the work left running there) must not hide
+    // fn's result or error. The next add at this path removes what is left (see addDetachedWorktree).
+    await removeWorktree(git, dir).catch((e) => { try { teardownFailed?.(e); } catch { /* the result stands */ } });
   }
 }

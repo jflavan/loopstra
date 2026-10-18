@@ -595,4 +595,109 @@ describe("merge", () => {
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
     trace.close(); repo.cleanup();
   });
+
+  /**
+   * A formatter committed on main (code the branch lacks, so the merge checks rebase): it rewrites the
+   * branch's src/add.ts once, the way a lint --fix or a format step would, and is set up as `where`
+   * in the config. A fresh context reads that config.
+   */
+  async function withFormatter(repo: string, where: (command: string) => (config: string) => string) {
+    await Bun.write(join(repo, "fmt.ts"), `import { writeFileSync } from "node:fs";\nwriteFileSync("src/add.ts", ${JSON.stringify(FORMATTED)});\n`);
+    const config = await Bun.file(configPath(repo)).text();
+    await Bun.write(configPath(repo), where(`bun "${join(repo, "fmt.ts").replace(/\\/g, "/")}"`)(config));
+    await new Git(repo).commitAll("a formatter");
+    return openRepo(repo);
+  }
+  const FORMATTED = "export function add(a: number, b: number): number {\n  return a + b; // formatted\n}\n";
+
+  test("a review after command that rewrites a tracked file is kept and reviewed, not taken for a conflict", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withFormatter(repo.path, (command) => (config) => `${config}stages:\n  review:\n    after:\n      - ${command}\n`);
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:src/add.ts"]).then((r) => r.out)).toBe(FORMATTED);
+    expect(phaseNames(trace)).toContain("review-2");
+    trace.close(); repo.cleanup();
+  });
+
+  test("files a lint command rewrites during the merge checks are put back, and the change merges as it was reviewed", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withFormatter(repo.path, (command) => (config) => config.replace("commands:\n", `commands:\n  lint: ${command}\n`));
+    expect(ctx.cfg.commands.lint).toContain("fmt.ts");
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:src/add.ts"]).then((r) => r.out)).not.toBe(FORMATTED);
+    expect(phaseNames(trace)).not.toContain("review-2");
+    expect(trace.events("add-numbers").some((e) => e.payload.includes("left out files the checks' commands rewrote: src/add.ts"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  /** A review whose words differ each round, as a real reviewer's do, so each round commits a new review.md on main. */
+  function reviewSaying(round: number): string {
+    const lines = [
+      { type: "system", subtype: "init", session_id: `r${round}`, cwd: "/", tools: [], model: "fake" },
+      { type: "result", subtype: "success", is_error: false, session_id: `r${round}`, total_cost_usd: 0.06, usage: {}, structured_output: { status: "success", summary: "ok", approved: true, findings: [], review_markdown: `# Review\n\nRound ${round}: looks good.\n` }, result: "ok" },
+    ];
+    return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+  }
+
+  /** A command that writes a fresh, tracked out/report.txt on every run (a report with a timestamp), and a new out/run.txt. */
+  async function withStamp(repo: string, where: (command: string) => (config: string) => string) {
+    const stamp = 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync("out", { recursive: true });\nwriteFileSync("out/report.txt", `generated ${Date.now()} ${Math.random()}\\n`);\nwriteFileSync("out/run.txt", "new\\n");\n';
+    await Bun.write(join(repo, "stamp.ts"), stamp);
+    await Bun.write(join(repo, "out", "report.txt"), "generated never\n");
+    const config = await Bun.file(configPath(repo)).text();
+    await Bun.write(configPath(repo), where(`bun "${join(repo, "stamp.ts").replace(/\\/g, "/")}"`)(config));
+    await new Git(repo).commitAll("a command that writes a report");
+    return openRepo(repo);
+  }
+
+  test("a lint command that writes a fresh report on every run merges without another review, and its files are not committed", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withStamp(repo.path, (command) => (config) => config.replace("commands:\n", `commands:\n  lint: ${command}\n`));
+    const dir = fixtureDir({ "review-1": reviewSaying(1), "review-2": reviewSaying(2), "review-3": reviewSaying(3) });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => runMergeStep(ctx));
+      expect(await status(repo.path)).toBe("merged");
+      expect(phaseNames(trace)).not.toContain("review-2");
+      expect(await onMain(repo.path, "out/run.txt")).toBe(false);
+      expect(await new Git(repo.path).run(["show", "main:out/report.txt"]).then((r) => r.out)).toBe("generated never\n");
+      expect(trace.events("add-numbers").some((e) => e.payload.includes("left out files the checks' commands rewrote: out/report.txt"))).toBe(true);
+    } finally {
+      dir.cleanup(); trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a review after command that rewrites a file differently every run blocks, naming the file, instead of using up the rounds", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withStamp(repo.path, (command) => (config) => `${config}stages:\n  review:\n    after:\n      - ${command}\n`);
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toContain("These files change every time the review's after command runs: out/report.txt");
+    expect(i.file.frontmatter.note).toContain("set status to reviewing");
+    expect(phaseNames(trace)).toContain("review-2");
+    expect(phaseNames(trace)).not.toContain("review-3");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a review after command's first rewrite of a file is reviewed, even when unfinished edits to another file were just kept", async () => {
+    const { repo, trace: first } = await built();
+    first.close();
+    const { ctx, trace } = await withFormatter(repo.path, (command) => (config) => `${config}stages:\n  review:\n    after:\n      - ${command}\n`);
+    // A revision stopped part-way left an edit to another file: review start keeps it.
+    await Bun.write(join(ctx.worktreeDir, "notes.txt"), "half done\n");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await new Git(repo.path).run(["show", "main:src/add.ts"]).then((r) => r.out)).toBe(FORMATTED);
+    expect(phaseNames(trace)).toContain("review-2");
+    trace.close(); repo.cleanup();
+  });
 });

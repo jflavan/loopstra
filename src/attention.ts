@@ -1,7 +1,8 @@
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
+import { ghProblem, GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
-import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, type HumanGates, type Scan, type Status } from "./intents";
+import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote } from "./stages/shared";
@@ -17,6 +18,8 @@ export interface AttentionItem {
   title: string;
   /** What a person should do or know, in plain words. */
   what: string;
+  /** What stays the same while the item lasts, when `what` does not (main's says when it was checked). */
+  key?: string;
 }
 
 export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
@@ -24,8 +27,11 @@ export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
   blocked: "Blocked", held: "Held", question: "Has a question", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
 
-/** What the tests on main say, in plain words: the newest check, and whether main is red. */
-export function healthView(trace: Trace, now: Date): { result: string; ts: string; text: string } | null {
+/**
+ * What the tests on main say, in plain words: the newest check, and whether main is red. `state` is
+ * the same words without the time.
+ */
+export function healthView(trace: Trace, now: Date): { result: string; ts: string; text: string; state: "pass" | "new" | "red" | "error" } | null {
   const newest = trace.lastSignal("main_health");
   if (!newest) return null;
   const red = trace.lastSignal("main_health", { excludeErrors: true })?.result === "fail";
@@ -36,7 +42,8 @@ export function healthView(trace: Trace, now: Date): { result: string; ts: strin
     : red && !everPassed ? `The tests on main have not passed yet (checked ${when}). On a new repository that is expected until the first change merges.`
     : red ? `The tests on main are failing (checked ${when}).`
     : `The last check of main could not run (${when}). An engineer can find the details in the trace.`;
-  return { result: red ? "fail" : newest.result, ts: newest.ts, text };
+  const state = newest.result === "pass" ? "pass" : red && !everPassed ? "new" : red ? "red" : "error";
+  return { result: red ? "fail" : newest.result, ts: newest.ts, text, state };
 }
 
 /** What an open question asks, in plain words, and where to answer it. Parts with no value are left out. */
@@ -70,7 +77,7 @@ export async function attention(root: string, config: Config | { problem: string
   scan ??= await scanRepo(root);
   const intents = orderQueue(scan.intents);
   const items: AttentionItem[] = [];
-  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what });
+  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string, key?: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what, ...(key ? { key } : {}) });
 
   // A person paused the loop: nothing new starts until they resume it. Titled apart from an outage's
   // pause, so the two are two items; worded for a loop that is stopped as much as one running.
@@ -82,10 +89,18 @@ export async function attention(root: string, config: Config | { problem: string
   // Only a spent day: one merely held by running phases clears by itself and needs no person.
   if (cfg && loopDaySpent(cfg, trace, now)) add("paused", null, "Loopstra is paused", loopDayNote(cfg, true));
   const health = healthView(trace, now);
-  if (health && health.result !== "pass") add("health", null, "Main branch", health.text);
+  if (health && health.result !== "pass") add("health", null, "Main branch", health.text, `main_health:${health.state}`);
   // Main and GitHub out of step (waiting on a person's own commits, or failing): the newest outcome only.
   const sync = trace.lastSignal(SYNC_SIGNAL);
   if (sync && (sync.result === "fail" || sync.result === "waiting")) add("sync", null, "Main and GitHub", sync.output);
+  // GitHub not answering about pull requests (gh signed out, a token it no longer takes): a passing
+  // hiccup needs nobody, so only once it has lasted. The words stay the same while it lasts. Only
+  // while a change watches its pull request: with none, nothing asks GitHub and the last look's
+  // failure is no news (the loop stopped after it, or the change moved on).
+  const since = trace.failingSince(GITHUB_SIGNAL);
+  if (since && now.getTime() - Date.parse(since) >= GITHUB_SILENT_MS && intents.some((i) => WATCHING_PR.has(i.file.frontmatter.status))) {
+    add("sync", null, "Not answering", `GitHub hasn't answered for 15 minutes: ${ghProblem(trace.lastSignal(GITHUB_SIGNAL)!.output)}`);
+  }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);
 
   for (const i of intents) {

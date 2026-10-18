@@ -22,7 +22,7 @@ export async function chat(root: string, opts: ChatOptions): Promise<number> {
   const terminal = opts.terminal ? new TerminalTransport() : null;
   const transports: Transport[] = [];
   if (terminal) transports.push(terminal);
-  if (cfg.chat.transports.slack) transports.push(new SlackTransport(cfg.chat.transports.slack));
+  if (cfg.chat.transports.slack) transports.push(new SlackTransport(cfg.chat.transports.slack, { root }));
   if (cfg.chat.transports.discord) transports.push(new DiscordTransport(cfg.chat.transports.discord, { root }));
   if (!transports.length) {
     console.error("There is nowhere to chat: --no-terminal was given and no Slack or Discord bot is set up under chat.transports in loopstra/config.yaml.");
@@ -34,7 +34,7 @@ export async function chat(root: string, opts: ChatOptions): Promise<number> {
     return 1;
   }
   resetStop();
-  const uninstall = installStopSignals();
+  const uninstall = installStopSignals("Stopping chat.");
   const service = new ChatService(root, transports);
   try {
     try {

@@ -303,11 +303,11 @@ describe("scan and queue", () => {
   });
 });
 
-describe("same files: a change waits instead of building into a conflict (more than one change at a time)", () => {
+describe("same files: a change waits instead of building into a conflict (at every number of changes at a time)", () => {
   /** A plan listing these files, or with no Files that change section (null). */
   const plan = (files: string[] | null) => `# Plan\n\n${files ? `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n` : ""}## Order of work\n1. x\n`;
   const planned = (files: string[] | null) => ({ "spec.md": "# Spec\n", "plan.md": plan(files) });
-  const holdsIn = async (root: string, lanes = 2) => sameFileHolds(lanes, orderQueue((await scanRepo(root)).intents));
+  const holdsIn = async (root: string) => sameFileHolds(orderQueue((await scanRepo(root)).intents));
   const rowOf = (md: string, slug: string) => md.split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
 
   test("a plan-approved change that lists a file a building change lists waits for it, and the queue says why", async () => {
@@ -320,6 +320,18 @@ describe("same files: a change waits instead of building into a conflict (more t
     const md = renderQueue(orderQueue((await scanRepo(t.path)).intents), [], undefined, holds);
     expect(rowOf(md, "say-goodbye")).toContain("Waits for add-numbers to be merged first, because both change the same files.");
     expect(rowOf(md, "elsewhere")).not.toContain("Waits for");
+    t.cleanup();
+  });
+
+  test("a building change also holds the files its build's reconciled plan added", async () => {
+    const t = tempDir();
+    await mk(t.path, "add-numbers", "status: building", planned(["src/math.ts"]));
+    await mk(t.path, "say-goodbye", "status: plan-approved", planned(["src/greet.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([]);
+    // The drift reconcile added src/greet.ts; that plan is kept in the run folder, not in plan.md.
+    mkdirSync(join(t.path, ".loopstra", "runs", "add-numbers"), { recursive: true });
+    await Bun.write(join(t.path, ".loopstra", "runs", "add-numbers", "plan.reconciled.md"), plan(["src/math.ts", "src/greet.ts"]));
+    expect([...(await holdsIn(t.path))]).toEqual([["say-goodbye", "add-numbers"]]);
     t.cleanup();
   });
 
@@ -362,11 +374,11 @@ describe("same files: a change waits instead of building into a conflict (more t
     t.cleanup();
   });
 
-  test("with one change at a time nothing waits for this", async () => {
+  test("a change waiting to merge holds the files too, as its pull request is still open", async () => {
     const t = tempDir();
-    await mk(t.path, "add-numbers", "status: building", planned(["src/math.ts"]));
+    await mk(t.path, "add-numbers", "status: merge-review", planned(["src/math.ts"]));
     await mk(t.path, "say-goodbye", "status: plan-approved", planned(["src/math.ts"]));
-    expect([...(await holdsIn(t.path, 1))]).toEqual([]);
+    expect([...(await holdsIn(t.path))]).toEqual([["say-goodbye", "add-numbers"]]);
     t.cleanup();
   });
 });

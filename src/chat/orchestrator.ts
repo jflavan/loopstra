@@ -100,6 +100,11 @@ export class Orchestrator {
     return next;
   }
 
+  /** Resolves once nothing runs on any thread: the turns and updates in progress have ended. */
+  async idle(): Promise<void> {
+    while (this.queues.size) await Promise.all(this.queues.values());
+  }
+
   /**
    * Puts a message from Loopstra into a thread's log (not through the agent) and sends it. `since`:
    * a line for the agent's next turn about it (see ThreadState.since), as for a request's result.

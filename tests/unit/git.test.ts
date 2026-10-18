@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
@@ -172,6 +172,17 @@ describe("Git", () => {
     repo.cleanup();
   });
 
+  test("runtime commits are Loopstra's even with an author or committer named in the environment", async () => {
+    const repo = await tempGitRepo();
+    const restore = setEnv({ GIT_AUTHOR_NAME: "Person", GIT_AUTHOR_EMAIL: "person@example.com", GIT_COMMITTER_NAME: "Person", GIT_COMMITTER_EMAIL: "person@example.com" });
+    try {
+      const git = new Git(repo.path);
+      await Bun.write(join(repo.path, "a.md"), "a");
+      expect(await git.commitAll("a")).toBe(true);
+      expect((await git.run(["log", "-1", "--format=%an|%ae|%cn|%ce"])).out.trim()).toBe(`${RUNTIME_NAME}|${RUNTIME_EMAIL}|${RUNTIME_NAME}|${RUNTIME_EMAIL}`);
+    } finally { restore(); repo.cleanup(); }
+  });
+
   test("runtime commits never start git's automatic gc or maintenance (another change may be committing meanwhile)", async () => {
     const repo = await tempGitRepo();
     try {
@@ -339,6 +350,39 @@ describe("Git across systems", () => {
       expect(await git.containsChanges("main", "feature")).toBe(false);
     } finally { repo.cleanup(); }
   });
+
+  test("putBack puts back hundreds of files, and a name with brackets names only itself", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const names = Array.from({ length: DIFF_CHUNK * 2 + 5 }, (_, i) => `generated-file-number-${String(i).padStart(4, "0")}.txt`);
+      for (const f of [...names, "[id].txt", "i.txt"]) await Bun.write(join(repo.path, f), "first\n");
+      await git.commitAll("files");
+      for (const f of [...names, "[id].txt", "i.txt"]) await Bun.write(join(repo.path, f), "rewritten\n");
+      await git.putBack([...names, "[id].txt"]);
+      expect(await git.changedTrackedFiles()).toEqual(["i.txt"]);
+    } finally { repo.cleanup(); }
+  });
+
+  test("containsChanges and changedFilesSince read non-ASCII paths and names with spaces", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      await Bun.write(join(wt, "docs", "café.md"), "bonjour\n");
+      await Bun.write(join(wt, "docs", "two words.md"), "spaced\n");
+      await new Git(wt).commitAll("café");
+      expect((await new Git(wt).changedFilesSince("main")).sort()).toEqual(["docs/café.md", "docs/two words.md"]);
+      // git quotes such a name unless asked not to; quoted, it matched nothing, so main seemed to have it.
+      expect(await git.containsChanges("main", "intent/x")).toBe(false);
+      await run(["git", "merge", "-q", "--squash", "intent/x"], repo.path);
+      await run(["git", "commit", "-q", "-m", "squash"], repo.path);
+      expect(await git.containsChanges("main", "intent/x")).toBe(true);
+      await git.worktreeRemove(wt);
+    } finally { repo.cleanup(); }
+  });
 });
 
 describe("Git and the locks", () => {
@@ -443,6 +487,50 @@ describe("Git and the locks", () => {
       expect(existsSync(dir)).toBe(false);
     } finally { repo.cleanup(); }
   });
+
+  test("a change's worktree whose folder is gone but whose entry is still locked 'initializing' can be ensured again", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.run(["worktree", "add", wt, "intent/x"]);
+      await git.run(["worktree", "lock", "--reason", "initializing", wt]);
+      rmSync(wt, { recursive: true, force: true });
+      // A prune never takes a locked entry, so the add used to fail the same way on every try.
+      await git.ensureWorktree(wt, "intent/x");
+      expect(existsSync(join(wt, "README.md"))).toBe(true);
+      expect(await new Git(wt).currentBranch()).toBe("intent/x");
+      await removeWorktree(git, wt);
+    } finally { repo.cleanup(); }
+  });
+
+  test("ensureWorktree replaces a worktree whose add was cut short, so no file is committed as deleted", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      for (let i = 0; i < 6; i++) await Bun.write(join(repo.path, `f${i}.txt`), `${i}\n`);
+      await git.commitAll("files");
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.ensureWorktree(wt, "intent/x");
+      // What a `worktree add` killed part way leaves: its "initializing" lock, no index, half the files.
+      const admin = join(repo.path, ".git", "worktrees", "x");
+      rmSync(join(admin, "index"));
+      for (let i = 3; i < 6; i++) rmSync(join(wt, `f${i}.txt`));
+      writeFileSync(join(admin, "locked"), "initializing");
+
+      await git.ensureWorktree(wt, "intent/x");
+      for (let i = 0; i < 6; i++) expect(existsSync(join(wt, `f${i}.txt`))).toBe(true);
+      expect(existsSync(join(admin, "locked"))).toBe(false);
+      const wtGit = new Git(wt);
+      expect(await wtGit.isDirty()).toBe(false);
+      await Bun.write(join(wt, "new.txt"), "n\n");
+      await wtGit.commitAll("save");
+      expect((await wtGit.run(["show", "--name-status", "--format=", "HEAD"])).out.trim()).toBe("A\tnew.txt");
+      await removeWorktree(git, wt);
+    } finally { repo.cleanup(); }
+  });
 });
 
 describe("worktree administration", () => {
@@ -459,6 +547,32 @@ describe("worktree administration", () => {
       }
       expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)?.length).toBe(1);
     } finally {
+      repo.cleanup();
+    }
+  });
+
+  test.if(process.platform === "win32")("a teardown Windows refuses never hides the work's result (Windows)", async () => {
+    const repo = await tempGitRepo();
+    let child = null as ReturnType<typeof Bun.spawn<"pipe", "ignore", "ignore">> | null;
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "verify", "x");
+      // A process the work left running in the copy (a test runner, a server): Windows will not delete the folder it runs in.
+      const failed: unknown[] = [];
+      const r = await withDetachedWorktree(git, dir, "main", async (cwd) => {
+        child = Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.stdin.text()"], cwd, stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+        await Bun.sleep(300);
+        return "passed";
+      }, (e) => failed.push(e));
+      expect(r).toBe("passed");
+      // The failed removal is not lost: the caller is told, to trace it.
+      expect(failed).toHaveLength(1);
+      child!.stdin.end();
+      await child!.exited;
+      // What was left is removed by the next add at that path.
+      expect(await withDetachedWorktree(git, dir, "main", async (cwd) => existsSync(join(cwd, "README.md")))).toBe(true);
+    } finally {
+      child?.kill();
       repo.cleanup();
     }
   });

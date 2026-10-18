@@ -5,6 +5,7 @@ import { modelFor } from "../config";
 import { Git, withDetachedWorktree } from "../git";
 import { cheapMayDecide, runJudge, type JudgeResult } from "../judges";
 import { phasePrompt, type AgentPhaseSpec } from "../phases";
+import { errorText } from "../shell";
 import { EARLY } from "../trace";
 import { takeKept, testResult } from "./shared";
 
@@ -43,7 +44,8 @@ export async function reviewAhead(ctx: StepContext, spec: string, plan: string):
   if (prompt === null) return null;
   const sha = await new Git(ctx.worktreeDir).headSha();
   const dir = join(ctx.root, ".loopstra", "review", ctx.slug);
-  const r = await withDetachedWorktree(ctx.git, dir, sha, (cwd) => runJudge(ctx, { ...phase, cwd }, { alongside: 1, prompt }));
+  const r = await withDetachedWorktree(ctx.git, dir, sha, (cwd) => runJudge(ctx, { ...phase, cwd }, { alongside: 1, prompt }),
+    (e) => ctx.trace.event(ctx.slug, "error", { where: "early review", what: "removing the copy of the branch", error: errorText(e) }));
   return r.ok ? JSON.stringify({ key: reviewKey(ctx, sha, phase, prompt), envelope: r.envelope, decidedBy: r.decidedBy }) : null;
 }
 
