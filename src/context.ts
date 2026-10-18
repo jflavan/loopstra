@@ -200,15 +200,20 @@ async function putBackRecord(git: Git, root: string, paths: string[], before: Ma
 }
 
 /**
- * commitRecord for a step's own change. When it fails, the step's intent is read again: the write
- * already changed it in memory, and commitRecord put the file back, so a block that follows starts
- * from the status the file has, not from one never saved (which it would take for a person's).
+ * commitRecord for a step's own change. When it fails, the step's intent goes back to what it was
+ * before the write: the write already changed it in memory, and commitRecord put the file back, so a
+ * block that follows starts from the status saved, not from one never saved (which it would take for
+ * a person's). Not read again from the file: a status a person set meanwhile, which commitRecord
+ * leaves, must still meet the block as theirs (PersonChangedStatus), not be blocked over.
  */
 export async function commitForStep(ctx: StepContext, what: string, write: () => Promise<boolean | void>): Promise<boolean> {
+  const { file, artifacts } = ctx.intent;
+  const known = new Set(artifacts);
   try {
     return await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, what, write);
   } catch (e) {
-    await ctx.reload().catch(() => {});
+    ctx.intent.file = file;
+    ctx.intent.artifacts = known;
     throw e;
   }
 }

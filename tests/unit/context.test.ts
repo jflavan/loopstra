@@ -230,6 +230,23 @@ describe("StepContext", () => {
     }
   });
 
+  test("a status a person set while a step's commit failed is kept: the step's intent goes back to before its write, so a block after meets the person's status", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      // The person sets closed while the commit runs; the commit then fails, and leaves their status.
+      const sed = "sed 's/^status: .*/status: closed/' intent/x/intent.md > .git/edited && mv .git/edited intent/x/intent.md";
+      writeFileSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"), `#!/bin/sh\n${sed}\nexit 1\n`, { mode: 0o755 });
+      await expect(setStatus(ctx, "designing", "go")).rejects.toBeInstanceOf(GitError);
+      rmSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"));
+      expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("closed");
+      expect(ctx.intent.file.frontmatter.status).toBe("accepted");
+      await expect(block(ctx, "Something went wrong.")).rejects.toBeInstanceOf(PersonChangedStatus);
+      expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("closed");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("a record whose commit meets a held index lock goes back to what was there, a person's uncommitted edit included", async () => {
     const { repo, ctx, trace } = await setup();
     const lock = join(repo.path, ".git", "index.lock");
