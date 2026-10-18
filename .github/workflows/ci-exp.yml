@@ -1,0 +1,54 @@
+name: ci-exp
+
+# Temporary: measures Windows test-time variants side by side. Deleted once a winner is chosen.
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: ${{ matrix.variant }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: control-buckets4,       defender: false, fasttmp: false, runner: old, args: "" }
+          - { variant: queue4,                 defender: false, fasttmp: false, runner: new, args: "--workers 4" }
+          - { variant: queue8,                 defender: false, fasttmp: false, runner: new, args: "--workers 8" }
+          - { variant: defender-tmp-queue4,    defender: true,  fasttmp: true,  runner: new, args: "--workers 4" }
+          - { variant: defender-tmp-queue8,    defender: true,  fasttmp: true,  runner: new, args: "--workers 8" }
+          - { variant: defender-only-queue4,   defender: true,  fasttmp: false, runner: new, args: "--workers 4" }
+          - { variant: part1of3,               defender: true,  fasttmp: true,  runner: new, args: "--workers 4 --part 1/3" }
+          - { variant: part2of3,               defender: true,  fasttmp: true,  runner: new, args: "--workers 4 --part 2/3" }
+          - { variant: part3of3,               defender: true,  fasttmp: true,  runner: new, args: "--workers 4 --part 3/3" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Git identity for the tests' throwaway repos
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+      - name: Exclude the workspace and temp folders from Defender's real-time scanning
+        if: matrix.defender
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:TEMP", "$env:USERPROFILE\.bun"
+          Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+      - name: Put temp on the runner's work disk
+        if: matrix.fasttmp
+        shell: pwsh
+        run: |
+          "TMP=${{ runner.temp }}" >> $env:GITHUB_ENV
+          "TEMP=${{ runner.temp }}" >> $env:GITHUB_ENV
+      - name: Use the old bucket runner
+        if: matrix.runner == 'old'
+        run: git show origin/main:scripts/test.ts > scripts/test.ts
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - name: Where temp is
+        shell: pwsh
+        run: 'bun -e "console.log(require(''node:os'').tmpdir())"'
+      - run: bun run test ${{ matrix.args }}
