@@ -9,7 +9,8 @@ import type { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { submitRequest } from "../requests";
 import type { Handoff } from "./schemas";
-import { chatDir, oneLine } from "./threads";
+import { oneLine } from "../text";
+import { chatDir } from "./threads";
 import { writeIntents, type WrittenIntent } from "./writer";
 
 export type HandoffOutcome =

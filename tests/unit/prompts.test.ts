@@ -32,3 +32,9 @@ describe("promptPath", () => {
     } finally { t.cleanup(); }
   });
 });
+
+describe("renderPrompt with placeholders that are not variables", () => {
+  test("leaves a placeholder that is not a declared variable as it is", () => {
+    expect(renderPrompt("{{constructor}} {{__proto__}} {{nope}} {{slug}}", { slug: "x" })).toBe("{{constructor}} {{__proto__}} {{nope}} x");
+  });
+});

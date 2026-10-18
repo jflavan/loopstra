@@ -189,3 +189,26 @@ describe("spawnBounded's stdin", () => {
     } finally { t.cleanup(); }
   });
 });
+
+describe("spawnBounded's onLine", () => {
+  test("a line split across two writes is delivered once, whole", async () => {
+    const t = tempDir();
+    try {
+      const lines: string[] = [];
+      const script = "process.stdout.write('abc'); await Bun.sleep(150); process.stdout.write('def\\nghi\\n');";
+      const r = await spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 10_000, onStop: "kill", onLine: (l) => { lines.push(l); return false; } });
+      expect(r.code).toBe(0);
+      expect(lines).toEqual(["abcdef", "ghi"]);
+    } finally { t.cleanup(); }
+  });
+
+  test("a handler that throws ends the call with its error, not with a timeout", async () => {
+    const t = tempDir();
+    try {
+      const script = "console.log('one'); await Bun.sleep(60_000);";
+      const started = Date.now();
+      await expect(spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 30_000, onStop: "kill", graceMs: 500, onLine: () => { throw new Error("handler bug"); } })).rejects.toThrow("handler bug");
+      expect(Date.now() - started).toBeLessThan(20_000);
+    } finally { t.cleanup(); }
+  });
+});

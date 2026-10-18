@@ -8,7 +8,6 @@ import { readIntent } from "../../src/intents";
 import { agentPhase, alongside } from "../../src/phases";
 import { answerQuestion, askedAt, closeStaleQuestion, closeUnusedAnswer, readQuestion, recordQuestion } from "../../src/questions";
 import { runStepGuarded } from "../../src/scheduler";
-import { runBuildStep } from "../../src/stages/build";
 import { runDesignStep } from "../../src/stages/design";
 import { writeChangeStop } from "../../src/inbox";
 import { QuestionAsked, SessionStopped } from "../../src/stop";

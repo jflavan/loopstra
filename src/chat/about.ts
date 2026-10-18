@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { runsDir } from "../console/files";
+import { runsDir } from "../paths";
 import { TranscriptReader } from "../console/transcript";
 import type { TranscriptItem } from "../console/types";
 import { readConversation } from "../conversation";

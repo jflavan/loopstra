@@ -7,7 +7,8 @@ import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
 import { Orchestrator, type IncomingMessage } from "./orchestrator";
 import { takeResults } from "../requests";
-import { chatDir, readJson, writeJson } from "./threads";
+import { readJson, writeJson } from "../fsutil";
+import { chatDir } from "./threads";
 
 /** What a transport hands the service for each message a person sends. */
 export type OnMessage = (m: Omit<IncomingMessage, "transport" | "via">) => Promise<void>;

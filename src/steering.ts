@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { readJson, writeJson } from "./fsutil";
 import type { SessionControl } from "./claude";
 import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL, steerable as isSteerable } from "./console/steerable";
 import { appendConversation, recordedAs, type ConversationEntry } from "./conversation";

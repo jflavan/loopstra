@@ -18,7 +18,8 @@ import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest, type RequestBody } from "../requests";
 import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
-import { oneLine, ThreadStore, threadKey, type ThreadState } from "./threads";
+import { oneLine } from "../text";
+import { ThreadStore, threadKey, type ThreadState } from "./threads";
 
 /** A message from a person, as a transport delivers it. */
 export interface IncomingMessage {

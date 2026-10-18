@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { runDir } from "./paths";
+import { readJson, writeJson } from "./fsutil";
 import { phaseKind } from "./console/steerable";
 import { commitForStep, writeForStep, type StepContext } from "./context";
 import { conversationPath, readConversation, withEntryOnce } from "./conversation";
@@ -47,7 +48,7 @@ export const NO_MORE_QUESTIONS = `You have asked ${MAX_QUESTIONS} questions in t
 export const TOO_MANY_NOTE = "The assistant kept asking questions on this step. Read conversation.md, and add what it needs to the intent.";
 
 function statePath(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "question.json");
+  return join(runDir(root, slug), "question.json");
 }
 
 function writeState(root: string, slug: string, state: QuestionState): void {

@@ -6,8 +6,6 @@ import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
-import { release } from "../../src/lanes";
-import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo } from "../helpers";
 

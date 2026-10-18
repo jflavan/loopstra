@@ -162,7 +162,7 @@ async function main(): Promise<number> {
     case "upgrade": {
       if (!setUp()) return 1;
       const { realIo, upgradeCommand } = await import("./commands/upgrade");
-      return upgradeCommand(root, rest, realIo(root));
+      return upgradeCommand(rest, realIo(root));
     }
     case "customize": {
       if (!setUp()) return 1;

@@ -10,8 +10,8 @@ import { runStepGuarded, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
-import { fixture, run, tempDir, withEnv } from "../helpers";
-import { FAKE_GH, Change, writeChange, statusOf, inTrace, payloadOf, numbered, LanesRepo, RemoteRepo, remoteLanesRepo, copyRemoteRepo, checksPass, commitWithLanes, personPushes, holdSession, traceShows } from "./lanes-helpers";
+import { run, tempDir, withEnv } from "../helpers";
+import { writeChange, statusOf, inTrace, payloadOf, numbered, type RemoteRepo, remoteLanesRepo, copyRemoteRepo, checksPass, commitWithLanes, personPushes, holdSession, traceShows } from "./lanes-helpers";
 
 afterEach(() => resetStop());
 

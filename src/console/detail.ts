@@ -6,7 +6,8 @@ import { loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
-import { PHASE_FILES, runsDir } from "./files";
+import { PHASE_FILES } from "./files";
+import { runsDir } from "../paths";
 import { changeSummary, loopNow, runningRows, totalsOf } from "./model";
 import type { ChangeDetail, PhaseView, SpendView } from "./types";
 

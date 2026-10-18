@@ -7,7 +7,7 @@ import { pendingRequests } from "../../src/requests";
 import { holdLoop, releaseLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
 import { CHAT_SLUG } from "../../src/chat/agents";
-import { writeJson } from "../../src/chat/threads";
+import { writeJson } from "../../src/fsutil";
 import { chatRepo, INTENT, message, sink, turn } from "../chat-helpers";
 import { setEnv } from "../helpers";
 

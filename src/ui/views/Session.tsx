@@ -59,6 +59,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
           return "stop";
         }
         setDown(true);
+        return undefined;
       },
     });
     return () => {

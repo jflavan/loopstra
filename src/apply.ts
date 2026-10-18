@@ -14,7 +14,7 @@ import { StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion, takeBackAnswer } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
-import { oneLine } from "./chat/threads";
+import { oneLine } from "./text";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
@@ -419,6 +419,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
       return false;
     }
     markWritten(root, req, req.slug, own);
+    return true;
   });
   if (refused !== null) {
     trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, via: req.via, result: "not-draft", status: refused });
@@ -558,6 +559,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     }
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
     if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
+    return true;
   });
   if (refused !== null) return movedOn(root, cfg.main_branch, trace, req, refused);
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));

@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { runDir } from "../paths";
 import type { z } from "zod";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
 import type { FailureReason } from "../claude";
@@ -90,7 +91,7 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
   }
   const out = await tracedSession({
     trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd,
-    dir: join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${held.seq}-${o.name}`),
+    dir: join(runDir(o.root, CHAT_SLUG), "phases", `${held.seq}-${o.name}`),
     run: {
       cwd: o.root,
       prompt: o.prompt,

@@ -1,13 +1,11 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { ARTIFACTS, intentRoot, SLUG } from "../intents";
+import { runsDir } from "../paths";
 
 /** Files a phase can leave behind, in the order the console lists them. */
 export const PHASE_FILES = ["prompt.md", "envelope.json", "raw.jsonl"] as const;
 
-export function runsDir(root: string): string {
-  return join(root, ".loopstra", "runs");
-}
 
 /**
  * The real path of a file under `.loopstra/runs/`, or null. `rel` is the part of the URL after

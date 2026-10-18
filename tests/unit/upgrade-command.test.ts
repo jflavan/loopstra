@@ -22,66 +22,66 @@ function io(installed: string, latest: string | null, o: { install?: boolean; st
 describe("upgradeCommand", () => {
   test("a development checkout skips the install and runs the repository step", async () => {
     const t = io("0.0.0-dev", "0.5.0");
-    expect(await upgradeCommand("/r", [], t.pieces)).toBe(0);
+    expect(await upgradeCommand([], t.pieces)).toBe(0);
     expect(t.calls).toEqual(["repo"]);
     expect(t.said.join("\n")).toContain("git pull");
   });
 
   test("a newer release is installed and the new version runs the repository step", async () => {
     const t = io("0.4.0", "0.5.0");
-    await upgradeCommand("/r", [], t.pieces);
+    await upgradeCommand([], t.pieces);
     expect(t.calls).toEqual(["install 0.5.0", "handoff 0.5.0 true"]);
   });
 
   test("a failed install still hands off, saying it failed", async () => {
     const t = io("0.4.0", "0.5.0", { install: false });
-    await upgradeCommand("/r", [], t.pieces);
+    await upgradeCommand([], t.pieces);
     expect(t.calls).toEqual(["install 0.5.0", "handoff 0.5.0 false"]);
   });
 
   test("up to date, or the registry unreachable: the repository step runs with this version", async () => {
     for (const latest of ["0.4.0", null]) {
       const t = io("0.4.0", latest);
-      await upgradeCommand("/r", [], t.pieces);
+      await upgradeCommand([], t.pieces);
       expect(t.calls).toEqual(["repo"]);
     }
     const offline = io("0.4.0", null);
-    await upgradeCommand("/r", [], offline.pieces);
+    await upgradeCommand([], offline.pieces);
     expect(offline.said.join("\n")).toContain("could not be reached");
   });
 
   test("--repo never installs", async () => {
     const t = io("0.4.0", "0.5.0");
-    await upgradeCommand("/r", ["--repo"], t.pieces);
+    await upgradeCommand(["--repo"], t.pieces);
     expect(t.calls).toEqual(["repo"]);
   });
 
   test("--check never installs; it names both versions and the release notes between them", async () => {
     const t = io("0.4.0", "0.5.0");
-    await upgradeCommand("/r", ["--check"], t.pieces);
+    await upgradeCommand(["--check"], t.pieces);
     expect(t.calls).toEqual(["check"]);
     const said = t.said.join("\n");
     expect(said).toContain("Installed: Loopstra 0.4.0. Latest: 0.5.0.");
     expect(said).toContain("## 0.5.0\n- feat: since 0.4.0");
 
     const current = io("0.5.0", "0.5.0");
-    await upgradeCommand("/r", ["--check"], current.pieces);
+    await upgradeCommand(["--check"], current.pieces);
     expect(current.said[0]).toBe("Installed: Loopstra 0.5.0, the latest.");
 
     const dev = io("0.0.0-dev", "0.5.0");
-    await upgradeCommand("/r", ["--check"], dev.pieces);
+    await upgradeCommand(["--check"], dev.pieces);
     expect(dev.said[0]).toContain("development checkout");
   });
 
   test("--check, with the repository on a release newer than this one: the newer release would be installed first, so nothing is refused", async () => {
     const t = io("0.4.0", "0.6.0", { stamp: "0.5.0" });
-    expect(await upgradeCommand("/r", ["--check"], t.pieces)).toBe(0);
+    expect(await upgradeCommand(["--check"], t.pieces)).toBe(0);
     expect(t.calls).toEqual([]);
     expect(t.said.at(-1)).toBe("This repository is on Loopstra 0.5.0: loopstra upgrade would install 0.6.0 first, then bring this repository up to it.");
 
     // The newest release is still older than the stamp: the repository step says why.
     const behind = io("0.4.0", "0.4.5", { stamp: "0.5.0" });
-    await upgradeCommand("/r", ["--check"], behind.pieces);
+    await upgradeCommand(["--check"], behind.pieces);
     expect(behind.calls).toEqual(["check"]);
   });
 });

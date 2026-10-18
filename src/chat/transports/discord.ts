@@ -1,7 +1,8 @@
 import { join } from "node:path";
 import type { DiscordTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
-import { chatDir, readJson, writeJson } from "../threads";
+import { readJson, writeJson } from "../../fsutil";
+import { chatDir } from "../threads";
 import { chunkText, LiveAccess, mentionList, Reconnector } from "./shared";
 
 /** The Discord REST API; tests point it at a stub server (which also hands out the gateway address). */

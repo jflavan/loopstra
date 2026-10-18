@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { runDir } from "./paths";
+import { ID, newId } from "./ids";
+import { readJson, writeJson } from "./fsutil";
 
 /**
  * A running session's inbox, `.loopstra/runs/<slug>/inbox/`: what people send a session while it
@@ -12,18 +14,12 @@ export interface InboxMessage { id: string; seq: number; kind: "message" | "stop
 /** How an inbox message ended: written to its session, kept in conversation.md for the next one, or dropped (a stop that came too late). */
 export type Done = "delivered" | "next session" | "dropped";
 
-const ID = /^\d{15}-\d+-\d{4,}$/;
 const KINDS = new Set(["message", "stop", "redirect"]);
 
 export function inboxDir(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "inbox");
+  return join(runDir(root, slug), "inbox");
 }
 
-let counter = 0;
-/** Sorts by when it was sent: the time, then this process's count. */
-function newId(): string {
-  return `${Date.now().toString().padStart(15, "0")}-${process.pid}-${(counter++).toString().padStart(4, "0")}`;
-}
 
 /** Leaves a message for a session. */
 export function sendToSession(root: string, slug: string, m: Omit<InboxMessage, "id" | "at">): InboxMessage {
@@ -75,7 +71,7 @@ export function inboxFor(root: string, slug: string, seq: number): InboxMessage[
  * ends the step. The next step's start clears it; the hold left with it keeps the change from starting.
  */
 function changeStopPath(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "stop.json");
+  return join(runDir(root, slug), "stop.json");
 }
 
 /** Leaves the change's stop (see changeStopPath). */

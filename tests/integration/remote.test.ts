@@ -9,7 +9,7 @@ import { runStepGuarded, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { fixture, run, tempDir, withEnv } from "../helpers";
-import { FAKE_GH, SLUG, BRANCH, PLAN, remoteSetup, intentOf, elsewhere, onRemoteMain } from "./remote-helpers";
+import { SLUG, BRANCH, PLAN, remoteSetup, intentOf, elsewhere, onRemoteMain } from "./remote-helpers";
 
 afterEach(() => resetStop());
 

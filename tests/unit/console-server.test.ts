@@ -6,7 +6,7 @@ import { loadConfig } from "../../src/config";
 import { Hub, type HubOptions } from "../../src/console/hub";
 import { JSON_IDLE_SECONDS, read, serveConsole } from "../../src/console/server";
 import type { SessionMessage } from "../../src/console/types";
-import { writeJson } from "../../src/chat/threads";
+import { writeJson } from "../../src/fsutil";
 import { localUser } from "../../src/chat/transports/shared";
 import { readLoopHold, writeHeartbeat } from "../../src/heartbeat";
 import { changeStoppedBy, inboxFor } from "../../src/inbox";

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { writeFileAtomic } from "../fsutil";
+import { readJson, writeJson } from "../fsutil";
 import type { RequestShape } from "../actions";
 import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
@@ -73,19 +73,6 @@ function fileName(key: string): string {
   return `${plain}-${createHash("sha256").update(key).digest("hex").slice(0, 10)}.json`;
 }
 
-/** Writes a JSON file whole (temp file, then rename), so a reader never sees half of it. Makes its folder. */
-export function writeJson(path: string, value: unknown): void {
-  writeFileAtomic(path, JSON.stringify(value, null, 2));
-}
-
-/** Text on one line, at most `max` characters: for commit subjects and pull request titles. */
-export function oneLine(s: string, max: number): string {
-  return s.replace(/\s+/g, " ").trim().slice(0, max);
-}
-
-export function readJson<T>(path: string): T | null {
-  try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }
-}
 
 export class ThreadStore {
   constructor(private readonly root: string) {}

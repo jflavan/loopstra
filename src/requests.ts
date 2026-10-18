@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { ID, newId } from "./ids";
 import type { Priority, Status } from "./intents";
-import { chatDir, readJson, writeJson } from "./chat/threads";
+import { readJson, writeJson } from "./fsutil";
+import { chatDir } from "./chat/threads";
 import { touchWake } from "./wake";
 
 /**
@@ -64,14 +66,6 @@ export function requestsDir(root: string): string { return join(root, ".loopstra
 function applyingDir(root: string): string { return join(requestsDir(root), "applying"); }
 function resultsDir(root: string): string { return join(requestsDir(root), "results"); }
 
-/** A request id (see newId): anything else is never used as a file name. */
-const ID = /^\d{15}-\d+-\d{4,}$/;
-
-let counter = 0;
-/** Sorts in the order requests were made. */
-function newId(): string {
-  return `${Date.now().toString().padStart(15, "0")}-${process.pid}-${(counter++).toString().padStart(4, "0")}`;
-}
 
 /** Leaves a request for the loop and wakes it (see touchWake). */
 export function submitRequest(root: string, req: Submission): Request {

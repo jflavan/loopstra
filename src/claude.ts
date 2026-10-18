@@ -43,6 +43,11 @@ export function answersNotification(e: StreamEvent): boolean {
   return e.type === "result" && (e as { origin?: { kind?: unknown } }).origin?.kind === "task-notification";
 }
 
+/** True for a parsed stream line that is an event: an object with a string `type`. */
+function isStreamEvent(v: unknown): v is StreamEvent {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { type?: unknown }).type === "string";
+}
+
 /** Accumulates `--output-format stream-json` lines into one result. A notification's result is not the result. */
 export class StreamCollector {
   private sessionId: string | null = null;
@@ -52,8 +57,11 @@ export class StreamCollector {
   push(line: string): StreamEvent | null {
     const trimmed = line.trim();
     if (!trimmed) return null;
-    let e: StreamEvent;
-    try { e = JSON.parse(trimmed) as StreamEvent; } catch { return null; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); } catch { return null; }
+    // Only an event (an object with a type) counts: a hook or an MCP server may print other JSON to stdout.
+    if (!isStreamEvent(parsed)) return null;
+    const e = parsed;
     this.events.push(e);
     if (e.session_id && !this.sessionId) this.sessionId = e.session_id;
     if (e.type === "result" && !answersNotification(e)) this.result = e;
@@ -456,7 +464,8 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       if (budgetArgs(earlierCostUsd + c.costUsd) === null) break; // nothing left to ask with
       nudged = true;
       earlierCostUsd += c.costUsd;
-      earlierDenied = c.denied;
+      // Kept with what a redirect before it was refused: the phase's report names every refusal.
+      earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
       resume = c.sessionId;
       stdin = ENVELOPE_NUDGE;
       collector = new StreamCollector();
@@ -468,6 +477,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
     earlierCostUsd += typeof cost === "number" ? cost : 0;
     if (budgetArgs(earlierCostUsd) === null) break; // nothing left to send it again with
+    earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
     resume = c.sessionId;
     collector = new StreamCollector();
   }

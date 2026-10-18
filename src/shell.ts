@@ -242,27 +242,38 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
 
   let out = "";
   let err = "";
+  // A throw from the caller's onLine is a bug in the handler, not a hang: reading ends, the process
+  // is killed like one that timed out, and the error is thrown once everything is cleaned up.
+  let handlerError: unknown;
+  let readingEnded = false;
   const reader = proc.stdout.getReader();
   const outDone = (async () => {
     const dec = new TextDecoder();
     let buffer = "";
+    // Where the next newline search starts: a long line arriving in many chunks is not rescanned from its start each time.
+    let scanFrom = 0;
     try {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         const text = dec.decode(value, { stream: true });
-        out += text;
-        if (!o.onLine) continue;
+        // With onLine the lines are what matters; the whole output is kept only for a caller that reads `out`.
+        if (!o.onLine) { out += text; continue; }
         buffer += text;
         let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
+        while ((nl = buffer.indexOf("\n", scanFrom)) >= 0) {
           const line = buffer.slice(0, nl);
           buffer = buffer.slice(nl + 1);
+          scanFrom = 0;
           if (o.onLine(line)) return;
         }
+        scanFrom = buffer.length;
       }
       if (o.onLine && buffer.trim()) o.onLine(buffer);
-    } catch { /* stream cancelled or broken; what arrived stands */ }
+    } catch (e) {
+      // Once reading or the process has ended the stream is cancelled or broken, and what arrived stands; before that, it is the handler's.
+      if (!readingEnded) handlerError = e;
+    }
   })();
   const errDone = (async () => {
     const dec = new TextDecoder();
@@ -271,11 +282,12 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
 
   // With onLine the deadline bounds the reading; otherwise it bounds the exit.
   const done = await within((o.onLine ? outDone : proc.exited).then(() => true), o.timeoutMs, false);
+  readingEnded = true;
   const timedOut = !done;
   // An open stdin must never keep a finished process waiting.
   closeStdin();
   if (o.onLine) void reader.cancel().catch(() => {});
-  let code = timedOut ? null : await within(proc.exited, graceMs, null);
+  let code = timedOut || handlerError !== undefined ? null : await within(proc.exited, graceMs, null);
   if (code === null) {
     await killTree(proc);
     code = await within(proc.exited, graceMs, null);
@@ -285,6 +297,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   o.signal?.removeEventListener("abort", cancel);
   // Output pipes may be held by a leftover grandchild; take what arrived.
   if (!stopped && !cancelled) await within(Promise.all([outDone, errDone]), timedOut || o.onLine ? 250 : 2_000, undefined);
+  if (handlerError !== undefined) throw handlerError;
   return { code, out, err, started: true, timedOut, stopped, cancelled };
 }
 

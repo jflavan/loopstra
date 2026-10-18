@@ -10,7 +10,7 @@ import { PR_PUSHING } from "../../src/stages/shared";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { fixture, fixtureDir, run, withEnv } from "../helpers";
-import { FAKE_GH, SLUG, BRANCH, remoteSetup, intentOf, elsewhere, onRemoteMain, headOn, inTrace, personPushesOnce } from "./remote-helpers";
+import { SLUG, BRANCH, remoteSetup, intentOf, elsewhere, onRemoteMain, headOn, inTrace, personPushesOnce } from "./remote-helpers";
 
 afterEach(() => resetStop());
 

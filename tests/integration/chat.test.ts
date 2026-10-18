@@ -106,7 +106,7 @@ describe("chat with the loop", () => {
   test("a request the loop was killed in before its commit is finished on the next tick, not mistaken for someone else's edit", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
-      const { writeJson } = await import("../../src/chat/threads");
+      const { writeJson } = await import("../../src/fsutil");
       const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       // As if the loop was killed after an earlier tick wrote both files, before it committed them.

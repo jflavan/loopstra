@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
+import { runDir } from "./paths";
 import { errorText } from "./shell";
 
 export type EventType =
@@ -144,7 +145,8 @@ function connect(path: string): { db: Database; note: string | null } {
     const note = useJournal(db);
     db.exec("PRAGMA synchronous = NORMAL;");
     db.exec(SCHEMA);
-    db.query("SELECT COUNT(*) AS n FROM events").get();
+    // A read, to meet a damaged file now rather than at the first query. One row, not a count: the console opens a trace per request.
+    db.query("SELECT 1 FROM events LIMIT 1").get();
     return { db, note };
   } catch (e) {
     try { db.close(); } catch { /* already unusable */ }
@@ -178,8 +180,13 @@ export class Trace {
     } catch (e) {
       if (!damaged(e)) throw e;
       const moved = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-      renameSync(path, moved);
-      for (const side of ["-wal", "-shm"]) if (existsSync(path + side)) renameSync(path + side, moved + side);
+      try {
+        renameSync(path, moved);
+        for (const side of ["-wal", "-shm"]) if (existsSync(path + side)) renameSync(path + side, moved + side);
+      } catch (moveError) {
+        // Held open by another process (the console, say; Windows refuses the rename): say what is wrong, plainly.
+        throw new Error(`The trace database .loopstra/trace.db could not be read (${errorText(e)}), and it could not be moved aside: ${errorText(moveError)}. Stop every loopstra process that has it open, then start again.`);
+      }
       say(`The trace database could not be read, so it was moved to .loopstra/${basename(moved)} and a new one was started.`);
       const trace = Trace.noted(root, connect(path));
       trace.event("_loop", "error", { where: "trace", what: "trace.db could not be read; it was moved aside and a new one started", movedTo: moved, error: errorText(e) });
@@ -203,7 +210,7 @@ export class Trace {
     const ts = now();
     const json = JSON.stringify(payload ?? {});
     this.db.run("INSERT INTO events (slug, phase_seq, type, ts, payload) VALUES (?, ?, ?, ?, ?)", [slug, phaseSeq, type, ts, json]);
-    const dir = join(this.root, ".loopstra", "runs", slug);
+    const dir = runDir(this.root, slug);
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "events.jsonl"), JSON.stringify({ ts, slug, phase_seq: phaseSeq, type, payload: payload ?? {} }) + "\n");
   }

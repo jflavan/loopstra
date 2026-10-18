@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 /**
@@ -17,4 +17,14 @@ export function writeFileAtomic(path: string, text: string, tmpDir = dirname(pat
   } catch {
     try { writeFileSync(path, text); } finally { rmSync(tmp, { force: true }); }
   }
+}
+
+/** Writes a JSON file whole (see writeFileAtomic), so a reader never sees half of it. Makes its folder. */
+export function writeJson(path: string, value: unknown): void {
+  writeFileAtomic(path, JSON.stringify(value, null, 2));
+}
+
+/** A JSON file's value as the caller expects it, or null when it is missing or not JSON. The shape is the caller's to check. */
+export function readJson<T>(path: string): T | null {
+  try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }
 }

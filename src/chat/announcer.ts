@@ -6,7 +6,8 @@ import { pidAlive } from "../heartbeat";
 import { inMain, scanRepo, type Status } from "../intents";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
-import { chatDir, readJson, writeJson } from "./threads";
+import { readJson, writeJson } from "../fsutil";
+import { chatDir } from "./threads";
 
 /** One announcement: what Loopstra told people without being asked. */
 export interface Announcement { id: number; ts: string; text: string; slug: string | null }

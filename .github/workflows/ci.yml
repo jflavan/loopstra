@@ -40,4 +40,5 @@ jobs:
           "TEMP=${{ runner.temp }}" >> $env:GITHUB_ENV
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - run: bun run lint
       - run: bun run test ${{ matrix.part && format('--part {0}', matrix.part) || '' }}

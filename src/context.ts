@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { runDir } from "./paths";
 import type { Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
@@ -31,7 +32,7 @@ export class StepContext {
     this.git = new Git(root);
   }
   get slug(): string { return this.intent.slug; }
-  get runDir(): string { return join(this.root, ".loopstra", "runs", this.slug); }
+  get runDir(): string { return runDir(this.root, this.slug); }
   get worktreeDir(): string { return join(this.root, ".loopstra", "worktrees", this.slug); }
   get branch(): string { return `intent/${this.slug}`; }
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
@@ -407,7 +408,7 @@ export const SENT_BACK = "sent-back.md";
 
 /** Keeps the note a person sent a change back with, until the next session of the stage it went back to has used it. */
 export function writeSentBack(root: string, slug: string, note: string): void {
-  const dir = join(root, ".loopstra", "runs", slug);
+  const dir = runDir(root, slug);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, SENT_BACK), note);
 }
@@ -420,7 +421,7 @@ export function sentBackNote(ctx: StepContext): string {
 
 /** Drops a kept sent-back note (its send back was undone, or never landed); with `only`, only when it is that note. */
 export function dropSentBack(root: string, slug: string, only?: string): void {
-  const path = join(root, ".loopstra", "runs", slug, SENT_BACK);
+  const path = join(runDir(root, slug), SENT_BACK);
   if (only !== undefined && (!existsSync(path) || readFileSync(path, "utf8") !== only)) return;
   rmSync(path, { force: true });
 }
@@ -440,5 +441,6 @@ export async function writeIntentPriority(ctx: StepContext, priority: Priority):
     if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return false; }
     await writeForStep(ctx, { priority });
     ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
+    return true;
   });
 }

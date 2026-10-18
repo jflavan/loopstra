@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { runDir } from "./paths";
+import { readJson, writeJson } from "./fsutil";
 import { commitRecord } from "./context";
 
 /**
@@ -90,7 +91,7 @@ export function withEntryOnce(current: string, e: ConversationEntry): string {
  * the record people read and every prompt quotes.
  */
 function recordedPath(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "recorded.json");
+  return join(runDir(root, slug), "recorded.json");
 }
 
 type EntryKind = ConversationEntry["kind"];
