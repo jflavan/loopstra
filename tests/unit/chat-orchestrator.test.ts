@@ -461,7 +461,9 @@ describe("the orchestrator's guards (review fixes)", () => {
       const denied = args[args.indexOf("--disallowedTools") + 1]!;
       for (const rule of ["Write", "Read(**/.env)", "Read(~/.ssh/**)", "Read(**/.git/**)"]) expect(denied.split(",")).toContain(rule);
       // No git at all: `git show HEAD:.env` would read around the Read rules. History comes in the context.
+      // Leaving git out of the allowed tools is not enough: Claude Code allows read-only git by itself, so it is denied.
       expect(args[args.indexOf("--allowedTools") + 1]).not.toContain("git");
+      for (const rule of ["Bash(git)", "Bash(git *)"]) expect(denied.split(",")).toContain(rule);
       const p = r.prompts()[0]!.prompt;
       expect(p).toMatch(/Recent changes on main \(newest first\):\n- \d{4}-\d\d-\d\d setup/);
     } finally { r.cleanup(); }
