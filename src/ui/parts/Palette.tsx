@@ -35,7 +35,7 @@ function commands(): Command[] {
       },
     },
   ];
-  for (const p of running.value?.now ?? []) list.push({ id: `s:${p.slug}:${p.seq}`, title: `Watch ${p.title}: ${p.name}`, hint: "running", run: () => navigate(`/s/${p.slug}/${p.seq}`) });
+  for (const p of running.value?.now ?? []) list.push({ id: `s:${p.slug}:${p.seq}`, title: `Watch ${p.title}: ${p.name}`, hint: "running", run: () => navigate(`/agents#${p.slug}:${p.seq}`) });
   for (const c of changes.value ?? []) list.push({ id: `c:${c.slug}`, title: `Open ${c.title}`, hint: c.plain, run: () => navigate(`/c/${c.slug}`) });
   return list;
 }
