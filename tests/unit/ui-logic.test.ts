@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
-import { ago, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
+import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
@@ -15,6 +15,7 @@ import { RECENT_DONE_MS, splitFinished } from "../../src/ui/board";
 import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
+import { follow } from "../../src/ui/stream";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -32,6 +33,10 @@ describe("formatting", () => {
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) expect(duration(bad)).toBe("–");
     expect(ago("not a time", Date.now())).toBe("–");
     expect(ago(new Date(0).toISOString(), Number.NaN)).toBe("–");
+    expect(usd(Number.NaN)).toBe("–");
+    expect(usd(Number.POSITIVE_INFINITY, true)).toBe("–");
+    expect(clock("not a time", Date.now())).toBe("–");
+    expect(clock(new Date().toISOString(), Date.now())).toMatch(/\d/);
     expect(shortModel("claude-sonnet-5-5")).toBe("sonnet 5.5");
     expect(shortModel("claude-haiku-4-5-20251001")).toBe("haiku 4.5");
     expect(shortModel("opus")).toBe("opus");
@@ -319,6 +324,75 @@ describe("the page's live stream", () => {
       (globalThis as { EventSource?: unknown }).EventSource = real;
     }
     expect(FakeSource.opened.at(-1)!.closed).toBe(true);
+  });
+
+  /** Runs `fn` with the fake EventSource and fake timers in place, and puts both back after. */
+  const faked = (fn: () => void) => {
+    const real = (globalThis as { EventSource?: unknown }).EventSource;
+    (globalThis as { EventSource?: unknown }).EventSource = FakeSource;
+    FakeSource.opened = [];
+    jest.useFakeTimers();
+    try { fn(); } finally {
+      jest.useRealTimers();
+      (globalThis as { EventSource?: unknown }).EventSource = real;
+    }
+  };
+
+  test("a stream the browser closed before it said anything can be ended for good, as a session that does not exist", () => {
+    faked(() => {
+      const down: string[] = [];
+      let got = false;
+      const stop = follow((from) => (from > 0 ? `/s?from=${from}` : "/s"), {
+        message() { got = true; },
+        down(why) { down.push(why); return got ? undefined : "stop"; },
+      });
+      const first = FakeSource.opened[0]!;
+      expect(first.url).toBe("/s");
+      first.readyState = FakeSource.CLOSED;
+      first.onerror!();
+      jest.advanceTimersByTime(30_000);
+      expect(down).toEqual(["closed"]);
+      expect(FakeSource.opened).toHaveLength(1);
+      expect(first.closed).toBe(true);
+      stop();
+    });
+  });
+
+  test("a stream closed after it spoke is opened again from the newest id; the browser's own reconnecting is only reported", () => {
+    faked(() => {
+      const down: string[] = [];
+      let lives = 0;
+      const stop = follow((from) => (from > 0 ? `/s?from=${from}` : "/s"), { message() {}, live() { lives++; }, down(why) { down.push(why); } });
+      const first = FakeSource.opened[0]!;
+      first.onmessage!({ data: "{}", lastEventId: "120" });
+      first.onmessage!({ data: "{}", lastEventId: "" }); // a frame without an id keeps the newest
+      expect(lives).toBe(2);
+      first.onerror!(); // still connecting: the browser retries by itself
+      expect(down).toEqual(["retrying"]);
+      expect(FakeSource.opened).toHaveLength(1);
+      first.readyState = FakeSource.CLOSED;
+      first.onerror!();
+      expect(down).toEqual(["retrying", "closed"]);
+      jest.advanceTimersByTime(1000);
+      expect(FakeSource.opened).toHaveLength(2);
+      expect(FakeSource.opened[1]!.url).toBe("/s?from=120");
+      stop();
+      // Closed for good: nothing opens later, whatever the timers do.
+      jest.advanceTimersByTime(60_000);
+      expect(FakeSource.opened).toHaveLength(2);
+      expect(FakeSource.opened[1]!.closed).toBe(true);
+    });
+  });
+
+  test("ending the stream from a message (the server said end) closes it and opens no other", () => {
+    faked(() => {
+      const stop = follow(() => "/s", { message(data) { if (data === "end") stop(); } });
+      const first = FakeSource.opened[0]!;
+      first.onmessage!({ data: "end", lastEventId: "" });
+      expect(first.closed).toBe(true);
+      jest.advanceTimersByTime(60_000);
+      expect(FakeSource.opened).toHaveLength(1);
+    });
   });
 });
 

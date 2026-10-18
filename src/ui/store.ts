@@ -1,5 +1,6 @@
 import { computed, signal } from "@preact/signals";
 import type { About } from "./chat";
+import { follow } from "./stream";
 import type { ActivityItem, Meta, Sections, StreamMessage } from "../console/types";
 
 export interface State {
@@ -10,8 +11,7 @@ export interface State {
 
 /** The most live events the page keeps. */
 export const ACTIVITY_MAX = 500;
-/** How long the stream may be silent (pings included) before the page says it is reconnecting and opens a new one. */
-export const STALE_MS = 20_000;
+export { STALE_MS } from "./stream";
 
 /** What one stream message does to the state. Sections it does not touch keep their identity. */
 export function applyMessage(s: State, msg: StreamMessage): State {
@@ -84,61 +84,20 @@ export async function getJson<T>(url: string): Promise<T> {
 }
 
 /**
- * Opens the live stream; gives back the function that closes it. EventSource reconnects by itself
- * (sending the newest id it saw, so the server can send the events it missed). When it gives up, or
- * the stream has been silent for STALE_MS (a connection can die without an error), this closes it
- * and opens a new one, waiting 1, 2, 4, then 8 seconds. A new EventSource sends no Last-Event-ID,
- * so the newest id the page has seen goes in ?after= instead.
+ * Opens the live stream (see follow) and starts the clock; gives back the function that closes it.
+ * A new stream names the newest event the page saw in ?after=, so the server sends the ones it missed.
  */
 export function connect(): () => void {
-  let last = Date.now();
-  let wait = 1000;
-  let newest = 0;
-  let source: EventSource | null = null;
-  let retry: ReturnType<typeof setTimeout> | null = null;
-  const reopen = () => {
-    source?.close();
-    source = null;
-    if (retry) return;
-    retry = setTimeout(() => { retry = null; open(); }, wait);
-    wait = Math.min(wait * 2, 8000);
-  };
-  const open = () => {
-    // The silence is counted from now, so a new stream gets its own STALE_MS to say something.
-    last = Date.now();
-    const s = new EventSource(newest > 0 ? `/api/stream?after=${newest}` : "/api/stream");
-    source = s;
-    const alive = () => {
-      last = Date.now();
-      wait = 1000;
-      connection.value = "live";
-    };
-    s.onmessage = (ev) => {
-      alive();
-      const id = Number(ev.lastEventId);
-      if (Number.isFinite(id) && id > newest) newest = id;
-      try { state.value = applyMessage(state.value, JSON.parse(ev.data as string) as StreamMessage); } catch { /* a bad frame is skipped */ }
-    };
-    s.addEventListener("ping", alive);
-    s.onerror = () => {
-      if (s !== source) return;
-      connection.value = "stale";
-      if (s.readyState === EventSource.CLOSED) reopen();
-    };
-  };
-  open();
-  const tick = setInterval(() => {
-    now.value = Date.now();
-    if (source && Date.now() - last > STALE_MS) {
-      connection.value = "stale";
-      reopen();
-    }
-  }, 1000);
+  const stop = follow((newest) => (newest > 0 ? `/api/stream?after=${newest}` : "/api/stream"), {
+    message(data) {
+      try { state.value = applyMessage(state.value, JSON.parse(data) as StreamMessage); } catch { /* a bad frame is skipped */ }
+    },
+    live() { connection.value = "live"; },
+    down() { connection.value = "stale"; },
+  });
+  const tick = setInterval(() => { now.value = Date.now(); }, 1000);
   return () => {
     clearInterval(tick);
-    if (retry) clearTimeout(retry);
-    retry = null;
-    source?.close();
-    source = null;
+    stop();
   };
 }
