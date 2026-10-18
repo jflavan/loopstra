@@ -62,6 +62,9 @@ export class ChatService {
     if (this.timer) clearTimeout(this.timer);
     await this.polling;
     for (const t of this.transports) { try { await t.stop(); } catch { /* stopping anyway */ } }
+    // Turns in progress end too (a stop request ends their sessions), so each is traced as ended
+    // and holds none of the day's chat budget after the process exits.
+    await this.orchestrator.idle();
   }
 
   private schedule(ms: number): void {

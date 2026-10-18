@@ -3,10 +3,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
 import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
-import { ChatService, type Transport } from "../../src/chat/service";
+import { ChatService, type OnMessage, type Transport } from "../../src/chat/service";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
+import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { chatRepo, draft, INTENT, message, sink, turn } from "../chat-helpers";
 import { lastCommit, run } from "../helpers";
@@ -122,6 +123,42 @@ describe("chat with the loop", () => {
       expect(log).toContain("loopstra(c): open intent from chat");
     } finally { r.cleanup(); }
   });
+
+  test("stopping chat waits for a turn in progress, so its session ends interrupted rather than left running", async () => {
+    const r = await chatRepo();
+    // The orchestrator's session holds until a file that never appears exists.
+    const lines = [
+      { type: "system", subtype: "init", session_id: "s", cwd: "/", tools: [], model: "fake" },
+      { type: "fake_action", wait_for: join(r.root, "never") },
+      { type: "result", subtype: "success", is_error: false, session_id: "s", total_cost_usd: 0.01, usage: {}, structured_output: turn("Hi."), result: "ok" },
+    ];
+    await Bun.write(join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR!, "orchestrator-1.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    const terminal = recorder();
+    let onMessage: OnMessage | null = null;
+    terminal.start = async (fn) => { onMessage = fn; };
+    const service = new ChatService(r.root, [terminal], { announce: false, pollMs: 60_000 });
+    const trace = Trace.open(r.root, () => {});
+    try {
+      await service.start();
+      const { transport: _t, via: _v, ...m } = message("hello");
+      void onMessage!(m);
+      const end = Date.now() + 10_000;
+      while (!trace.phases("_chat").some((p) => p.status === "running")) {
+        if (Date.now() > end) throw new Error("the session did not start");
+        await Bun.sleep(20);
+      }
+      requestStop();
+      await service.stop();
+      expect(trace.phases("_chat").map((p) => p.status)).toEqual(["interrupted"]);
+    } finally {
+      resetStop();
+      trace.close();
+      // A session left waiting (the test failed) ends, so the folder can be removed.
+      await Bun.write(join(r.root, "never"), "");
+      await service.stop();
+      r.cleanup();
+    }
+  }, 30_000);
 
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
