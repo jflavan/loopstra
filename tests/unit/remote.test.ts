@@ -405,7 +405,10 @@ describe("pushBranch", () => {
       await run(["git", "add", "x.md"], s.repo);
       await run(["git", "commit", "-q", "-m", "first"], s.repo);
       await run(["git", "checkout", "-q", "main"], s.repo);
+      const config = await Bun.file(join(s.repo, ".git", "config")).text();
       expect(await pushBranch(git, "intent/x")).toEqual({ ok: true });
+      // No upstream is set: writing .git/config while another lane's git reads it can fail that git (Windows).
+      expect(await Bun.file(join(s.repo, ".git", "config")).text()).toBe(config);
 
       // Rewritten here: Loopstra's own last push is overwritten.
       const first = await sha();

@@ -381,12 +381,13 @@ async function push(git: Git, remote: string, main: string, trace: Trace): Promi
  * `lease` (the commit Loopstra last pushed there, or took from there): work a person added on GitHub
  * is never overwritten, even when a fetch has seen it since. An empty lease: the remote must have no
  * such branch. Without a lease (the first push of a build) the remote's branch must be what the last
- * fetch saw. `moved`: refused because the remote's branch has changed.
+ * fetch saw. `moved`: refused because the remote's branch has changed. No upstream is set (no `-u`):
+ * nothing reads it, and writing .git/config can fail another lane's git reading it at that moment.
  */
 export async function pushBranch(git: Git, branch: string, lease?: string): Promise<{ ok: true } | { ok: false; detail: string; moved?: true }> {
   const remote = await git.remoteName();
   if (!remote) return { ok: false, detail: "no remote" };
-  const r = await git.run(["push", "--quiet", lease !== undefined ? `--force-with-lease=${branch}:${lease}` : "--force-with-lease", "-u", remote, `${branch}:${branch}`], true);
+  const r = await git.run(["push", "--quiet", lease !== undefined ? `--force-with-lease=${branch}:${lease}` : "--force-with-lease", remote, `${branch}:${branch}`], true);
   if (r.code === 0) return { ok: true };
   const detail = `push of ${branch} to ${remote} failed: ${lastLine(r.err) || `exit ${r.code}`}`;
   return /\(stale info\)/i.test(r.err) ? { ok: false, detail, moved: true } : { ok: false, detail };
