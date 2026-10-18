@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  assertNoCheckoutLock, assertNoLock, checkoutKey, claim, holdsLock, onCheckout, onCheckoutKey, oneMerge, oneSync, onRemoteKey, othersRunning, othersRunningCommands, release, runsNoCommands,
+  assertNoCheckoutLock, assertNoLock, checkoutKey, claim, holdsLock, onCheckout, onCheckoutKey, oneMerge, oneSync, onRemoteKey, othersRunning, othersRunningCommands, release, runsNoCommands, slotEnv,
 } from "../../src/lanes";
 import { StopRequested } from "../../src/stop";
 import { tempDir } from "../helpers";
@@ -232,5 +232,24 @@ describe("claims", () => {
     release("a");
     release("b");
     expect(othersRunningCommands("c")).toBe(0);
+  });
+
+  test("each claimed change gets the lowest slot no other claimed change holds, kept until it is released", () => {
+    expect(slotEnv("a")).toEqual({});
+    claim("a");
+    claim("b");
+    expect(slotEnv("b")).toEqual({ LOOPSTRA_SLOT: "0" });
+    expect(slotEnv("a")).toEqual({ LOOPSTRA_SLOT: "1" });
+    expect(slotEnv("b")).toEqual({ LOOPSTRA_SLOT: "0" });
+    release("b");
+    claim("c");
+    // The slot b let go of is taken again, and a keeps its own.
+    expect(slotEnv("c")).toEqual({ LOOPSTRA_SLOT: "0" });
+    expect(slotEnv("a")).toEqual({ LOOPSTRA_SLOT: "1" });
+    release("a");
+    release("c");
+    claim("a");
+    expect(slotEnv("a")).toEqual({ LOOPSTRA_SLOT: "0" });
+    release("a");
   });
 });

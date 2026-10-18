@@ -167,10 +167,31 @@ export function runsNoCommands(slug: string): void {
   if (claimed.has(slug)) noCommands.add(slug);
 }
 
+/** The slot of each claimed change that has asked for one (see slotEnv). */
+const slots = new Map<string, number>();
+
+/**
+ * LOOPSTRA_SLOT for a claimed change's commands and sessions that run them: the lowest number (from 0)
+ * no other claimed change holds, the same for the rest of its step. A project picks its ports,
+ * database and Docker project names from it, so changes running at the same time never share them.
+ * Empty for a change that is not claimed (main's health check runs alone, at a tick's start).
+ */
+export function slotEnv(slug: string): { LOOPSTRA_SLOT?: string } {
+  if (!claimed.has(slug)) return {};
+  let slot = slots.get(slug);
+  if (slot === undefined) {
+    const held = new Set(slots.values());
+    for (slot = 0; held.has(slot); slot++);
+    slots.set(slug, slot);
+  }
+  return { LOOPSTRA_SLOT: String(slot) };
+}
+
 /** Releases a change's claim once its step has ended. */
 export function release(slug: string): void {
   claimed.delete(slug);
   noCommands.delete(slug);
+  slots.delete(slug);
 }
 
 /** How many claimed changes there are besides this one. */

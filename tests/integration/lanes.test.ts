@@ -180,6 +180,29 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 120_000);
 
+  test("two builds running at once get different slots, so their commands can pick their own ports", async () => {
+    const out = tempDir("loopstra-slots-");
+    const script = join(out.path, "slot.ts").replaceAll("\\", "/");
+    const log = join(out.path, "slots.log").replaceAll("\\", "/");
+    writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2]!, process.env.LOOPSTRA_SLUG + " " + process.env.LOOPSTRA_SLOT + "\\n");\n`);
+    const r = await lanesRepo(2, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "plan-approved" }],
+      `stages:\n  build:\n    before:\n      - 'bun "${script}" "${log}"'\n`);
+    // alpha's step holds at its verifier until beta's build has started: the two run at once.
+    const releaseAlpha = holdSession(r, "alpha", "verify");
+    await withEnv(r.env, async () => {
+      const ticking = tick(r.path);
+      await traceShows(r.path, (t) => t.phases("beta").some((p) => p.name === "build"));
+      releaseAlpha();
+      await ticking;
+      expect(await statusOf(r.path, "alpha")).toBe("reviewing");
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+    });
+    const slots = (await Bun.file(log).text()).trim().split("\n").map((l) => l.split(" ")[1]).sort();
+    expect(slots).toEqual(["0", "1"]);
+    r.cleanup();
+    out.cleanup();
+  }, 120_000);
+
   test("a change that depends on another waits for it to merge, then builds on a branch with its code", async () => {
     const r = await lanesRepo(2, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "plan-approved", dependsOn: ["alpha"] }]);
     await withEnv(r.env, async () => {

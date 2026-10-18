@@ -63,7 +63,8 @@ stages:
 # max_parallel_changes: how many changes may each run a step at the same time (1 to 4). Raise it
 # only if the project's commands (test, lint, build, install) can run twice at once on this
 # machine: no fixed ports, no shared test database, no output outside the worktree. Each command
-# gets LOOPSTRA_SLUG, so it can pick its own port or database name. More changes at once also
+# gets LOOPSTRA_SLUG and LOOPSTRA_SLOT (0, 1, ...: no two changes running at once share one), so it
+# can pick its own ports, database and Docker project names. More changes at once also
 # spend the daily budget and the subscription's usage limits faster.
 speed:
   parallel_checks: false
