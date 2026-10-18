@@ -333,7 +333,7 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("a chat hand-off's throwaway checkout left behind is removed once its process is gone, not while it runs", async () => {
+  test("a chat hand-off's throwaway checkout left behind is removed once its process is gone and an hour has passed, not while it runs", async () => {
     const { repo, trace } = await setupRepo("accepted");
     const git = new Git(repo.path);
     const ended = Bun.spawn({ cmd: [process.execPath, "-e", "0"] });
@@ -342,6 +342,12 @@ describe("scheduler resilience", () => {
     const running = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-2-${process.pid}`);
     await git.run(["worktree", "add", "--detach", left, "main"]);
     await git.run(["worktree", "add", "--detach", running, "main"]);
+    // A pid not alive here may be a hand-off on another machine sharing the repository, mid-push.
+    await tick(repo.path);
+    expect(existsSync(left)).toBe(true);
+    const old = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(left, old, old);
+    utimesSync(running, old, old);
     await tick(repo.path);
     expect(existsSync(left)).toBe(false);
     expect(existsSync(running)).toBe(true);

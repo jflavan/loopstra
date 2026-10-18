@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readdirSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { lanesFor, loopDayNote, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
@@ -679,12 +679,17 @@ async function writeQueue(root: string, trace: Trace, text: string): Promise<voi
   }
 }
 
+/** How long a chat hand-off's copy whose process is not alive here is left before it is removed. */
+const HANDOFF_LEFT_MS = 60 * 60_000;
+
 /**
  * A merged change's worktree and branch are removed right after the merge; if that failed, try
  * again here. A closed change's worktree is removed once it holds nothing uncommitted (its branch
  * is kept, so nothing is lost). Snapshots of main a killed loop left behind are removed (no step
  * runs yet), and so are a chat hand-off's throwaway checkouts once the process that made one is gone
- * (its folder, handoff-<time>-<pid>, names it). Best effort and traced; never blocks anything.
+ * (its folder, handoff-<time>-<pid>, names it) and the folder is an hour old: a pid not alive here
+ * may be another machine's (WSL, say) sharing the repository, mid-push. Best effort and traced;
+ * never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
   if (existsSync(snapshotsDir(root))) {
@@ -703,6 +708,7 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
       const pid = Number(/^handoff-\d+-(\d+)$/.exec(name)?.[1]);
       if (!pid || pidAlive(pid)) continue;
       try {
+        if (Date.now() - statSync(join(handoffs, name)).mtimeMs < HANDOFF_LEFT_MS) continue;
         await removeWorktree(new Git(root), join(handoffs, name));
       } catch (e) {
         if (e instanceof StopRequested) throw e;
