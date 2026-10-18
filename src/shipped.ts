@@ -13,14 +13,21 @@ export type FetchText = (template: string, commit: string) => Promise<string | n
 /** Where a release's base texts are read from. LOOPSTRA_RAW_URL is for tests only. */
 const RAW_URL = process.env.LOOPSTRA_RAW_URL ?? "https://raw.githubusercontent.com/jflavan/loopstra";
 
+/** How long reading every blob may take before git is stopped. */
+const BLOBS_TIMEOUT_MS = 60_000;
+
 /** The texts of these blobs, read in one `git cat-file --batch`; a blob git does not have is left out. */
 async function blobTexts(repo: string, blobs: string[]): Promise<Map<string, string>> {
   const texts = new Map<string, string>();
   if (!blobs.length) return texts;
+  // Bun.spawn, not spawnBounded: the batch output is parsed by byte counts, and spawnBounded gives text.
   const proc = Bun.spawn({ cmd: ["git", "cat-file", "--batch"], cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, BLOBS_TIMEOUT_MS);
   proc.stdin.write(`${blobs.join("\n")}\n`);
   proc.stdin.end();
-  const [bytes, err, code] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]);
+  const [bytes, err, code] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]).finally(() => clearTimeout(timer));
+  if (timedOut) throw new Error(`git cat-file --batch did not finish within ${BLOBS_TIMEOUT_MS / 1000}s`);
   if (code !== 0) throw new Error(`git cat-file --batch failed (${code}): ${err.trim()}`);
   const dec = new TextDecoder();
   let at = 0;
@@ -115,10 +122,12 @@ function differingLines(a: string, b: string): number {
 
 /** The shipped version closest to `text` (fewest differing lines), with its text; null when none can be fetched. Ties go to the newer version. */
 export async function closestBase(index: ShippedIndex, template: string, text: string, fetchText: FetchText = fetchShipped): Promise<{ sha: string; commit: string; text: string } | null> {
+  const entries = index[template] ?? [];
+  const fetched = await Promise.all(entries.map((e) => fetchText(template, e.commit)));
   let best: { sha: string; commit: string; text: string; d: number } | null = null;
-  for (const e of index[template] ?? []) {
-    const t = await fetchText(template, e.commit);
-    if (t === null) continue;
+  for (const [i, e] of entries.entries()) {
+    const t = fetched[i];
+    if (t === null || t === undefined) continue;
     const d = differingLines(text, t);
     if (!best || d <= best.d) best = { ...e, text: t, d };
   }

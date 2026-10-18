@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
+import { spawnBounded } from "../shell";
 import { textSha, type ManagedFile, type StampEntry } from "../stamp";
 
 /** What upgrade did, or would do, to one managed file. */
@@ -18,6 +19,9 @@ export interface FileResult {
 /** Gets the shipped text whose textSha is `sha`, or null. */
 export type BaseFor = (sha: string) => Promise<string | null>;
 
+/** How long one merge may take before it is stopped. */
+const MERGE_TIMEOUT_MS = 60_000;
+
 const lf = (s: string) => s.replace(/\r\n/g, "\n");
 const isCrlf = (s: string) => (s.match(/\r\n/g)?.length ?? 0) * 2 > (s.match(/\n/g)?.length ?? 0);
 
@@ -31,10 +35,13 @@ export async function mergeText(theirs: string, base: string, next: string): Pro
   try {
     const [a, o, b] = [join(dir, "theirs"), join(dir, "base"), join(dir, "new")];
     writeFileSync(a, lf(theirs)); writeFileSync(o, lf(base)); writeFileSync(b, lf(next));
-    const proc = Bun.spawn({ cmd: ["git", "merge-file", "-p", "-L", "yours", "-L", "base", "-L", "loopstra", a, o, b], stdout: "pipe", stderr: "pipe" });
-    const [text, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    if (code < 0 || code > 127) throw new Error(`git merge-file failed (${code}): ${err.trim()}`);
-    return { text, conflict: code > 0 };
+    const r = await spawnBounded({
+      cmd: ["git", "merge-file", "-p", "-L", "yours", "-L", "base", "-L", "loopstra", a, o, b],
+      cwd: dir, timeoutMs: MERGE_TIMEOUT_MS, onStop: "ignore",
+    });
+    if (r.timedOut) throw new Error(`git merge-file did not finish within ${MERGE_TIMEOUT_MS / 1000}s`);
+    if (r.code === null || r.code < 0 || r.code > 127) throw new Error(`git merge-file failed (${r.code}): ${r.err.trim()}`);
+    return { text: r.out, conflict: r.code > 0 };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

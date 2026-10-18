@@ -50,6 +50,13 @@ describe("shipped index", () => {
     expect(await closestBase(index, "templates/REVIEW.md", "x\n", async () => null)).toBeNull();
   });
 
+  test("closestBase: a tie goes to the newer version, and a version that cannot be read is passed over", async () => {
+    const texts: Record<string, string> = { a: "l1\nA\n", b: "l1\nB\n", c: "l1\nC\n" };
+    const index: ShippedIndex = { "templates/REVIEW.md": ["a", "b", "c"].map((c) => ({ sha: textSha(texts[c]!), commit: c })) };
+    const best = await closestBase(index, "templates/REVIEW.md", "l1\nX\n", async (_t, commit) => (commit === "c" ? null : texts[commit]!));
+    expect(best?.commit).toBe("b");
+  });
+
   test("baseText finds the text for a sha through the index", async () => {
     const index: ShippedIndex = { "templates/REVIEW.md": [{ sha: "s1", commit: "c1" }] };
     const fetch = async (t: string, commit: string) => `${t}@${commit}`;

@@ -26,4 +26,21 @@ describe("migrateConfig", () => {
     const ok: Migration[] = [{ from: 1, run: () => {} }];
     expect(() => migrateConfig(V1, ok, () => { throw new Error("commands.test is required"); })).toThrow("commands.test is required");
   });
+
+  test("a file at the latest version is left as it is", () => {
+    const steps: Migration[] = [{ from: 1, run: () => { throw new Error("not run"); } }];
+    const v2 = V1.replace("version: 1", "version: 2");
+    expect(migrateConfig(v2, steps, () => {})).toEqual({ text: v2, from: 2, to: 2 });
+  });
+
+  test("a version newer than this Loopstra reads, or no whole-number version, is refused", () => {
+    const steps: Migration[] = [{ from: 1, run: () => {} }];
+    expect(() => migrateConfig(V1.replace("version: 1", "version: 3"), steps, () => {})).toThrow(
+      "loopstra/config.yaml is version 3, newer than this Loopstra reads (2); run loopstra upgrade",
+    );
+    expect(() => migrateConfig(V1.replace("version: 1", "version: 2"), [], () => {})).toThrow("newer than this Loopstra reads (1)");
+    for (const bad of ["version: 1.5", "version: two", "version: 0", "other_version: 1"]) {
+      expect(() => migrateConfig(V1.replace("version: 1", bad), [], () => {})).toThrow("loopstra/config.yaml has no valid version");
+    }
+  });
 });

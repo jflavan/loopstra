@@ -94,6 +94,27 @@ describe("upgradeFile", () => {
       expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe("# Title\r\n\r\nline a\r\nline b changed\r\nline c\r\nmine\r\n");
     } finally { t.cleanup(); }
   });
+
+  test("an unedited CRLF file is replaced with CRLF", async () => {
+    const { t, file } = setup(BASE.replace(/\n/g, "\r\n"));
+    try {
+      const r = await upgradeFile(t.path, file, { base: textSha(BASE) }, async () => null, { write: true });
+      expect(r).toEqual({ path: "REVIEW.md", outcome: "replaced", entry: { base: textSha(NEW) } });
+      expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(NEW.replace(/\n/g, "\r\n"));
+    } finally { t.cleanup(); }
+  });
+
+  test("an edited file whose base is already the new text is unchanged and not written", async () => {
+    const mine = "# Title\n\nline a\nline b changed\nline c\nmine\n";
+    const { t, file } = setup(mine);
+    try {
+      let asked = false;
+      const r = await upgradeFile(t.path, file, { base: textSha(NEW) }, async () => { asked = true; return NEW; }, { write: true });
+      expect(r).toEqual({ path: "REVIEW.md", outcome: "unchanged", entry: { base: textSha(NEW) } });
+      expect(asked).toBe(false);
+      expect(readFileSync(join(t.path, "REVIEW.md"), "utf8")).toBe(mine);
+    } finally { t.cleanup(); }
+  });
 });
 
 describe("mergeText", () => {

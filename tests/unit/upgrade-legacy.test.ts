@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { templatePath } from "../../src/package";
 import { adoptLegacy } from "../../src/upgrade/legacy";
 import { textSha } from "../../src/stamp";
 import type { ShippedIndex } from "../../src/shipped";
@@ -49,11 +50,75 @@ describe("adoptLegacy", () => {
     const t = legacyRepo();
     try {
       writeFileSync(join(t.path, ".claude", "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "bun loopstra-protect-tests.ts" }] }] } }));
+      const settingsBefore = readFileSync(join(t.path, ".claude", "settings.json"), "utf8");
       const dry = await adoptLegacy(t.path, INDEX, fetchText, { write: false });
-      expect(dry.removed).toContain("loopstra/prompts/review.md");
+      expect(dry.removed).toEqual(["loopstra/prompts/review.md", ".claude/hooks/loopstra-protect-tests.ts", ".claude/settings.json"]);
       expect(existsSync(join(t.path, "loopstra", "prompts", "review.md"))).toBe(true);
+      expect(existsSync(join(t.path, ".claude", "hooks", "loopstra-protect-tests.ts"))).toBe(true);
+      expect(readFileSync(join(t.path, ".claude", "settings.json"), "utf8")).toBe(settingsBefore);
       await adoptLegacy(t.path, INDEX, fetchText, { write: true });
       expect(existsSync(join(t.path, ".claude", "settings.json"))).toBe(false);
+      expect(existsSync(join(t.path, ".claude", "hooks"))).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
+  test("the hooks folder stays when it holds other files", async () => {
+    const t = legacyRepo();
+    try {
+      writeFileSync(join(t.path, ".claude", "hooks", "mine.ts"), "// mine");
+      await adoptLegacy(t.path, INDEX, fetchText, { write: true });
+      expect(existsSync(join(t.path, ".claude", "hooks", "loopstra-protect-tests.ts"))).toBe(false);
+      expect(existsSync(join(t.path, ".claude", "hooks", "mine.ts"))).toBe(true);
+    } finally { t.cleanup(); }
+  });
+
+  test("settings that are not JSON are left alone, with a note", async () => {
+    const t = legacyRepo();
+    try {
+      writeFileSync(join(t.path, ".claude", "settings.json"), "{ not json loopstra-protect-tests");
+      const r = await adoptLegacy(t.path, INDEX, fetchText, { write: true });
+      expect(readFileSync(join(t.path, ".claude", "settings.json"), "utf8")).toBe("{ not json loopstra-protect-tests");
+      expect(r.changed).toEqual([]);
+      expect(r.removed).not.toContain(".claude/settings.json");
+      expect(r.notes).toContain(".claude/settings.json is not valid JSON, so the old test-hook entry was not removed; remove it by hand.");
+    } finally { t.cleanup(); }
+  });
+
+  test("an edited REVIEW.md gets the closest shipped version as its base, and a note", async () => {
+    const t = legacyRepo();
+    try {
+      const v1 = "guide\nrule 1\n";
+      const v2 = "guide\nrule 1\nrule 2\n";
+      writeFileSync(join(t.path, "REVIEW.md"), "guide\nrule 1\nrule 2\nmy rule\n");
+      const index: ShippedIndex = { ...INDEX, "templates/REVIEW.md": [{ sha: textSha(v1), commit: "aaaaaaaaaa1" }, { sha: textSha(v2), commit: "bbbbbbbbbb2" }] };
+      const texts: Record<string, string> = { aaaaaaaaaa1: v1, bbbbbbbbbb2: v2 };
+      const r = await adoptLegacy(t.path, index, async (template, commit) => (template === "templates/REVIEW.md" ? texts[commit] ?? null : fetchText(template)), { write: true });
+      expect(r.stamp.files["REVIEW.md"]).toEqual({ base: textSha(v2) });
+      expect(r.notes).toContain("REVIEW.md is your own; it is merged from the shipped version of commit bbbbbbb.");
+    } finally { t.cleanup(); }
+  });
+
+  test("an edited file with no known shipped version takes today's text as its base", async () => {
+    const t = legacyRepo();
+    try {
+      writeFileSync(join(t.path, "REVIEW.md"), "entirely my own\n");
+      const { "templates/REVIEW.md": _, ...index } = INDEX;
+      const r = await adoptLegacy(t.path, index, fetchText, { write: true });
+      expect(r.stamp.files["REVIEW.md"]).toEqual({ base: textSha(readFileSync(templatePath("REVIEW.md"), "utf8")) });
+      expect(r.notes).toContain("REVIEW.md is your own; Loopstra knows no earlier version of it, so it is left as it is.");
+    } finally { t.cleanup(); }
+  });
+
+  test("offline: an edited file whose shipped versions cannot be read stops the adoption before anything is written", async () => {
+    const t = legacyRepo();
+    try {
+      const settingsBefore = readFileSync(join(t.path, ".claude", "settings.json"), "utf8");
+      await expect(adoptLegacy(t.path, INDEX, async () => null, { write: true })).rejects.toThrow(
+        "Loopstra's shipped versions of loopstra/prompts/plan.md could not be read to merge from; check the connection and run loopstra upgrade again.",
+      );
+      expect(existsSync(join(t.path, "loopstra", "prompts", "review.md"))).toBe(true);
+      expect(existsSync(join(t.path, ".claude", "hooks", "loopstra-protect-tests.ts"))).toBe(true);
+      expect(readFileSync(join(t.path, ".claude", "settings.json"), "utf8")).toBe(settingsBefore);
     } finally { t.cleanup(); }
   });
 });

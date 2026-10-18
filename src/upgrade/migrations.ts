@@ -20,12 +20,16 @@ export const CONFIG_VERSION = 1 + MIGRATIONS.length;
 /**
  * Applies every migration from the file's version on, then checks the result with `validate` (which
  * throws a ConfigError naming the setting). Throws without returning anything when a step or the
- * check fails, so nothing half-migrated is ever written.
+ * check fails, so nothing half-migrated is ever written. A file with no whole-number version, or with
+ * a version newer than the migrations reach (written by a later Loopstra), is refused.
  */
 export function migrateConfig(text: string, migrations: readonly Migration[] = MIGRATIONS, validate: (text: string) => void): { text: string; from: number; to: number } {
   const doc = parseDocument(text);
   if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
-  const from = Number(doc.get("version") ?? 1);
+  const from = doc.get("version");
+  if (typeof from !== "number" || !Number.isInteger(from) || from < 1) throw new ConfigError("loopstra/config.yaml has no valid version");
+  const latest = Math.max(1, ...migrations.map((m) => m.from + 1));
+  if (from > latest) throw new ConfigError(`loopstra/config.yaml is version ${from}, newer than this Loopstra reads (${latest}); run loopstra upgrade`);
   let version = from;
   for (const m of migrations.filter((m) => m.from >= from).sort((a, b) => a.from - b.from)) {
     if (m.from !== version) continue;
