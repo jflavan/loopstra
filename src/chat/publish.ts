@@ -104,7 +104,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       done = { kind: "pr", number: pr.number, url: pr.url, branch, intents: w.intents };
       note({ kind: "pr", number: pr.number, url: pr.url, branch, slugs: w.intents.map((i) => i.slug), by: o.author });
       return done;
-    });
+    }, (e) => note({ where: "handoff cleanup", error: errorText(e), dir }));
   } catch (e) {
     if (e instanceof StopRequested && !done) throw e;
     note({ where: "handoff", error: errorText(e), afterPublishing: done !== null, pushed });

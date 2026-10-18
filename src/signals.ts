@@ -85,7 +85,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
       }
       const t = await projectCommand(on, cfg.commands.test, cwd, { env: {}, where: SIGNAL });
       return { result: t.code === 0 ? "pass" : "fail", output: t.output.slice(-4000) };
-    }));
+    }, (e) => trace.event("_loop", "error", { where: SIGNAL, what: "removing the copy of main", error: errorText(e) })));
   } catch (e) {
     if (e instanceof StopRequested) throw e;
     result = "error";

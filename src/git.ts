@@ -458,14 +458,17 @@ function worktreeAdmin<T>(git: Git, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** Runs `fn` in a throwaway detached worktree of `ref` at `dir` (see addDetachedWorktree), and always tries to remove it afterwards. */
-export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` in a throwaway detached worktree of `ref` at `dir` (see addDetachedWorktree), and always
+ * tries to remove it afterwards. A removal that fails is given to `teardownFailed` (to trace it).
+ */
+export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string, fn: (dir: string) => Promise<T>, teardownFailed?: (e: unknown) => void): Promise<T> {
   await addDetachedWorktree(git, dir, ref);
   try {
     return await fn(dir);
   } finally {
     // Best effort: a folder Windows still holds (a process the work left running there) must not hide
     // fn's result or error. The next add at this path removes what is left (see addDetachedWorktree).
-    await removeWorktree(git, dir).catch(() => {});
+    await removeWorktree(git, dir).catch((e) => { try { teardownFailed?.(e); } catch { /* the result stands */ } });
   }
 }

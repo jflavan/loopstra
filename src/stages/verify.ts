@@ -103,7 +103,7 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
         vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review },
         skills: ctx.cfg.stages.verify.skills,
       });
-    });
+    }, (e) => ctx.trace.event(ctx.slug, "error", { where: "done-check", what: "removing the copy of main", error: errorText(e) }));
   } catch (e) {
     passOn(e);
     return { ok: false, note: JUDGE_FAILED, detail: `could not prepare a clean copy of main: ${errorText(e)}` };

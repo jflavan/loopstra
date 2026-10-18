@@ -545,12 +545,15 @@ describe("worktree administration", () => {
       const git = new Git(repo.path);
       const dir = join(repo.path, ".loopstra", "verify", "x");
       // A process the work left running in the copy (a test runner, a server): Windows will not delete the folder it runs in.
+      const failed: unknown[] = [];
       const r = await withDetachedWorktree(git, dir, "main", async (cwd) => {
         child = Bun.spawn({ cmd: [process.execPath, "-e", "await Bun.stdin.text()"], cwd, stdin: "pipe", stdout: "ignore", stderr: "ignore" });
         await Bun.sleep(300);
         return "passed";
-      });
+      }, (e) => failed.push(e));
       expect(r).toBe("passed");
+      // The failed removal is not lost: the caller is told, to trace it.
+      expect(failed).toHaveLength(1);
       child!.stdin.end();
       await child!.exited;
       // What was left is removed by the next add at that path.

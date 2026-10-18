@@ -333,6 +333,22 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a chat hand-off's throwaway checkout left behind is removed once its process is gone, not while it runs", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const git = new Git(repo.path);
+    const ended = Bun.spawn({ cmd: [process.execPath, "-e", "0"] });
+    await ended.exited;
+    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${ended.pid}`);
+    const running = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-2-${process.pid}`);
+    await git.run(["worktree", "add", "--detach", left, "main"]);
+    await git.run(["worktree", "add", "--detach", running, "main"]);
+    await tick(repo.path);
+    expect(existsSync(left)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+    expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)).toHaveLength(2);
+    trace.close(); repo.cleanup();
+  });
+
   test("a move of main that a kill cut short is put back before the tick does anything else", async () => {
     const { repo, trace } = await setupRepo("accepted");
     const git = new Git(repo.path);

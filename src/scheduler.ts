@@ -7,7 +7,7 @@ import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, blo
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release } from "./lanes";
-import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, readLoopHold, startHeartbeat } from "./heartbeat";
+import { activePause, clearPause, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, startHeartbeat } from "./heartbeat";
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
@@ -28,6 +28,7 @@ import { uncommittedSetup } from "./init";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
+import { chatDir } from "./chat/threads";
 
 export interface TickResult {
   /**
@@ -677,7 +678,8 @@ async function writeQueue(root: string, trace: Trace, text: string): Promise<voi
  * A merged change's worktree and branch are removed right after the merge; if that failed, try
  * again here. A closed change's worktree is removed once it holds nothing uncommitted (its branch
  * is kept, so nothing is lost). Snapshots of main a killed loop left behind are removed (no step
- * runs yet). Best effort and traced; never blocks anything.
+ * runs yet), and so are a chat hand-off's throwaway checkouts once the process that made one is gone
+ * (its folder, handoff-<time>-<pid>, names it). Best effort and traced; never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
   if (existsSync(snapshotsDir(root))) {
@@ -687,6 +689,19 @@ async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents
       } catch (e) {
         if (e instanceof StopRequested) throw e;
         trace.event(name, "error", { where: "cleanup", what: "snapshot of main left behind", error: errorText(e) });
+      }
+    }
+  }
+  const handoffs = join(chatDir(root), "worktrees");
+  if (existsSync(handoffs)) {
+    for (const name of readdirSync(handoffs)) {
+      const pid = Number(/^handoff-\d+-(\d+)$/.exec(name)?.[1]);
+      if (!pid || pidAlive(pid)) continue;
+      try {
+        await removeWorktree(new Git(root), join(handoffs, name));
+      } catch (e) {
+        if (e instanceof StopRequested) throw e;
+        trace.event("_loop", "error", { where: "cleanup", what: "chat hand-off copy left behind", dir: name, error: errorText(e) });
       }
     }
   }
