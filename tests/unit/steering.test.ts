@@ -5,6 +5,7 @@ import { readConversation } from "../../src/conversation";
 import { inboxDir, inboxFor, sendToSession, type InboxMessage } from "../../src/inbox";
 import { agentPhase } from "../../src/phases";
 import { runStepGuarded } from "../../src/scheduler";
+import { runDesignStep } from "../../src/stages/design";
 import { deliverInbox, sweepInbox } from "../../src/steering";
 import { requestStop, resetStop, SessionStopped } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -290,4 +291,31 @@ describe("steering a running session", () => {
       trace.close(); fixtures.cleanup(); t.cleanup(); repo.cleanup();
     }
   }, 60_000);
+
+  test("a writer's retry after a crash has what people told the crashed attempt, though the stage rendered its prompt", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    const t = tempDir();
+    const gate = join(t.path, "go");
+    const prompts = join(t.path, "prompts.jsonl");
+    const crash = [fixture("design").split("\n")[0], JSON.stringify({ type: "fake_action", wait_for: gate })].join("\n");
+    const fixtures = fixtureDir({ "design-1": crash, design: fixture("design") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        const run = runDesignStep(ctx);
+        await until(() => running(trace, "design") !== null);
+        const seq = running(trace, "design")!;
+        const m = sendToSession(repo.path, SLUG, { seq, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+        await until(() => howDone(repo.path, m) === "delivered");
+        writeFileSync(gate, "");
+        expect(await run).toEqual({ ok: true });
+        expect(trace.phases(SLUG).map((p) => p.name)).toContain("design-retry");
+        const sent = readFileSync(prompts, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { phase: string; prompt: string }).filter((p) => p.phase === "design").map((p) => p.prompt);
+        expect(sent).toHaveLength(2);
+        expect(sent[0]).not.toContain("cover negatives");
+        expect(sent[1]).toContain("cover negatives");
+      });
+    } finally {
+      trace.close(); fixtures.cleanup(); t.cleanup(); repo.cleanup();
+    }
+  }, 90_000);
 });

@@ -5,7 +5,7 @@ import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
 import type { Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
-import { agentPhase, alongsideFirst, withNote, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, alongsideFirst, renderedThen, withNote,type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
@@ -110,10 +110,12 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   const sentBack = sentBackNote(ctx);
   const all = [sentBack, findings].filter(Boolean).join("\n\n");
   const phase = writerPhase(ctx, s, await artifacts(ctx), all);
-  // Rendered once, so an answer written earlier is matched against exactly what the session is sent.
-  // The note reaches the session even through an older prompt file without {{findings}}.
-  const prompt = await withNote(ctx, phase, NOTE_VAR[s.stage], sentBack, sentBack);
-  const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, prompt);
+  // Rendered once, so an answer written earlier is matched against exactly what the session is sent;
+  // a retry renders it again (see renderedThen). The note reaches the session even through an older
+  // prompt file without {{findings}}.
+  const render = () => withNote(ctx, phase, NOTE_VAR[s.stage], sentBack, sentBack);
+  const prompt = await render();
+  const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, renderedThen(prompt, render));
   if (!r.ok) return block(ctx, r.note);
   await writeArtifact(ctx, s.artifact, s.text(r.envelope));
   // Used: the artifact it asked to change is written again.

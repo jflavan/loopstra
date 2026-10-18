@@ -198,8 +198,27 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
   return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
 }
 
+/** A phase's prompt as the caller gives it: rendered already (null: its prompt file is missing), or the function that renders it. */
+export type PromptSource = string | null | (() => Promise<string | null>);
+
 /**
- * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it.
+ * A renderer that gives `first` (a prompt the caller rendered already, to match it against work kept
+ * from earlier) the first time, and renders afresh with `render` every time after: a retry then has
+ * what people told the attempt before it.
+ */
+export function renderedThen(first: string | null, render: () => Promise<string | null>): () => Promise<string | null> {
+  let used = false;
+  return async () => {
+    if (used) return render();
+    used = true;
+    return first;
+  };
+}
+
+/**
+ * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller
+ * already has it, or the function that renders it. A retry renders its prompt again (with the function,
+ * else phasePrompt; never a prompt given as text), so it has what people told the crashed attempt.
  *
  * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
  * ends quietly and the change waits. Once it is answered, the step's first agent session resumes the asking
@@ -208,8 +227,9 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
  * in this stay at the status the prompt says no more may be, and one more fails the phase. Work run alongside never
  * asks: a question fails it, and that work is just not used.
  */
-export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
-  const prompt = rendered === undefined ? await phasePrompt(ctx, spec) : rendered;
+export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: PromptSource): Promise<AgentPhaseResult<N>> {
+  const render = typeof rendered === "function" ? rendered : rendered === undefined ? () => phasePrompt(ctx, spec) : null;
+  const prompt = render ? await render() : (rendered as string | null);
   if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `loopstra/prompts/${spec.name}.md is missing; \`loopstra init\` restores it` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to restore it.`, sessionId: null };
@@ -227,7 +247,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     const first = await attempt(ctx, s, limited(p), traceName, ask);
     if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
     ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-    const again = normal && rendered === undefined ? ((await phasePrompt(ctx, spec)) ?? p) : p;
+    const again = normal && render ? ((await render()) ?? p) : p;
     return attempt(ctx, s, limited(again), `${traceName}-retry`, ask);
   };
 

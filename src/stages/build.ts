@@ -43,7 +43,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback }, skills: stage.skills,
   };
   // The note reaches the session even through an older build.md without {{feedback}}.
-  const build = await agentPhase(ctx, phase, await withNote(ctx, phase, "feedback", feedback, `A person's notes on an earlier build of this change; address each one:\n\n${feedback}`));
+  const build = await agentPhase(ctx, phase, () => withNote(ctx, phase, "feedback", feedback, `A person's notes on an earlier build of this change; address each one:\n\n${feedback}`));
   if (!build.ok) return block(ctx, build.note);
   // The build session is what fix, reconcile, and revise resume.
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);
