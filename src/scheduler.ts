@@ -12,7 +12,7 @@ import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText } from "./shell";
 import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, type HumanGates, type Intent } from "./intents";
-import { openQuestions } from "./questions";
+import { closeStaleQuestion, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
@@ -594,11 +594,13 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
  * plain note (the detail goes to the trace); only a stop request passes through. A session a person
  * stopped, or a question an agent asked, ends the step quietly: the change keeps its status. First,
- * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come.
+ * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come,
+ * and a question from another stay at a status is closed (see closeStaleQuestion).
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   try {
     await sweepInbox(ctx);
+    closeStaleQuestion(ctx);
     return await runStep(ctx);
   } catch (e) {
     if (e instanceof SessionStopped) {

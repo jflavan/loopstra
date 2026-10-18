@@ -14,7 +14,7 @@ import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./s
 import { clearPause } from "./heartbeat";
 import { assertNoCheckoutLock, assertNoLock } from "./lanes";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
-import { answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, readQuestion, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
+import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
 import { steerable } from "./console/steerable";
 import { deliverInbox } from "./steering";
@@ -202,9 +202,10 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
  * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller already has it.
  *
  * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
- * ends quietly and the change waits. Once it is answered, the first session of that phase resumes the asking
- * session with the answer (one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS
- * asked at this status the prompt says no more may be, and one more fails the phase. Work run alongside never
+ * ends quietly and the change waits. Once it is answered, the step's first agent session resumes the asking
+ * session with the answer, when it is of the same kind of phase and the change has not changed status since
+ * (see answerFor; one that cannot be resumed starts fresh with the normal prompt). With MAX_QUESTIONS asked
+ * in this stay at the status the prompt says no more may be, and one more fails the phase. Work run alongside never
  * asks: a question fails it, and that work is just not used.
  */
 export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: string | null): Promise<AgentPhaseResult<N>> {
@@ -216,7 +217,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
 
   const traceName = spec.traceName ?? spec.name;
   const here = ASKERS.has(spec.name) && !cancelSignal();
-  const atLimit = here && askedAt(ctx.root, ctx.slug, ctx.intent.file.frontmatter.status) >= MAX_QUESTIONS;
+  const atLimit = here && askedAt(ctx) >= MAX_QUESTIONS;
   const ask: AskRule | null = !ASKERS.has(spec.name) ? null : !here ? { refuse: "It asked a question" } : atLimit ? { refuse: TOO_MANY_NOTE } : {};
   const limited = (p: string) => (atLimit ? `${p.trimEnd()}\n\n${NO_MORE_QUESTIONS}\n` : p);
   // One run of the phase on `p`, retried once on a timeout or crash. `normal`: `p` is the phase's own
@@ -231,8 +232,8 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   };
 
   let r: Attempted<N>;
-  const answered = here ? readQuestion(ctx.root, ctx.slug)?.open : null;
-  if (answered?.answer && answered.phase === spec.name) {
+  const answered = answerFor(ctx, spec.name, here);
+  if (answered) {
     // The answer goes to the session that asked; one that cannot be resumed starts fresh with the normal prompt.
     r = answered.sessionId ? await tries(answerPrompt(answered), answered.sessionId, false) : await tries(prompt, spec.resume, true);
     if (!r.ok && r.reason === "no-session") r = await tries(prompt, undefined, true);
@@ -415,6 +416,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfCancelled(signal);
   const cwd = spec.cwd ?? (await ctx.snapshot());
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+  ctx.agentSessionsStarted++;
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");

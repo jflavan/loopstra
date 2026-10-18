@@ -1,9 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readJson, writeJson } from "./chat/threads";
+import { phaseKind } from "./console/steerable";
 import { commitRecord, type StepContext } from "./context";
 import { conversationPath, readConversation, withEntry } from "./conversation";
 import { hasQuestion, readIntent, writeIntent, type Intent, type Status } from "./intents";
+import { errorText } from "./shell";
+import type { Trace } from "./trace";
 
 /**
  * Questions an agent asks a person. The asking session's id, the phase, the question and the step's
@@ -24,8 +27,13 @@ export interface Asked {
   answer?: { text: string; by: string; via: string; at: string };
 }
 
-/** `count`: the questions asked at `status` in this step; it starts again at 0 at another status. */
-export interface QuestionState { status: Status; count: number; open: Asked | null }
+/**
+ * `status` and `since`: the change's stay at a status the question and the count belong to (`since`: the
+ * id of the trace's newest status change then, 0 when there was none; see stayAt). `count`: the questions
+ * asked in that stay; it starts again at 0 once the status changes, even back to the same one (a block
+ * and a retry, a send back).
+ */
+export interface QuestionState { status: Status; since?: number; count: number; open: Asked | null }
 
 /** A question as an envelope carries it. */
 export interface Question { text: string; why: string; options: string[] }
@@ -49,10 +57,24 @@ export function readQuestion(root: string, slug: string): QuestionState | null {
   return readJson<QuestionState>(statePath(root, slug));
 }
 
-/** The questions asked so far at this status (0 at another). */
-export function askedAt(root: string, slug: string, status: Status): number {
-  const s = readQuestion(root, slug);
-  return s && s.status === status ? s.count : 0;
+/** The change's present stay at its status: the status, and the id of the trace's newest status change (0: none). */
+export function stayAt(ctx: StepContext): { status: Status; since: number } {
+  return { status: ctx.intent.file.frontmatter.status, since: newestStatusChange(ctx.trace, ctx.slug) };
+}
+
+function newestStatusChange(trace: Trace, slug: string): number {
+  return trace.lastEvent(slug, "status_change")?.id ?? 0;
+}
+
+/** True when the state belongs to the change's present stay at its status (see stayAt). */
+function inStay(s: QuestionState, stay: { status: Status; since: number }): boolean {
+  return s.status === stay.status && (s.since ?? 0) === stay.since;
+}
+
+/** The questions asked so far in the change's present stay at its status (0 once it changed). */
+export function askedAt(ctx: StepContext): number {
+  const s = readQuestion(ctx.root, ctx.slug);
+  return s && inStay(s, stayAt(ctx)) ? s.count : 0;
 }
 
 /** The question in an envelope, or null: intake's string (non-empty asks), or the others' object. */
@@ -73,16 +95,16 @@ export function questionIn(envelope: Record<string, unknown>): Question | null {
  * session's row already ended asked, with the question traced as an event of its own (see tracedSession).
  */
 export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "answer">): Promise<void> {
-  const status = ctx.intent.file.frontmatter.status;
+  const stay = stayAt(ctx);
   const at = new Date();
-  const count = askedAt(ctx.root, ctx.slug, status) + 1;
+  const count = askedAt(ctx) + 1;
   await commitRecord(ctx.root, ctx.cfg.main_branch, ctx.slug, `${a.phase} asks a question`, async () => {
     const fresh = await readIntent(ctx.root, ctx.slug);
     await writeIntent(fresh, { question: "open" });
     ctx.intent.file = fresh.file;
     await Bun.write(conversationPath(ctx.root, ctx.slug), withEntry(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
   });
-  writeState(ctx.root, ctx.slug, { status, count, open: { ...a, at: at.toISOString() } });
+  writeState(ctx.root, ctx.slug, { ...stay, count, open: { ...a, at: at.toISOString() } });
 }
 
 /** The text of each open question, by change, for the changes whose intent.md says `question: open` (see renderQueue). */
@@ -119,5 +141,36 @@ export function answerPrompt(a: Asked): string {
 /** The answered question is done with: the count stays for this step's limit. */
 export function closeQuestion(root: string, slug: string): void {
   const s = readQuestion(root, slug);
-  if (s) writeState(root, slug, { ...s, open: null });
+  if (s?.open) writeState(root, slug, { ...s, open: null });
+}
+
+/**
+ * The answered question a session of `phase` resumes with, or null. Decided as the step's first agent
+ * session starts: the question resumes only that session, only when the change is still in the stay at
+ * its status the question was asked in (no status change since: not moved on, sent back or retried), and
+ * only for a session of the same kind of phase (fix-2 and fix-1 are both fix). Otherwise the answered
+ * question is closed without resuming anything: the answer is in conversation.md, so a fresh session
+ * still reads it. `mayResume`: false for a session that may not ask (work run alongside).
+ */
+export function answerFor(ctx: StepContext, phase: string, mayResume: boolean): Asked | null {
+  if (ctx.agentSessionsStarted > 0) return null;
+  const s = readQuestion(ctx.root, ctx.slug);
+  if (!s?.open?.answer) return null;
+  if (mayResume && inStay(s, stayAt(ctx)) && phaseKind(s.open.phase) === phaseKind(phase)) return s.open;
+  closeQuestion(ctx.root, ctx.slug);
+  return null;
+}
+
+/**
+ * At a step's start: a question, open or answered, from another stay at a status (the change moved on,
+ * or was sent back or retried) is closed. Its entries in conversation.md stay for the sessions to come.
+ * Never fails the step: a problem is traced, and the next step's start tries again.
+ */
+export function closeStaleQuestion(ctx: StepContext): void {
+  try {
+    const s = readQuestion(ctx.root, ctx.slug);
+    if (s?.open && !inStay(s, stayAt(ctx))) closeQuestion(ctx.root, ctx.slug);
+  } catch (e) {
+    ctx.trace.event(ctx.slug, "error", { where: "question", error: errorText(e) });
+  }
 }

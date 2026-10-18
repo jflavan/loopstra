@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { StepContext } from "../../src/context";
+import { block, setStatus, StepContext } from "../../src/context";
 import { readConversation } from "../../src/conversation";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { agentPhase, alongside } from "../../src/phases";
-import { answerQuestion, readQuestion, recordQuestion } from "../../src/questions";
+import { answerQuestion, closeStaleQuestion, readQuestion, recordQuestion } from "../../src/questions";
 import { runDesignStep } from "../../src/stages/design";
 import { QuestionAsked } from "../../src/stop";
 import type { Trace } from "../../src/trace";
@@ -27,6 +27,15 @@ function asking(name: string, question: unknown): string {
 
 const design = (ctx: StepContext) => agentPhase(ctx, { name: "design", model: "default", permissionMode: "plan", tools: "read", vars: { intent: ctx.intent.file.body, findings: "" } });
 const plan = (ctx: StepContext) => agentPhase(ctx, { name: "plan", model: "default", permissionMode: "plan", tools: "read", vars: { intent: ctx.intent.file.body, spec: "", concerns: "" } });
+const build = (ctx: StepContext) => agentPhase(ctx, { name: "build", model: "default", permissionMode: "plan", tools: "read", vars: { plan: "", spec: "", feedback: "", test_command: "echo ok" } });
+const fix = (ctx: StepContext, i: number) => agentPhase(ctx, { name: "fix", traceName: `fix-${i}`, model: "default", permissionMode: "plan", tools: "read", vars: { failure_output: `failure ${i}`, test_command: "echo ok" } });
+
+/** The next step's context: one is made per step. */
+async function nextStep(ctx: StepContext): Promise<StepContext> {
+  return new StepContext(ctx.root, ctx.cfg, ctx.trace, await readIntent(ctx.root, ctx.slug));
+}
+
+const ANSWER = { text: "No.", by: "John", via: "the dashboard" };
 
 /** Each line of a LOOPSTRA_FAKE_* log, parsed. */
 function logLines<T>(path: string): T[] {
@@ -74,7 +83,7 @@ describe("questions", () => {
       await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
         expect(await design(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
         expect(answerQuestion(repo.path, SLUG, { text: "No.", by: "John", via: "the dashboard" })).toBe(true);
-        const r = await design(ctx);
+        const r = await design(await nextStep(ctx));
         expect(r.ok).toBe(true);
       });
       const last = logLines<string[]>(calls).at(-1)!;
@@ -98,7 +107,7 @@ describe("questions", () => {
         state.open.sessionId = "missing-session";
         await Bun.write(questionPath(repo.path), JSON.stringify(state));
         expect(answerQuestion(repo.path, SLUG, { text: "No.", by: "John", via: "the dashboard" })).toBe(true);
-        const r = await design(ctx);
+        const r = await design(await nextStep(ctx));
         expect(r.ok).toBe(true);
       });
       const args = logLines<string[]>(calls);
@@ -110,6 +119,111 @@ describe("questions", () => {
       expect(last).not.toContain("answered your question");
       expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
       expect(trace.phases(SLUG).map((p) => [p.name, p.status])).toEqual([["design", "asked"], ["design", "fail"], ["design", "success"]]);
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("a fix that asked as fix-2 resumes as the next step's first fix session, whatever its number", async () => {
+    const { repo, ctx, trace } = await setupRepo("building");
+    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS), fix: fixture("fix") });
+    const calls = join(fixtures.path, "calls.jsonl");
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await fix(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        expect((await fix(await nextStep(ctx), 1)).ok).toBe(true);
+      });
+      expect(logLines<string[]>(calls).at(-1)).toContain("--resume");
+      expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).toBe("John answered your question: No.\n\nCarry on.");
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("an answer resumes only the step's first session, and only one of the same kind: otherwise it is closed and every session starts fresh", async () => {
+    const { repo, ctx, trace } = await setupRepo("building");
+    const fixtures = fixtureDir({ "fix-1": asking("fix", ASKS), fix: fixture("fix"), build: fixture("build") });
+    const calls = join(fixtures.path, "calls.jsonl");
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await fix(ctx, 2).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        // The next step starts with a build: another kind of phase. The answer is closed, not given to it.
+        const step = await nextStep(ctx);
+        expect((await build(step)).ok).toBe(true);
+        expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+        // The step's later fix is of the asking kind, but not its first session: it starts fresh, with its own failure.
+        expect((await fix(step, 1)).ok).toBe(true);
+      });
+      for (const args of logLines<string[]>(calls).slice(1)) expect(args).not.toContain("--resume");
+      const sent = logLines<{ prompt: string }>(prompts).map((p) => p.prompt);
+      expect(sent.some((p) => p.includes("answered your question"))).toBe(false);
+      expect(sent.at(-1)).toContain("failure 1");
+      // A fresh session still reads the question and its answer, in conversation.md.
+      expect(sent.at(-1)).toContain("Archived too?");
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("an answer is not given to a session after the change's status changed", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const fixtures = fixtureDir({ "design-1": asking("design", ASKS), design: fixture("design"), plan: fixture("plan") });
+    const calls = join(fixtures.path, "calls.jsonl");
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await design(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        await setStatus(await nextStep(ctx), "planning");
+        expect((await plan(await nextStep(ctx))).ok).toBe(true);
+      });
+      expect(logLines<string[]>(calls).at(-1)).not.toContain("--resume");
+      expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).not.toContain("answered your question");
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("an answer is not given to a session once the change came back to the same status (sent back, or blocked and retried)", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const fixtures = fixtureDir({ "design-1": asking("design", ASKS), design: fixture("design") });
+    const calls = join(fixtures.path, "calls.jsonl");
+    const prompts = join(fixtures.path, "prompts.jsonl");
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: calls, LOOPSTRA_FAKE_PROMPTS: prompts }, async () => {
+        expect(await design(ctx).then(() => null, (err: unknown) => err)).toBeInstanceOf(QuestionAsked);
+        expect(answerQuestion(repo.path, SLUG, ANSWER)).toBe(true);
+        await setStatus(await nextStep(ctx), "spec-review");
+        await setStatus(await nextStep(ctx), "designing");
+        expect((await design(await nextStep(ctx))).ok).toBe(true);
+      });
+      expect(logLines<string[]>(calls).at(-1)).not.toContain("--resume");
+      expect(logLines<{ prompt: string }>(prompts).at(-1)!.prompt).not.toContain("answered your question");
+      expect(readQuestion(repo.path, SLUG)!.open).toBeNull();
+    } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
+  }, 90_000);
+
+  test("at a step's start, a question from another stay at a status is closed; one from this stay is kept", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    try {
+      await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS });
+      closeStaleQuestion(await nextStep(ctx));
+      expect(readQuestion(repo.path, SLUG)!.open).toMatchObject({ text: "Archived too?" });
+      // A person sent it back and it came round again: the question was asked in an earlier stay.
+      trace.statusChange(SLUG, "designing", "designing", "sent back");
+      closeStaleQuestion(await nextStep(ctx));
+      expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: null });
+    } finally { trace.close(); repo.cleanup(); }
+  }, 90_000);
+
+  test("the question count starts again once the status changes: three asked, blocked and retried, the next question is allowed", async () => {
+    const { repo, ctx, trace } = await setupRepo("designing");
+    const fixtures = fixtureDir({ design: asking("design", ASKS) });
+    try {
+      await Bun.write(questionPath(repo.path), JSON.stringify({ status: "designing", since: 0, count: 3, open: null }));
+      await block(await nextStep(ctx), "Something went wrong.");
+      await setStatus(await nextStep(ctx), "designing");
+      const e = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => design(await nextStep(ctx)).then(() => null, (err: unknown) => err));
+      expect(e).toBeInstanceOf(QuestionAsked);
+      expect(readQuestion(repo.path, SLUG)).toMatchObject({ status: "designing", count: 1, open: { text: "Archived too?" } });
     } finally { trace.close(); fixtures.cleanup(); repo.cleanup(); }
   }, 90_000);
 

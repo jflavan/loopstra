@@ -18,6 +18,8 @@ export class StepContext {
   private reading: Promise<string> | null = null;
   /** The step's snapshot, once asked for (see snapshot). */
   private made: Promise<string> | null = null;
+  /** How many agent sessions the step has started (see attempt in src/phases.ts): only its first may resume an answered question. */
+  agentSessionsStarted = 0;
   constructor(
     public readonly root: string,
     public readonly cfg: Config,
