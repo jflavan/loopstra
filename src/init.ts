@@ -206,8 +206,9 @@ export async function uncommittedSetup(root: string, main: string): Promise<stri
   const settings = join(root, ".claude", "settings.json");
   const hooked = existsSync(settings) && (await Bun.file(settings).text()).includes(HOOK_MARK);
   const wanted = ["loopstra/config.yaml", ...prompts, ...(hooked ? [".claude/settings.json", HOOK_FILE] : [])];
-  const r = await new Git(root).run(["ls-tree", "-r", "--name-only", main, "--", ...wanted], true);
-  const onMain = new Set(r.code === 0 ? r.out.split(/\r?\n/).map((l) => l.trim()) : []);
+  // -z: git quotes a name that is not ASCII otherwise, and the quoted name would match nothing here.
+  const r = await new Git(root).run(["ls-tree", "-r", "-z", "--name-only", main, "--", ...wanted], true);
+  const onMain = new Set(r.code === 0 ? r.out.split("\0") : []);
   const missing = wanted.filter((p) => !onMain.has(p) && existsSync(join(root, p)));
   const named = missing.map((p) => (p.startsWith("loopstra/prompts/") ? "loopstra/prompts/" : p));
   return [...new Set(named)];

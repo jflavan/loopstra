@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { changeDiff, cutDiff, DIFF_MAX_CHARS, DIFF_MAX_LINES } from "../../src/console/diff";
 import { Git, GitTimeout, type GitRunOptions } from "../../src/git";
+import { parseDiff } from "../../src/ui/diff";
 import { run, tempGitRepo } from "../helpers";
 
 describe("a change's diff", () => {
@@ -19,6 +20,23 @@ describe("a change's diff", () => {
       expect(d.stat).toContain("src.txt");
       expect(d.patch).toContain("+hello");
       expect(await changeDiff(repo.path, "main", "nope")).toEqual({ exists: false, stat: "", patch: "", cut: false });
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  test("a file whose name is not ASCII is named as it is, so the page shows its name", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await run(["git", "checkout", "-q", "-b", "intent/csv"], repo.path);
+      await Bun.write(join(repo.path, "café.txt"), "hello\n");
+      await run(["git", "add", "-A"], repo.path);
+      await run(["git", "commit", "-q", "-m", "add"], repo.path);
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      const d = await changeDiff(repo.path, "main", "csv");
+      expect(d.stat).toContain("café.txt");
+      expect(d.patch).toContain("diff --git a/café.txt b/café.txt");
+      expect(parseDiff(d.patch)[0]).toEqual({ kind: "file", text: "café.txt" });
     } finally {
       repo.cleanup();
     }
@@ -90,7 +108,7 @@ describe("a change's diff", () => {
       // A tiny time limit cannot be relied on to land after the branch checks and before the diff,
       // so the diff itself is the call that times out.
       Git.prototype.run = function (this: Git, args: string[], opts?: boolean | GitRunOptions) {
-        if (args[0] === "diff") return Promise.reject(new GitTimeout(args, 30_000));
+        if (args.includes("diff")) return Promise.reject(new GitTimeout(args, 30_000));
         return realRun.call(this, args, opts);
       };
       expect(await changeDiff(repo.path, "main", "csv")).toEqual({ exists: true, stat: "", patch: "", cut: true });

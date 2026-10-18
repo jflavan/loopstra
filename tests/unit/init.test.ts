@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config";
-import { init } from "../../src/init";
+import { init, uncommittedSetup } from "../../src/init";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
 describe("init", () => {
@@ -114,6 +114,20 @@ describe("init", () => {
       expect(report.warnings.join(" ")).toContain("There is a claude.md but no CLAUDE.md.");
       expect(readdirSync(t.path)).not.toContain("CLAUDE.md");
       expect(await Bun.file(join(t.path, "claude.md")).text()).toBe("# Mine\n");
+    } finally { t.cleanup(); }
+  });
+
+  test("a committed prompt whose name is not ASCII counts as committed", async () => {
+    const t = await tempGitRepo();
+    try {
+      await Bun.write(join(t.path, "package.json"), JSON.stringify({ name: "x", scripts: { test: "bun test" } }));
+      await init(t.path);
+      await Bun.write(join(t.path, "loopstra", "prompts", "révision.md"), "Review it.\n");
+      expect(await uncommittedSetup(t.path, "main")).toContain("loopstra/prompts/");
+      await run(["git", "add", "-A"], t.path);
+      await run(["git", "commit", "-q", "-m", "init"], t.path);
+      // git quotes such a name ("loopstra/prompts/r\303\251vision.md") unless asked for NUL-separated names.
+      expect(await uncommittedSetup(t.path, "main")).toEqual([]);
     } finally { t.cleanup(); }
   });
 
