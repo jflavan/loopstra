@@ -64,6 +64,18 @@ describe("heartbeatState", () => {
     expect(heartbeatState(hb(stale), 60, NOW, { alive: () => false }).state).toBe("stopped");
   });
 
+  test("a stale heartbeat from another machine is a loop that ended, though its process id is alive here", () => {
+    const stale = { lastTickAt: ago(8 * 3600), lastBeatAt: ago(8 * 3600), working: ["big"], current: { slug: "big" } };
+    // process.pid is alive here, but on another machine it means nothing (status, the console, chat and tail call it so).
+    expect(heartbeatState(hb({ ...stale, host: "elsewhere" }), 60, NOW))
+      .toMatchObject({ state: "stopped", text: "Stopped — it did not shut down cleanly (last check 8 h ago)", working: [] });
+    // This machine's, or an older one without its machine, is checked here.
+    expect(heartbeatState(hb({ ...stale, host: thisHost() }), 60, NOW)).toMatchObject({ state: "not-responding", working: [{ slug: "big" }] });
+    expect(heartbeatState(hb(stale), 60, NOW).state).toBe("not-responding");
+    // A fresh one from another machine is running: it beats there.
+    expect(heartbeatState(hb({ host: "elsewhere" }), 60, NOW).state).toBe("running");
+  });
+
   test("stopped with a pause pending says when the next start will try", () => {
     const until = new Date(NOW.getTime() + 10 * 60_000);
     const hhmm = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
