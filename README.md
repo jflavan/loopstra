@@ -371,6 +371,8 @@ Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Re
 
 ## Develop Loopstra
 
+How the source is layered, the rules every part keeps, and the TypeScript practices the code holds itself to are in [docs/architecture.md](docs/architecture.md).
+
 ```
 git clone https://github.com/jflavan/loopstra.git
 cd loopstra
