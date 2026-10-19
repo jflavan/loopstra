@@ -243,6 +243,22 @@ describe("markdown", () => {
     // The first link is its text alone, and the page's own address stays a link.
     expect(html).toBe('<p>a <a href="/docs/x" target="_blank" rel="noopener noreferrer">b</a></p>\n');
   });
+
+  test("an address with a backslash is shown as its text: browsers read it as a slash, so /\\host and \\\\host leave for another host", () => {
+    for (const text of [
+      "[a](/\\evil.example/x)",
+      "[a](\\\\evil.example/x)",
+      "[a](<\\\\evil.example>)",
+      // Markdown's escaped slashes are plain slashes by the time the address is checked.
+      "[a](\\/\\/evil.example)",
+      "[a](docs\\x.md)",
+      "[a]\n\n[a]: /\\evil.example",
+    ]) {
+      const html = renderMarkdown(text);
+      expect({ text, html, href: html.includes("href") }).toEqual({ text, html, href: false });
+    }
+    expect(renderMarkdown("[a](/docs/x)")).toContain('<a href="/docs/x"');
+  });
 });
 
 describe("a transcript on the page", () => {

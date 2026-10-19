@@ -8,10 +8,11 @@ const escapeHtml = (s: string): string =>
  * An address with spaces or control characters is refused first: marked passes `<java\tscript:…>` on
  * unchanged, and browsers drop those characters, which would turn it back into a live script link.
  * One starting with two slashes (`//evil.example`) is refused too: it reads as relative but leaves
- * for another host.
+ * for another host. So is any with a backslash, which browsers read as a slash in a web address:
+ * `/\evil.example` and `\\evil.example` leave for another host the same way.
  */
 function safeHref(href: string): boolean {
-  if (/[\u0000- \u007f-\u009f]/.test(href) || href.startsWith("//")) return false;
+  if (/[\u0000- \u007f-\u009f\\]/.test(href) || href.startsWith("//")) return false;
   return /^https?:\/\//i.test(href) || !/^[a-z][a-z0-9+.-]*:/i.test(href);
 }
 
