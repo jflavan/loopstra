@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendConversation, readConversation } from "../../src/conversation";
 import { changeStoppedBy, inboxDir, inboxFor, leaveDelivered, sendToSession, writeChangeStop, type InboxMessage } from "../../src/inbox";
+import { StepContext } from "../../src/context";
 import { agentPhase } from "../../src/phases";
 import { runStepGuarded } from "../../src/scheduler";
 import { runDesignStep } from "../../src/stages/design";
@@ -217,6 +218,66 @@ describe("steering a running session", () => {
       expect(howDone(repo.path, ahead)).toBeNull();
       expect(inboxFor(repo.path, SLUG, 7).map((x) => x.id)).toEqual([ahead.id]);
     } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a message for a session alongside that ended while a later one runs is kept for the next session; one for a session yet to come waits", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const ctl = { message: () => true, stop: () => false, redirect: () => false };
+      const first = trace.phaseStart(SLUG, "design", "agent");
+      const alongside = trace.phaseStart(SLUG, "plan-ahead", "agent");
+      trace.phaseEnd(SLUG, alongside, { status: "success" });
+      const detach = deliverInbox(ctx, first, "design", ctl);
+      const late = sendToSession(repo.path, SLUG, { seq: alongside, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      const ahead = sendToSession(repo.path, SLUG, { seq: alongside + 1, kind: "message", text: "later still", by: "John", via: "the dashboard" });
+      await until(() => howDone(repo.path, late) === "next session");
+      await detach();
+      expect(readConversation(repo.path, SLUG)).toContain("· John (the dashboard) → the next session\ncover negatives");
+      expect(howDone(repo.path, ahead)).toBeNull();
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("an ended session's message whose record keeps failing is tried a few times, further apart each time, and traced once", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    // Every try reads the name of the branch it records on, once; nothing else in the watching does.
+    let tries = 0;
+    const counting = { ...ctx.cfg, get main_branch() { tries++; return ctx.cfg.main_branch; } };
+    const watching = new StepContext(repo.path, counting, trace, ctx.intent);
+    const lock = join(repo.path, ".git", "refs", "heads", "main.lock");
+    const start = Date.now();
+    let detach: (() => Promise<void>) | null = null;
+    try {
+      // A lock on main's ref: every record's commit fails.
+      writeFileSync(lock, "");
+      const ctl = { message: () => true, stop: () => false, redirect: () => false };
+      detach = deliverInbox(watching, 6, "design", ctl);
+      const m = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      await until(() => tries === 1);
+      // Looks every second: none tries again within the wait.
+      await Bun.sleep(2500);
+      expect(tries).toBe(1);
+      // Past each wait (one minute, then two, then four) one more try; then it is left for the next step's sweep.
+      for (const [minutes, expected] of [[1.1, 2], [3.2, 3], [7.3, 4], [60, 4], [120, 4]] as const) {
+        setSystemTime(new Date(start + minutes * 60_000));
+        await Bun.sleep(1500);
+        expect(tries).toBe(expected);
+      }
+      const errors = trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes(m.id));
+      expect(errors).toHaveLength(1);
+      expect(howDone(repo.path, m)).toBeNull();
+      setSystemTime();
+      rmSync(lock);
+      await detach();
+      detach = null;
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m)).toBe("next session");
+    } finally {
+      setSystemTime();
+      await detach?.();
       trace.close(); repo.cleanup();
     }
   }, 30_000);
