@@ -116,6 +116,11 @@ describe("hold", () => {
     expect(parseIntentFile("---\nstatus: building\nhold:\n---\n# Intent: x\n").frontmatter.hold).toBe("");
     expect(parseIntentFile("---\nstatus: building\n---\n# Intent: x\n").frontmatter.hold).toBe("");
   });
+
+  test("a hold that ends in blank lines, written last, is read back with them", () => {
+    const held = parseIntentFile("---\nstatus: building\nhold: \"waiting for legal\\n\\n\"\n---\n# Intent: x\n");
+    expect(parseIntentFile(serializeIntentFile(held)).frontmatter.hold).toBe("waiting for legal\n\n");
+  });
 });
 
 describe("question", () => {

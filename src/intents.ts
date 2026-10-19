@@ -93,7 +93,8 @@ export function parseIntentFile(rawText: string): IntentFile {
   } else if (looksFenced(text)) {
     throw new FrontmatterProblem("---", "intent.md frontmatter problem: its --- fence is not one Loopstra reads", false, FENCE_PROBLEM);
   }
-  const raw: unknown = fmText.trim() ? parse(fmText) : {};
+  // The line break before the closing fence is the frontmatter's last; FRONTMATTER takes it with the fence.
+  const raw: unknown = fmText.trim() ? parse(`${fmText}\n`) : {};
   const fm = Frontmatter.safeParse(raw ?? {});
   if (!fm.success) {
     const issue = fm.error.issues[0];
@@ -127,7 +128,8 @@ const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question"]);
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
   // A blank hold or question is none: it gets no line, so a released change's file does not say `hold: ""`.
-  const fm = stringify(Object.fromEntries(Object.entries(file.frontmatter).filter(([k, v]) => !(BLANK_LEFT_OUT.has(k) && !v))), { lineWidth: 0 }).trimEnd();
+  // Only stringify's own last line break goes: a value kept with its line breaks (`|+`) may end in more.
+  const fm = stringify(Object.fromEntries(Object.entries(file.frontmatter).filter(([k, v]) => !(BLANK_LEFT_OUT.has(k) && !v))), { lineWidth: 0 }).replace(/\n$/, "");
   const body = file.body.replace(/^\r?\n/, "");
   const text = `---\n${fm}\n---\n${body}`;
   return crlf ? text.replace(/\r?\n/g, "\r\n") : text;
