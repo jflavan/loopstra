@@ -506,6 +506,26 @@ describe("the loop lock", () => {
     }
   }, 60_000);
 
+  test("a removal refused while another start takes the lock over is that race, lost; one refused for good says what is wrong", async () => {
+    const t = tempDir();
+    try {
+      // Another start is removing the same lock left behind, and makes its own: Windows refuses this one's removal.
+      writeLock(t.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      const other = { pid: process.pid + 1_000_000, host: thisHost(), startedAt: new Date().toISOString() };
+      const racing = () => {
+        writeLock(t.path, other);
+        throw Object.assign(new Error("EFAULT: bad address in system call argument, rm"), { code: "EFAULT" });
+      };
+      expect(await takeLoopLock(t.path, 60, undefined, racing)).toBe(loopAlreadyRunning(other.pid));
+      // Nothing else is changing it: the folder cannot be written, and the start says so.
+      writeLock(t.path, { pid: DEAD_PID, host: thisHost(), startedAt: ago(60) });
+      const stuck = () => { throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" }); };
+      expect(await takeLoopLock(t.path, 60, undefined, stuck)).toStartWith("Could not make the loop's lock, .loopstra/loop.lock (EPERM");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a start keeps a lock it made only while the lock still names it", async () => {
     const t = tempDir();
     try {
