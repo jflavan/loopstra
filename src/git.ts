@@ -364,7 +364,7 @@ export class Git {
    * differs from what HEAD has.
    */
   async stagePaths(paths: string[], o: GitRunOptions = {}): Promise<string[] | null> {
-    const names =(out: string) => out.split("\0").filter(Boolean);
+    const names = (out: string) => out.split("\0").filter(Boolean);
     const covers = (list: string[]) => (p: string) => list.some((l) => l === p || l.startsWith(`${p.replace(/\/$/, "")}/`));
     // `git add -A -- <pathspec>` errors on a path that matches nothing it can stage, so these are left out:
     // - one on disk that is ignored and untracked (a repository that ignores .claude/, say);
@@ -424,8 +424,9 @@ export class Git {
           continue;
         }
         const blob = (await this.run(["hash-object", "-w", `--path=${c.rel}`, "--stdin"], { ...o, stdin: c.text })).out.trim();
-        // A file `parent` has keeps its mode (an executable stays one); a new one is a plain file.
-        const mode = (await this.run(["ls-tree", parent, "--", c.rel], o)).out.split(/\s/)[0] || "100644";
+        // A file already in the temporary index keeps its mode there (`parent`'s, or one a person set
+        // on disk that stagePaths took along: an executable stays one); a new one is a plain file.
+        const mode = (await this.run(["ls-files", "-s", "--", c.rel], o)).out.split(/\s/)[0] || "100644";
         await this.run(["update-index", "--add", "--cacheinfo", `${mode},${blob},${c.rel}`], o);
       }
       const tree = (await this.run(["write-tree"], o)).out.trim();
@@ -437,10 +438,18 @@ export class Git {
     }
   }
 
-  /** Moves HEAD (its branch) from `from` to `to`, as a compare-and-swap: false when HEAD is no longer `from`. */
+  /**
+   * Moves HEAD (its branch) from `from` to `to`, as a compare-and-swap: false when HEAD is no longer
+   * `from`. Any other failure (a missing object, a ref another git process has locked) throws a
+   * GitError, so a real error is never taken for a race.
+   */
   async moveHead(from: string, to: string): Promise<boolean> {
-    const r = await this.run(["update-ref", "-m", "loopstra: record", "HEAD", to, from], { allowFail: true, cleanup: true });
-    return r.code === 0;
+    const args = ["update-ref", "-m", "loopstra: record", "HEAD", to, from];
+    const r = await this.run(args, { allowFail: true, cleanup: true });
+    if (r.code === 0) return true;
+    // git's words when the ref holds another value (LC_ALL=C, see gitEnv): "cannot lock ref 'HEAD': is at <sha> but expected <sha>".
+    if (/: is at [0-9a-f]+ but expected [0-9a-f]+/.test(r.err)) return false;
+    throw new GitError(args, r.out, r.err, r.code);
   }
 
   /** The commit a ref names, or null when it names none. */

@@ -15,9 +15,14 @@ export class RecordDraft {
 
   constructor(readonly root: string, readonly slug: string) {}
 
-  /** Throws for a path outside the change's folder and queue.md, including one that climbs out with `..` or uses a backslash. */
+  /**
+   * Throws for a path outside the change's folder and queue.md. Inside the folder, an empty, `.` or
+   * `..` segment (each names a file two ways, climbs out, or names none) and a backslash are refused too.
+   */
   private check(rel: string): void {
-    const inFolder = rel.startsWith(`intent/${this.slug}/`) && !rel.split("/").includes("..") && !rel.includes("\\");
+    const prefix = `intent/${this.slug}/`;
+    const inFolder = rel.startsWith(prefix) && !rel.includes("\\")
+      && rel.slice(prefix.length).split("/").every((s) => s !== "" && s !== "." && s !== "..");
     if (!inFolder && rel !== "intent/queue.md") throw new Error(`a record of ${this.slug} cannot write ${rel}`);
   }
 

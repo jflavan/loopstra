@@ -32,6 +32,11 @@ describe("RecordDraft", () => {
     expect(() => d.write("intent/a/../b/intent.md", "x")).toThrow();
     expect(() => d.write("intent/a\\x.md", "x")).toThrow();
     expect(() => d.read("src/index.ts")).toThrow();
+    // An empty, `.` or `..` segment anywhere inside the folder is refused: each names a path two ways, or none.
+    for (const rel of ["intent/a/", "intent/a//x.md", "intent/a/./x.md", "intent/a/sub/../x.md", "intent/a/x.md/", "intent/a/.."]) {
+      expect(() => d.write(rel, "x")).toThrow(`a record of a cannot write ${rel}`);
+    }
+    expect(() => d.write("intent/a/sub/x.md", "x")).not.toThrow();
     expect(() => d.write("intent/queue.md", "q")).not.toThrow();
   });
 });

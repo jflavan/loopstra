@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Git } from "../../src/git";
+import { Git, GitError } from "../../src/git";
 import { run, tempGitRepo } from "../helpers";
 
 async function repo() {
@@ -21,9 +21,10 @@ describe("Git.commitFiles", () => {
     try {
       const git = new Git(r.path);
       const parent = await git.headSha();
-      // A person's uncommitted edit in the folder is taken along; one outside it is not.
+      // A person's uncommitted edit in the folder is taken along; one outside it is not, even staged.
       writeFileSync(join(r.path, "intent", "a", "notes.md"), "a person's notes\n");
       writeFileSync(join(r.path, "other.txt"), "edited elsewhere\n");
+      await run(["git", "add", "other.txt"], r.path);
       const commit = await git.commitFiles(parent, ["intent/a", "intent/queue.md"], [
         { rel: "intent/a/intent.md", text: "---\nstatus: accepted\n---\n" },
         { rel: "intent/a/old.md", text: null },
@@ -35,9 +36,10 @@ describe("Git.commitFiles", () => {
       expect((await run(["git", "cat-file", "-e", `${commit}:intent/a/old.md`], r.path)).code).not.toBe(0);
       expect((await run(["git", "show", `${commit}:other.txt`], r.path)).out).toBe("other\n");
       expect((await run(["git", "log", "-1", "--format=%P%n%s", commit!], r.path)).out.trim()).toBe(`${parent}\nloopstra(a): accepted [skip ci]`);
-      // Untouched: HEAD, the index, the files.
+      expect((await run(["git", "log", "-1", "--format=%an <%ae>", commit!], r.path)).out.trim()).toBe("Loopstra <loopstra@localhost>");
+      // Untouched: HEAD, the index (the person's staged edit is still staged, and only it), the files.
       expect(await git.headSha()).toBe(parent);
-      expect((await run(["git", "diff", "--cached", "--name-only"], r.path)).out.trim()).toBe("");
+      expect((await run(["git", "diff", "--cached", "--name-only"], r.path)).out.trim()).toBe("other.txt");
       expect(readFileSync(join(r.path, "intent", "a", "intent.md"), "utf8")).toBe("---\nstatus: draft\n---\n");
     } finally { r.cleanup(); }
   });
@@ -52,6 +54,18 @@ describe("Git.commitFiles", () => {
       expect(await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/x.md", text: "x\n" }], "with a hook")).not.toBeNull();
     } finally { r.cleanup(); }
   });
+
+  // Windows checkouts do not track the executable bit (core.fileMode is false there).
+  test.skipIf(process.platform === "win32")("a written file keeps the mode a person set on disk", async () => {
+    const r = await repo();
+    try {
+      const git = new Git(r.path);
+      const parent = await git.headSha();
+      chmodSync(join(r.path, "intent", "a", "intent.md"), 0o755);
+      const commit = await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/intent.md", text: "changed\n" }], "x");
+      expect((await run(["git", "ls-tree", commit!, "--", "intent/a/intent.md"], r.path)).out.split(/\s/)[0]).toBe("100755");
+    } finally { r.cleanup(); }
+  });
 });
 
 describe("Git.moveHead", () => {
@@ -61,7 +75,11 @@ describe("Git.moveHead", () => {
       const git = new Git(r.path);
       const parent = await git.headSha();
       const commit = (await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/x.md", text: "x\n" }], "x"))!;
-      expect(await git.moveHead("0".repeat(40), commit)).toBe(false);
+      const other = (await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/y.md", text: "y\n" }], "y"))!;
+      expect(await git.moveHead(other, commit)).toBe(false);
+      expect(await git.headSha()).toBe(parent);
+      // A failure that is not a moved HEAD (here, a commit that does not exist) is an error, not a race.
+      await expect(git.moveHead(parent, "1".repeat(40))).rejects.toThrow(GitError);
       expect(await git.headSha()).toBe(parent);
       expect(await git.moveHead(parent, commit)).toBe(true);
       expect(await git.headSha()).toBe(commit);
