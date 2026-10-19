@@ -1,0 +1,4 @@
+[test]
+# Applies when tests run with --coverage (bun run coverage): fail below 80% lines and functions.
+coverageThreshold = { line = 0.8, function = 0.8 }
+coverageSkipTestFiles = true
