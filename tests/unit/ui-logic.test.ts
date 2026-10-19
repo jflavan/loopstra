@@ -2,7 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { decide, focusOr, keyLabel, keyMatcher, keyName, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
+import { decide, enterPressed, focusOr, keyLabel, keyMatcher, keyName, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore, stepAt } from "../../src/ui/palette";
 import { changesAddress, parseRoute, routePath, type Route } from "../../src/ui/router";
@@ -126,6 +126,14 @@ describe("keys", () => {
     expect(sendsOnEnter({ ...enter(), key: "a" })).toBe(false);
     expect(sendsOnEnter(enter({ isComposing: true }))).toBe(false);
     expect(sendsOnEnter(enter({ keyCode: 229 }))).toBe(false);
+  });
+
+  test("Enter that picks the palette's row is any Enter but an input method's", () => {
+    const enter = (mods: Partial<{ isComposing: boolean; keyCode: number }> = {}) => ({ key: "Enter", isComposing: false, keyCode: 13, ...mods });
+    expect(enterPressed(enter())).toBe(true);
+    expect(enterPressed({ ...enter(), key: "a" })).toBe(false);
+    expect(enterPressed(enter({ isComposing: true }))).toBe(false);
+    expect(enterPressed(enter({ keyCode: 229 }))).toBe(false);
   });
 
   test("after a form closes the focus goes to its button, or to the box when the button is gone or disabled (a stopped session)", () => {

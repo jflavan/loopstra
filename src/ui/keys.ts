@@ -41,6 +41,11 @@ export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; al
  */
 const composing = (e: { isComposing: boolean; keyCode: number }): boolean => e.isComposing || e.keyCode === 229;
 
+/** Whether a key press is Enter meant for the page (the palette picks its row on it): never while an input method is picking a character. */
+export function enterPressed(e: { key: string; isComposing: boolean; keyCode: number }): boolean {
+  return !composing(e) && e.key === "Enter";
+}
+
 /** Whether a key press in a message box sends it: Ctrl or Cmd with Enter, never while an input method is picking a character. */
 export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }): boolean {
   return !composing(e) && e.key === "Enter" && (e.ctrlKey || e.metaKey);

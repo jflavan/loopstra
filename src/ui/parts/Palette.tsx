@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { notificationsOn, setNotifications } from "../alerts";
-import { keyLabel, onMac } from "../keys";
+import { enterPressed, keyLabel, onMac } from "../keys";
 import { navigate } from "../nav";
 import { clampAt, filterCommands, type Command } from "../palette";
 import { setLoopHeld } from "../requests";
@@ -79,7 +79,7 @@ function PaletteBox() {
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") { e.preventDefault(); setAt(clampAt(cur + 1, items.length)); }
             else if (e.key === "ArrowUp") { e.preventDefault(); setAt(clampAt(cur - 1, items.length)); }
-            else if (e.key === "Enter") { e.preventDefault(); run(items[cur]); }
+            else if (enterPressed(e)) { e.preventDefault(); run(items[cur]); }
           }}
         />
         <ul role="listbox" id="palette-list" aria-label="Results" hidden={!items.length}>
