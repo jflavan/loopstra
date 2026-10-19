@@ -26,3 +26,17 @@ describe("StreamCollector", () => {
     expect(r.structuredOutput).toBeUndefined();
   });
 });
+
+describe("StreamCollector with lines that are JSON but not events", () => {
+  test("ignores null, numbers, strings, arrays and objects without a type", () => {
+    const c = new StreamCollector();
+    for (const line of ["null", "123", '"text"', "[1,2]", "true", '{"session_id":"s9"}', '{"type":7}']) expect(c.push(line)).toBeNull();
+    c.push('{"type":"system","subtype":"init","session_id":"s1"}');
+    c.push('{"type":"result","subtype":"success","session_id":"s1","total_cost_usd":0.5,"structured_output":{"ok":1}}');
+    const r = c.finish();
+    expect(r.events.length).toBe(2);
+    expect(r.sessionId).toBe("s1");
+    expect(r.subtype).toBe("success");
+    expect(r.costUsd).toBe(0.5);
+  });
+});

@@ -6,7 +6,7 @@ import { clampAt, filterCommands, type Command } from "../palette";
 import { setLoopHeld } from "../requests";
 import { changes, loop, openDrawer, paletteOpen, running, toast } from "../store";
 import { cycleTheme } from "../theme";
-import { useReturnFocus } from "./focus";
+import { useInertPage, useReturnFocus } from "./focus";
 
 /** Everything the palette can do: go to a screen, watch an agent, open a change, and a few settings. */
 function commands(): Command[] {
@@ -49,6 +49,7 @@ function PaletteBox() {
   const [at, setAt] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   useReturnFocus();
+  useInertPage();
   useEffect(() => { input.current?.focus(); }, []);
   const items = filterCommands(commands(), query);
   // The list can shrink under the highlighted row (typing, or an agent finishing), so it is clamped on every draw.

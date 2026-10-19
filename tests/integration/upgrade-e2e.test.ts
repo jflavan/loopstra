@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, tempDir, tempGitRepo } from "../helpers";
 
@@ -64,6 +64,13 @@ describe("upgrade end to end", () => {
         expect(shown.code).toBe(0);
         writeFileSync(join(repo.path, "loopstra", "prompts", basename(path)), shown.out);
       }
+      // The fixed files the old init wrote too, as committed: a repository without one is taken to have removed it on purpose (see adoptLegacy).
+      for (const [template, path] of [["templates/skill/SKILL.md", ".claude/skills/loopstra/SKILL.md"], ["templates/intent-README.md", "intent/README.md"], ["templates/REVIEW.md", "REVIEW.md"]] as const) {
+        const shown = await run(["git", "show", `HEAD:${template}`], ROOT);
+        expect(shown.code).toBe(0);
+        mkdirSync(dirname(join(repo.path, path)), { recursive: true });
+        writeFileSync(join(repo.path, path), shown.out);
+      }
       const config = readFileSync(join(ROOT, "templates", "config.yaml"), "utf8").replace("__MAIN_BRANCH__", "main").replace("__COMMANDS__", '  test: "bun test"');
       writeFileSync(join(repo.path, "loopstra", "config.yaml"), config);
       mkdirSync(join(repo.path, ".claude", "hooks"), { recursive: true });
@@ -98,7 +105,7 @@ describe("upgrade end to end", () => {
         expect((await run(["git", "log", "-1", "--format=%s"], repo.path)).out.trim()).toBe("loopstra: upgrade to 0.9.1 (from 0.9.0)");
         expect((await exec([bin, "--version"], repo.path, env)).out.trim()).toBe("0.9.1");
       } finally {
-        server.stop(true);
+        await server.stop(true);
       }
 
       // The installed package serves the console: Bun bundles its page from src/ui, with the JSX

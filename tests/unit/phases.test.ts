@@ -479,6 +479,7 @@ describe("codePhase", () => {
     const phases = trace.phases("x");
     expect(phases.map((p) => p.status)).toEqual(["success", "fail"]);
     expect(phases[1]?.error).toContain("kaboom");
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- a step that throws something that is not an Error
     const odd = await codePhase(ctx, "odd", async () => { throw null; });
     expect(odd.ok).toBe(false);
     if (!odd.ok) expect(odd.detail).toContain("null");

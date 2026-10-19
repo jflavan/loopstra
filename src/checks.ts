@@ -11,10 +11,10 @@ export function headingsPresent(markdown: string, headings: string[]): { ok: tru
   return missing.length ? { ok: false, missing } : { ok: true };
 }
 
-export interface PlanFile { path: string; new: boolean }
+interface PlanFile { path: string; new: boolean }
 
 /** Repository-relative path in one spelling: forward slashes, no leading `./`. */
-export function normalizePath(p: string): string {
+function normalizePath(p: string): string {
   let s = p.trim().replace(/\\/g, "/");
   while (s.startsWith("./")) s = s.slice(2);
   return s;

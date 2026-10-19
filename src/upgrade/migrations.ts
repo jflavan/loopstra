@@ -21,7 +21,8 @@ export const CONFIG_VERSION = 1 + MIGRATIONS.length;
  * Applies every migration from the file's version on, then checks the result with `validate` (which
  * throws a ConfigError naming the setting). Throws without returning anything when a step or the
  * check fails, so nothing half-migrated is ever written. A file with no whole-number version, or with
- * a version newer than the migrations reach (written by a later Loopstra), is refused.
+ * a version newer than the migrations reach (written by a later Loopstra), is refused. A file with
+ * Windows line endings keeps them (as ConfigDocument does): the YAML library writes `\n`.
  */
 export function migrateConfig(text: string, migrations: readonly Migration[] = MIGRATIONS, validate: (text: string) => void): { text: string; from: number; to: number } {
   const doc = parseDocument(text);
@@ -37,7 +38,9 @@ export function migrateConfig(text: string, migrations: readonly Migration[] = M
     version = m.from + 1;
     doc.set("version", version);
   }
-  const out = version === from ? text : doc.toString();
+  // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.
+  const crlf = (text.match(/\r\n/g)?.length ?? 0) * 2 > (text.match(/\n/g)?.length ?? 0);
+  const out = version === from ? text : crlf ? doc.toString().replace(/\r?\n/g, "\r\n") : doc.toString();
   validate(out);
   return { text: out, from, to: version };
 }

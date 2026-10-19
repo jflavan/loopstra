@@ -33,7 +33,7 @@ export interface Heartbeat {
   pauseReason?: string | null;
 }
 
-export type LoopState = "running" | "paused" | "stopped" | "not-responding";
+type LoopState = "running" | "paused" | "stopped" | "not-responding";
 
 export interface LoopStatus {
   state: LoopState;
@@ -51,7 +51,7 @@ function workingOf(hb: Heartbeat): Array<{ slug: string }> {
 
 
 /** How often a live loop refreshes `lastBeatAt`. */
-export const BEAT_MS = 5_000;
+const BEAT_MS = 5_000;
 
 export function heartbeatPath(root: string): string {
   return join(root, ".loopstra", "heartbeat.json");
@@ -163,12 +163,16 @@ export function thisHost(): string {
  * The process of the loop running in this repository, by its heartbeat, or null when none is:
  * running, paused, or not responding. A heartbeat written on this machine whose process is gone is
  * a loop that ended (closed window, killed, crashed) at once; one from another machine sharing the
- * folder, or an older one without its machine, counts as running until it goes stale.
+ * folder, or an older one without its machine, counts as running until it goes stale. Another
+ * machine's process id means nothing here, so once its heartbeat is stale it is a loop that ended,
+ * even when a process on this machine happens to have the same id; an older heartbeat without its
+ * machine is taken as this machine's.
  */
 export function runningLoopPid(root: string, pollSeconds: number): number | null {
   const hb = readHeartbeat(root);
   if (!hb || (hb.host === thisHost() && !pidAlive(hb.pid))) return null;
-  return heartbeatState(hb, pollSeconds).state === "stopped" ? null : hb.pid;
+  const here = hb.host === undefined || hb.host === thisHost();
+  return heartbeatState(hb, pollSeconds, new Date(), { alive: here ? pidAlive : () => false }).state === "stopped" ? null : hb.pid;
 }
 
 /**
@@ -294,7 +298,7 @@ export function dropLoopLock(root: string): void {
  * The loop's pause after the assistant was unavailable, `.loopstra/paused.json`. It is on disk, not
  * in the process, so a restart keeps backing off. `failures` counts unavailable sessions in a row.
  */
-export interface Pause {
+interface Pause {
   until: string;
   /** Plain words for the owner, with the time of the next try. */
   reason: string;
@@ -312,7 +316,7 @@ export interface Pause {
 }
 
 /** What made the loop pause: the change, its phase, the line that matched, and the model it asked. */
-export interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
+interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
 
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
@@ -390,7 +394,7 @@ export function readLoopHold(root: string): LoopHold | null {
   let h: Partial<Record<keyof LoopHold, unknown>> = {};
   try {
     const read = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (read && typeof read === "object") h = read as typeof h;
+    if (read && typeof read === "object") h = read;
   } catch { /* unreadable: it still pauses */ }
   return { by: typeof h.by === "string" ? h.by : "someone", at: typeof h.at === "string" ? h.at : since };
 }
@@ -415,7 +419,7 @@ export function loopHoldText(h: LoopHold): string {
 }
 
 /** "14:32", local time. */
-export function clockText(d: Date): string {
+function clockText(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
@@ -443,7 +447,7 @@ export function clearPause(root: string, slug?: string, now: Date = new Date(), 
 }
 
 /** The tick waits for the loop's daily budget: why, and until when the loop line says so. */
-export interface DayPause { until: string; reason: string }
+interface DayPause { until: string; reason: string }
 
 export interface LoopBeat {
   tickStarted(): void;

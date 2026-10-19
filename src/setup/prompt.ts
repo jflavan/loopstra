@@ -11,12 +11,12 @@ export class SetupStopped extends Error {
 }
 
 /** A spending limit in US dollars, or no limit. */
-export type Amount = number | "none";
+type Amount = number | "none";
 
 /** What setup converts minutes at unless the person gives another rate: about $2 per 10 minutes. */
 export const DEFAULT_RATE_PER_MINUTE = USD_PER_MINUTE;
 
-export interface TextOptions {
+interface TextOptions {
   /** What Enter takes. */
   suggestion?: string;
   /** May be left empty; "-" empties one that has a suggestion (on a question that needs an answer, it is asked again). */

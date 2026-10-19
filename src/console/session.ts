@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { Trace, type PhaseRow } from "../trace";
-import { runsDir } from "./files";
+import { runsDir } from "../paths";
 import { frame, PING, type Send } from "./hub";
 import { TranscriptReader } from "./transcript";
 import type { SessionMessage } from "./types";
@@ -14,7 +14,7 @@ function sizeOf(path: string): number {
 }
 
 /** What a follower is told: one message, with an item's resume offset; false once whoever reads it is gone (it then stops). */
-export type Emit = (msg: SessionMessage, offset?: number) => boolean;
+type Emit = (msg: SessionMessage, offset?: number) => boolean;
 
 /**
  * Streams one phase's transcript to a page (see followSession), each item with its offset as the

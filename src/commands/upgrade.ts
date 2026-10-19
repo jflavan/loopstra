@@ -66,7 +66,7 @@ export function realIo(root: string): UpgradeIo {
  * reached, or this is a development checkout), brings the repository up to this version. `--repo`
  * skips the install; `--check` installs and writes nothing, and says what would happen.
  */
-export async function upgradeCommand(root: string, args: string[], io: UpgradeIo): Promise<number> {
+export async function upgradeCommand(args: string[], io: UpgradeIo): Promise<number> {
   const dev = io.installed.startsWith(DEV_VERSION);
   if (args.includes("--check")) {
     if (dev) {

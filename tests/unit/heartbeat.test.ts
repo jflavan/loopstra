@@ -548,6 +548,20 @@ describe("runningLoopPid", () => {
       t.cleanup();
     }
   });
+
+  test("a stale heartbeat from another machine is no loop here, even when its process id is a live process on this machine", () => {
+    const t = tempDir();
+    try {
+      const stale = new Date(Date.now() - 3_600_000).toISOString();
+      writeHeartbeat(t.path, hb({ pid: process.pid, host: "elsewhere", lastBeatAt: stale }));
+      expect(runningLoopPid(t.path, 60)).toBeNull();
+      // An older heartbeat without its machine is taken as this machine's: its live process is a loop not responding.
+      writeHeartbeat(t.path, hb({ pid: process.pid, lastBeatAt: stale }));
+      expect(runningLoopPid(t.path, 60)).toBe(process.pid);
+    } finally {
+      t.cleanup();
+    }
+  });
 });
 
 describe("the scheduler writes the heartbeat", () => {
@@ -669,6 +683,18 @@ describe("the loop's pause by a person", () => {
     const stopped = heartbeatState({ ...beat, stopped: true }, 60, now, { pause: null, hold });
     expect(stopped.state).toBe("stopped");
     expect(stopped.text).toEndWith("Paused by John: the next start starts nothing until it is resumed.");
+  });
+
+  test("an outage pause and a person's hold at once: the outage is what the line says, and a stopped loop names the outage first", () => {
+    const until = new Date(NOW.getTime() + 10 * 60_000);
+    const hhmm = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
+    const pause = { until: until.toISOString(), reason: `The assistant is unavailable. Retrying at ${hhmm}.`, failures: 1 };
+    const hold = { by: "John", at: ago(60) };
+    const running = heartbeatState(hb({ pausedUntil: pause.until, pauseReason: pause.reason, current: { slug: "a" }, working: ["a"] }), 60, NOW, { pause, hold });
+    expect(running).toEqual({ state: "paused", text: `Paused — The assistant is unavailable. Retrying at ${hhmm}.`, working: [] });
+    const stopped = heartbeatState(hb({ stopped: true, lastTickAt: ago(300) }), 60, NOW, { pause, hold });
+    expect(stopped.state).toBe("stopped");
+    expect(stopped.text).toBe(`Stopped — last check 5 min ago. The assistant was unavailable; the next start waits until ${hhmm}. Paused by John: the next start starts nothing until it is resumed.`);
   });
 });
 

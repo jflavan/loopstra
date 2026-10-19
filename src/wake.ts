@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
  * `.loopstra/wake`: written whenever someone asks the loop for something (a request, a resume). The
  * loop's sleep between ticks checks it every second and starts the next tick as soon as it changes.
  */
-export function wakePath(root: string): string {
+function wakePath(root: string): string {
   return join(root, ".loopstra", "wake");
 }
 

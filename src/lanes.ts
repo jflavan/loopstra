@@ -31,7 +31,7 @@ const ORDER = { merge: 0, sync: 1, checkout: 2, remote: 3 } as const;
 type Kind = keyof typeof ORDER;
 
 /** A first-come, first-served lock, re-entrant within one async context. */
-export interface Lock {
+interface Lock {
   readonly name: string;
   /** Runs `fn` once every earlier caller is done (at once when this context holds the lock already). `who` is recorded as the holder. */
   run<T>(fn: () => Promise<T>, who?: string): Promise<T>;
@@ -159,7 +159,7 @@ export function claim(slug: string): boolean {
   return true;
 }
 
-/** The claimed changes whose step runs none of the project's commands (a design or plan step). */
+/** The claimed changes whose step runs none of the project's commands (a design or plan step, in a lane or beside them; see thinkingStep in the scheduler). */
 const noCommands = new Set<string>();
 
 /** Marks a claimed change's step as one that runs none of the project's commands, until it is released. */

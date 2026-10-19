@@ -1,7 +1,10 @@
 import { signal } from "@preact/signals";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { aboutOf, aboutPrefix, addLines, type About, type Line } from "../chat";
+import { sendsOnEnter } from "../keys";
 import { drawer, meta } from "../store";
+import { Connecting } from "./Connecting";
+import { useReturnFocus } from "./focus";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
 
@@ -28,8 +31,13 @@ function threadId(): string {
 }
 
 export function Drawer() {
+  return drawer.value.open ? <DrawerBox /> : null;
+}
+
+/** The drawer itself, mounted only while it is open, so closing it gives the focus back to where it was. */
+function DrawerBox() {
   const d = drawer.value;
-  if (!d.open) return null;
+  useReturnFocus();
   const close = () => { drawer.value = { ...d, open: false }; };
   return (
     <aside class="drawer" aria-label="The orchestrator">
@@ -38,7 +46,7 @@ export function Drawer() {
         <span class="muted about">{d.about ? `About ${d.about.title}` : "Ask how things are going, or talk through a new change."}</span>
         <button class="ghost" onClick={close} aria-label="Close"><Icon name="close" /></button>
       </header>
-      {meta.value === null ? <p class="pad muted">Connecting…</p>
+      {meta.value === null ? <Connecting pad />
         : !meta.value.chat ? <p class="pad muted">Chat is off in this console: it was started with --no-chat.</p>
         : <Chat about={d.about} />}
     </aside>
@@ -97,7 +105,8 @@ export function Chat({ about, autoFocus = true }: { about: About | null; autoFoc
   };
   useEffect(() => {
     void refresh();
-    const timer = setInterval(refresh, 1500);
+    // The poll is wrapped: a timer given an async function would lose a rejection (read catches its own, so none is expected).
+    const timer = setInterval(() => void refresh(), 1500);
     return () => clearInterval(timer);
   }, []);
   // The cursor is in the box when the drawer opens, and when a button elsewhere points it at another change or session.
@@ -150,7 +159,7 @@ export function Chat({ about, autoFocus = true }: { about: About | null; autoFoc
           placeholder="Message the orchestrator"
           aria-label="Message the orchestrator"
           onInput={(e) => setText(e.currentTarget.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }}
+          onKeyDown={(e) => { if (sendsOnEnter(e)) { e.preventDefault(); void send(); } }}
         />
         <button class="btn primary" type="submit" disabled={busy || !text.trim()}>Send</button>
       </form>

@@ -1,21 +1,30 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import type { Priority, Status } from "./intents";
-import { chatDir, readJson, writeJson } from "./chat/threads";
+import { z } from "zod";
+import { ID, newId } from "./ids";
+import { PRIORITIES, SLUG, STATUSES, type Status } from "./intents";
+import { readJson, readJsonAs, writeJson } from "./fsutil";
+import { chatDir } from "./chat/threads";
+import type { Trace } from "./trace";
 import { touchWake } from "./wake";
 
 /**
  * Requests: the one way people change things the loop owns. Only the loop writes the main checkout,
  * so two processes never commit there at once. Chat and the console leave a request in
  * `.loopstra/requests/`; the loop claims it (moves it to `applying/`), applies it (src/apply.ts),
- * and leaves a plain-words result in `results/` for whoever asked.
+ * and leaves a plain-words result in `results/` for whoever asked. A file there that is not a
+ * request at all goes to `bad/` (see setAside).
  */
 
 /** The console's transport name: its results are read by id by the page that asked, never by chat. */
 export const CONSOLE = "console";
 
+/** The longest answer a request may carry. */
+const MAX_ANSWER = 4000;
+
 /**
- * `via`: where the person was, in words ("the dashboard", "Slack"), for the commit and the trace.
+ * What every request carries. `via`: where the person was, in words ("the dashboard", "Slack"), for
+ * the commit and the trace; requests chat left before it existed came from chat.
  * `written`: the slugs whose intent.md the loop already wrote for this request. A request whose
  * commit failed is tried again, and must not then read its own write as someone else's.
  * `writtenHash`: for each of those slugs, the sha256 (hex) of the exact text the loop wrote, so a
@@ -25,34 +34,60 @@ export const CONSOLE = "console";
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
  * applyRequests, which gives up after a few, and not before some minutes).
  */
-interface RequestBase { id: string; by: string; byName: string; via: string; transport: string; thread: string; at: string; written?: string[]; writtenHash?: Record<string, string>; recordHash?: string; tries?: number; firstFailedAt?: string }
+const base = z.object({
+  id: z.string().regex(ID),
+  by: z.string(),
+  byName: z.string(),
+  via: z.string().default("chat"),
+  transport: z.string(),
+  thread: z.string(),
+  at: z.string(),
+  written: z.array(z.string()).optional(),
+  writtenHash: z.record(z.string(), z.string()).optional(),
+  recordHash: z.string().optional(),
+  tries: z.number().optional(),
+  firstFailedAt: z.string().optional(),
+});
+const slug = z.string().regex(SLUG);
+const status = z.enum(STATUSES);
 
-/** What a request asks for. `expect` is the status the person saw. */
-export type RequestBody =
-  | { kind: "accept"; slug: string }
-  | { kind: "new"; title: string; intents: Array<{ slug: string; text: string; update: boolean }> }
-  | { kind: "approve"; slug: string; expect: Status }
-  | { kind: "send-back"; slug: string; expect: Status; note: string }
-  | { kind: "retry"; slug: string; expect: "blocked"; to: Status }
-  | { kind: "close"; slug: string; expect: Status }
+/**
+ * A request file as the loop reads it: what it carries (see base), and what it asks for, by `kind`.
+ * `expect` is the status the person saw. A retry's is blocked in every request the console or chat
+ * writes; a file can say any status, which the applier refuses in words rather than as unreadable.
+ */
+const RequestSchema = z.discriminatedUnion("kind", [
+  base.extend({ kind: z.literal("accept"), slug }),
+  base.extend({ kind: z.literal("new"), title: z.string(), intents: z.array(z.object({ slug: z.string(), text: z.string(), update: z.boolean() })) }),
+  base.extend({ kind: z.literal("approve"), slug, expect: status }),
+  base.extend({ kind: z.literal("send-back"), slug, expect: status, note: z.string().default("") }),
+  base.extend({ kind: z.literal("retry"), slug, expect: status, to: status }),
+  base.extend({ kind: z.literal("close"), slug, expect: status }),
   /** `priority` null: no stated priority (the line is taken out, so the change reads as normal), as an undo puts back. */
-  | { kind: "priority"; slug: string; expect: Status; priority: Priority | null }
-  | { kind: "hold"; slug: string; expect: Status; reason: string }
-  | { kind: "release"; slug: string; expect: Status }
+  base.extend({ kind: z.literal("priority"), slug, expect: status, priority: z.enum(PRIORITIES).nullable() }),
+  base.extend({ kind: z.literal("hold"), slug, expect: status, reason: z.string().default("") }),
+  base.extend({ kind: z.literal("release"), slug, expect: status }),
   /**
    * Answers the change's waiting question (see src/questions.ts); on any open change whose question is open.
    * `question`: when the question the person answered was asked (its `at` in question.json); the loop
    * refuses the answer when another question waits by then. One without it (an older request) goes to
    * whatever question waits.
    */
-  | { kind: "answer"; slug: string; text: string; question?: string }
+  base.extend({ kind: z.literal("answer"), slug, text: z.string().max(MAX_ANSWER).refine((t) => t.trim() !== ""), question: z.string().optional() }),
   /** Takes back an approve or a send back (see undoAllowed): from `expect` to `to`, restoring the note it replaced. */
-  | { kind: "undo"; slug: string; expect: Status; to: Status; note: string };
+  base.extend({ kind: z.literal("undo"), slug, expect: status, to: status, note: z.string().default("") }),
+]);
 
-export type Request = RequestBase & RequestBody;
+export type Request = z.infer<typeof RequestSchema>;
 
-/** What submitRequest takes: everything but the id and the time. */
-export type Submission = Omit<RequestBase, "id" | "at" | "written" | "writtenHash" | "recordHash" | "tries" | "firstFailedAt"> & RequestBody;
+/** Omit on each member of a union (Omit alone keeps only the keys they share). */
+type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/** What a request asks for: a request without what every one carries. */
+export type RequestBody = OmitEach<Request, keyof z.infer<typeof base>>;
+
+/** What submitRequest takes: everything but the id and the time, and what the loop notes while applying. */
+export type Submission = OmitEach<Request, "id" | "at" | "written" | "writtenHash" | "recordHash" | "tries" | "firstFailedAt">;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
@@ -63,15 +98,9 @@ export interface Outcome { text: string; ok: boolean; status: Status | null }
 export function requestsDir(root: string): string { return join(root, ".loopstra", "requests"); }
 function applyingDir(root: string): string { return join(requestsDir(root), "applying"); }
 function resultsDir(root: string): string { return join(requestsDir(root), "results"); }
+/** Where files that are not requests go (see setAside). */
+function badDir(root: string): string { return join(requestsDir(root), "bad"); }
 
-/** A request id (see newId): anything else is never used as a file name. */
-const ID = /^\d{15}-\d+-\d{4,}$/;
-
-let counter = 0;
-/** Sorts in the order requests were made. */
-function newId(): string {
-  return `${Date.now().toString().padStart(15, "0")}-${process.pid}-${(counter++).toString().padStart(4, "0")}`;
-}
 
 /** Leaves a request for the loop and wakes it (see touchWake). */
 export function submitRequest(root: string, req: Submission): Request {
@@ -81,30 +110,78 @@ export function submitRequest(root: string, req: Submission): Request {
   return full;
 }
 
-function readDir(dir: string): Request[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((n) => n.endsWith(".json")).sort()
-    .map((n) => ({ n, r: readJson<Request>(join(dir, n)) }))
+/**
+ * A request file someone waits on (named for its id, with the transport and thread its result goes
+ * to) whose body is not a request the loop knows: a wrong field, a kind it has no action for. The
+ * pass finishes it with a plain result (see src/apply.ts), as it would any request, rather than try
+ * it, or leave the page that asked waiting. `slug`: the change it names, when that is a change name.
+ */
+interface Unreadable { id: string; kind: string; slug: string | null; transport: string; thread: string; problem: string }
+
+/** What makes a request file someone's (see Unreadable). Anything less is not a request (see setAside). */
+const RequestFile = z.object({ id: z.string().regex(ID), transport: z.string(), thread: z.string() }).loose();
+
+interface Read { requests: Request[]; unreadable: Unreadable[] }
+
+/**
+ * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
+ * not requests the loop knows (see Unreadable). A file that is not a request at all is set aside.
+ */
+function readDir(root: string, dir: string, trace?: Trace): Read {
+  const read: Read = { requests: [], unreadable: [] };
+  if (!existsSync(dir)) return read;
+  for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
+    const file = readJsonAs(join(dir, n), RequestFile);
     // Named for its own id, or claiming, cancelling and finishing it would act on another file.
-    .filter((x): x is { n: string; r: Request } => !!x.r && typeof x.r.id === "string" && ID.test(x.r.id) && x.n === `${x.r.id}.json`)
-    .map((x) => x.r)
-    // Requests chat left before `via` existed came from chat.
-    .map((r) => ({ ...r, via: r.via ?? "chat" }));
+    if (!file || n !== `${file.id}.json`) { setAside(root, dir, n, trace); continue; }
+    const r = RequestSchema.safeParse(file);
+    if (r.success) { read.requests.push(r.data); continue; }
+    read.unreadable.push({
+      id: file.id,
+      kind: typeof file.kind === "string" ? file.kind : "",
+      slug: typeof file.slug === "string" && SLUG.test(file.slug) ? file.slug : null,
+      transport: file.transport,
+      thread: file.thread,
+      problem: r.error.issues.map((i) => `${i.path.join(".") || "top"}: ${i.message}`).join("; "),
+    });
+  }
+  return read;
 }
 
-/** Requests not yet claimed. */
-function waiting(root: string): Request[] { return readDir(requestsDir(root)); }
+/**
+ * Moves a file in a requests folder that is not a request (not JSON, no id of its own, not named
+ * for it) to `requests/bad/<name>`, once. Left where it is, every pass would read it again every
+ * 2 s, and the console would say its request is pending for ever. Traced when the reader has a
+ * trace (a pass); the applier's look between passes has none, and only moves it. A file that cannot
+ * be moved (held open) is left for the next look.
+ */
+function setAside(root: string, dir: string, name: string, trace?: Trace): void {
+  try {
+    mkdirSync(badDir(root), { recursive: true });
+    renameSync(join(dir, name), join(badDir(root), name));
+    trace?.event("_loop", "error", { where: "request", file: name, error: `${name} is not a request; it was moved to .loopstra/requests/bad/` });
+  } catch { /* see above */ }
+}
+
+/** Request files not yet claimed. */
+function waiting(root: string, trace?: Trace): Read { return readDir(root, requestsDir(root), trace); }
+
+/** Request files the loop claimed and has not finished (a pass that failed, or one cut short), oldest first. */
+export function claimedRequests(root: string, trace?: Trace): Read { return readDir(root, applyingDir(root), trace); }
 
 /** Requests the loop has not finished, claimed or not, oldest first: what the console shows as waiting. */
 export function pendingRequests(root: string): Request[] {
-  return [...waiting(root), ...applyingRequests(root)].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return [...waiting(root).requests, ...applyingRequests(root)].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
-/** Requests the loop claimed and has not finished (a pass that failed, or one cut short), oldest first. */
-export function applyingRequests(root: string): Request[] { return readDir(applyingDir(root)); }
+/** Requests the loop claimed and has not finished, oldest first (see claimedRequests). */
+export function applyingRequests(root: string): Request[] { return claimedRequests(root).requests; }
 
-/** The ids of the requests waiting to be claimed, oldest first. */
-export function waitingIds(root: string): string[] { return waiting(root).map((r) => r.id); }
+/** The ids of the request files waiting to be claimed, oldest first: the requests, and the ones someone waits on that cannot be read (see Unreadable). */
+export function waitingIds(root: string, trace?: Trace): string[] {
+  const read = waiting(root, trace);
+  return [...read.requests, ...read.unreadable].map((r) => r.id).sort();
+}
 
 /** Takes a request for applying: false when it is gone (cancelled, or claimed already). */
 export function claimRequest(root: string, id: string): boolean {
@@ -123,8 +200,8 @@ export function saveApplying(root: string, req: Request): void {
   writeJson(join(applyingDir(root), `${req.id}.json`), req);
 }
 
-/** Leaves the result for whoever asked and removes the claimed request. */
-export function finishRequest(root: string, req: Request, o: Outcome): void {
+/** Leaves the result for whoever asked and removes the claimed request (or the claimed file nobody could read). */
+export function finishRequest(root: string, req: Request | Unreadable, o: Outcome): void {
   const slug = "slug" in req && typeof req.slug === "string" ? req.slug : null;
   writeJson(join(resultsDir(root), `${req.id}.json`), { id: req.id, kind: req.kind, slug, transport: req.transport, thread: req.thread, text: o.text, ok: o.ok, status: o.status, at: new Date().toISOString() } satisfies RequestResult);
   rmSync(join(applyingDir(root), `${req.id}.json`), { force: true });
@@ -179,14 +256,14 @@ function oldDirs(root: string): ReadonlyArray<readonly [string, string]> {
 }
 
 /**
- * True when an applier pass has something to do: a request file waiting or claimed, or a folder chat
- * used before still there to drain. Cheap, so an idle applier does next to nothing every 2 s.
+ * True when an applier pass has something to do: a request file waiting or claimed (one that can be
+ * read, or that someone waits on: a file that is not a request is set aside here, so it never keeps
+ * the applier busy), or a folder chat used before still there to drain. An idle applier does next to
+ * nothing every 2 s.
  */
 export function anythingToApply(root: string): boolean {
-  const hasJson = (dir: string) => {
-    try { return readdirSync(dir).some((n) => n.endsWith(".json")); } catch { return false; }
-  };
-  return hasJson(requestsDir(root)) || hasJson(applyingDir(root)) || oldDirs(root).some(([from]) => existsSync(from));
+  const claimed = claimedRequests(root);
+  return waitingIds(root).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
 }
 
 /** Moves what chat left in the folders it used before (`.loopstra/chat/requests|results/`) into the new ones. */

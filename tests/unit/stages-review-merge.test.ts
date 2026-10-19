@@ -531,6 +531,53 @@ describe("merge", () => {
     trace.close(); repo.cleanup();
   });
 
+  /**
+   * A merge that landed, then a record on main: the branch changed intent.md too (a session's note
+   * in the intent), main got its version in the squash, and a person's note on the status line
+   * changed it again since. `marker`: what the merging marker holds, given main's commit before the
+   * squash and the squash commit.
+   */
+  async function landedThenRecorded(marker: (base: string, merge: string) => string) {
+    const s = await reviewed(PERSON_MERGES);
+    const { ctx } = s;
+    await personSets(ctx, "merge-approved");
+    const git = new Git(s.repo.path);
+    const intent = join(ctx.worktreeDir, "intent", "add-numbers", "intent.md");
+    await Bun.write(intent, `${await Bun.file(intent).text()}\nA note the build left.\n`);
+    await new Git(ctx.worktreeDir).commitAll("a note in the intent");
+    // Stopped right after main moved to the merge commit, before the status was recorded.
+    const base = await git.headSha();
+    await landSquash(git, ctx.branch, "add-numbers: add numbers");
+    mkdirSync(ctx.runDir, { recursive: true });
+    writeFileSync(join(ctx.runDir, "merging"), marker(base, await git.headSha()));
+    await writeIntent(ctx.intent, { status: "merge-approved", note: "Looked at it again." });
+    await git.commitPaths([`intent/${ctx.slug}`], "person: a note");
+    await ctx.reload();
+    const merges = async () => (await git.run(["log", "--format=%s", "main"])).out.split("\n").filter((l) => l.startsWith("add-numbers:")).length;
+    return { ...s, git, merges };
+  }
+
+  test("resuming after the merge landed and a record landed on main since: recorded as merged, never merged again (no empty second merge)", async () => {
+    const { repo, ctx, trace, git, merges } = await landedThenRecorded((base, merge) => `${base}\n${merge}`);
+    const before = await merges();
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await merges()).toBe(before);
+    expect(await git.branchExists(ctx.branch)).toBe(false);
+    expect(existsSync(join(ctx.runDir, "merging"))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a merging marker from before the merge commit was known (main's commit only) still sees the landed merge past a record on main", async () => {
+    const { repo, ctx, trace, git, merges } = await landedThenRecorded((base) => base);
+    const before = await merges();
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await merges()).toBe(before);
+    expect(await git.branchExists(ctx.branch)).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("resuming reviewing after the merge landed (no person on the gate) records it as merged", async () => {
     const { repo, ctx, trace } = await built();
     const git = new Git(repo.path);

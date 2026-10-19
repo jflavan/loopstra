@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { inboxFor, leaveDelivered, markDone, sendToSession, waitingIn } from "../../src/inbox";
+import { changeStoppedBy, clearChangeStop, inboxFor, leaveDelivered, markDone, sendToSession, waitingIn, writeChangeStop } from "../../src/inbox";
 import { tempDir } from "../helpers";
 
 describe("the inbox", () => {
@@ -46,11 +46,37 @@ describe("the inbox", () => {
   test("a file that is not a message, or an id that is not one, is ignored", () => {
     const t = tempDir();
     try {
-      sendToSession(t.path, "x", { seq: 1, kind: "message", text: "ok", by: "J", via: "v" });
-      writeFileSync(join(t.path, ".loopstra", "runs", "x", "inbox", "junk.json"), "{}");
-      writeFileSync(join(t.path, ".loopstra", "runs", "x", "inbox", "000000000000001-1-0001.json"), JSON.stringify({ id: "elsewhere", seq: 1, kind: "message", text: "no", by: "J", via: "v", at: "" }));
-      expect(inboxFor(t.path, "x", 1)).toHaveLength(1);
-      expect(existsSync(join(t.path, ".loopstra", "runs", "x", "inbox"))).toBe(true);
+      const m = sendToSession(t.path, "x", { seq: 1, kind: "message", text: "ok", by: "J", via: "v" });
+      const inbox = join(t.path, ".loopstra", "runs", "x", "inbox");
+      writeFileSync(join(inbox, "junk.json"), "{}");
+      writeFileSync(join(inbox, "000000000000001-1-0001.json"), JSON.stringify({ id: "elsewhere", seq: 1, kind: "message", text: "no", by: "J", via: "v", at: "" }));
+      // One with no one named as its sender would read "undefined, who is watching this work" to the session.
+      writeFileSync(join(inbox, "000000000000001-1-0002.json"), JSON.stringify({ id: "000000000000001-1-0002", seq: 1, kind: "message", text: "no", by: 7, via: "v", at: "" }));
+      writeFileSync(join(inbox, "000000000000001-1-0003.json"), JSON.stringify({ id: "000000000000001-1-0003", seq: 1, kind: "message", text: "no", by: "J", at: "" }));
+      writeFileSync(join(inbox, "000000000000001-1-0004.json"), JSON.stringify({ id: "000000000000001-1-0004", seq: "1", kind: "message", text: "no", by: "J", via: "v", at: "" }));
+      writeFileSync(join(inbox, "000000000000001-1-0005.json"), JSON.stringify({ id: "000000000000001-1-0005", seq: 1, kind: "shout", text: "no", by: "J", via: "v", at: "" }));
+      expect(inboxFor(t.path, "x", 1).map((x) => x.id)).toEqual([m.id]);
+      expect(existsSync(inbox)).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a change's stop says who stopped it; one that does not say reads as a person's", () => {
+    const t = tempDir();
+    try {
+      expect(changeStoppedBy(t.path, "x")).toBeNull();
+      writeChangeStop(t.path, "x", "John");
+      expect(changeStoppedBy(t.path, "x")).toBe("John");
+      const path = join(t.path, ".loopstra", "runs", "x", "stop.json");
+      writeFileSync(path, JSON.stringify({ by: 7, at: "" }));
+      expect(changeStoppedBy(t.path, "x")).toBe("a person");
+      writeFileSync(path, JSON.stringify({ by: "  ", at: "" }));
+      expect(changeStoppedBy(t.path, "x")).toBe("a person");
+      writeFileSync(path, "not json");
+      expect(changeStoppedBy(t.path, "x")).toBe("a person");
+      clearChangeStop(t.path, "x");
+      expect(changeStoppedBy(t.path, "x")).toBeNull();
     } finally {
       t.cleanup();
     }

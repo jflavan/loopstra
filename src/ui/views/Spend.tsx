@@ -13,7 +13,8 @@ export function Spend() {
     // A failed read shows the numbers already on screen; the next tick tries again.
     const load = () => getJson<SpendView>("/api/spend").then((x) => { if (live) { setV(x); setFailed(false); } }, () => { if (live) setFailed(true); });
     void load();
-    const timer = setInterval(load, 30_000);
+    // Wrapped: a timer given the promise-returning load would lose a rejection (both outcomes are handled above, so none is expected).
+    const timer = setInterval(() => void load(), 30_000);
     return () => {
       live = false;
       clearInterval(timer);

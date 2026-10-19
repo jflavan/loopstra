@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCommand, spawnBounded, withBunOnPath, within, type StdinWriter } from "../../src/shell";
+import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitLocation, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
@@ -187,5 +187,57 @@ describe("spawnBounded's stdin", () => {
       });
       expect(r.code).toBe(7);
     } finally { t.cleanup(); }
+  });
+});
+
+describe("spawnBounded's onLine", () => {
+  test("a line split across two writes is delivered once, whole", async () => {
+    const t = tempDir();
+    try {
+      const lines: string[] = [];
+      const script = "process.stdout.write('abc'); await Bun.sleep(150); process.stdout.write('def\\nghi\\n');";
+      const r = await spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 10_000, onStop: "kill", onLine: (l) => { lines.push(l); return false; } });
+      expect(r.code).toBe(0);
+      expect(lines).toEqual(["abcdef", "ghi"]);
+    } finally { t.cleanup(); }
+  });
+
+  test("a handler that throws ends the call with its error, not with a timeout", async () => {
+    const t = tempDir();
+    try {
+      const script = "console.log('one'); await Bun.sleep(60_000);";
+      const started = Date.now();
+      await expect(spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 30_000, onStop: "kill", graceMs: 500, onLine: () => { throw new Error("handler bug"); } })).rejects.toThrow("handler bug");
+      expect(Date.now() - started).toBeLessThan(20_000);
+    } finally { t.cleanup(); }
+  });
+});
+
+describe("errorText", () => {
+  test("an Error gives its message; anything else is shown as text, never [object Object]", () => {
+    expect(errorText(new Error("boom"))).toBe("boom");
+    expect(errorText("plain")).toBe("plain");
+    expect(errorText(null)).not.toContain("[object");
+    expect(errorText({ code: "ENOENT" })).not.toBe("[object Object]");
+  });
+});
+
+describe("a project command's environment", () => {
+  test("a hook's repository variables (GIT_DIR, GIT_INDEX_FILE) do not reach the command", async () => {
+    const t = tempDir();
+    const had = { GIT_DIR: process.env.GIT_DIR, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE };
+    process.env.GIT_DIR = join(t.path, "elsewhere", ".git");
+    process.env.GIT_INDEX_FILE = join(t.path, "elsewhere", "index");
+    try {
+      const script = "console.log(JSON.stringify([process.env.GIT_DIR ?? null, process.env.GIT_INDEX_FILE ?? null, typeof process.env.PATH]))";
+      const r = await runCommand(`bun -e "${script.replace(/"/g, '\\"')}"`, t.path);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.output.trim())).toEqual([null, null, "string"]);
+      const env: Record<string, string | undefined> = { GIT_DIR: "x", GIT_WORK_TREE: "y", HOME: "h" };
+      expect(withoutGitLocation(env)).toEqual({ HOME: "h" });
+    } finally {
+      for (const [k, v] of Object.entries(had)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      t.cleanup();
+    }
   });
 });

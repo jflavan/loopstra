@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { isStatus, offers, questionChangedText, REQUEST_KINDS, retryOptions, sameQuestion, undoMatches, type RequestKind } from "../actions";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig, type Config } from "../config";
@@ -11,6 +9,7 @@ import { Trace } from "../trace";
 import { touchWake } from "../wake";
 import type { Hub } from "./hub";
 import { loopNow } from "./model";
+import { changeExists, decode, fromPage, json, jsonWrite, ownSite, plain, refuse } from "./routes";
 
 /** The longest note a send back takes, and the longest hold reason. */
 const MAX_NOTE = 4_000;
@@ -19,55 +18,37 @@ const MAX_REASON = 300;
 type Kind = Exclude<RequestKind, "new">;
 const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new");
 
-const json = (body: unknown, status = 200) => Response.json(body, { status });
-const refuse = (error: string, status = 409) => json({ error }, status);
-
 /**
  * The console's writes: requests for the loop (`/api/requests`, with GET and DELETE of one by id)
  * and the loop's pause (`/api/loop`). Null for any other path. Every write must come from the page
- * itself (its Origin), and a POST must be JSON: a page framed or opened by another site cannot send
- * either (see "Safety of writes" in the spec).
+ * itself (its Origin), and a POST must be JSON (see jsonWrite): a page opened by another site cannot
+ * send either (see "Safety of writes" in the spec). A page framed by another site could, which is
+ * why the page itself refuses to draw when framed (src/ui/app.tsx).
  */
 export async function writes(root: string, hub: Hub, req: Request, url: URL): Promise<Response | null> {
   const path = url.pathname;
   const one = path.match(/^\/api\/requests\/([^/]+)$/);
   if (path !== "/api/requests" && path !== "/api/loop" && !one) return null;
-  // Only GET reads a result, which reading removes: a HEAD would take it with no body to carry it.
-  if (one && req.method === "HEAD") return new Response("Method not allowed", { status: 405 });
-  if (one && req.method === "GET") {
-    const s = requestState(root, decode(one[1]!));
-    return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
-  }
-  if (!fromPage(req, url)) return new Response("Forbidden", { status: 403 });
-  if (one && req.method === "DELETE") {
+  if (one) {
+    // Only GET reads a result, which reading removes: a HEAD would take it with no body to carry it,
+    // and so would another site's <img src> (ids are predictable), which carries no Origin but
+    // which the browser names (see ownSite).
+    if (req.method === "GET") {
+      if (!ownSite(req)) return plain("Forbidden", 403);
+      const s = requestState(root, decode(one[1]!));
+      return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
+    }
+    if (req.method !== "DELETE") return plain("Method not allowed", 405);
+    if (!fromPage(req, url)) return plain("Forbidden", 403);
     const cancelled = cancelRequest(root, decode(one[1]!));
     hub.poke();
     return json({ cancelled }, cancelled ? 200 : 409);
   }
-  if (req.method !== "POST" || one) return new Response("Method not allowed", { status: 405 });
-  if (!isJson(req.headers.get("content-type"))) return new Response("Expected JSON", { status: 415 });
-  let body: unknown;
-  try { body = await req.json(); } catch { return refuse("The request was not JSON.", 400); }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse("The request was not an object.", 400);
-  const fields = body as Record<string, unknown>;
-  const answer = path === "/api/loop" ? loop(root, fields) : await action(root, fields);
-  hub.poke();
-  return answer;
-}
-
-/** True when a write comes from the page itself: its Origin is the console's own. */
-export function fromPage(req: Request, url: URL): boolean {
-  return req.headers.get("origin") === url.origin;
-}
-
-/** True when a content type's MIME essence (before any parameters) is JSON. */
-export function isJson(ct: string | null): boolean {
-  return ((ct ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
-}
-
-/** A path part as text; one that cannot be decoded is no request id (requestState and cancelRequest say so). */
-function decode(part: string): string {
-  try { return decodeURIComponent(part); } catch { return ""; }
+  return jsonWrite(req, url, async (fields) => {
+    const answer = path === "/api/loop" ? loop(root, fields) : await action(root, fields);
+    hub.poke();
+    return answer;
+  });
 }
 
 function loop(root: string, body: Record<string, unknown>): Response {
@@ -145,7 +126,7 @@ async function action(root: string, body: Record<string, unknown>): Promise<Resp
   const r = parse(body);
   if (typeof r === "string") return refuse(r, 400);
   if (r.kind === "new") return refuse("Unknown action.", 400);
-  if (!existsSync(join(root, "intent", r.slug, "intent.md"))) return refuse(`There is no change called ${r.slug}.`, 404);
+  if (!changeExists(root, r.slug)) return refuse(`There is no change called ${r.slug}.`, 404);
   let cfg: Config | null = null;
   try { cfg = await loadConfig(root); } catch { /* nobody on any gate, as the model reads it too */ }
   let fm: Frontmatter;

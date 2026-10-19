@@ -9,6 +9,7 @@ import { changeDetail, spendView } from "./detail";
 import { changeDiff } from "./diff";
 import { resolveDocument, resolveRunFile } from "./files";
 import { Hub, type Send } from "./hub";
+import { decode, json, NO_STORE, plain } from "./routes";
 import { streamSession } from "./session";
 import { steerRoutes } from "./steer";
 import { ANY_SLUG } from "./types";
@@ -16,11 +17,8 @@ import { writes } from "./writes";
 
 /** Host names the console answers to: a page on another name that resolves here (DNS rebinding) gets nothing. */
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-/** Data is read fresh every time: a document or a change read again must not come from the browser's cache. */
-const NO_STORE = { "cache-control": "no-store" };
+/** A file's text, which the browser must not read as anything else; read fresh every time (see NO_STORE). */
 const PLAIN_TEXT = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", ...NO_STORE };
-const NOT_FOUND = () => new Response("Not found", { status: 404, headers: PLAIN_TEXT });
-const json = (body: unknown, status = 200) => Response.json(body, { status, headers: NO_STORE });
 /** The largest body a write may carry: the longest message is 20,000 characters, so anything near this is not the page's. */
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -38,7 +36,8 @@ export const JSON_IDLE_SECONDS = 60;
  * on the screens' paths (the page's router knows the same ones). They are the same static code for
  * everyone and never reach `fetch`, so only the data routes check the host. Its only writes are
  * `/api/chat` (when `chat` is given, see DashboardTransport), `/api/requests` and `/api/loop` (see
- * writes.ts), and steering a running session (see steer.ts); each needs the page's own Origin.
+ * writes.ts), and steering a running session (see steer.ts); each needs the page's own Origin (see
+ * jsonWrite in routes.ts).
  */
 export function serveConsole(root: string, port = 4646, opts: { chat?: DashboardTransport; hub?: Hub } = {}): ReturnType<typeof Bun.serve> {
   const hub = opts.hub ?? new Hub(root, { chat: !!opts.chat });
@@ -51,17 +50,17 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/c/*": page, "/s/*": page },
     async fetch(req, server) {
       const url = new URL(req.url);
-      if (!LOCAL_HOSTS.has(url.hostname)) return new Response("Forbidden", { status: 403 });
+      if (!LOCAL_HOSTS.has(url.hostname)) return plain("Forbidden", 403);
       if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
       const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url));
       if (written) return written;
-      if (req.method !== "GET" && req.method !== "HEAD") return new Response("Read only", { status: 405 });
-      return (await read(root, hub, req, url, server)) ?? NOT_FOUND();
+      if (req.method !== "GET" && req.method !== "HEAD") return plain("Read only", 405);
+      return (await read(root, hub, req, url, server)) ?? plain("Not found", 404);
     },
     // A route that fails says so in plain words; the stack stays on this machine's stderr, not on the page.
     error(e) {
       console.error(`loopstra ui: a request failed: ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ")}`);
-      return new Response("Server error", { status: 500, headers: PLAIN_TEXT });
+      return plain("Server error", 500);
     },
   });
 }
@@ -115,7 +114,7 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
   }
   if (path.startsWith("/files/")) {
     const rel = decode(path.slice("/files/".length));
-    const file = rel === null ? null : resolveRunFile(root, rel);
+    const file = rel ? resolveRunFile(root, rel) : null;
     return file ? new Response(Bun.file(file), { headers: PLAIN_TEXT }) : null;
   }
   if (path.startsWith("/docs/")) {
@@ -126,12 +125,16 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
   return null;
 }
 
+const SSE_HEADERS = { "content-type": "text/event-stream; charset=utf-8", "x-content-type-options": "nosniff", ...NO_STORE };
+
 /**
  * An SSE response. `start` gets a writer and a closer and gives back the function that stops it,
  * which runs once, when the page goes away. The request's idle limit is lifted, since a quiet
- * stream is still alive.
+ * stream is still alive. A HEAD gets the headers alone: no stream is opened for it, so it leaves
+ * no page connected.
  */
 function sse(server: Timeouts, req: Request, start: (send: Send, close: () => void) => (() => void) | Promise<() => void>): Response {
+  if (req.method === "HEAD") return new Response(null, { headers: SSE_HEADERS });
   server.timeout(req, 0);
   let stop: (() => void) | null = null;
   let gone = false;
@@ -153,11 +156,7 @@ function sse(server: Timeouts, req: Request, start: (send: Send, close: () => vo
     cancel: end,
   });
   req.signal.addEventListener("abort", end);
-  return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
-}
-
-function decode(part: string): string | null {
-  try { return decodeURIComponent(part); } catch { return null; }
+  return new Response(stream, { headers: SSE_HEADERS });
 }
 
 async function config(root: string): Promise<Config | null> {

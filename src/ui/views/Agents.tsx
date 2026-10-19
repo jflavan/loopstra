@@ -30,6 +30,8 @@ export function Agents() {
       const batch = buffer;
       buffer = [];
       setTiles((t) => apply(t, batch, Date.now()));
+      // Said only once the tiles sent before it are applied, so the screen never says no agent works while their opens wait here.
+      if (batch.some((m) => m.type === "sync")) setSynced(true);
     };
     // Rows arrive in bursts; drawing them ten times a second keeps many sessions smooth.
     const timer = setInterval(flush, 100);
@@ -39,7 +41,8 @@ export function Agents() {
         try {
           const msg = JSON.parse(data) as AgentMessage;
           buffer.push(msg);
-          if (msg.type === "sync") setSynced(true);
+          // The sync settles what runs at once, with the opens that came before it.
+          if (msg.type === "sync") flush();
         } catch { /* a bad frame is skipped */ }
       },
       live() { setDown(false); },

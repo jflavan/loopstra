@@ -1,11 +1,10 @@
 import type { ChangeSummary, RunningPhase } from "../../console/types";
-import type { Status } from "../../intents";
-import { ago, costSoFar, duration, shortModel, stepWord, usd } from "../format";
+import { upNext } from "../board";
+import { ago, duration, shortModel, stepWord, usd } from "../format";
+import { Connecting } from "../parts/Connecting";
 import { Link } from "../parts/Link";
+import { sessionFacts } from "../session-facts";
 import { changes, loop, meta, now, running } from "../store";
-
-/** Changes waiting their turn: in progress, or approved and ready for their next step. */
-const WAITING: ReadonlySet<Status> = new Set<Status>(["accepted", "designing", "spec-approved", "planning", "plan-approved", "building", "reviewing", "merge-approved", "merged", "verifying"]);
 
 export function Live() {
   const r = running.value;
@@ -13,9 +12,8 @@ export function Live() {
   const l = loop.value;
   const m = meta.value;
   const t = now.value;
-  if (!r || !list || !l || !m) return <section class="view"><p class="muted">Connecting…</p></section>;
-  const busy = new Set(r.now.map((p) => p.slug));
-  const next = list.filter((c) => !busy.has(c.slug) && WAITING.has(c.status as Status)).slice(0, 6);
+  if (!r || !list || !l || !m) return <Connecting />;
+  const next = upNext(list, r.now.map((p) => p.slug));
   const when = (iso: string) => {
     const a = ago(iso, t);
     return a === "now" ? "just now" : `${a} ago`;
@@ -63,6 +61,7 @@ export function Live() {
 
 /** One running session. `asks`: its change's question waiting for a person, if any. */
 function AgentCard({ p, t, rate, asks }: { p: RunningPhase; t: number; rate: number; asks: ChangeSummary["question"] }) {
+  const facts = sessionFacts({ started: p.started, ended: null, status: "running", finished: null, rate, now: t });
   return (
     <article class="card live">
       <div class="card-head">
@@ -74,8 +73,8 @@ function AgentCard({ p, t, rate, asks }: { p: RunningPhase; t: number; rate: num
       <div class="card-now" title={p.now}><span class="pulse" aria-hidden="true" />{p.now}</div>
       <div class="strip" aria-hidden="true">{p.strip.map((k, i) => <i key={i} class={k} />)}</div>
       <div class="card-foot">
-        <span title="Running for">{duration(t - Date.parse(p.started))}</span>
-        <span title="An estimate: the real cost is recorded when the step ends">{usd(costSoFar(p.started, t, rate), true)}</span>
+        <span title="Running for">{duration(facts.elapsedMs)}</span>
+        {facts.cost !== null && <span title="An estimate: the real cost is recorded when the step ends">{usd(facts.cost, facts.estimate)}</span>}
         <span class="grow" />
         {p.steerable && <Link href={`/agents#${p.slug}:${p.seq}:message`} class="link" title="Send this session a message from its tile">Message</Link>}
         <Link href={`/agents#${p.slug}:${p.seq}`} class="btn">Watch</Link>

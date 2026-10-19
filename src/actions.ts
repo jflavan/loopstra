@@ -145,19 +145,22 @@ export function undoMatches(trace: Trace, slug: string, expect: Status, to: Stat
   }
 }
 
+/** Where a retry or an undo goes: its `to`, which a retry and an undo always name (the shape leaves it optional for the others). */
+const toStatus = (r: RequestShape): string => r.to ?? "an earlier status";
+
 /** What a request did, for the commit subject and the trace: "plan approved", "build sent back". */
 export function doneWords(r: RequestShape): string {
   switch (r.kind) {
     case "approve": return r.expect === "verifying" ? "confirmed done" : `${REVIEWED[r.expect] ?? "work"} approved`;
     case "send-back": return `${REVIEWED[r.expect] ?? "work"} sent back`;
-    case "retry": return `retried from ${r.to}`;
+    case "retry": return `retried from ${toStatus(r)}`;
     case "accept": return "accepted";
     case "close": return "closed";
     case "priority": return `priority set to ${r.priority ?? "normal"}`;
     case "hold": return "held";
     case "release": return "released";
     case "answer": return "question answered";
-    case "undo": return `undone, back to ${r.to}`;
+    case "undo": return `undone, back to ${toStatus(r)}`;
   }
 }
 
@@ -166,14 +169,14 @@ export function requestLabel(r: RequestShape): string {
   switch (r.kind) {
     case "approve": return APPROVE_LABEL[r.expect] ?? "Approve";
     case "send-back": return "Send back";
-    case "retry": return `Retry from ${r.to}`;
+    case "retry": return `Retry from ${toStatus(r)}`;
     case "accept": return "Start";
     case "close": return "Close";
     case "priority": return `Set priority to ${r.priority ?? "normal"}`;
     case "hold": return "Hold";
     case "release": return "Release";
     case "answer": return "Answer";
-    case "undo": return `Undo, back to ${r.to}`;
+    case "undo": return `Undo, back to ${toStatus(r)}`;
   }
 }
 
@@ -188,7 +191,7 @@ export function askText(r: RequestShape, slug: string): string {
   switch (r.kind) {
     case "approve": return r.expect === "verifying" ? `Confirm ${slug} is done?` : r.expect === "merge-review" ? `Approve merging ${slug}?` : `Approve the ${REVIEWED[r.expect] ?? "work"} of ${slug}?`;
     case "send-back": return `Send ${slug} back, so its ${REVIEWED[r.expect] ?? "work"} is done again, with this note?\n\n${note}`;
-    case "retry": return `Retry ${slug} from ${r.to}?`;
+    case "retry": return `Retry ${slug} from ${toStatus(r)}?`;
     case "accept": return `Start work on ${slug} now?`;
     case "close": return `Close ${slug}? It stops for good.`;
     case "priority": return `Set ${slug}'s priority to ${r.priority ?? "normal"}?`;
@@ -198,7 +201,7 @@ export function askText(r: RequestShape, slug: string): string {
       const asked = (r.asked ?? "").replace(/\s+/g, " ").trim();
       return asked ? `Send this answer to ${slug}'s question "${asked}"?\n\n${note}` : `Send this answer to ${slug}'s waiting question?\n\n${note}`;
     }
-    case "undo": return `Take ${slug} back to ${r.to}?`;
+    case "undo": return `Take ${slug} back to ${toStatus(r)}?`;
   }
 }
 
@@ -207,14 +210,14 @@ export function askedWords(r: RequestShape, slug: string): string {
   switch (r.kind) {
     case "approve": return r.expect === "verifying" ? `confirm ${slug} is done` : r.expect === "merge-review" ? `approve merging ${slug}` : `approve the ${REVIEWED[r.expect] ?? "work"} of ${slug}`;
     case "send-back": return `send ${slug} back, so its ${REVIEWED[r.expect] ?? "work"} is done again`;
-    case "retry": return `retry ${slug} from ${r.to}`;
+    case "retry": return `retry ${slug} from ${toStatus(r)}`;
     case "accept": return `start ${slug}`;
     case "close": return `close ${slug}`;
     case "priority": return `set ${slug}'s priority to ${r.priority ?? "normal"}`;
     case "hold": return `hold ${slug}`;
     case "release": return `release ${slug}`;
     case "answer": return `answer ${slug}'s question`;
-    case "undo": return `take ${slug} back to ${r.to}`;
+    case "undo": return `take ${slug} back to ${toStatus(r)}`;
   }
 }
 

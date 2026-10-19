@@ -56,31 +56,50 @@ export function effectivePriority(fm: { priority?: Priority }): Priority {
   return fm.priority ?? "normal";
 }
 
-export interface IntentFile {
+interface IntentFile {
   frontmatter: Frontmatter;
   title: string;
   body: string;
   sections: Record<string, string>;
 }
 
-export const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
+const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
+
+/** The frontmatter block: `---` alone on the first line, the lines, and `---` starting a line (the file may end there). */
+const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+/**
+ * True when the text's first line with anything on it is meant as the opening fence (`---`, maybe
+ * with spaces after it). Such a file is frontmatter in the writer's eyes: one FRONTMATTER does not
+ * take (a blank line above the fence, a space after the dashes, no closing line) is refused rather
+ * than read as a draft with the real status in its body (see parseIntentFile and patchFrontmatter).
+ */
+function looksFenced(text: string): boolean {
+  const first = text.split(/\r?\n/).find((l) => l.trim() !== "") ?? "";
+  return first.trimEnd() === "---";
+}
+
+/** What a person is told about a fence FRONTMATTER does not take (see looksFenced). */
+const FENCE_PROBLEM = "intent.md must start with a line of exactly three dashes (---) and close its top lines with another, with nothing else on either line. Fix them, and the change is picked up again.";
 
 export function parseIntentFile(rawText: string): IntentFile {
   const text = rawText.replace(/^﻿/, "");
   let fmText = "";
   let body = text;
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  const m = FRONTMATTER.exec(text);
   if (m) {
     fmText = m[1] ?? "";
     body = text.slice(m[0].length);
+  } else if (looksFenced(text)) {
+    throw new FrontmatterProblem("---", "intent.md frontmatter problem: its --- fence is not one Loopstra reads", false, FENCE_PROBLEM);
   }
-  const raw = fmText.trim() ? parse(fmText) : {};
+  const raw: unknown = fmText.trim() ? parse(fmText) : {};
   const fm = Frontmatter.safeParse(raw ?? {});
   if (!fm.success) {
     const issue = fm.error.issues[0];
     const unknown = issue?.code === "unrecognized_keys" ? issue.keys : [];
     const field = issue?.path.join(".") || unknown.join(", ") || "top";
-    throw new FrontmatterProblem(field, `intent.md frontmatter problem at ${field}: ${issue?.message}`, unknown.length > 0);
+    throw new FrontmatterProblem(field, `intent.md frontmatter problem at ${field}: ${issue?.message ?? "invalid"}`, unknown.length > 0);
   }
   const titleMatch = /^#(?!#)\s*(?:Intent:\s*)?(.+)$/m.exec(body);
   const title = titleMatch?.[1]?.trim() ?? "";
@@ -136,7 +155,7 @@ export async function readIntent(root: string, slug: string): Promise<Intent> {
 }
 
 /** An intent folder whose intent.md could not be read, or a Markdown file loose in intent/. `problem` is plain; `detail` is for the trace. */
-export interface Unreadable { slug: string; problem: string; detail: string }
+interface Unreadable { slug: string; problem: string; detail: string }
 
 export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 
@@ -164,7 +183,7 @@ export async function scanRepo(root: string): Promise<Scan> {
       if (!existsSync(join(dir, "intent.md"))) continue;
       // The folder name is also the branch name and the pull request's title: keep it plain.
       if (!SLUG.test(name)) {
-        scan.unreadable.push({ slug: name, problem: "Rename the folder to lowercase words joined by dashes, like add-numbers.", detail: `"${name}" is not a valid change name (${SLUG})` });
+        scan.unreadable.push({ slug: name, problem: "Rename the folder to lowercase words joined by dashes, like add-numbers.", detail: `"${name}" is not a valid change name (${SLUG.source})` });
         continue;
       }
       scan.intents.push(await readIntent(root, name));
@@ -177,6 +196,7 @@ export async function scanRepo(root: string): Promise<Scan> {
 }
 
 function unreadableProblem(e: unknown): string {
+  if (e instanceof FrontmatterProblem && e.plain) return e.plain;
   if (e instanceof FrontmatterProblem && e.unknownKey) {
     return `intent.md has a line Loopstra does not recognise: '${e.field.split(", ").join("', '")}'. Remove it or fix the spelling.`;
   }
@@ -186,9 +206,13 @@ function unreadableProblem(e: unknown): string {
   return "The lines between the --- markers at the top of intent.md could not be read. Fix them, and the change is picked up again.";
 }
 
-/** intent.md frontmatter that parsed as YAML but has an invalid field (or, `unknownKey`, a key Loopstra does not know). */
+/**
+ * intent.md frontmatter that parsed as YAML but has an invalid field (or, `unknownKey`, a key
+ * Loopstra does not know), or whose `---` fence is not one Loopstra reads. `plain`: what a person
+ * is told, when the generic words for a field do not fit.
+ */
 export class FrontmatterProblem extends Error {
-  constructor(public readonly field: string, message: string, public readonly unknownKey = false) {
+  constructor(public readonly field: string, message: string, public readonly unknownKey = false, public readonly plain = "") {
     super(message);
     this.name = "FrontmatterProblem";
   }
@@ -226,28 +250,56 @@ function commentStart(rest: string): number {
   return start;
 }
 
+/** A line's text without its line ending. */
+const content = (p: string) => p.replace(/\r?\n$/, "");
+
+/**
+ * The index after the last line of the value on `head[at]` (a `key: value` line): the indented lines
+ * a block or folded scalar (`|`, `>`) went on over, blank lines among them, or a plain value's
+ * continuation lines. A line whose first character is `#` is a person's comment and ends a plain
+ * value; inside a block scalar it is text, and goes with the value. Blank lines at the end are not the value's.
+ */
+function valueEnd(head: string[], at: number): number {
+  const own = content(head[at]!);
+  const block = /^\s*[|>]/.test(own.slice(own.indexOf(":") + 1));
+  let end = at + 1;
+  while (end < head.length) {
+    const line = content(head[end]!);
+    if (!/^(\s+\S|\s*$)/.test(line)) break;
+    if (!block && /^\s*#/.test(line)) break;
+    end++;
+  }
+  while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+  return end;
+}
+
 /**
  * Changes frontmatter keys in intent.md text, line by line: each given key's line is replaced (a
  * trailing comment is kept), or added just before the closing `---`. Everything else (other keys
  * and their order, comments, blank lines, the body, CRLF or LF, a leading BOM) stays as it was, so
  * a person's own edits to the file survive a status change. A frontmatter shape the line patcher
  * cannot handle (for example a one-line `{...}` map) is rewritten whole, which still parses. Each
- * key in `remove` loses its line (with its comment and any lines its value went on over).
+ * key in `remove` loses its line (with its comment and any lines its value went on over). A file
+ * with no frontmatter gets one; one whose fence parseIntentFile refuses (see looksFenced) is refused
+ * here too, so a patch never puts a second frontmatter block in front of the first.
  */
 export function patchFrontmatter(raw: string, patch: Record<string, string>, remove: readonly string[] = []): string {
   const bom = raw.startsWith("﻿") ? "﻿" : "";
   const text = raw.slice(bom.length);
   const parts = text.split(/(?<=\n)/);
-  const content = (p: string) => p.replace(/\r?\n$/, "");
   const eol = /\r\n/.exec(text) ? "\r\n" : "\n";
   const entries = Object.entries(patch);
   if (!entries.length && !remove.length) return raw;
 
-  const close = content(parts[0] ?? "").trimEnd() === "---" ? parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---") : -1;
+  // The closing fence, by the same rules as parseIntentFile: an opening fence it takes, then a line of dashes.
+  const close = /^---\r?\n/.test(text) ? parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---") : -1;
   let out: string;
-  if (close < 0) {
+  if (close < 0 && !looksFenced(text)) {
     if (!entries.length) return raw;
     out = bom + ["---", ...entries.map(([k, v]) => `${k}: ${scalar(v)}`), "---"].join(eol) + eol + text;
+  } else if (close < 0) {
+    // Meant as frontmatter, but not one parseIntentFile takes: it says so (the rewrite below would too).
+    out = "";
   } else {
     const head = parts.slice(0, close);
     const tail = parts.slice(close);
@@ -255,10 +307,7 @@ export function patchFrontmatter(raw: string, patch: Record<string, string>, rem
       const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
       if (at < 0) continue;
       // The key's line and any lines its value went on over (a block or folded scalar).
-      let end = at + 1;
-      while (end < head.length && /^(\s+\S|\s*$)/.test(content(head[end]!))) end++;
-      while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
-      head.splice(at, end - at);
+      head.splice(at, valueEnd(head, at) - at);
     }
     for (const [key, value] of entries) {
       const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
@@ -268,16 +317,14 @@ export function patchFrontmatter(raw: string, patch: Record<string, string>, rem
       const ending = head[at]!.slice(own.length) || eol;
       const rest = own.slice(own.indexOf(":") + 1);
       const c = commentStart(rest);
-      head[at] = line + (c >= 0 ? rest.slice(c) : "") + ending;
       // A value that went on over indented lines (a block or folded scalar) is replaced whole.
-      let end = at + 1;
-      while (end < head.length && /^(\s+\S|\s*$)/.test(content(head[end]!))) end++;
-      while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+      const end = valueEnd(head, at);
+      head[at] = line + (c >= 0 ? rest.slice(c) : "") + ending;
       head.splice(at + 1, end - at - 1);
     }
     out = bom + head.join("") + tail.join("");
   }
-  if (patched(out, patch, remove)) return out;
+  if (out && patched(out, patch, remove)) return out;
   // Fallback: rewrite the whole frontmatter from what the file says, with the patch on top.
   const file = parseIntentFile(raw);
   const merged: Record<string, unknown> = { ...file.frontmatter, ...patch };
@@ -498,7 +545,7 @@ export function hasQuestion(intent: Intent): boolean {
  * "Has a question: <text>." for a change whose question waits, or "". `text`: the question, from
  * question.json; without it the note sends a person to conversation.md.
  */
-export function questionNote(intent: Intent, text?: string): string {
+function questionNote(intent: Intent, text?: string): string {
   if (!hasQuestion(intent)) return "";
   const q = text?.replace(/\s+/g, " ").trim();
   return q ? `Has a question: ${/[.!?]$/.test(q) ? q : `${q}.`}` : "Has a question. Read conversation.md.";

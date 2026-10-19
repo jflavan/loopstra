@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../config";
 import { GitHub } from "../github";
@@ -6,8 +7,9 @@ import { Trace } from "../trace";
 import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
 import { Orchestrator, type IncomingMessage } from "./orchestrator";
-import { takeResults } from "../requests";
-import { chatDir, readJson, writeJson } from "./threads";
+import { CONSOLE, requestsDir, type RequestResult } from "../requests";
+import { readJson, writeJson } from "../fsutil";
+import { chatDir } from "./threads";
 
 /** What a transport hands the service for each message a person sends. */
 export type OnMessage = (m: Omit<IncomingMessage, "transport" | "via">) => Promise<void>;
@@ -32,6 +34,26 @@ export interface Transport {
 
 /** How often pull requests opened from chat are checked on GitHub. */
 const PR_CHECK_MS = 60_000;
+
+/**
+ * The results the loop left for the given transports (the files in `.loopstra/requests/results/`,
+ * oldest first), each with its file, so it is removed only once it was passed on (see poll). One
+ * that is not JSON can never be passed on and is removed here. Results for transports another
+ * process serves (and the console's) are left.
+ */
+function waitingResults(root: string, transports: ReadonlySet<string>): Array<{ path: string; result: RequestResult }> {
+  const dir = join(requestsDir(root), "results");
+  if (!existsSync(dir)) return [];
+  const out: Array<{ path: string; result: RequestResult }> = [];
+  for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
+    const path = join(dir, n);
+    const r = readJson<RequestResult>(path);
+    if (!r) { rmSync(path, { force: true }); continue; }
+    if (r.transport === CONSOLE || !transports.has(r.transport)) continue;
+    out.push({ path, result: r });
+  }
+  return out;
+}
 
 export class ChatService {
   readonly orchestrator: Orchestrator;
@@ -107,11 +129,16 @@ export class ChatService {
           if (t.announceFrom === "kept") writeJson(this.cursorPath(t.name), { id: a.id });
         }
       }
-      for (const r of takeResults(this.root, new Set(this.transports.map((t) => t.name)))) {
+      // A result is removed once it was passed on, not before: one whose delivery fails is tried
+      // again next poll (deliver sends before it records, so nothing of the failed try is kept).
+      for (const { path, result: r } of waitingResults(this.root, new Set(this.transports.map((t) => t.name)))) {
         const t = this.transport(r.transport);
         if (!t) continue;
         // The agent hears it too, on its next turn: it proposed the request, and would think it still open.
-        try { await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text), `The loop answered: ${r.text}`); } catch (e) { this.traceError("chat-result", e); }
+        try {
+          await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text), `The loop answered: ${r.text}`);
+          rmSync(path, { force: true });
+        } catch (e) { this.traceError("chat-result", e); }
       }
       if (Date.now() - this.lastPrCheck >= PR_CHECK_MS) {
         this.lastPrCheck = Date.now();

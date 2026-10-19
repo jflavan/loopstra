@@ -1,13 +1,13 @@
 import { signal } from "@preact/signals";
-import { parseRoute, type Route } from "./router";
+import { changesAddress, parseRoute, type Route } from "./router";
 
 /** The screen the page shows. */
 export const route = signal<Route>(parseRoute(location.pathname));
 
 /** Goes to `path` without reloading the page. */
 export function navigate(path: string): void {
-  // A path with a query string ("/c/x?tab=y") is compared with its query, or it would push every time.
-  if (path !== location.pathname + location.search) history.pushState(null, "", path);
+  if (changesAddress(location, path)) history.pushState(null, "", path);
+  // A new route value even for the same address, so a screen that reads the part after # (Agents) looks again.
   route.value = parseRoute(location.pathname);
   document.getElementById("main")?.scrollTo(0, 0);
 }

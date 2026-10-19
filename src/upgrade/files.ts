@@ -22,7 +22,7 @@ export interface FileResult {
 }
 
 /** Gets the shipped text whose textSha is `sha`, or null. */
-export type BaseFor = (sha: string) => Promise<string | null>;
+type BaseFor = (sha: string) => Promise<string | null>;
 
 /** How long one merge may take before it is stopped. */
 const MERGE_TIMEOUT_MS = 60_000;
@@ -47,7 +47,7 @@ export async function mergeText(theirs: string, base: string, next: string, git 
     });
     if (!r.started) throw new Error(`git merge-file could not be started: ${r.err}`);
     if (r.timedOut) throw new Error(`git merge-file did not finish within ${MERGE_TIMEOUT_MS / 1000}s`);
-    if (r.code === null || r.code < 0 || r.code > 127) throw new Error(`git merge-file failed (${r.code}): ${r.err.trim()}`);
+    if (r.code === null || r.code < 0 || r.code > 127) throw new Error(`git merge-file failed (${r.code ?? "no exit code"}): ${r.err.trim()}`);
     return { text: r.out, conflict: r.code > 0 };
   } finally {
     rmSync(dir, { recursive: true, force: true });

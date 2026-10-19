@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { effectivePriority, parseIntentFile, serializeIntentFile, STATUSES } from "../../src/intents";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { effectivePriority, FrontmatterProblem, parseIntentFile, scanRepo, serializeIntentFile, STATUSES } from "../../src/intents";
+import { tempDir } from "../helpers";
 
 const SAMPLE = `---
 status: draft
@@ -61,6 +64,29 @@ describe("intent frontmatter", () => {
   test("strips a leading BOM before matching the frontmatter fence", () => {
     const f = parseIntentFile("﻿---\nstatus: accepted\n---\n# Intent: x\n");
     expect(f.frontmatter.status).toBe("accepted");
+  });
+
+  test("a fence parse cannot take (a blank line above it, a space after the dashes, no closing line) is refused, never read as a draft", () => {
+    // Read as a draft, the file's real status would be lost, and a patch could add a second frontmatter block.
+    for (const text of ["\n---\nstatus: accepted\n---\n# Intent: x\n", "--- \nstatus: accepted\n---\n# Intent: x\n", "  \n\n---\nstatus: accepted\n---\n", "---\nstatus: accepted\n# Intent: x\n"]) {
+      expect(() => parseIntentFile(text)).toThrow(FrontmatterProblem);
+    }
+    // No newline after the closing fence is fine.
+    expect(parseIntentFile("---\nstatus: accepted\n---").frontmatter.status).toBe("accepted");
+    expect(parseIntentFile("﻿---\r\nstatus: accepted\r\n---").frontmatter.status).toBe("accepted");
+  });
+
+  test("scanRepo lists a change whose fence is wrong under the ones a person needs to fix, with how", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "intent", "a"), { recursive: true });
+      await Bun.write(join(t.path, "intent", "a", "intent.md"), "\n---\nstatus: accepted\n---\n# Intent: a\n");
+      const scan = await scanRepo(t.path);
+      expect(scan.intents).toEqual([]);
+      expect(scan.unreadable.map((u) => [u.slug, u.problem])).toEqual([["a", "intent.md must start with a line of exactly three dashes (---) and close its top lines with another, with nothing else on either line. Fix them, and the change is picked up again."]]);
+    } finally {
+      t.cleanup();
+    }
   });
 
   test("treats blank frontmatter values as the default empty string", () => {

@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { focusOr, onMac, sendsMessage } from "../keys";
+import { focusOr, onMac, sendsMessage, sendsOnEnter } from "../keys";
 import { steer, type steerOffer } from "../requests";
 
 type SteerOffer = NonNullable<ReturnType<typeof steerOffer>>;
@@ -67,7 +67,7 @@ export function Steer({ slug, seq, offer, compact = false, extra }: { slug: stri
       placeholder="Tell the agent something"
       aria-label="Tell the agent something"
       onInput={(e) => setText(e.currentTarget.value)}
-      onKeyDown={(e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void send("message"); } }}
+      onKeyDown={(e) => { if (sendsOnEnter(e)) { e.preventDefault(); void send("message"); } }}
     />
   ) : (
     <textarea

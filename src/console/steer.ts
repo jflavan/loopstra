@@ -1,15 +1,13 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { localUser } from "../chat/transports/shared";
 import { loadConfig } from "../config";
-import { readIntent, SLUG } from "../intents";
+import { readIntent } from "../intents";
 import { sendToSession, writeChangeStop, type InboxMessage } from "../inbox";
 import { CONSOLE, submitRequest } from "../requests";
 import { Trace, type PhaseRow } from "../trace";
 import type { Hub } from "./hub";
 import { loopNow, runningRows } from "./model";
+import { changeExists, decode, json, jsonWrite, refuse } from "./routes";
 import { steerable } from "./steerable";
-import { fromPage, isJson } from "./writes";
 
 /** The longest message or redirect a person may send a session. */
 const MAX_TEXT = 4_000;
@@ -18,32 +16,25 @@ const VIA = "the dashboard";
 /** The hold a stop leaves, so the change does not start again at once. */
 const STOP_REASON = "Stopped";
 
-const json = (body: unknown, status = 200) => Response.json(body, { status });
-const refuse = (error: string, status = 409) => json({ error }, status);
-
 /**
  * The console's steering writes (null for any other path):
  * - `POST /api/sessions/<slug>/<seq>/message` with `{ kind: "message" | "redirect" | "stop", text }`:
  *   leaves it in the running session's inbox (see src/inbox.ts); a stop also leaves the change's stop
  *   (see writeChangeStop) and a hold request.
  * - `POST /api/changes/<slug>/stop`: a stop for every running session of the change, the change's stop, and one hold.
- * Each needs the page's own Origin and a JSON body, as the other writes (see writes.ts).
+ * Each needs the page's own Origin and a JSON body, as the other writes (see jsonWrite in routes.ts).
  */
 export async function steerRoutes(root: string, hub: Hub, req: Request, url: URL): Promise<Response | null> {
   const session = url.pathname.match(/^\/api\/sessions\/([^/]+)\/(\d+)\/message$/);
   const change = url.pathname.match(/^\/api\/changes\/([^/]+)\/stop$/);
   if (!session && !change) return null;
-  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  if (!fromPage(req, url)) return new Response("Forbidden", { status: 403 });
-  if (!isJson(req.headers.get("content-type"))) return new Response("Expected JSON", { status: 415 });
-  let body: unknown;
-  try { body = await req.json(); } catch { return refuse("The request was not JSON.", 400); }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse("The request was not an object.", 400);
-  const slug = decode((session ?? change)![1]!);
-  if (!SLUG.test(slug) || !existsSync(join(root, "intent", slug, "intent.md"))) return refuse(`There is no change called ${slug}.`, 404);
-  const answer = session ? await toSession(root, slug, Number(session[2]), body as Record<string, unknown>) : await stopChange(root, slug);
-  hub.poke();
-  return answer;
+  return jsonWrite(req, url, async (body) => {
+    const slug = decode((session ?? change)![1]!);
+    if (!changeExists(root, slug)) return refuse(`There is no change called ${slug}.`, 404);
+    const answer = session ? await toSession(root, slug, Number(session[2]), body) : await stopChange(root, slug);
+    hub.poke();
+    return answer;
+  });
 }
 
 /** A message, redirect or stop for one running session. */
@@ -105,9 +96,4 @@ async function hold(root: string, slug: string): Promise<void> {
   if (fm.hold.trim()) return;
   const user = localUser();
   submitRequest(root, { kind: "hold", slug, expect: fm.status, reason: STOP_REASON, by: user, byName: user, via: VIA, transport: CONSOLE, thread: "" });
-}
-
-/** A path part as text; one that cannot be decoded is no change name. */
-function decode(part: string): string {
-  try { return decodeURIComponent(part); } catch { return ""; }
 }

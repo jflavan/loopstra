@@ -6,7 +6,7 @@ import { GitHub } from "../../src/github";
 import { agentPhase } from "../../src/phases";
 import { runCommand } from "../../src/shell";
 import { GitTimeout, passOn } from "../../src/git";
-import { AssistantUnavailable, LoopBudgetReached, notTheStepsFault, onStopSignal, requestStop, resetStop, stopPromise, stopRequested, StopRequested } from "../../src/stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, onStopSignal, requestStop, resetStop, STOP_SIGNALS, stopPromise, stopRequested, StopRequested } from "../../src/stop";
 import { FAKE_CLAUDE as FAKE, setupRepo, tempDir } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -37,6 +37,15 @@ describe("stop", () => {
     expect(exits).toEqual([]);
     onStopSignal((c) => exits.push(c), quiet);
     expect(exits).toEqual([130]);
+  });
+
+  test("installStopSignals puts one handler on every stop signal, and the function it returns takes them off again", () => {
+    const counts = () => STOP_SIGNALS.map((s) => process.listenerCount(s));
+    const before = counts();
+    const remove = installStopSignals();
+    expect(counts()).toEqual(before.map((n) => n + 1));
+    remove();
+    expect(counts()).toEqual(before);
   });
 
   test("no command starts after a stop", async () => {

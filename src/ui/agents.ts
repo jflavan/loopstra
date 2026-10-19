@@ -14,7 +14,7 @@ export interface Tile {
 }
 
 /** What the grid shows, in its order. */
-export type Slot =
+type Slot =
   | { kind: "question"; change: ChangeSummary }
   | { kind: "agent"; tile: Tile }
   | { kind: "chat" };

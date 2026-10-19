@@ -7,7 +7,7 @@ import { readIntent, writeIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
   StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker, PersonChangedStatus,
-  readArtifact, setStatus, statusPatch, writeArtifact, writeIntentPriority, loadSessions, saveSession,
+  readArtifact, setStatus, statusPatch, writeArtifact, writeIntentPriority, clearSession, loadSessions, saveSession,
 } from "../../src/context";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 import { lastCommit, run, setupRepo, tempGitRepo } from "../helpers";
@@ -208,6 +208,27 @@ describe("StepContext", () => {
     }
   });
 
+  test("a write that throws after writing (a trace that cannot be written) is put back as it was, nothing staged, and the error surfaces", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      const head = await new Git(repo.path).headSha();
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+        await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
+        throw new Error("SQLITE_BUSY: the trace could not be written");
+      })).rejects.toThrow("SQLITE_BUSY");
+      expect(await Bun.file(intentMd).text()).toBe(before);
+      expect(existsSync(join(ctx.intent.dir, "note.md"))).toBe(false);
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect((await run(["git", "diff", "--cached", "--name-only"], repo.path)).out.trim()).toBe("");
+      expect(await new Git(repo.path).headSha()).toBe(head);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("a record whose commit landed before its error (git's time limit after the commit) is kept, not put back behind HEAD", async () => {
     const { repo, ctx, trace } = await setup();
     const commitPaths = Git.prototype.commitPaths;
@@ -346,6 +367,22 @@ describe("StepContext", () => {
     const { repo, ctx, trace } = await setup();
     mkdirSync(ctx.runDir, { recursive: true });
     await Bun.write(join(ctx.runDir, "sessions.json"), "not json");
+    expect(loadSessions(ctx)).toEqual({});
+    trace.close(); repo.cleanup();
+  });
+
+  test("loadSessions takes only a plain object, and only its string values, so clearSession never meets anything else", async () => {
+    const { repo, ctx, trace } = await setup();
+    mkdirSync(ctx.runDir, { recursive: true });
+    for (const notAnObject of ["null", '["sid-1"]', '"sid-1"', "7"]) {
+      await Bun.write(join(ctx.runDir, "sessions.json"), notAnObject);
+      expect(loadSessions(ctx)).toEqual({});
+      clearSession(ctx, "build");
+      expect(loadSessions(ctx)).toEqual({});
+    }
+    await Bun.write(join(ctx.runDir, "sessions.json"), JSON.stringify({ build: "sid-1", verify: 3, judge: null, design: { id: "sid-2" } }));
+    expect(loadSessions(ctx)).toEqual({ build: "sid-1" });
+    clearSession(ctx, "build");
     expect(loadSessions(ctx)).toEqual({});
     trace.close(); repo.cleanup();
   });

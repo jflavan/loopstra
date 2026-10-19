@@ -1,5 +1,5 @@
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
-import { lastLine, spawnBounded, withBunOnPath, type StdinWriter } from "./shell";
+import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitLocation } from "./shell";
 import { Cancelled, SessionStopped, StopRequested } from "./stop";
 import { MEANWHILE_HEADING } from "./console/steerable";
 
@@ -10,7 +10,7 @@ export interface StreamEvent {
   [key: string]: unknown;
 }
 
-export interface Collected {
+interface Collected {
   sessionId: string | null;
   subtype: string;
   structuredOutput: unknown;
@@ -39,21 +39,35 @@ function deniedText(d: { tool_name?: string; tool_input?: Record<string, unknown
  * A result event that answers a background task's notification, not the prompt. A resumed session
  * with a task still pending delivers the notification first and answers it with a turn of its own.
  */
-export function answersNotification(e: StreamEvent): boolean {
+function answersNotification(e: StreamEvent): boolean {
   return e.type === "result" && (e as { origin?: { kind?: unknown } }).origin?.kind === "task-notification";
+}
+
+/** True for a parsed stream line that is an event: an object with a string `type`. */
+function isStreamEvent(v: unknown): v is StreamEvent {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { type?: unknown }).type === "string";
+}
+
+/** The result event's fields the runner reads. Each is checked where it is used: the CLI's shape is not Loopstra's to trust. */
+interface ResultEvent extends StreamEvent {
+  structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
+  permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
 }
 
 /** Accumulates `--output-format stream-json` lines into one result. A notification's result is not the result. */
 export class StreamCollector {
   private sessionId: string | null = null;
-  private result: StreamEvent | null = null;
+  private result: ResultEvent | null = null;
   readonly events: StreamEvent[] = [];
 
   push(line: string): StreamEvent | null {
     const trimmed = line.trim();
     if (!trimmed) return null;
-    let e: StreamEvent;
-    try { e = JSON.parse(trimmed) as StreamEvent; } catch { return null; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); } catch { return null; }
+    // Only an event (an object with a type) counts: a hook or an MCP server may print other JSON to stdout.
+    if (!isStreamEvent(parsed)) return null;
+    const e = parsed;
     this.events.push(e);
     if (e.session_id && !this.sessionId) this.sessionId = e.session_id;
     if (e.type === "result" && !answersNotification(e)) this.result = e;
@@ -61,10 +75,7 @@ export class StreamCollector {
   }
 
   finish(): Collected {
-    const r = this.result as (StreamEvent & {
-      structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
-      permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
-    }) | null;
+    const r = this.result;
     return {
       sessionId: this.sessionId ?? r?.session_id ?? null,
       subtype: r?.subtype ?? "missing_result",
@@ -151,6 +162,8 @@ export interface RunPhaseInput {
   maxBudgetUsd?: number;
   resume?: string;
   env?: Record<string, string>;
+  /** Names of this process's environment variables the session must not inherit (a chat session: the bot tokens). `env` is added after. */
+  dropEnv?: string[];
   /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
   executable?: string;
   onEvent?: (e: StreamEvent) => void;
@@ -186,7 +199,7 @@ export interface SessionControl {
 }
 
 /** A user message as one stream-json input line. */
-export function userLine(text: string): string {
+function userLine(text: string): string {
   return `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
 }
 
@@ -296,7 +309,7 @@ const NOTIFICATION_RESENDS = 2;
  * Sent once, on the same session, when a session finishes without structured output (for example
  * it wrote its report as text). Cheaper than a new session, which would redo the whole phase.
  */
-export const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the StructuredOutput tool (a tool call, not text) with the result you reached; do not redo the work.";
+const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the StructuredOutput tool (a tool call, not text) with the result you reached; do not redo the work.";
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -366,7 +379,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
-  const env = withBunOnPath({ ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
+  const env = withBunOnPath(withoutGitLocation({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env }));
 
   // A session that ended having answered only notifications (one started before background tasks
   // were turned off) gets the prompt again on the same session, within the same deadline. A session
@@ -456,7 +469,8 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       if (budgetArgs(earlierCostUsd + c.costUsd) === null) break; // nothing left to ask with
       nudged = true;
       earlierCostUsd += c.costUsd;
-      earlierDenied = c.denied;
+      // Kept with what a redirect before it was refused: the phase's report names every refusal.
+      earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
       resume = c.sessionId;
       stdin = ENVELOPE_NUDGE;
       collector = new StreamCollector();
@@ -468,6 +482,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
     earlierCostUsd += typeof cost === "number" ? cost : 0;
     if (budgetArgs(earlierCostUsd) === null) break; // nothing left to send it again with
+    earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
     resume = c.sessionId;
     collector = new StreamCollector();
   }
@@ -485,13 +500,13 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
     const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr))
-      ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus}` : null);
+      ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus ?? ""}` : null);
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
   }
   if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {
     return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   }
-  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
+  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode ?? "without an exit code"} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);

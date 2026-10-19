@@ -106,7 +106,7 @@ describe("chat with the loop", () => {
   test("a request the loop was killed in before its commit is finished on the next tick, not mistaken for someone else's edit", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
-      const { writeJson } = await import("../../src/chat/threads");
+      const { writeJson } = await import("../../src/fsutil");
       const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       // As if the loop was killed after an earlier tick wrote both files, before it committed them.
@@ -162,6 +162,31 @@ describe("chat with the loop", () => {
       r.cleanup();
     }
   }, 30_000);
+
+  test("a result whose delivery fails is kept for the next poll, and the thread sees it once", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft") } });
+    try {
+      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      await tick(r.root).catch(() => {});
+      const t = recorder();
+      let down = true;
+      t.send = async (thread, text) => { if (down) throw new Error("the terminal is gone"); t.sent.push([thread, text]); };
+      const service = new ChatService(r.root, [t], { announce: false, pollMs: 60_000 });
+      await service.poll();
+      expect(t.sent).toEqual([]);
+      down = false;
+      await service.poll();
+      const started = "Started a. I will say here when it needs anyone, and when it is done.";
+      expect(t.sent).toEqual([["local", started]]);
+      await service.poll();
+      expect(t.sent).toHaveLength(1);
+      // The failed try left nothing in the thread: the message and the agent's line are there once.
+      const thread = service.orchestrator.store.get("terminal", "local");
+      expect(thread.messages.map((m) => m.text)).toEqual([started]);
+      expect(thread.since).toEqual([`The loop answered: ${started}`]);
+      expect(takeResults(r.root, new Set(["terminal"]))).toEqual([]);
+    } finally { r.cleanup(); }
+  });
 
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });

@@ -2,7 +2,7 @@ import { lastLine, spawnBounded } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
-export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
+const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
 /** Whether GitHub answered the pull request watcher's last look: `fail` with gh's error, or `pass`. */
@@ -39,10 +39,11 @@ export function recordGitHub(trace: Trace, error: string | null): void {
 /**
  * `mergeCommit`: the commit the merge made on the base branch (null until merged, or when gh does not say).
  * `head`: the commit at the tip of the pull request's branch on GitHub (null when gh does not say).
+ * `draft`: a draft pull request, which GitHub refuses to merge until it is marked ready for review.
  */
-export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null }
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null; draft: boolean }
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
-export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
+type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
 /**
  * Check states that fail or are still running. A failed state wins over gh's `bucket`, which puts
@@ -65,6 +66,28 @@ type PrJson = {
   latestReviews?: { author?: { login?: string } | null; authorAssociation?: string; state?: string }[] | null;
   author?: { login?: string } | null;
 };
+
+/** What gh pr view --json prints, as far as it is read here (see lookupPr). */
+type PrViewJson = PrJson & { number: number; state: PrInfo["state"]; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string; isDraft?: boolean };
+
+const PR_STATES = new Set<string>(["OPEN", "MERGED", "CLOSED"]);
+
+/** True when `j` has the shape of a pull request as gh prints it: the fields read without a fallback are there, of the right type. */
+function isPrView(j: unknown): j is PrViewJson {
+  if (typeof j !== "object" || j === null) return false;
+  const o = j as Record<string, unknown>;
+  return typeof o.number === "number" && typeof o.state === "string" && PR_STATES.has(o.state) && typeof o.url === "string"
+    && typeof o.createdAt === "string" && (o.mergedAt === null || typeof o.mergedAt === "string");
+}
+
+/** The rows gh pr checks --json prints, each read for its state and bucket where they are strings; null when it printed no list. */
+function checkRows(rows: unknown): { state?: string; bucket?: string }[] | null {
+  if (!Array.isArray(rows)) return null;
+  return rows.map((r: unknown) => {
+    const o = typeof r === "object" && r !== null ? (r as Record<string, unknown>) : {};
+    return { ...(typeof o.state === "string" ? { state: o.state } : {}), ...(typeof o.bucket === "string" ? { bucket: o.bucket } : {}) };
+  });
+}
 
 /**
  * Who has a say in the repository; on a public one anybody else can leave a review too. Broader than
@@ -123,15 +146,15 @@ export class GitHub {
    * and `{ error }` when gh could not tell (not found, timed out, not signed in), so a caller can wait instead.
    */
   async lookupPr(branchOrNumber: string): Promise<{ pr: PrInfo | null } | { error: string }> {
-    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,latestReviews,author,mergedAt,mergeCommit,url,createdAt,headRefOid"]);
+    const r = await this.run(["pr", "view", branchOrNumber, "--json", "number,state,reviewDecision,latestReviews,author,mergedAt,mergeCommit,url,createdAt,headRefOid,isDraft"]);
     if (r.code !== 0) {
       if (/no pull requests found/i.test(r.err)) return { pr: null };
       return { error: lastLine(r.err) || `gh exited ${r.code}` };
     }
-    try {
-      const j = JSON.parse(r.out) as PrJson & { number: number; state: PrInfo["state"]; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string };
-      return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null } };
-    } catch { return { error: "gh pr view printed something that is not JSON" }; }
+    let j: unknown;
+    try { j = JSON.parse(r.out); } catch { return { error: "gh pr view printed something that is not JSON" }; }
+    if (!isPrView(j)) return { error: "gh pr view printed something that is not a pull request" };
+    return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null, draft: j.isDraft === true } };
   }
 
   async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {
@@ -156,8 +179,8 @@ export class GitHub {
     const r = await this.run(["pr", "checks", String(number), "--json", "name,state,bucket"]);
     if (r.code === 124 || r.code === 127) { onError?.(lastLine(r.err)); return "unknown"; }
     try {
-      const rows = JSON.parse(r.out) as unknown;
-      if (Array.isArray(rows)) return checksFromRows(rows);
+      const rows = checkRows(JSON.parse(r.out));
+      if (rows) return checksFromRows(rows);
     } catch { /* not JSON: gh reported an error */ }
     if (/no checks reported/i.test(r.err)) return "none";
     onError?.(lastLine(r.err) || `gh exited ${r.code}`);

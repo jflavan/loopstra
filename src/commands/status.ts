@@ -44,7 +44,7 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
   const questions = openQuestions(root, intents);
   const rows = intents.map((i) => {
     const s = trace.intentSummary(i.slug);
-    const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus})` : "-";
+    const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus ?? "running"})` : "-";
     const cost = `$${(s?.costUsd ?? 0).toFixed(2)}`;
     return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents, undefined, questions.get(i.slug))];
   });
@@ -65,7 +65,7 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
 }
 
 /** Splits text into lines of at most `width` characters at spaces; a longer word is cut. */
-export function wrap(text: string, width: number): string[] {
+function wrap(text: string, width: number): string[] {
   const out: string[] = [];
   let lineText = "";
   for (const word of text.split(/\s+/).filter(Boolean)) {

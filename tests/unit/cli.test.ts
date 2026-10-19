@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "../../src/commands/args";
 import { preflight } from "../../src/scheduler";
 import { writeStamp } from "../../src/stamp";
 import { FAKE_CLAUDE, run, tempDir, tempGitRepo } from "../helpers";
@@ -103,6 +104,36 @@ describe("the command line outside a set-up repo", () => {
     }
   });
 
+  test("a flag a command does not take, or a port that is not a number, gets the usage line and exit 1, and creates nothing", async () => {
+    const t = tempDir();
+    try {
+      const cases: Array<[string[], string]> = [
+        [["start", "--onec"], "Usage: loopstra start [--once]"],
+        [["start", "once"], "Usage: loopstra start [--once]"],
+        [["ui", "--port=5000x"], "Usage: loopstra ui [--port <number>] [--no-chat]"],
+        [["ui", "--port", ""], "Usage: loopstra ui [--port <number>] [--no-chat]"],
+        [["ui", "--port"], "Usage: loopstra ui [--port <number>] [--no-chat]"],
+        [["ui", "--port", "70000"], "Usage: loopstra ui [--port <number>] [--no-chat]"],
+        [["ui", "--nochat"], "Usage: loopstra ui [--port <number>] [--no-chat]"],
+        [["chat", "--terminal"], "Usage: loopstra chat [--no-terminal]"],
+        [["tail", "one", "two"], "Usage: loopstra tail [slug]"],
+        [["tail", "--follow"], "Usage: loopstra tail [slug]"],
+        [["judges", "--all"], "Usage: loopstra judges"],
+        [["upgrade", "--force"], "Usage: loopstra upgrade [--check] [--repo]"],
+        [["customize", "--list"], "Usage: loopstra customize [prompt]"],
+        [["apply-lessons", "one", "--dry"], "Usage: loopstra apply-lessons <slug>"],
+        [["apply-lessons"], "Usage: loopstra apply-lessons <slug>"],
+      ];
+      for (const [args, usage] of cases) {
+        const r = await run([process.execPath, CLI, ...args], t.path);
+        expect({ args, code: r.code, said: (r.out + r.err).trim() }).toEqual({ args, code: 1, said: usage });
+      }
+      expect(readdirSync(t.path)).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("init in a folder that is not a git repository warns and stops", async () => {
     const t = tempDir();
     try {
@@ -132,5 +163,31 @@ describe("the update notice", () => {
     } finally {
       repo.cleanup();
     }
+  });
+});
+
+describe("parseArgs", () => {
+  const ui = { usage: "Usage: loopstra ui [--port <number>] [--no-chat]", flags: ["--no-chat"], port: true } as const;
+
+  test("the flags a command takes, in either order, with or without a port", () => {
+    expect(parseArgs([], ui)).toEqual({ flags: new Set(), port: null, names: [] });
+    expect(parseArgs(["--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: null, names: [] });
+    expect(parseArgs(["--port", "5000", "--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, names: [] });
+    expect(parseArgs(["--no-chat", "--port=5000"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, names: [] });
+    expect(parseArgs(["--port=0"], ui)!.port).toBe(0);
+    expect(parseArgs(["--port", "65535"], ui)!.port).toBe(65535);
+  });
+
+  test("a word it does not know, a port that is not a whole number in range, or a name too many is null", () => {
+    for (const bad of [["--onec"], ["--port"], ["--port", ""], ["--port", "-1"], ["--port=5000x"], ["--port", "70000"], ["--port", "1.5"], ["--port=5000", "--port=6000"], ["x"], ["-p", "5000"], ["--no-chat", "--no-chat"]]) {
+      expect({ bad, parsed: parseArgs(bad, ui) }).toEqual({ bad, parsed: null });
+    }
+    expect(parseArgs(["--port", "5000"], { usage: "u" })).toBeNull();
+  });
+
+  test("names: as many as the command takes", () => {
+    expect(parseArgs(["one"], { usage: "u", names: 1 })).toEqual({ flags: new Set(), port: null, names: ["one"] });
+    expect(parseArgs(["one", "two"], { usage: "u", names: 1 })).toBeNull();
+    expect(parseArgs(["--check", "--repo"], { usage: "u", flags: ["--check", "--repo"] })!.flags).toEqual(new Set(["--check", "--repo"]));
   });
 });

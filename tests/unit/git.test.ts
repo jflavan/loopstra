@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
+import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeStaleLocks, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
 import { moveMain } from "../../src/remote";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -245,6 +245,61 @@ describe("Git", () => {
       expect(await git.commitAll("a")).toBe(true);
       expect((await git.run(["log", "-1", "--format=%an|%ae|%cn|%ce"])).out.trim()).toBe(`${RUNTIME_NAME}|${RUNTIME_EMAIL}|${RUNTIME_NAME}|${RUNTIME_EMAIL}`);
     } finally { restore(); repo.cleanup(); }
+  });
+
+  test("git works on the checkout it is given, even when a hook or alias that started Loopstra named another repository in the environment", async () => {
+    const repo = await tempGitRepo();
+    const other = await tempGitRepo();
+    // What a git hook exports to what it starts: its own repository and index.
+    const restore = setEnv({ GIT_DIR: join(other.path, ".git"), GIT_INDEX_FILE: join(other.path, ".git", "index") });
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      const wtGit = new Git(wt);
+      expect(await wtGit.currentBranch()).toBe("intent/x");
+      await Bun.write(join(wt, "src", "new.ts"), "export const a = 1;\n");
+      expect(await wtGit.commitAll("add new")).toBe(true);
+      expect((await git.run(["cat-file", "-e", "intent/x:src/new.ts"], true)).code).toBe(0);
+      expect(await git.currentBranch()).toBe("main");
+      await git.worktreeRemove(wt);
+    } finally { restore(); }
+    // The other repository was never touched.
+    expect(await lastCommit(other.path)).toContain("init");
+    expect(await new Git(other.path).isDirty()).toBe(false);
+    repo.cleanup(); other.cleanup();
+  });
+
+  test("rebaseOnto aborts a rebase an interrupted step left in progress, then rebases onto the base it is given", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      const wtGit = new Git(wt);
+      await Bun.write(join(wt, "a.md"), "branch\n");
+      await wtGit.commitAll("a on the branch");
+      // A branch that clashes with it, and a rebase onto that branch stopped at the conflict (the step was interrupted).
+      await run(["git", "checkout", "-q", "-b", "other"], repo.path);
+      await Bun.write(join(repo.path, "a.md"), "other\n");
+      await git.commitAll("a on other");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      await Bun.write(join(repo.path, "b.md"), "main\n");
+      await git.commitAll("b on main");
+      expect((await wtGit.runtime("rebase", ["-q", "other"], true)).code).not.toBe(0);
+      expect(await wtGit.rebasing()).toBe(true);
+
+      expect(await wtGit.rebaseOnto("main")).toBe(true);
+      expect(await wtGit.rebasing()).toBe(false);
+      expect(await wtGit.isDirty()).toBe(false);
+      expect(await git.isAncestor("main", "intent/x")).toBe(true);
+      expect((await wtGit.run(["log", "--format=%s", "main..HEAD"])).out.trim()).toBe("a on the branch");
+      expect((await Bun.file(join(wt, "a.md")).text()).replace(/\r\n/g, "\n")).toBe("branch\n");
+      expect(existsSync(join(wt, "b.md"))).toBe(true);
+      await git.worktreeRemove(wt);
+    } finally { repo.cleanup(); }
   });
 
   test("runtime commits never start git's automatic gc or maintenance (another change may be committing meanwhile)", async () => {
@@ -536,6 +591,34 @@ describe("Git and the locks", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("old locks a killed git left on HEAD, the packed refs, the config and a ref are removed, in the repository and its worktrees; a fresh one is kept", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      const gitDir = join(repo.path, ".git");
+      const admin = join(gitDir, "worktrees", "x");
+      const old = [
+        join(gitDir, "HEAD.lock"), join(gitDir, "packed-refs.lock"), join(gitDir, "config.lock"),
+        join(gitDir, "refs", "heads", "main.lock"), join(gitDir, "refs", "heads", "intent", "x.lock"),
+        join(admin, "index.lock"), join(admin, "HEAD.lock"),
+      ];
+      const fresh = [join(gitDir, "index.lock"), join(gitDir, "refs", "heads", "fresh.lock")];
+      const ago = new Date(Date.now() - 11 * 60_000);
+      for (const p of old) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, ""); utimesSync(p, ago, ago); }
+      for (const p of fresh) writeFileSync(p, "");
+      const removed = await removeStaleLocks(repo.path);
+      expect(removed.map((p) => resolve(p)).sort()).toEqual(old.map((p) => resolve(p)).sort());
+      for (const p of old) expect(existsSync(p)).toBe(false);
+      for (const p of fresh) expect(existsSync(p)).toBe(true);
+      // The branch and the ref of the fresh lock are untouched, and nothing else was removed.
+      expect(await git.branchExists("intent/x")).toBe(true);
+      expect(await removeStaleLocks(repo.path)).toEqual([]);
+    } finally { repo.cleanup(); }
+  });
+
   test("a worktree whose add was killed part way (left locked) is removed, so it can be added again", async () => {
     const repo = await tempGitRepo();
     try {
@@ -632,7 +715,7 @@ describe("worktree administration", () => {
       expect(r).toBe("passed");
       // The failed removal is not lost: the caller is told, to trace it.
       expect(failed).toHaveLength(1);
-      child!.stdin.end();
+      await child!.stdin.end();
       await child!.exited;
       // What was left is removed by the next add at that path.
       expect(await withDetachedWorktree(git, dir, "main", async (cwd) => existsSync(join(cwd, "README.md")))).toBe(true);

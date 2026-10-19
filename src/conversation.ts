@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { z } from "zod";
+import { runDir } from "./paths";
+import { readJsonAs, writeJson } from "./fsutil";
 import { commitRecord } from "./context";
 
 /**
@@ -75,13 +77,16 @@ export function withEntry(current: string, e: ConversationEntry): string {
 /** An entry's text without its time (the header's "YYYY-MM-DD HH:MM · "). */
 const timeless = (entry: string) => entry.trim().replace(/^## \S+ \S+ · /, "## ");
 
+/** The record's entries (the heading first), each without its time. */
+const entriesOf = (current: string) => current.trim().split(/\n(?=## )/).map(timeless);
+
 /**
  * The record with one more entry, unless it already ends with that same entry (whatever its time): an
  * earlier try whose commit failed left it on disk.
  */
 export function withEntryOnce(current: string, e: ConversationEntry): string {
-  const last = current.trim().split(/\n(?=## )/).at(-1) ?? "";
-  return timeless(last) === timeless(conversationEntry(e)) ? current : withEntry(current, e);
+  const last = entriesOf(current).at(-1) ?? "";
+  return last === timeless(conversationEntry(e)) ? current : withEntry(current, e);
 }
 
 /**
@@ -90,26 +95,50 @@ export function withEntryOnce(current: string, e: ConversationEntry): string {
  * the record people read and every prompt quotes.
  */
 function recordedPath(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "recorded.json");
+  return join(runDir(root, slug), "recorded.json");
 }
 
 type EntryKind = ConversationEntry["kind"];
 
+const ENTRY_KINDS = ["message", "redirect", "question", "answer", "later", "sent-back", "took-back"] as const satisfies readonly EntryKind[];
+
+/** recorded.json's shape: message id to the kind of entry it got. */
+const RecordedSchema = z.record(z.string(), z.enum(ENTRY_KINDS));
+
+/** An inbox message as its record is looked for: who sent it, from where, and its words. */
+interface Recorded { who: string; via: string; text: string }
+
+/**
+ * True when the record holds the inbox message's entry: one by the same person from the same place
+ * (its header), addressed to a phase or to the next session (which of them is not known to every
+ * caller), whose body is exactly the message's text. The whole entry, never the words alone: "ok" is
+ * in many a record, and a message whose first commit failed must still be written.
+ */
+function holdsEntry(current: string, m: Recorded): boolean {
+  const head = `## ${one(m.who)} (${one(m.via)}) `;
+  const text = body(m.text);
+  return entriesOf(current).some((entry) => {
+    if (!entry.startsWith(head)) return false;
+    const nl = entry.indexOf("\n");
+    const address = nl < 0 ? entry.slice(head.length) : entry.slice(head.length, nl);
+    return /^(→|redirects) \S/.test(address) && (nl < 0 ? "" : entry.slice(nl + 1)) === text;
+  });
+}
+
 /**
  * The kind of entry an inbox message got in conversation.md ("message", "redirect", "later"), or null
- * when it has none: never written, or its text is no longer in the record (a failed write put back).
+ * when it has none: never written, or its entry is no longer in the record (a failed write put back;
+ * see holdsEntry).
  */
-export function recordedAs(root: string, slug: string, id: string, text: string, current = readConversation(root, slug)): EntryKind | null {
-  const kinds = readJson<Record<string, EntryKind>>(recordedPath(root, slug));
-  const kind = kinds && typeof kinds === "object" ? kinds[id] : undefined;
-  return typeof kind === "string" && current.includes(body(text)) ? kind : null;
+export function recordedAs(root: string, slug: string, id: string, m: Recorded, current = readConversation(root, slug)): EntryKind | null {
+  const kind = readJsonAs(recordedPath(root, slug), RecordedSchema)?.[id];
+  return kind && holdsEntry(current, m) ? kind : null;
 }
 
 /** Notes that an inbox message's entry is written. A failure is left: at worst a later try writes the entry again. */
 function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): void {
   try {
-    const kinds = readJson<Record<string, EntryKind>>(recordedPath(root, slug));
-    writeJson(recordedPath(root, slug), { ...(kinds && typeof kinds === "object" ? kinds : {}), [id]: kind });
+    writeJson(recordedPath(root, slug), { ...readJsonAs(recordedPath(root, slug), RecordedSchema), [id]: kind });
   } catch { /* see above */ }
 }
 
@@ -123,7 +152,7 @@ function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): 
 export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string } = {}): Promise<void> {
   await commitRecord(root, main, slug, "conversation", async () => {
     const current = readConversation(root, slug);
-    if (opts.id && "text" in e && recordedAs(root, slug, opts.id, e.text, current)) return;
+    if (opts.id && "who" in e && "text" in e && recordedAs(root, slug, opts.id, e, current)) return;
     await Bun.write(conversationPath(root, slug), withEntry(current, e));
     if (opts.id) noteRecorded(root, slug, opts.id, e.kind);
   });

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "preact/hooks";
-import type { ChangeDetail, PhaseView, SessionMessage, TranscriptItem } from "../../console/types";
-import { clock, costSoFar, duration, shortModel, stepWord, usd } from "../format";
+import type { ChangeDetail, PhaseView, SessionMessage } from "../../console/types";
+import { clock, duration, shortModel, stepWord, usd } from "../format";
 import { Link } from "../parts/Link";
 import { Steer } from "../parts/Steer";
 import { Transcript } from "../parts/Transcript";
 import { steerOffer } from "../requests";
+import { sessionFacts } from "../session-facts";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
 import { follow } from "../stream";
-import { addItems, EMPTY, lastCost, type Shown } from "../transcript";
+import { addFrames, EMPTY, lastCost, type Frame, type Shown } from "../transcript";
 
 type Phase = Extract<SessionMessage, { type: "phase" }>;
 
@@ -22,23 +23,24 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
   const chat = slug.startsWith("_");
 
   useEffect(() => {
-    let buffer: TranscriptItem[] = [];
+    let buffer: Frame[] = [];
     let gotPhase = false;
     const flushNow = () => {
       if (!buffer.length) return;
       const batch = buffer;
       buffer = [];
-      setShown((s) => addItems(s, batch));
+      setShown((s) => addFrames(s, batch));
     };
     // Rows arrive in bursts; drawing them ten times a second keeps a long session smooth.
     const flush = setInterval(flushNow, 100);
-    // A stream opened again continues from the last row's offset (see follow); each row's id is one.
+    // A stream opened again continues from the last row's offset (see follow); each row's id is one,
+    // and goes with the row so a line sent again is drawn once (see addFrames).
     const stop = follow((from) => `/api/sessions/${encodeURIComponent(slug)}/${seq}/stream${from > 0 ? `?from=${from}` : ""}`, {
-      message(data) {
+      message(data, offset) {
         let m: SessionMessage;
         try { m = JSON.parse(data) as SessionMessage; } catch { return; }
         if (m.type === "item") {
-          buffer.push(m.item);
+          buffer.push({ item: m.item, offset });
           return;
         }
         // A phase or the end settles what is shown at once, so "no transcript" is never said while rows wait in the buffer.
@@ -59,6 +61,7 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
           return "stop";
         }
         setDown(true);
+        return undefined;
       },
     });
     return () => {
@@ -127,20 +130,16 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
 /** The facts that move with the clock. They read the time here, so a tick redraws these lines and not the transcript. */
 function Facts({ phase, live, model, detail, chatCost }: { phase: Phase | null; live: boolean; model: string | null; detail: PhaseView | null; chatCost: number | null }) {
   const t = now.value;
-  const rate = meta.value?.usdPerMinute;
-  const elapsed = phase ? (phase.ended ? Date.parse(phase.ended) : t) - Date.parse(phase.started) : 0;
-  let cost = "–";
-  if (live && phase) {
-    if (rate !== undefined) cost = usd(costSoFar(phase.started, t, rate), true);
-  } else if (chatCost !== null) cost = usd(chatCost);
-  else if (detail) cost = usd(detail.costUsd);
+  // Once over, the cost is a chat turn's own, or the trace's; the detail does not count while it runs (it is read then too).
+  const finished = live ? null : chatCost !== null ? { costUsd: chatCost } : detail ? { costUsd: detail.costUsd } : {};
+  const facts = phase ? sessionFacts({ started: phase.started, ended: phase.ended, status: phase.status, finished, rate: meta.value?.usdPerMinute, now: t }) : null;
   return (
     <dl>
       {model && <><dt>Model</dt><dd>{shortModel(model)}</dd></>}
       {phase && <><dt>Started</dt><dd>{clock(phase.started, t)}</dd></>}
-      {phase && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(elapsed)}</dd></>}
+      {facts && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(facts.elapsedMs)}</dd></>}
       <dt>Cost</dt>
-      <dd>{cost}</dd>
+      <dd>{facts && facts.cost !== null ? usd(facts.cost, facts.estimate) : "–"}</dd>
       {detail?.error && <><dt>Problem</dt><dd>{detail.error}</dd></>}
     </dl>
   );

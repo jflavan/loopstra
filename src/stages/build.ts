@@ -137,7 +137,7 @@ async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
 }
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
-export const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
+const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
 
 /** What fix is told about a failed project command: which one, and the end of its output. */
 function failureOutput(f: CommandResult): string {
@@ -176,7 +176,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       // work before the loop, and each fix is committed below. Removed, so neither a fix's commit nor a
       // later look for unsaved work (review start, the merge checks) commits them; also when a stop cut
       // the run short.
-      await wt.run(["clean", "-f", "-d", "-q"], { allowFail: true, cleanup: true });
+      await removeNewFiles(ctx, wt);
     }
     if (!failure) {
       // The merge checks need not run them again on the same code (see checkMerge).
@@ -200,11 +200,27 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
 }
 
 /**
+ * Removes the new files in the worktree after the checks ran (see testLoop), best effort. Windows
+ * can hold a brief open handle on a file a command just wrote (as worktreeRemove sees), so a
+ * failure is tried once more after a short wait; one that lasts is traced, since the next fix's
+ * commit may then include the commands' output files.
+ */
+async function removeNewFiles(ctx: StepContext, wt: Git): Promise<void> {
+  const clean = () => wt.run(["clean", "-f", "-d", "-q"], { allowFail: true, cleanup: true });
+  let r = await clean();
+  if (r.code !== 0) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    r = await clean();
+  }
+  if (r.code !== 0) ctx.trace.event(ctx.slug, "error", { where: "clean", error: (r.err || r.out || `exit ${r.code}`).trim(), note: "new files the commands wrote were not removed; the next fix's commit may include them" });
+}
+
+/**
  * Runs test, lint, build in the worktree: in order, stopping at the first failure, or with
  * `speed.parallel_checks` all at once. Returns the first failure in that order, or null when all
  * pass. The phase is recorded as failed when a command fails.
  */
-export async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
+async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
   const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
   let failed = null as CommandResult | null;
   const r = await codePhase(ctx, phaseName, async (seq) => {

@@ -24,8 +24,8 @@ async function blobTexts(repo: string, blobs: string[]): Promise<Map<string, str
   const proc = Bun.spawn({ cmd: ["git", "cat-file", "--batch"], cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; proc.kill(); }, BLOBS_TIMEOUT_MS);
-  proc.stdin.write(`${blobs.join("\n")}\n`);
-  proc.stdin.end();
+  void proc.stdin.write(`${blobs.join("\n")}\n`);
+  void proc.stdin.end();
   const [bytes, err, code] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]).finally(() => clearTimeout(timer));
   if (timedOut) throw new Error(`git cat-file --batch did not finish within ${BLOBS_TIMEOUT_MS / 1000}s`);
   if (code !== 0) throw new Error(`git cat-file --batch failed (${code}): ${err.trim()}`);

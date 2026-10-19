@@ -62,6 +62,20 @@ describe("applyLessons", () => {
     }
   });
 
+  test("a lesson already there as a bullet is skipped, however it is bulleted; one only mentioned in prose is added", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "intent", "one"), { recursive: true });
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "## Proposed CLAUDE.md additions\n- Never log tokens.\n- Run the linter first.\n- Keep tests fast.\n");
+      await Bun.write(join(t.path, "CLAUDE.md"), "# Project\n\nA note: Never log tokens. That is prose, not a lesson.\n\n## Lessons\n*   Run the linter first.   \n  - Keep tests fast.\n");
+      const r = await applyLessons(t.path, "one");
+      expect(r.added).toEqual(["- Never log tokens."]);
+      expect(await Bun.file(join(t.path, "CLAUDE.md")).text()).toBe("# Project\n\nA note: Never log tokens. That is prose, not a lesson.\n\n## Lessons\n*   Run the linter first.   \n  - Keep tests fast.\n- Never log tokens.\n");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("creates CLAUDE.md when there is none", async () => {
     const t = tempDir();
     try {

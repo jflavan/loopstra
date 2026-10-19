@@ -6,8 +6,6 @@ import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
-import { release } from "../../src/lanes";
-import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo } from "../helpers";
 
@@ -148,7 +146,7 @@ export async function copyRemoteRepo(r: RemoteRepo): Promise<RemoteRepo> {
 /** Every open pull request's checks have passed on GitHub. */
 export async function checksPass(r: RemoteRepo): Promise<void> {
   const s = await Bun.file(r.state).json();
-  for (const pr of Object.values(s.prs) as { checks: string }[]) pr.checks = "pass";
+  for (const pr of Object.values<{ checks: string }>(s.prs)) pr.checks = "pass";
   await Bun.write(r.state, JSON.stringify(s));
 }
 

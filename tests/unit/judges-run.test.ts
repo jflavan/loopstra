@@ -177,8 +177,8 @@ describe("runJudge shadow", () => {
       await new Git(repo.path).commitAll("revise");
       await runJudge(ctx, review);
       const [a, b, c] = trace.judgeRows().map((r) => r.prompt_sha);
-      expect(a).toBe(b!);
-      expect(c).not.toBe(a!);
+      expect(a).toBe(b);
+      expect(c).not.toBe(a);
     });
   });
 

@@ -326,7 +326,7 @@ describe("moving main", () => {
       expect(r.ok).toBe(false);
       expect(await git.headSha()).toBe(from);
       expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
-      holder.stdin.end();
+      await holder.stdin.end();
       await holder.exited;
       expect(await text(a)).toBe("a1\n");
     } finally {
@@ -355,6 +355,34 @@ describe("moving main", () => {
       expect((await git.run(["status", "--porcelain", "--untracked-files=no"])).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "moving-main"))).toBe(false);
       expect(trace.events("_loop").some((e) => e.payload.includes("a move of main cut short was put back"))).toBe(true);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a put-back of a file whose name has brackets puts back that file only: a person's unsaved edit to a sibling the name matches is kept", async () => {
+    const repo = await tempGitRepo();
+    const git = new Git(repo.path);
+    const trace = Trace.open(repo.path);
+    try {
+      await Bun.write(join(repo.path, "src", "[id].ts"), "first\n");
+      await Bun.write(join(repo.path, "src", "i.ts"), "first\n");
+      await git.commitAll("from");
+      const from = await git.headSha();
+      await Bun.write(join(repo.path, "src", "[id].ts"), "second\n");
+      await git.commitAll("to");
+      const to = await git.headSha();
+      await run(["git", "reset", "-q", "--hard", from], repo.path);
+      // As a killed move leaves it: the file written and staged, the branch not moved. Beside it, a
+      // person's unsaved edit to a file the other's name matches as a pattern.
+      await Bun.write(join(repo.path, "src", "[id].ts"), "second\n");
+      await run(["git", "update-index", "--", "src/[id].ts"], repo.path);
+      await Bun.write(join(repo.path, "src", "i.ts"), "a person's unsaved edit\n");
+      await Bun.write(join(repo.path, ".loopstra", "moving-main"), `${from}\n${to}\n`);
+      expect(await settleCutShortMove(repo.path, trace)).toBeNull();
+      expect(await git.headSha()).toBe(from);
+      expect(await text(join(repo.path, "src", "[id].ts"))).toBe("first\n");
+      expect(await text(join(repo.path, "src", "i.ts"))).toBe("a person's unsaved edit\n");
+      expect((await git.run(["diff", "--cached", "--name-only"])).out.trim()).toBe("");
+      expect(await git.changedTrackedFiles()).toEqual(["src/i.ts"]);
     } finally { trace.close(); repo.cleanup(); }
   });
 

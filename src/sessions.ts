@@ -10,7 +10,7 @@ import type { Trace } from "./trace";
  * How a session's report is read: its value, or why it cannot be used. `endAs: "asked"`: the session asked a
  * person `note` (see src/questions.ts); its row ends asked, and the question is traced as an event of its own.
  */
-export type ReportRead<T> =
+type ReportRead<T> =
   | { ok: true; value: T; endAs?: "asked"; note?: string }
   | { ok: false; reason: "invalid-envelope" | "agent-fail"; detail: string };
 
@@ -19,7 +19,7 @@ export type ReportRead<T> =
  * The caller starts the phase row (each holds its budget its own way) and says how to read the report
  * and what a failure that is not the session's own means to it.
  */
-export interface TracedSession<T> {
+interface TracedSession<T> {
   trace: Trace;
   slug: string;
   /** The phase row, already started. */
@@ -45,7 +45,7 @@ export interface TracedSession<T> {
 }
 
 /** What one traced session gave. `denied`: the commands it was not allowed to run. */
-export type SessionOutcome<T> =
+type SessionOutcome<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number; denied: string[] }
   | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number; denied: string[] };
 
@@ -76,7 +76,7 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
     await Bun.write(join(s.dir, "prompt.md"), s.run.prompt);
     const writer = Bun.file(join(s.dir, "raw.jsonl")).writer();
     raw = writer;
-    const r = await runPhase({ ...s.run, onEvent: (e) => { writer.write(JSON.stringify(e) + "\n"); s.onEvent?.(e); } });
+    const r = await runPhase({ ...s.run, onEvent: (e) => { void writer.write(JSON.stringify(e) + "\n"); s.onEvent?.(e); } });
     denied = r.denied;
     costUsd = sessionCost(r, r.durationMs, s.capUsd);
     if (!r.ok) {

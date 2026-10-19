@@ -6,7 +6,8 @@ import { loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
-import { PHASE_FILES, runsDir } from "./files";
+import { PHASE_FILES } from "./files";
+import { runsDir } from "../paths";
 import { changeSummary, loopNow, runningRows, totalsOf } from "./model";
 import type { ChangeDetail, PhaseView, SpendView } from "./types";
 
@@ -18,7 +19,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   let cfg: Config | null = null;
   try { cfg = await loadConfig(root); } catch { /* the inbox says what is wrong with the config */ }
   const pollSeconds = cfg?.poll_seconds ?? 60;
-  const holds = await sameFileHolds(ordered);
+  const holds = await sameFileHolds(ordered, root);
   const rows = trace.phases(slug);
   // The board's rule, so the two never disagree.
   const busy = new Set(runningRows(trace, loopNow(root, pollSeconds, now)).keys());

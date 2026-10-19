@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { runDir } from "./paths";
 import type { Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
@@ -31,7 +32,7 @@ export class StepContext {
     this.git = new Git(root);
   }
   get slug(): string { return this.intent.slug; }
-  get runDir(): string { return join(this.root, ".loopstra", "runs", this.slug); }
+  get runDir(): string { return runDir(this.root, this.slug); }
   get worktreeDir(): string { return join(this.root, ".loopstra", "worktrees", this.slug); }
   get branch(): string { return `intent/${this.slug}`; }
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
@@ -72,7 +73,7 @@ export class StepContext {
     this.reading = null;
     if (!made) return;
     const dir = await made.catch(() => null);
-    if (dir) await removeWorktree(this.git, dir);
+    if (dir) await removeWorktree(this.git, dir, { cleanup: true });
   }
 }
 
@@ -134,10 +135,12 @@ async function assertOnMain(git: Git, main: string): Promise<void> {
  * give false: nothing to commit after all); then they are committed with the generated queue.md,
  * which is never committed on its own. Once writing has begun the commit is not stopped by a stop
  * request (only bounded by git's time limit), so a stop never leaves a record written but not
- * committed. All or nothing: when the commit fails (a held index lock, a timeout, a hook), the files
- * are put back as they were before the write and nothing is left staged (see putBackRecord), then the
- * error goes on; a record left written but not committed would hold up every sync and local merge.
- * The tick shares main with the remote once, at its end. False when nothing was committed.
+ * committed. All or nothing: when `write` throws after writing (a trace it records to cannot be
+ * written: a full disk, a database held too long) or the commit fails (a held index lock, a timeout,
+ * a hook), the files are put back as they were before the write and nothing is left staged (see
+ * putBackRecord), then the error goes on; a record left written but not committed would hold up
+ * every sync and local merge. The tick shares main with the remote once, at its end. False when
+ * nothing was committed.
  */
 export function commitRecord(root: string, main: string, slug: string, what: string, write: () => Promise<boolean | void> = async () => {}): Promise<boolean> {
   return onCheckout(root, async () => {
@@ -147,7 +150,14 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     const paths = [`intent/${slug}`, "intent/queue.md"];
     const before = filesUnder(root, paths);
     const head = await git.headSha();
-    if ((await write()) === false) return false;
+    let wrote: boolean | void;
+    try {
+      wrote = await write();
+    } catch (e) {
+      await putBackRecord(git, root, paths, before, filesUnder(root, paths));
+      throw e;
+    }
+    if (wrote === false) return false;
     const written = filesUnder(root, paths);
     const message = bookkeeping(`loopstra(${slug}): ${what}`);
     try {
@@ -187,7 +197,7 @@ function filesUnder(root: string, paths: string[]): Map<string, Buffer> {
 }
 
 /**
- * Puts a record whose commit failed back as it was before the write: each file the write changed
+ * Puts a record whose write threw or whose commit failed back as it was before the write: each file the write changed
  * gets its old content back, one it made goes, one it removed comes back. A file that changed again
  * since the write (a person's edit) is left as it is. Then the paths are unstaged. The unstage runs
  * even after a stop request, like the commit it undoes, and a failure of it is left: the files are
@@ -282,7 +292,7 @@ function saysWhatToSet(note: string): boolean {
  * the approved status the change is resumed from. Null when the note already says what to set, or
  * there is no approved status to go back to.
  */
-export function retryTarget(ctx: StepContext, note: string, retryFrom?: Status): Status | null {
+function retryTarget(ctx: StepContext, note: string, retryFrom?: Status): Status | null {
   if (saysWhatToSet(note)) return null;
   const from = ctx.intent.file.frontmatter.status;
   return retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from) ?? null;
@@ -363,7 +373,8 @@ export function onceMarker(ctx: StepContext, name: string, content = ""): boolea
 
 export async function readArtifact(ctx: StepContext, name: string): Promise<string | null> {
   const p = join(ctx.intent.dir, name);
-  return existsSync(p) ? await Bun.file(p).text() : null;
+  if (!existsSync(p)) return null;
+  return Bun.file(p).text();
 }
 
 /** Writes an artifact whole on main and commits it (see commitRecord); never into a change a person deleted (PersonChangedStatus). */
@@ -383,13 +394,20 @@ export async function recordPersonEdits(ctx: StepContext): Promise<void> {
 /** Run-folder file: the agent sessions to resume, by key. */
 const SESSIONS = "sessions.json";
 
+/**
+ * The sessions to resume, by key. Only a plain object's string values count: a file that holds
+ * anything else (null, a list, a number where an id should be) should never crash a step, so the
+ * rest is dropped, as a corrupt or unreadable file is.
+ */
 export function loadSessions(ctx: StepContext): Record<string, string> {
+  let read: unknown;
   try {
-    return JSON.parse(readMarker(ctx, SESSIONS) ?? "{}") as Record<string, string>;
+    read = JSON.parse(readMarker(ctx, SESSIONS) ?? "{}");
   } catch {
-    // A corrupt or unreadable sessions.json should never crash a step; start fresh.
     return {};
   }
+  if (!read || typeof read !== "object" || Array.isArray(read)) return {};
+  return Object.fromEntries(Object.entries(read).filter((kv): kv is [string, string] => typeof kv[1] === "string"));
 }
 
 export function saveSession(ctx: StepContext, key: string, sessionId: string): void {
@@ -407,7 +425,7 @@ export const SENT_BACK = "sent-back.md";
 
 /** Keeps the note a person sent a change back with, until the next session of the stage it went back to has used it. */
 export function writeSentBack(root: string, slug: string, note: string): void {
-  const dir = join(root, ".loopstra", "runs", slug);
+  const dir = runDir(root, slug);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, SENT_BACK), note);
 }
@@ -420,7 +438,7 @@ export function sentBackNote(ctx: StepContext): string {
 
 /** Drops a kept sent-back note (its send back was undone, or never landed); with `only`, only when it is that note. */
 export function dropSentBack(root: string, slug: string, only?: string): void {
-  const path = join(root, ".loopstra", "runs", slug, SENT_BACK);
+  const path = join(runDir(root, slug), SENT_BACK);
   if (only !== undefined && (!existsSync(path) || readFileSync(path, "utf8") !== only)) return;
   rmSync(path, { force: true });
 }
@@ -440,5 +458,6 @@ export async function writeIntentPriority(ctx: StepContext, priority: Priority):
     if (now.file.frontmatter.priority !== undefined) { ctx.intent.file = now.file; return false; }
     await writeForStep(ctx, { priority });
     ctx.trace.upsertIntent(ctx.slug, ctx.intent.file.frontmatter.status, priority);
+    return true;
   });
 }

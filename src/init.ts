@@ -110,7 +110,7 @@ function commandLines(d: Detected): string {
   const optional = ["install", "lint", "build", "run"] as const;
   return [
     "  # Optional: leave a key out if you do not have it.",
-    ...optional.map((k) => (d[k] ? `  ${k}: ${q(d[k]!)}` : `  # ${k}:`)),
+    ...optional.map((k) => (d[k] ? `  ${k}: ${q(d[k])}` : `  # ${k}:`)),
     "  # The single command that runs your tests and exits non-zero on failure. A chain (a && b) works:",
     "  # sessions may run the whole chain and each part of it.",
     `  test: ${d.test ? q(d.test) : '""'}`,

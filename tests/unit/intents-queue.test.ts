@@ -141,6 +141,16 @@ describe("scan and queue", () => {
     t.cleanup();
   });
 
+  test("a change with no opened date sorts after dated ones of the same status and priority, before the slug decides", async () => {
+    const t = tempDir();
+    await mk(t.path, "a-undated", "status: accepted");
+    await mk(t.path, "b-undated-blank", "status: accepted\nopened:");
+    await mk(t.path, "z-dated", "status: accepted\nopened: 2026-09-01");
+    await mk(t.path, "c-undated", "status: accepted");
+    expect(orderQueue((await scanRepo(t.path)).intents).map((i) => i.slug)).toEqual(["z-dated", "a-undated", "b-undated-blank", "c-undated"]);
+    t.cleanup();
+  });
+
   test("renderQueue lists active, blocked, and finished intents in plain language", async () => {
     const t = tempDir();
     await mk(t.path, "active", "status: building\npriority: high", { "spec.md": "s", "plan.md": "p" });
@@ -307,7 +317,7 @@ describe("same files: a change waits instead of building into a conflict (at eve
   /** A plan listing these files, or with no Files that change section (null). */
   const plan = (files: string[] | null) => `# Plan\n\n${files ? `## Files that change\n${files.map((f) => `- ${f}`).join("\n")}\n\n` : ""}## Order of work\n1. x\n`;
   const planned = (files: string[] | null) => ({ "spec.md": "# Spec\n", "plan.md": plan(files) });
-  const holdsIn = async (root: string) => sameFileHolds(orderQueue((await scanRepo(root)).intents));
+  const holdsIn = async (root: string) => sameFileHolds(orderQueue((await scanRepo(root)).intents), root);
   const rowOf = (md: string, slug: string) => md.split("\n").find((l) => l.startsWith(`| ${slug} |`)) ?? "";
 
   test("a plan-approved change that lists a file a building change lists waits for it, and the queue says why", async () => {

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { errorText } from "./shell";
 
 /** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
-export interface ConfigProblem {
+interface ConfigProblem {
   path: string[];
   text: string;
   /** A key the schema does not know, at `path`: only removing it fixes it. */
@@ -31,8 +31,11 @@ const stage = z.object({
   after: z.array(z.string()).default([]),
 }).strict();
 
+const ID_PROBLEM = "must be a user or channel id; put long numeric ids in quotes";
 /** A platform id (user or channel). Long numeric ids (Discord's) lose digits as YAML numbers, so those must be quoted. */
-const platformId = z.union([z.string().min(1), z.number().refine(Number.isSafeInteger, "is too long to be read as a number: put it in quotes")]).transform(String);
+const platformId = z.union([z.string(), z.number()], { error: ID_PROBLEM })
+  .refine((v) => (typeof v === "string" ? v.length > 0 : Number.isSafeInteger(v)), ID_PROBLEM)
+  .transform(String);
 /** Platform user ids. Empty `allow`: anyone in the channel may chat. Empty `acceptors`: nobody may accept from there. */
 const ids = z.array(platformId).default([]);
 /** The name of an environment variable, like LOOPSTRA_SLACK_BOT_TOKEN. */
@@ -75,25 +78,30 @@ const chat = z.object({
 export type SlackTransportConfig = z.infer<typeof slackTransport>;
 export type DiscordTransportConfig = z.infer<typeof discordTransport>;
 
+/** An optional project command: present, it runs, so a blank one is a mistake, not none. */
+const command = z.string().min(1, "must be a command, or the line removed").optional();
+/** The CLI name of a model, like sonnet. */
+const modelName = (fallback: string) => z.string().min(1, "must be a model name").default(fallback);
+
 export const ConfigSchema = z.object({
-  version: z.literal(1),
-  main_branch: z.string().default("main"),
+  version: z.literal(1, { error: "must be 1" }),
+  main_branch: z.string().min(1, "must be a branch name, like main").default("main"),
   poll_seconds: z.number().int().positive().default(60),
   // Empty prefault is deliberate: a missing `commands` block should still report `commands.test`, not `commands`.
   commands: z.object({
     test: z
       .string({ error: "commands.test is required: the single command that runs your tests" })
       .min(1, "commands.test is required: the single command that runs your tests"),
-    lint: z.string().optional(),
-    build: z.string().optional(),
-    run: z.string().optional(),
-    install: z.string().optional(),
+    lint: command,
+    build: command,
+    run: command,
+    install: command,
   }).strict().prefault({} as { test: string }),
   claude: z.object({
     models: z.object({
-      default: z.string().default("sonnet"),
-      cheap: z.string().default("haiku"),
-      strong: z.string().default("opus"),
+      default: modelName("sonnet"),
+      cheap: modelName("haiku"),
+      strong: modelName("opus"),
     }).strict().prefault({}),
     timeout_minutes: z.number().positive().default(30),
     /** What one session may spend. Unset: no limit (timeout_minutes still ends a session). */

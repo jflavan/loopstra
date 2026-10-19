@@ -28,6 +28,15 @@ export function parseRoute(path: string): Route {
   return missing;
 }
 
+/**
+ * Whether `path` is another address than the one the page is at: its path, its query ("/c/x?tab=y")
+ * and its part after # ("/agents#csv:3") all count. A link to where the page already is adds
+ * nothing to the history, so pressing Watch twice leaves one entry, not two.
+ */
+export function changesAddress(here: { pathname: string; search: string; hash: string }, path: string): boolean {
+  return path !== here.pathname + here.search + here.hash;
+}
+
 export function routePath(r: Route): string {
   switch (r.name) {
     case "live": return "/";

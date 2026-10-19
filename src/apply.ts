@@ -1,27 +1,24 @@
 import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { APPROVE_TO, doneWords, isOpen, isStatus, personReviews, questionChangedText, REQUEST_KINDS, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
+import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { conversationPath, readConversation, withEntry, type ConversationEntry } from "./conversation";
 import { Git } from "./git";
 import { asAtHead, fileHash, matchesHead } from "./headfiles";
-import { effectivePriority, humanGates, parseIntentFile, PRIORITIES, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
-import { anythingToApply, applyingRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
+import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion, takeBackAnswer } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
-import { oneLine } from "./chat/threads";
+import { oneLine } from "./text";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
 type AnswerRequest = Extract<Request, { kind: "answer" }>;
-
-/** The longest answer a request may carry. */
-const MAX_ANSWER = 4000;
 
 /**
  * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
@@ -52,8 +49,8 @@ export function betweenPasses<T>(root: string, fn: () => Promise<T>): Promise<T>
  * Applies every waiting request on the main checkout, as the loop: claims each (see claimRequest),
  * then applies the claimed ones oldest first through commitRecord. A request that hits an unexpected
  * problem (a commit refused, the checkout off main) is traced and stays claimed for the next pass; one
- * that cannot be done gets a plain result saying why. One that cannot be read (see badShape) is
- * finished at once, and one that kept failing (see giveUp) is given up with a plain result once what it
+ * that cannot be done gets a plain result saying why. One that cannot be read (see Unreadable in
+ * src/requests.ts) is finished at once, and one that kept failing (see giveUp) is given up with a plain result once what it
  * wrote is put back (a checkout off main is not a try: it is a reason to wait). Passes on a root run one after another, never side
  * by side, and at most one waits behind the running one: a call while one waits gets that pass (it
  * has not started, so it sees this caller's requests too). Gives how many were finished.
@@ -174,16 +171,16 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
     pruned.set(key, Date.now());
     pruneResults(root);
   }
-  for (const id of waitingIds(root)) claimRequest(root, id);
+  for (const id of waitingIds(root, trace)) claimRequest(root, id);
   let applied = 0;
-  for (const req of applyingRequests(root)) {
-    const bad = badShape(req);
-    if (bad) {
-      shapeTraced(trace, req, "refused", { problem: bad });
-      finishRequest(root, req, { ok: false, status: null, text: "That request could not be read, so nothing changed." });
-      applied++;
-      continue;
-    }
+  const claimed = claimedRequests(root, trace);
+  // A request with a wrong field would otherwise fail the same way every pass: finished at once, under its slug when it has a real one.
+  for (const u of claimed.unreadable) {
+    trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, transport: u.transport, result: "refused", problem: u.problem });
+    finishRequest(root, u, { ok: false, status: null, text: "That request could not be read, so nothing changed." });
+    applied++;
+  }
+  for (const req of claimed.requests) {
     try {
       finishRequest(root, req, await applyOne(root, cfg, trace, req));
       applied++;
@@ -199,7 +196,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       // Never say it failed while its write is still on disk: the scheduler would act on it anyway.
       const kept = await putBack(root, cfg.main_branch, trace, req);
       if (!kept) { saveApplying(root, req); continue; }
-      shapeTraced(trace, req, "failed", { tries: req.tries, ...(kept.length ? { kept, why: "intent.md holds changes the request did not make, so it was left as it is" } : {}) });
+      trace.event("slug" in req ? req.slug : "_loop", "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result: "failed", tries: req.tries, ...(kept.length ? { kept, why: "intent.md holds changes the request did not make, so it was left as it is" } : {}) });
       finishRequest(root, req, { ok: false, status: null, text: kept.length ? CHANGED_SINCE : "The loop could not apply this request; an engineer can find the details in the trace." });
       applied++;
     }
@@ -245,7 +242,8 @@ async function putBack(root: string, main: string, trace: Trace, req: Request): 
     return null;
   }
   // Gone even with a kept file: the request failed, and a note the person cannot see must not steer the next session.
-  if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug);
+  // Only its own note: a later send back's, kept since, stands.
+  if (req.kind === "send-back" && slugs.includes(req.slug)) dropSentBack(root, req.slug, req.note.trim());
   // An answer that never landed must not resume the session: the question waits again. Only when intent.md
   // was put back: one a person edited since is kept without its question line, so the answer stays with it.
   if (req.kind === "answer" && slugs.includes(req.slug) && !kept.includes(req.slug)) takeBackAnswer(root, req.slug);
@@ -300,41 +298,6 @@ async function putBackConversation(root: string, main: string, trace: Trace, req
     if (e instanceof StopRequested) throw e;
     trace.event(req.slug, "error", { where: "request", id: req.id, kind: req.kind, error: `the send back's conversation.md entry could not be taken back: ${errorText(e)}` });
   }
-}
-
-const KINDS: ReadonlySet<string> = new Set(REQUEST_KINDS);
-
-/**
- * Why a request file cannot be read as the request it says it is, or null when it can. Checked
- * before applying: a request with a wrong field would otherwise fail the same way every pass.
- */
-function badShape(req: Request): string | null {
-  const r = req as unknown as Record<string, unknown>;
-  if (typeof r.kind !== "string" || !KINDS.has(r.kind)) return "it asks for nothing the loop knows";
-  if (r.kind === "new") {
-    const ok = Array.isArray(r.intents) && r.intents.every((i: unknown) => {
-      const x = i as Record<string, unknown> | null;
-      return !!x && typeof x === "object" && typeof x.slug === "string" && typeof x.text === "string" && typeof x.update === "boolean";
-    });
-    return ok ? null : "its changes are not a list of slug, text and update";
-  }
-  if (typeof r.slug !== "string" || !SLUG.test(r.slug)) return "its slug is not a change name";
-  if (r.kind === "accept") return null;
-  if (r.kind === "answer") {
-    if (r.question !== undefined && typeof r.question !== "string") return "the question it answers is not named by its time";
-    return typeof r.text === "string" && r.text.trim() && r.text.length <= MAX_ANSWER ? null : `its answer is not text of at most ${MAX_ANSWER} characters`;
-  }
-  if (!isStatus(r.expect)) return "the status it saw is not a status";
-  if ((r.kind === "retry" || r.kind === "undo") && !isStatus(r.to)) return "the status it goes to is not a status";
-  if (r.kind === "priority" && r.priority !== null && !(PRIORITIES as readonly unknown[]).includes(r.priority)) return "its priority is not a priority";
-  for (const k of ["note", "reason"]) if (r[k] !== undefined && typeof r[k] !== "string") return `its ${k} is not text`;
-  return null;
-}
-
-/** A request event for a request that may not be well formed: under its slug when it has a real one. */
-function shapeTraced(trace: Trace, req: Request, result: string, more: Record<string, unknown>): void {
-  const slug = "slug" in req && typeof req.slug === "string" && SLUG.test(req.slug) ? req.slug : "_loop";
-  trace.event(slug, "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result, ...more });
 }
 
 function applyOne(root: string, cfg: Config, trace: Trace, req: Request): Promise<Outcome> {
@@ -419,6 +382,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
       return false;
     }
     markWritten(root, req, req.slug, own);
+    return true;
   });
   if (refused !== null) {
     trace.event(req.slug, "chat-request", { id: req.id, kind: "accept", by: req.byName, via: req.via, result: "not-draft", status: refused });
@@ -558,6 +522,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     }
     // Kept with the write, before the commit: a crash after the commit must not lose it. Given up on, it goes (see putBack).
     if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
+    return true;
   });
   if (refused !== null) return movedOn(root, cfg.main_branch, trace, req, refused);
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));

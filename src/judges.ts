@@ -60,7 +60,7 @@ function matches(row: JudgeRow, key: JudgeKey): boolean {
  * unsure of), newest first, before any miss; `miss`: the newest row where it passed what the strong
  * judge rejected, if one stopped the count; `auditDue`: the next first-mode call should run as shadow.
  */
-export interface FirstStanding {
+interface FirstStanding {
   earned: boolean;
   caught: number;
   miss: JudgeRow | null;
@@ -107,7 +107,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /** "14 Oct": a row's day, in local time. */
 export function shortDay(ts: string): string {
   const d = new Date(ts);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return `${d.getDate()} ${MONTHS[d.getMonth()] ?? ""}`;
 }
 
 /** Why a judge that has not earned first still runs as shadow, in words. */
@@ -117,12 +117,12 @@ export function standingWhy(s: FirstStanding): string {
 }
 
 /** The model alias each judge runs on: spec-check and plan-challenge always strong; review as configured. */
-export function judgeModel(cfg: Config, judge: JudgeName): ModelRef {
+function judgeModel(cfg: Config, judge: JudgeName): ModelRef {
   return judge === "review" ? cfg.stages.review.model : "strong";
 }
 
 /** Why a cheaper judge is never compared with this one, in words, or null when it can be. */
-export function notComparable(cfg: Config, judge: JudgeName): string | null {
+function notComparable(cfg: Config, judge: JudgeName): string | null {
   const ref = judgeModel(cfg, judge);
   if (ref !== "strong") return `${judge} already runs on ${modelFor(cfg, ref)}; there is nothing cheaper to compare`;
   if (modelFor(cfg, "default") === modelFor(cfg, "strong")) return `the cheaper and the strong model are both ${modelFor(cfg, "strong")}; there is nothing cheaper to compare`;
@@ -362,7 +362,7 @@ export async function runJudge<J extends JudgeName>(ctx: StepContext, phase: Age
  * cheaper judge of a shadow and records the comparison, and throws a stop request that ended it;
  * `cancel` calls it off, and then nothing is recorded.
  */
-export interface JudgeAnswer<J extends JudgeName> {
+interface JudgeAnswer<J extends JudgeName> {
   result: JudgeResult<J>;
   rest: () => Promise<void>;
   cancel: () => void;

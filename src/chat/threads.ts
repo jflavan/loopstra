@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { writeFileAtomic } from "../fsutil";
+import { z } from "zod";
+import { writeJson } from "../fsutil";
 import type { RequestShape } from "../actions";
 import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
+import { readStateFile } from "./statefile";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
 export function chatDir(root: string): string {
@@ -12,14 +14,14 @@ export function chatDir(root: string): string {
 }
 
 /** A proposal waiting for a person's yes. */
-export type Pending =
+type Pending =
   | { kind: "handoff"; handoff: Handoff; by: string; at: string }
   | { kind: "accept"; slug: string; by: string; at: string }
   /** An action on a change, as it will be submitted; `ask` is the question the person was asked. */
   | { kind: "action"; request: RequestBody & RequestShape; ask: string; by: string; at: string };
 
 /** One hand-off made from a thread, and what became of it. */
-export interface HandoffRecord {
+interface HandoffRecord {
   title: string;
   slugs: string[];
   at: string;
@@ -30,7 +32,7 @@ export interface HandoffRecord {
   local: boolean;
 }
 
-export interface ChatMessage {
+interface ChatMessage {
   id: number;
   from: "person" | "loopstra";
   author?: string;
@@ -58,6 +60,28 @@ export interface ThreadState {
   since: string[];
 }
 
+/**
+ * A thread's file as it is read back: what the store itself relies on is checked (the arrays it
+ * pushes to, the ids it counts from), and what a thread saved by an older Loopstra has not got is
+ * filled in. A proposal's own body (the hand-off, the request) is the store's own write and is
+ * taken as it is.
+ */
+const ThreadStateSchema = z.object({
+  key: z.string(),
+  transport: z.string(),
+  thread: z.string(),
+  sessionId: z.string().nullable().default(null),
+  pending: z.looseObject({ kind: z.enum(["handoff", "accept", "action"]), by: z.string(), at: z.string() }).nullable().default(null),
+  handoffs: z.array(z.object({
+    title: z.string(), slugs: z.array(z.string()), at: z.string(), by: z.string(),
+    pr: z.object({ number: z.number(), url: z.string(), branch: z.string(), state: z.enum(["OPEN", "MERGED", "CLOSED"]) }).nullable().default(null),
+    local: z.boolean().default(false),
+  })).default([]),
+  lastAnnouncementSeen: z.number().default(0),
+  messages: z.array(z.object({ id: z.number(), from: z.enum(["person", "loopstra"]), author: z.string().optional(), text: z.string(), ts: z.string() })).default([]),
+  since: z.array(z.string()).default([]),
+});
+
 /** How many messages a thread keeps for display. The conversation itself lives in the session. */
 const KEPT_MESSAGES = 200;
 /** How many lines of what happened since the agent's last turn a thread keeps (the newest). */
@@ -73,22 +97,12 @@ function fileName(key: string): string {
   return `${plain}-${createHash("sha256").update(key).digest("hex").slice(0, 10)}.json`;
 }
 
-/** Writes a JSON file whole (temp file, then rename), so a reader never sees half of it. Makes its folder. */
-export function writeJson(path: string, value: unknown): void {
-  writeFileAtomic(path, JSON.stringify(value, null, 2));
-}
-
-/** Text on one line, at most `max` characters: for commit subjects and pull request titles. */
-export function oneLine(s: string, max: number): string {
-  return s.replace(/\s+/g, " ").trim().slice(0, max);
-}
-
-export function readJson<T>(path: string): T | null {
-  try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }
-}
+/** A thread's files are JSON; one moved aside as damaged (`.json.bad-<time>`) is not one of them. */
+const THREAD_FILE = /\.json$/;
 
 export class ThreadStore {
-  constructor(private readonly root: string) {}
+  /** `log`: where a damaged thread file is reported (see readStateFile). */
+  constructor(private readonly root: string, private readonly log: (line: string) => void = (l) => console.error(l)) {}
 
   private dir(): string {
     const d = join(chatDir(this.root), "threads");
@@ -96,10 +110,16 @@ export class ThreadStore {
     return d;
   }
 
+  /** The thread saved at `path`, or null when there is none (or the file was damaged: it is moved aside, see readStateFile). */
+  private read(path: string): ThreadState | null {
+    const t = readStateFile(path, ThreadStateSchema, this.log);
+    return t ? { ...t, pending: t.pending as Pending | null } : null;
+  }
+
   get(transport: string, thread: string): ThreadState {
     const key = threadKey(transport, thread);
-    const found = readJson<ThreadState>(join(this.dir(), fileName(key)));
-    return found ? filled(found) : { key, transport, thread, sessionId: null, pending: null, handoffs: [], lastAnnouncementSeen: 0, messages: [], since: [] };
+    const found = this.read(join(this.dir(), fileName(key)));
+    return found ? { ...found, key, transport, thread } : { key, transport, thread, sessionId: null, pending: null, handoffs: [], lastAnnouncementSeen: 0, messages: [], since: [] };
   }
 
   save(t: ThreadState): void {
@@ -122,11 +142,6 @@ export class ThreadStore {
   all(): ThreadState[] {
     const d = this.dir();
     if (!existsSync(d)) return [];
-    return readdirSync(d).filter((n) => n.endsWith(".json")).map((n) => readJson<ThreadState>(join(d, n))).filter((t): t is ThreadState => !!t).map(filled);
+    return readdirSync(d).filter((n) => THREAD_FILE.test(n)).map((n) => this.read(join(d, n))).filter((t): t is ThreadState => !!t);
   }
-}
-
-/** A thread as it was saved, with what a thread saved by an older version has not got. */
-function filled(t: ThreadState): ThreadState {
-  return { ...t, since: Array.isArray(t.since) ? t.since : [] };
 }

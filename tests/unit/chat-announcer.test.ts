@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AnnouncementLog, announce, holdAnnouncerLock } from "../../src/chat/announcer";
 import { ChatService, type Transport } from "../../src/chat/service";
-import { chatDir, writeJson } from "../../src/chat/threads";
+import { writeJson } from "../../src/fsutil";
+import { chatDir } from "../../src/chat/threads";
 import { readIntent, writeIntent } from "../../src/intents";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { tempDir } from "../helpers";
@@ -149,6 +150,39 @@ describe("announcements that fail to post (Copilot review)", () => {
       await s.poll();
       await s.stop();
       expect(posted).toEqual(["first", "second", "third"]);
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the announcer's state (hardening review)", () => {
+  test("what was seen is written before it is announced: a kill between the two loses that batch, never repeats everything", async () => {
+    const r = await chatRepo({ intents: { stuck: "---\nstatus: blocked\nnote: The tests failed. When that is sorted out, set status to plan-approved.\n---\n# Intent: stuck one\n\n## Problem\nP\n" } });
+    try {
+      const log = new AnnouncementLog(r.root);
+      // A process killed as it posts: the log never gets the line.
+      const killed = new AnnouncementLog(r.root);
+      killed.append = () => { throw new Error("killed before the post"); };
+      await expect(announce(r.root, killed)).rejects.toThrow("killed before the post");
+      expect(log.all()).toEqual([]);
+      expect(existsSync(join(chatDir(r.root), "announcer.json"))).toBe(true);
+      // The next poll has nothing new: that one batch is lost, nothing is announced twice.
+      expect(await announce(r.root, log)).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a damaged announcer.json is moved aside and a fresh one starts, not read as empty and written over", async () => {
+    const r = await chatRepo({ intents: { going: INTENT("reviewing", "going one") } });
+    try {
+      const log = new AnnouncementLog(r.root);
+      await announce(r.root, log);
+      const path = join(chatDir(r.root), "announcer.json");
+      writeFileSync(path, "{ not json");
+      await announce(r.root, log);
+      expect(readdirSync(chatDir(r.root)).filter((n) => n.startsWith("announcer.json.bad-"))).toHaveLength(1);
+      // A fresh state: the first poll after it compares nothing, so a merge noticed then is not news.
+      const going = await readIntent(r.root, "going");
+      await writeIntent(going, { status: "merged" });
+      expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Merged: going one. It is in the main code now."]);
     } finally { r.cleanup(); }
   });
 });

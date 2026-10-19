@@ -5,6 +5,8 @@
 - Install: `bun install`
 - Test: `bun run test` (four parallel shards); `bun run test:serial` runs it in one process
 - Typecheck: `bun run typecheck`
+- Lint: `bun run lint` (type-aware ESLint; see `eslint.config.js` for what each rule guards)
+- All three: `bun run check`
 - Run the checkout: `bun src/cli.ts <command>`
 
 ## Releases and npm

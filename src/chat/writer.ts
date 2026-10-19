@@ -72,7 +72,7 @@ export function draftProblems(drafts: DraftIntent[], rendered: string[], existin
   return problems;
 }
 
-export type WriteOutcome =
+type WriteOutcome =
   | { ok: true; intents: WrittenIntent[]; summary: string; costUsd: number }
   /** `budget`: stopped by the day's chat budget, so the same hand-off can be confirmed again later. */
   | { ok: false; problem: string; costUsd: number; budget?: "today" | "held" };
@@ -83,7 +83,7 @@ function existingList(existing: Map<string, Status | "unreadable">): string {
 }
 
 /** Every change in a checkout and its status (unreadable ones count as taken). */
-export async function existingIntents(root: string): Promise<Map<string, Status | "unreadable">> {
+async function existingIntents(root: string): Promise<Map<string, Status | "unreadable">> {
   const scan = await scanRepo(root);
   const out = new Map<string, Status | "unreadable">();
   for (const i of scan.intents) out.set(i.slug, i.file.frontmatter.status);

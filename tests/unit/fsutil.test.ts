@@ -1,8 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { writeFileAtomic } from "../../src/fsutil";
+import { z } from "zod";
+import { readJsonAs, writeFileAtomic, writeJson } from "../../src/fsutil";
 import { tempDir } from "../helpers";
+
+describe("readJsonAs", () => {
+  const Shape = z.object({ by: z.string(), seq: z.number(), via: z.string().default("chat") });
+
+  test("gives the file's value when it has the shape, with the schema's defaults filled in", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "a.json");
+      writeJson(path, { by: "John", seq: 3 });
+      expect(readJsonAs(path, Shape)).toEqual({ by: "John", seq: 3, via: "chat" });
+    } finally { t.cleanup(); }
+  });
+
+  test("gives null for a file that is missing, not JSON, or not the shape", () => {
+    const t = tempDir();
+    try {
+      expect(readJsonAs(join(t.path, "missing.json"), Shape)).toBeNull();
+      writeFileSync(join(t.path, "broken.json"), "{ not json");
+      expect(readJsonAs(join(t.path, "broken.json"), Shape)).toBeNull();
+      writeJson(join(t.path, "wrong.json"), { by: 7, seq: "3" });
+      expect(readJsonAs(join(t.path, "wrong.json"), Shape)).toBeNull();
+      writeJson(join(t.path, "short.json"), { by: "John" });
+      expect(readJsonAs(join(t.path, "short.json"), Shape)).toBeNull();
+      writeJson(join(t.path, "list.json"), ["John"]);
+      expect(readJsonAs(join(t.path, "list.json"), Shape)).toBeNull();
+    } finally { t.cleanup(); }
+  });
+});
 
 describe("writeFileAtomic", () => {
   test("writes the whole file, makes its folder, and leaves no temp file", () => {

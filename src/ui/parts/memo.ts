@@ -6,14 +6,14 @@ import { Component, h, type ComponentChild, type FunctionComponent } from "preac
  */
 export function memo<P extends object>(Inner: FunctionComponent<P>): FunctionComponent<P> {
   class Memo extends Component<P> {
-    shouldComponentUpdate(next: P): boolean {
+    override shouldComponentUpdate(next: P): boolean {
       const a = this.props as Record<string, unknown>;
       const b = next as Record<string, unknown>;
       const keys = Object.keys(b);
       return keys.length !== Object.keys(a).length || keys.some((k) => a[k] !== b[k]);
     }
-    render(): ComponentChild {
-      return h(Inner as FunctionComponent<P>, this.props);
+    override render(): ComponentChild {
+      return h(Inner, this.props);
     }
   }
   return Memo as unknown as FunctionComponent<P>;

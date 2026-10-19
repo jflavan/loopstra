@@ -32,9 +32,9 @@ beforeAll(() => {
   });
   const dead = Bun.serve({ port: 0, fetch: () => new Response() });
   deadPort = dead.port!;
-  dead.stop(true);
+  void dead.stop(true);
 });
-afterAll(() => server.stop(true));
+afterAll(async () => { await server.stop(true); });
 const api = (slack = "slack", discord = "discord", port = server.port) => ({ [SLACK_API_ENV]: `http://127.0.0.1:${port}/${slack}`, [DISCORD_API_ENV]: `http://127.0.0.1:${port}/${discord}` });
 const SLACK_VARS = { token_env: "LOOPSTRA_SLACK_APP_TOKEN", bot_token_env: "LOOPSTRA_SLACK_BOT_TOKEN" };
 const TOKENS = { LOOPSTRA_SLACK_APP_TOKEN: "xapp-1", LOOPSTRA_SLACK_BOT_TOKEN: "good", LOOPSTRA_DISCORD_TOKEN: "good" };

@@ -11,7 +11,7 @@ function serve(routes: Record<string, unknown>) {
     const path = new URL(req.url).pathname;
     return path in routes ? Response.json(routes[path]) : new Response("no", { status: 404 });
   } });
-  return { url: `http://localhost:${server.port}`, asked: () => asked, stop: () => server.stop(true) };
+  return { url: `http://localhost:${server.port}`, asked: () => asked, stop: () => { void server.stop(true); } };
 }
 
 describe("versions", () => {

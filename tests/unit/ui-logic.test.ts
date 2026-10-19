@@ -2,20 +2,22 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { focusOr, keyLabel, keyMatcher, keyName, sendsMessage, typingIn } from "../../src/ui/keys";
+import { decide, focusOr, keyLabel, keyMatcher, keyName, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
-import { clampAt, filterCommands, fuzzyScore } from "../../src/ui/palette";
-import { parseRoute, routePath, type Route } from "../../src/ui/router";
+import { clampAt, filterCommands, fuzzyScore, stepAt } from "../../src/ui/palette";
+import { changesAddress, parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
-import { addItems, EMPTY, lastCost } from "../../src/ui/transcript";
+import { addFrames, addItems, EMPTY, lastCost, type Frame } from "../../src/ui/transcript";
 import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { nextTheme } from "../../src/ui/theme";
-import { RECENT_DONE_MS, splitFinished } from "../../src/ui/board";
-import { barEnd, codeKey, detailKey } from "../../src/ui/change-key";
+import { RECENT_DONE_MS, splitFinished, UP_NEXT, upNext } from "../../src/ui/board";
+import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { follow } from "../../src/ui/stream";
+import { mergeFeed } from "../../src/ui/feed";
+import { sessionFacts } from "../../src/ui/session-facts";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -116,6 +118,15 @@ describe("keys", () => {
     expect(sendsMessage(enter({ ctrlKey: true, keyCode: 229 }))).toBe(false);
   });
 
+  test("in a box where Enter alone sends, Shift with Enter is a line break, and an input method's Enter is its own", () => {
+    const enter = (mods: Partial<{ shiftKey: boolean; isComposing: boolean; keyCode: number }> = {}) => ({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, ...mods });
+    expect(sendsOnEnter(enter())).toBe(true);
+    expect(sendsOnEnter(enter({ shiftKey: true }))).toBe(false);
+    expect(sendsOnEnter({ ...enter(), key: "a" })).toBe(false);
+    expect(sendsOnEnter(enter({ isComposing: true }))).toBe(false);
+    expect(sendsOnEnter(enter({ keyCode: 229 }))).toBe(false);
+  });
+
   test("after a form closes the focus goes to its button, or to the box when the button is gone or disabled (a stopped session)", () => {
     const focused: string[] = [];
     const el = (name: string, disabled = false) => ({ disabled, focus: () => { focused.push(name); } });
@@ -202,6 +213,14 @@ describe("markdown", () => {
     expect(renderMarkdown("[a](<java\tscript:alert(1)>)")).toBe("<p>a</p>\n");
     expect(renderMarkdown("[docs](<./notes.md>)")).toContain('<a href="./notes.md"');
   });
+
+  test("an address that starts with two slashes reads as relative but leaves for another host, so it is shown as its text", () => {
+    const html = renderMarkdown("[a](//evil.example/x) [b](/docs/x)");
+    expect(html).not.toContain('href="//');
+    expect(html).toContain('<a href="/docs/x"');
+    // The first link is its text alone, and the page's own address stays a link.
+    expect(html).toBe('<p>a <a href="/docs/x" target="_blank" rel="noopener noreferrer">b</a></p>\n');
+  });
 });
 
 describe("a transcript on the page", () => {
@@ -225,6 +244,76 @@ describe("a transcript on the page", () => {
     const again = addItems(s, [tool, edit, { kind: "text", text: "a" }, { kind: "tool", id: "t2", tool: "Read", target: "y", input: {} }]);
     // Text has no id, so it cannot be told from a new line; only calls and edits are checked.
     expect(again.items.map((i) => ("id" in i ? i.id : i.kind))).toEqual(["t1", "e1", "text", "text", "t2"]);
+  });
+
+  // The server gives a line's rows the line's start as their offset, except the last, which gets the line's end (see TranscriptReader.read).
+  const text = (t: string, offset: number): Frame => ({ item: { kind: "text", text: t }, offset });
+  const tool = (id: string, offset: number): Frame => ({ item: { kind: "tool", id, tool: "Bash", target: "x", input: {} }, offset });
+  const texts = (s: ReturnType<typeof addFrames>) => s.items.map((i) => ("id" in i ? i.id : i.kind === "text" ? i.text : i.kind));
+
+  test("a line re-sent after a reconnect draws once: the stream continues from the line it was in and sends that line again", () => {
+    // Line 1 is bytes 0 to 100 (two rows), line 2 is 100 to 200 (three rows). The page saw line 1 and the first two rows of line 2.
+    let s = addFrames(EMPTY, [text("a", 0), tool("t1", 100), text("b", 100), tool("t2", 100)]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "t2"]);
+    // The stream came back from offset 100 (the newest id the page saw) and sent line 2 from its start.
+    s = addFrames(s, [text("b", 100), tool("t2", 100), text("c", 200)]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "t2", "c"]);
+    // The next line's rows carry the offset where line 2 ended, and are new.
+    s = addFrames(s, [text("d", 200), text("e", 300)]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "t2", "c", "d", "e"]);
+    expect(s.line).toEqual({ at: 300, drawn: [] });
+  });
+
+  test("the same words in two lines are two rows; a line's rows arriving in two batches are all drawn", () => {
+    // Two one-row lines, each saying the same thing.
+    let s = addFrames(EMPTY, [text("ok", 100)]);
+    s = addFrames(s, [text("ok", 200)]);
+    expect(texts(s)).toEqual(["ok", "ok"]);
+    // The third line's rows come in two batches: the second batch continues the line, it does not re-send it.
+    s = addFrames(s, [text("x", 200)]);
+    s = addFrames(s, [text("y", 200), text("z", 300)]);
+    expect(texts(s)).toEqual(["ok", "ok", "x", "y", "z"]);
+    // A row below the line is an older line sent again (a server that resumes earlier): its id-less rows are passed over.
+    expect(texts(addFrames(s, [text("old", 50), tool("t9", 50)]))).toEqual(["ok", "ok", "x", "y", "z", "t9"]);
+    // The old state is left alone.
+    expect(texts(s)).toEqual(["ok", "ok", "x", "y", "z"]);
+  });
+});
+
+describe("going to an address", () => {
+  test("the same path, query and part after # adds nothing to the history; any of them different does", () => {
+    const here = { pathname: "/agents", search: "", hash: "#csv:3" };
+    expect(changesAddress(here, "/agents#csv:3")).toBe(false);
+    expect(changesAddress(here, "/agents#csv:3:message")).toBe(true);
+    expect(changesAddress(here, "/agents")).toBe(true);
+    expect(changesAddress({ pathname: "/c/x", search: "?tab=y", hash: "" }, "/c/x?tab=y")).toBe(false);
+    expect(changesAddress({ pathname: "/c/x", search: "?tab=y", hash: "" }, "/c/x")).toBe(true);
+  });
+});
+
+describe("the activity feed read again after a gap", () => {
+  const item = (id: number, slug = "a", text: string | null = "x"): ActivityItem => ({ id, slug, seq: null, ts: "t", type: "phase_start", text, technical: "tech" });
+  const ids = (items: ActivityItem[]) => items.map((a) => a.id);
+  const all = { slug: "", technical: false };
+
+  test("the newest page is merged into what is shown by id, newest first, so older pages read before are kept", () => {
+    const older = [item(30), item(20), item(10)];
+    const { items, joined } = mergeFeed(older, [item(50), item(40), item(30)], all);
+    expect(joined).toBe(true);
+    expect(ids(items)).toEqual([50, 40, 30, 20, 10]);
+    expect(ids(older)).toEqual([30, 20, 10]);
+  });
+
+  test("a page that does not reach what is shown stands alone, since what lies between could not be read", () => {
+    expect(mergeFeed([item(30), item(20)], [item(90), item(80)], all)).toEqual({ items: [item(90), item(80)], joined: false });
+    expect(mergeFeed([], [item(5)], all)).toEqual({ items: [item(5)], joined: false });
+  });
+
+  test("only rows that fit the filter go in: one change's, and rows in plain words unless the view is technical", () => {
+    const page = [item(3, "b"), item(2, "a", null), item(1, "a")];
+    expect(ids(mergeFeed([], page, { slug: "a", technical: false }).items)).toEqual([1]);
+    expect(ids(mergeFeed([], page, { slug: "a", technical: true }).items)).toEqual([2, 1]);
+    expect(ids(mergeFeed([], page, { slug: "", technical: true }).items)).toEqual([3, 2, 1]);
   });
 });
 
@@ -510,6 +599,100 @@ describe("where a timeline bar ends", () => {
     expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "running", durationMs: 0 }, t0 + 60_000)).toBe(t0 + 60_000);
     expect(barEnd({ started: "2026-01-01T00:00:00Z", ended: null, status: "fail", durationMs: 5_000 }, t0 + 60_000)).toBe(t0 + 5_000);
   });
+
+  test("bars sit as percentages of the timeline; a step whose times cannot be read gets a sliver and does not set the scale", () => {
+    const iso = (s: number) => new Date(t0 + s * 1000).toISOString();
+    const bars = barGeometry([
+      { started: iso(0), ended: iso(50), status: "success", durationMs: 50_000 },
+      { started: "not a time", ended: null, status: "fail", durationMs: 5 },
+      { started: iso(50), ended: null, status: "running", durationMs: 0 },
+    ], t0 + 100_000);
+    expect(bars[0]).toEqual({ left: 0, width: 50 });
+    expect(bars[1]).toEqual({ left: 0, width: 0.4 });
+    expect(bars[2]).toEqual({ left: 50, width: 50 });
+    for (const b of bars) {
+      expect(Number.isFinite(b.left)).toBe(true);
+      expect(Number.isFinite(b.width)).toBe(true);
+    }
+    // A step over in a moment still shows; one whose end cannot be read is a sliver too.
+    expect(barGeometry([{ started: iso(0), ended: iso(0), status: "success", durationMs: 0 }], t0)[0]!.width).toBe(0.4);
+    expect(barGeometry([{ started: iso(0), ended: "?", status: "success", durationMs: 1 }], t0)[0]).toEqual({ left: 0, width: 0.4 });
+    expect(barGeometry([], t0)).toEqual([]);
+  });
+});
+
+describe("a session's facts", () => {
+  const t0 = Date.parse("2026-01-01T00:00:00Z");
+  const started = "2026-01-01T00:00:00Z";
+  test("while it runs: the clock runs and the cost is an estimate at the rate, or nothing without one", () => {
+    const f = sessionFacts({ started, ended: null, status: "running", finished: null, rate: 0.2, now: t0 + 5 * 60_000 });
+    expect(f).toEqual({ elapsedMs: 5 * 60_000, cost: 1, estimate: true, status: "running" });
+    expect(sessionFacts({ started, ended: null, status: "running", finished: null, rate: undefined, now: t0 + 1000 }).cost).toBeNull();
+  });
+  test("once over: the clock stops when it ended, the cost is what was recorded, and the trace's status stands in for a stream that only said running", () => {
+    const f = sessionFacts({ started, ended: "2026-01-01T00:01:00Z", status: "success", finished: { costUsd: 0.5 }, rate: 0.2, now: t0 + 9 * 60_000 });
+    expect(f).toEqual({ elapsedMs: 60_000, cost: 0.5, estimate: false, status: "success" });
+    const late = sessionFacts({ started, ended: null, status: "running", finished: { status: "fail", ended: "2026-01-01T00:02:00Z", costUsd: 0.7 }, rate: 0.2, now: t0 + 9 * 60_000 });
+    expect(late).toEqual({ elapsedMs: 120_000, cost: 0.7, estimate: false, status: "fail" });
+    // Over with nothing recorded: the clock stops at the time given (when the page heard it end), and there is no cost to say.
+    expect(sessionFacts({ started, ended: null, status: "running", finished: {}, rate: 0.2, now: t0 + 30_000 })).toEqual({ elapsedMs: 30_000, cost: null, estimate: false, status: "running" });
+    // A status the stream settled is not an estimate even before the trace has the row.
+    expect(sessionFacts({ started, ended: null, status: "success", finished: null, rate: 0.2, now: t0 + 30_000 }).estimate).toBe(false);
+  });
+});
+
+describe("which keys count", () => {
+  const press = keyMatcher([{ keys: "mod+k", action: "palette" }, { keys: "g l", action: "live" }, { keys: "escape", action: "escape" }]);
+  const at = (over: Partial<{ typing: boolean; overlay: boolean; screenKey: boolean }> = {}) => ({ typing: false, overlay: false, screenKey: false, ...over });
+  const run = (name: string | null, where = at()) => decide(name, (n) => press(n, 0), where);
+
+  test("on the page, shortcuts and the screen's own keys both count", () => {
+    expect(run("mod+k")).toEqual({ kind: "action", action: "palette" });
+    expect(run("g")).toEqual({ kind: "nothing" });
+    expect(run("l")).toEqual({ kind: "action", action: "live" });
+    expect(run("j", at({ screenKey: true }))).toEqual({ kind: "screen" });
+    expect(run("j")).toEqual({ kind: "nothing" });
+    expect(run(null, at({ screenKey: true }))).toEqual({ kind: "nothing" });
+  });
+
+  test("while typing, letters are typing: only Ctrl or Cmd shortcuts and Escape count, and the screen's keys never", () => {
+    expect(run("j", at({ typing: true, screenKey: true }))).toEqual({ kind: "nothing" });
+    expect(run("g", at({ typing: true }))).toEqual({ kind: "nothing" });
+    expect(run("mod+k", at({ typing: true }))).toEqual({ kind: "action", action: "palette" });
+    expect(run("escape", at({ typing: true }))).toEqual({ kind: "action", action: "escape" });
+  });
+
+  test("with an overlay in front, the screen's keys do not count, but the page's shortcuts (Escape closes it) do", () => {
+    expect(run("j", at({ overlay: true, screenKey: true }))).toEqual({ kind: "nothing" });
+    expect(run("escape", at({ overlay: true }))).toEqual({ kind: "action", action: "escape" });
+    expect(run("mod+k", at({ overlay: true }))).toEqual({ kind: "action", action: "palette" });
+  });
+});
+
+describe("the inbox's selection", () => {
+  test("j and k step through the list and stop at its ends; a row left beyond a list that shrank is brought back in first", () => {
+    expect(stepAt(0, 1, 5)).toBe(1);
+    expect(stepAt(4, 1, 5)).toBe(4);
+    expect(stepAt(0, -1, 5)).toBe(0);
+    expect(stepAt(3, -1, 5)).toBe(2);
+    expect(stepAt(7, 1, 5)).toBe(4);
+    expect(stepAt(7, -1, 5)).toBe(3);
+    expect(stepAt(2, 1, 0)).toBe(0);
+    expect(stepAt(0, -1, 0)).toBe(0);
+  });
+});
+
+describe("what is up next on the Live screen", () => {
+  const change = (slug: string, status: string) => ({ slug, status }) as ChangeSummary;
+  test("changes waiting their turn, without the ones being worked on, at most six, in the list's order", () => {
+    const list = [change("busy", "building"), change("a", "accepted"), change("done", "done"), change("b", "plan-approved"), change("draft", "draft"), change("blocked", "blocked")];
+    expect(upNext(list, ["busy"]).map((c) => c.slug)).toEqual(["a", "b"]);
+    expect(upNext(list, []).map((c) => c.slug)).toEqual(["busy", "a", "b"]);
+    const many = Array.from({ length: 10 }, (_, k) => change(`c${k}`, "building"));
+    expect(upNext(many, [])).toHaveLength(UP_NEXT);
+    expect(upNext(many, ["c0"]).map((c) => c.slug)).toEqual(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    expect(upNext(many, [], 2)).toHaveLength(2);
+  });
 });
 
 describe("reading JSON", () => {
@@ -554,7 +737,7 @@ describe("requests from the page", () => {
     const posted: Array<[string, unknown]> = [];
     let refuse = false;
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
-      posted.push([url, JSON.parse(String(init?.body))]);
+      posted.push([url, JSON.parse(init?.body as string)]);
       return refuse ? Response.json({ error: "Nothing of a is running." }, { status: 409 }) : Response.json({ stopped: 1 }, { status: 202 });
     }) as unknown as typeof fetch;
     toasts.value = [];
@@ -643,7 +826,7 @@ describe("requests from the page", () => {
     const posted: Array<[string, unknown]> = [];
     let refuse = false;
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
-      posted.push([url, JSON.parse(String(init?.body))]);
+      posted.push([url, JSON.parse(init?.body as string)]);
       return refuse ? Response.json({ error: "That session is not running." }, { status: 409 }) : Response.json({ id: "m1" }, { status: 202 });
     }) as unknown as typeof fetch;
     toasts.value = [];

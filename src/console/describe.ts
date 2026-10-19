@@ -16,7 +16,13 @@ export function parsePayload(text: string): Payload {
   }
 }
 
-const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
+/** A payload value as text: a string as it is, nothing for null, a number or boolean as written, and anything else (a list, an object) as JSON. */
+const str = (v: unknown): string => {
+  if (typeof v === "string") return v;
+  if (v == null) return "";
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v);
+  return JSON.stringify(v);
+};
 const plain = (v: unknown): string => ((STATUSES as readonly string[]).includes(str(v)) ? plainStatus(str(v) as Status) : str(v));
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const money = (v: unknown): string => (typeof v === "number" && v >= 0.005 ? ` ($${v.toFixed(2)})` : "");

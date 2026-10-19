@@ -38,7 +38,7 @@ export function limitOf(usd: number | undefined): number {
 }
 
 /** A session ends by its timeout plus this, at the latest; a hold still "running" after that was left by a killed process. */
-export const STALE_GRACE_MINUTES = 10;
+const STALE_GRACE_MINUTES = 10;
 
 /**
  * The ISO time before which a phase still marked running no longer holds budget: its process was
@@ -49,7 +49,7 @@ export function staleBefore(cfg: Config, now = new Date()): string {
 }
 
 /** "claude.max_budget_usd_per_day, $5.00": the setting and its value, for notes. */
-export function loopDaySetting(cfg: Config): string {
+function loopDaySetting(cfg: Config): string {
   return `claude.max_budget_usd_per_day, $${(cfg.claude.max_budget_usd_per_day ?? 0).toFixed(2)}`;
 }
 
@@ -60,7 +60,7 @@ const LOOP_POOL = { except: CHAT_SLUG };
  * What is left of the loop's day: the daily budget less what was spent today and what running phases
  * hold, as startPhase counts it. Infinity without claude.max_budget_usd_per_day.
  */
-export function loopDayLeft(cfg: Config, trace: Trace, now = new Date()): number {
+function loopDayLeft(cfg: Config, trace: Trace, now = new Date()): number {
   const day = cfg.claude.max_budget_usd_per_day;
   return day === undefined ? Infinity : day - trace.costIn(LOOP_POOL, startOfToday(now), { runningSince: staleBefore(cfg, now) });
 }

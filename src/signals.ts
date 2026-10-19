@@ -9,7 +9,7 @@ import { StopRequested } from "./stop";
 import { andList } from "./text";
 import type { Trace } from "./trace";
 
-export type HealthResult = "pass" | "fail" | "error";
+type HealthResult = "pass" | "fail" | "error";
 
 const SIGNAL = "main_health";
 
@@ -111,10 +111,10 @@ export function localDate(d = new Date()): string {
 
 /** `after the change "a" merged`, `after the changes "a" and "b" merged`, or `on the main branch`. */
 function brokeWhen(afterSlugs: string[]): string {
-  const names = afterSlugs.map((s) => `"${s}"`);
-  if (names.length === 0) return "on the main branch";
-  if (names.length === 1) return `after the change ${names[0]} merged`;
-  return `after the changes ${andList(names)} merged`;
+  const [first, ...rest] = afterSlugs.map((s) => `"${s}"`);
+  if (first === undefined) return "on the main branch";
+  if (rest.length === 0) return `after the change ${first} merged`;
+  return `after the changes ${andList([first, ...rest])} merged`;
 }
 
 /** Opens a draft for the failing tests, named after the first change merged since the last check. */

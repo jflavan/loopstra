@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
+import { FrontmatterProblem, parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
 import { tempDir } from "../helpers";
 
 const OWNER = `---
@@ -60,6 +60,38 @@ describe("patchFrontmatter", () => {
     const f = parseIntentFile(out);
     expect(f.frontmatter.status).toBe("accepted");
     expect(f.frontmatter.author).toBe("A");
+  });
+
+  test("a fence parse refuses is refused here too: a patch never puts a second frontmatter block in front of the first", () => {
+    for (const text of ["\n---\nstatus: building\n---\n# Intent: x\n", "--- \nstatus: building\n---\n# Intent: x\n", "---\nstatus: building\n# Intent: x\n"]) {
+      expect(() => patchFrontmatter(text, { status: "reviewing" })).toThrow(FrontmatterProblem);
+    }
+    // No newline after the closing fence: patched in place, one block.
+    const out = patchFrontmatter("---\nstatus: building\n---", { status: "reviewing" });
+    expect(out).toBe("---\nstatus: reviewing\n---");
+    expect(out.split("\n").filter((l) => l === "---")).toHaveLength(2);
+  });
+
+  test("an indented comment line after the patched key stays: only a block scalar's lines are its value's", () => {
+    const raw = "---\nstatus: building\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n";
+    expect(patchFrontmatter(raw, { status: "reviewing" })).toBe("---\nstatus: reviewing\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n");
+    const held = "---\nstatus: building\nhold: legal\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n";
+    expect(patchFrontmatter(held, {}, ["hold"])).toBe("---\nstatus: building\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n");
+    // Inside a block scalar an indented # line is text, and goes with the value.
+    const block = "---\nnote: |\n  # not a comment\n  more\nstatus: building\n---\n";
+    expect(patchFrontmatter(block, { note: "new" })).toBe("---\nnote: new\nstatus: building\n---\n");
+    expect(patchFrontmatter("---\nnote: >-\n  # not a comment\nstatus: building\n---\n", {}, ["note"])).toBe("---\nstatus: building\n---\n");
+  });
+
+  test("a value YAML would read as something else is quoted, and reads back as the same text", () => {
+    const values = ["true", "123", "null", "#x", "a: b", "- x", "[a]", "~", "2026-09-28", "  leading", "trailing  ", "yes", "1e3", "0x1f", "", "a # b", "'quoted'", '"double"', "*ref", "&anchor", "!tag", "%percent", "@at", "`tick`", "|", ">", "{a: 1}", "key:"];
+    for (const value of values) {
+      const out = patchFrontmatter("---\nstatus: building\nnote: old\n---\n# Intent: x\n", { note: value, hold: value });
+      const f = parseIntentFile(out);
+      expect([value, f.frontmatter.note]).toEqual([value, value]);
+      expect([value, f.frontmatter.hold]).toEqual([value, value]);
+      expect(f.frontmatter.status).toBe("building");
+    }
   });
 });
 

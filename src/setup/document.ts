@@ -4,7 +4,7 @@ import { ConfigError, configPath, validateConfig, type Config } from "../config"
 import { writeFileAtomic } from "../fsutil";
 
 /** Where a value is in the config, like ["claude", "max_budget_usd"]. */
-export type Path = readonly (string | number)[];
+type Path = readonly (string | number)[];
 
 /** Comment texts joined into one, skipping the empty ones; undefined when there are none. */
 function joined(...comments: (string | null | undefined)[]): string | undefined {
@@ -55,7 +55,9 @@ export class ConfigDocument {
    * digit, where get() gives the number YAML read, already rounded.
    */
   written(path: Path): string | string[] | undefined {
-    const asWritten = (n: unknown) => (!isScalar(n) || n.value === null ? undefined : typeof n.source === "string" ? n.source : String(n.value));
+    // A scalar made by code has no source: its value is a string, number or boolean, written as such.
+    const scalarText = (v: unknown): string | undefined => (typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" || typeof v === "bigint" ? String(v) : undefined);
+    const asWritten = (n: unknown) => (!isScalar(n) || n.value === null ? undefined : typeof n.source === "string" ? n.source : scalarText(n.value));
     const node = this.doc.getIn(path, true);
     if (isSeq(node)) return node.items.map(asWritten).filter((s): s is string => s !== undefined);
     return asWritten(node);

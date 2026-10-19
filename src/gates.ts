@@ -3,9 +3,9 @@ import { passOn } from "./git";
 import { errorText } from "./shell";
 
 /** One check's verdict. `payload` carries what the gate's caller needs back from the check (findings, a failure to record). */
-export type CheckResult<P = never> = { result: "pass" | "fail" | "waiting"; evidence: string; payload?: P };
+type CheckResult<P = never> = { result: "pass" | "fail" | "waiting"; evidence: string; payload?: P };
 export interface Check<P = never> { name: string; run: () => Promise<CheckResult<P>> }
-export type GateName = "spec" | "plan" | "merge" | "done";
+type GateName = "spec" | "plan" | "merge" | "done";
 /** Pass, with the payloads the passing checks returned; or the first check that did not pass, as it returned. */
 export type GateOutcome<P = never> = { result: "pass"; payloads: P[] } | (CheckResult<P> & { result: "fail" | "waiting"; check: string });
 

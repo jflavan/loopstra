@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
+import { writeFileAtomic } from "./fsutil";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
@@ -26,6 +27,7 @@ import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
 import { repositoryTop, uncommittedSetup } from "./init";
+import { loopstraDir, runDir } from "./paths";
 import { olderSetupRefusal } from "./stamp";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
@@ -134,7 +136,7 @@ export async function tick(root: string): Promise<TickResult> {
     const scan = await scanRepo(root);
     const ordered = orderQueue(scan.intents);
     // A change that would build into another's files waits (see sameFileHolds).
-    const holds = await sameFileHolds(ordered);
+    const holds = await sameFileHolds(ordered, root);
     await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
@@ -211,6 +213,7 @@ export async function tick(root: string): Promise<TickResult> {
       out.stopped = true;
       return out;
     }
+    // Defensive: nothing between the tick's start and its lanes starts a session, so neither is expected here; a step's own goes through afterLanes.
     if (e instanceof AssistantUnavailable) return await afterUnavailable(root, cfg, trace, out, null, e);
     if (e instanceof LoopBudgetReached) return await afterDayBudget(root, cfg, trace, out, []);
     trace.event("_loop", "error", { where: "tick", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
@@ -273,7 +276,8 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
   try {
     const fresh = await readFresh(root, trace, slug);
     if (!fresh || !runs(fresh)) return null;
-    if (cfg.speed.think_ahead && thinkingStep(fresh, cfg)) runsNoCommands(slug);
+    // A design or plan step runs none of the project's commands, in a lane as much as beside them.
+    if (thinkingStep(fresh, cfg)) runsNoCommands(slug);
     const result = await runStepGuarded(new StepContext(root, cfg, trace, fresh));
     return { slug, result, durationMs: Date.now() - t0 };
   } catch (e) {
@@ -458,14 +462,13 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
  * the files its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved
  * change's is an earlier build's, which its next build drops).
  */
-export async function sameFileHolds(ordered: Intent[]): Promise<Map<string, string>> {
+export async function sameFileHolds(ordered: Intent[], root: string): Promise<Map<string, string>> {
   const files = new Map<string, string[] | null>();
   const paths = (plan: string | null) => (plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
     const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
-    // i.dir is <root>/intent/<slug>.
     const reconciled = i.file.frontmatter.status === "plan-approved" ? null
-      : await Bun.file(join(i.dir, "..", "..", ".loopstra", "runs", i.slug, RECONCILED_PLAN)).text().catch(() => null);
+      : await Bun.file(join(runDir(root, i.slug), RECONCILED_PLAN)).text().catch(() => null);
     const listed = paths(plan), added = paths(reconciled);
     files.set(i.slug, listed === null && added === null ? null : [...new Set([...(listed ?? []), ...(added ?? [])])]);
   }
@@ -533,7 +536,7 @@ async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResul
     if (out.steps?.length) {
       const scan = await scanRepo(root);
       const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(ordered);
+      const holds = await sameFileHolds(ordered, root);
       await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
     }
     if (share) await shareMain(root, cfg, trace);
@@ -586,7 +589,7 @@ async function afterUnavailable(root: string, cfg: Config, trace: Trace, out: Ti
     const ctx = new StepContext(root, cfg, trace, await readIntent(root, cause.slug));
     trace.event(cause.slug, "error", {
       where: "probe", phase: cause.phase, line: cause.line, repeats: p.repeats,
-      detail: `the ${cause.phase} phase failed ${p.repeats} times in a row with the same line, but a probe session reached the assistant, so the failure is the phase's own (crash)`,
+      detail: `the ${cause.phase} phase failed ${p.repeats ?? PROBE_AFTER} times in a row with the same line, but a probe session reached the assistant, so the failure is the phase's own (crash)`,
     });
     stepEnded(out, cause.slug, await blockSafely(ctx, ownerNote("crash")));
   } catch (err) {
@@ -705,18 +708,23 @@ export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
     }
     if (e instanceof PersonChangedStatus) return personChangedStatus(ctx, e);
     ctx.trace.event(ctx.slug, "error", { where: "step", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
-    return blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
+    return await blockSafely(ctx, e instanceof MainCheckoutMoved ? e.message : unexpectedNote(e));
   } finally {
     if (!cutShort) closeUnusedAnswer(ctx);
     await dropSnapshot(ctx);
   }
 }
 
-/** The step's snapshot of main is removed once it ends; a failure is traced (the next tick's start removes it). */
+/**
+ * The step's snapshot of main is removed once it ends; a failure is traced (the next tick's start
+ * removes it). A stop request is not the change's error: the removal is a cleanup call that a stop
+ * does not interrupt, but should one reach here it is left to the next tick's start, quietly.
+ */
 async function dropSnapshot(ctx: StepContext): Promise<void> {
   try {
     await ctx.dropSnapshot();
   } catch (e) {
+    if (e instanceof StopRequested) return;
     ctx.trace.event(ctx.slug, "error", { where: "snapshot", what: "could not remove the step's snapshot of main", error: errorText(e) });
   }
 }
@@ -738,14 +746,16 @@ async function blockSafely(ctx: StepContext, note: string, opts: { detail?: unkn
 }
 
 /**
- * Writes the generated queue.md (only when it changed). It is never committed on its own: the next
- * runtime commit on main takes it along, so a tick with nothing else to record adds no commit.
+ * Writes the generated queue.md (only when it changed), whole (see writeFileAtomic), so the console
+ * or a person's editor never reads half of it; the temp file goes in .loopstra, not intent/, where
+ * one a kill left behind would be committed with the next record. It is never committed on its own:
+ * the next runtime commit on main takes it along, so a tick with nothing else to record adds no commit.
  */
 async function writeQueue(root: string, trace: Trace, text: string): Promise<void> {
   try {
     const path = join(root, "intent", "queue.md");
     if (existsSync(path) && (await Bun.file(path).text()) === text) return;
-    await Bun.write(path, text);
+    writeFileAtomic(path, text, loopstraDir(root));
   } catch (e) {
     trace.event("_loop", "error", { where: "queue", error: errorText(e) });
   }
@@ -999,7 +1009,7 @@ async function runLoop(root: string, opts: { once: boolean; installSignals?: boo
         }
         lastPaused = r.paused ?? "";
       } catch (e) {
-        log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0]}`);
+        log(`the loop hit an unexpected problem and will try again: ${errorText(e).split("\n")[0] ?? ""}`);
         try {
           const trace = Trace.open(root);
           try { trace.event("_loop", "error", { where: "start", error: errorText(e), stack: e instanceof Error ? e.stack : undefined }); } finally { trace.close(); }

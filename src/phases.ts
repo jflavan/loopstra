@@ -27,7 +27,7 @@ import { toolTarget } from "./tools";
  * configured project commands except install, and read-only git (verify, done-check). build:
  * `claude.allowed_tools` plus every configured project command, install included.
  */
-export type ToolSet = "read" | "read+git" | "read+commands" | "build";
+type ToolSet = "read" | "read+git" | "read+commands" | "build";
 
 /** The tool sets whose sessions may run the project's commands. */
 const RUNS_COMMANDS: ReadonlySet<ToolSet> = new Set(["read+commands", "build"]);
@@ -74,7 +74,7 @@ const NO_POWERSHELL = ["PowerShell"];
  * chain operator is its own single part. Pipes are not split: a pipe's right side (`| tee out.log`)
  * would let judges, which are read-only, write files.
  */
-export function commandParts(cmd: string): string[] {
+function commandParts(cmd: string): string[] {
   const parts: string[] = [];
   let quote: string | null = null;
   let start = 0;
@@ -199,7 +199,7 @@ export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable:
 }
 
 /** A phase's prompt as the caller gives it: rendered already (null: its prompt file is missing), or the function that renders it. */
-export type PromptSource = string | null | (() => Promise<string | null>);
+type PromptSource = string | null | (() => Promise<string | null>);
 
 /**
  * A renderer that gives `first` (a prompt the caller rendered already, to match it against work kept
@@ -262,14 +262,14 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     r = await tries(prompt, spec.resume, true);
   }
   if (!r.ok) return r;
-  const { asked, ...ok } = r as Asking<N>;
+  const { asked, ...ok } = r;
   // Recorded already, as its session ended (see attempt).
   if (asked) throw new QuestionAsked(spec.name, asked.text);
   return ok;
 }
 
 /** The phases whose sessions may ask a person a question (see src/questions.ts). */
-export const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "revise"]);
+const ASKERS: ReadonlySet<string> = new Set(["intake", "design", "plan", "build", "revise"]);
 
 /**
  * What a session of an asker does with a question in its report: it is recorded (no `refuse`), or the
@@ -508,7 +508,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
  * Throws SessionStopped when a person stopped the change (see writeChangeStop in src/inbox.ts): checked
  * before each phase starts and once it ends, so a stop ends the step whichever phase it came in.
  */
-export function throwIfChangeStopped(ctx: StepContext): void {
+function throwIfChangeStopped(ctx: StepContext): void {
   const by = changeStoppedBy(ctx.root, ctx.slug);
   if (by !== null) throw new SessionStopped(by);
 }
@@ -523,7 +523,7 @@ function protectedTests(log: string): string[] {
 }
 
 /** Names the protected test files a failed fix wanted to edit, so a person can make the edit instead of a rebuild. */
-export function protectedNote(ctx: StepContext, files: string[]): string {
+function protectedNote(ctx: StepContext, files: string[]): string {
   const list = files.map((f) => `\`${f}\``).join(", ");
   return `It was not allowed to edit ${files.length === 1 ? "this test file" : "these test files"}, which this branch did not add or edit: ${list}. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
 }
@@ -570,7 +570,7 @@ export function summarize(e: Record<string, unknown>, cwd?: string): Record<stri
     const content = (e as { message?: { content?: Array<{ type: string; name?: string; text?: string; input?: unknown }> } }).message?.content ?? [];
     return {
       type: "assistant",
-      items: content.map((c) => c.type === "tool_use" ? `tool:${c.name}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type),
+      items: content.map((c) => c.type === "tool_use" ? `tool:${c.name ?? "?"}` : c.type === "text" ? `text:${(c.text ?? "").slice(0, 120)}` : c.type),
       targets: content.map((c) => c.type === "tool_use" ? toolTarget(c.name ?? "", c.input, cwd) : ""),
     };
   }
@@ -601,7 +601,7 @@ export async function projectCommand(
 }
 
 /** `detail`: what went wrong, for the trace (the caller words the owner's note). */
-export type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
+type CodePhaseResult<T> = ({ ok: true } & T) | { ok: false; detail: string };
 
 /**
  * Runs deterministic work as a traced phase. Exceptions become a failed phase, never a crash; a stop
@@ -625,7 +625,7 @@ export async function codePhase<T extends object>(ctx: StepContext, name: string
     // A hung git command is reported the same way wherever it happens (see the scheduler).
     if (e instanceof GitTimeout) throw e;
     throwIfChangeStopped(ctx);
-    return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0]}` };
+    return { ok: false, detail: `The ${name} step failed: ${msg.split("\n")[0] ?? msg}` };
   }
   ctx.trace.phaseEnd(ctx.slug, seq, { status: "success" });
   throwIfChangeStopped(ctx);

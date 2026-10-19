@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { runDir } from "../paths";
 import type { z } from "zod";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
 import type { FailureReason } from "../claude";
@@ -10,11 +11,11 @@ import type { Trace } from "../trace";
 
 export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
 
-export type ChatPhase = "orchestrator" | "write-intent";
+type ChatPhase = "orchestrator" | "write-intent";
 
 /** Every variable a chat prompt template may use. A variable with no value renders as `(none)`. */
 export const CHAT_PROMPT_VARS = ["main_branch", "brief", "existing", "template", "updates", "problems"] as const;
-export type ChatPromptVars = Partial<Record<(typeof CHAT_PROMPT_VARS)[number], string>>;
+type ChatPromptVars = Partial<Record<(typeof CHAT_PROMPT_VARS)[number], string>>;
 
 /** The prompt template for a chat phase: the repository's override, else the one shipped with Loopstra. */
 export async function chatTemplate(root: string, name: ChatPhase): Promise<string> {
@@ -37,26 +38,53 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
  * present, around the Read rules below; the runtime puts recent history in the context instead. Claude
  * Code allows read-only git by itself, so CHAT_DENIED also denies it.
  */
-export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
+const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
+/** Files that hold secrets wherever they are: denied by their relative glob and by the absolute one (`//` is the file system's root). */
+const SECRET_FILES = [".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", ".git/**"];
+/** Places in the home folder that hold secrets or sign-ins (shell rc files and the profile export them; ~/.claude.json holds Claude Code's own). */
+const SECRET_HOMES = [".ssh/**", ".aws/**", ".config/**", ".claude/**", ".claude.json", ".gnupg/**", ".netrc", ".npmrc", ".git-credentials", ".*rc", ".profile", ".docker/**", ".kube/**", ".azure/**"];
 /**
  * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools,
  * reading the usual places secrets are kept is denied (Read rules also cover Grep and Glob), and so
- * are git's own folder and git itself (see CHAT_TOOLS). This is a guard, not a sandbox: keep `allow` lists tight.
+ * are git's own folder and git itself (see CHAT_TOOLS). /proc is denied too: /proc/<pid>/environ
+ * holds a process's environment (the secrets this process keeps out of a session's, see
+ * secretEnvNames, are still in its own). This is a guard, not a sandbox: keep `allow` lists tight.
  */
 export const CHAT_DENIED = [
   "Edit", "Write", "NotebookEdit", "PowerShell", "Bash(git)", "Bash(git *)",
-  ...["**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/.git/**", "~/.ssh/**", "~/.aws/**", "~/.config/**", "~/.claude/**", "~/.gnupg/**", "~/.netrc", "~/.npmrc", "~/.git-credentials"].map((p) => `Read(${p})`),
+  ...SECRET_FILES.flatMap((p) => [`Read(**/${p})`, `Read(//**/${p})`]),
+  ...SECRET_HOMES.map((p) => `Read(~/${p})`),
+  "Read(//proc/**)",
   // Other people's conversations (other threads, other platforms) and the chat sessions' own prompts.
   ...["**/.loopstra/chat/**", "**/.loopstra/runs/_chat/**"].map((p) => `Read(${p})`),
 ];
 
-export type ChatAgentResult<T> =
+/** An environment variable that looks like a secret, by name. */
+const SECRET_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY/i;
+/**
+ * What Claude Code signs in and connects with (an API key or OAuth token, Bedrock's or Vertex's
+ * credentials, its own settings): kept, or no session could start.
+ */
+const CLAUDE_OWN = /^(ANTHROPIC_|CLAUDE_|AWS_|GOOGLE_|CLOUD_ML_)/;
+
+/**
+ * The names of the environment variables a chat session must not inherit: the bot tokens the
+ * config names (`loopstra chat` has them in its environment), and anything else that looks like a
+ * secret by name. Everything else (PATH, HOME, the editor's settings) is passed on as usual.
+ */
+export function secretEnvNames(cfg: Config, env: Record<string, string | undefined> = process.env): string[] {
+  const named = [cfg.chat.transports.slack?.token_env, cfg.chat.transports.slack?.bot_token_env, cfg.chat.transports.discord?.token_env].filter((n): n is string => !!n);
+  const looksSecret = Object.keys(env).filter((k) => SECRET_NAME.test(k) && !CLAUDE_OWN.test(k));
+  return [...new Set([...named, ...looksSecret])];
+}
+
+type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
   | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number;
       /** Why no session started: the day's budget is spent ("today"), or what is left is held by sessions still running ("held"). */
       budgetUsedUp?: "today" | "held" };
 
-export interface ChatAgentInput<T> {
+interface ChatAgentInput<T> {
   root: string;
   cfg: Config;
   trace: Trace;
@@ -90,7 +118,7 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
   }
   const out = await tracedSession({
     trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd,
-    dir: join(o.root, ".loopstra", "runs", CHAT_SLUG, "phases", `${held.seq}-${o.name}`),
+    dir: join(runDir(o.root, CHAT_SLUG), "phases", `${held.seq}-${o.name}`),
     run: {
       cwd: o.root,
       prompt: o.prompt,
@@ -105,6 +133,8 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       // It runs in the main checkout: should git run there anyway (git itself is denied, see CHAT_DENIED),
       // it skips the index refresh `git status` writes, so it never holds the lock the loop commits records with.
       env: { LOOPSTRA_PHASE: o.name, LOOPSTRA_SLUG: CHAT_SLUG, GIT_OPTIONAL_LOCKS: "0" },
+      // The bot tokens and anything else secret stay out of a session that takes instructions from a chat channel.
+      dropEnv: secretEnvNames(o.cfg),
     },
     read: (output) => {
       const parsed = o.schema.safeParse(output);

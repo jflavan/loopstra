@@ -75,6 +75,6 @@ export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & 
   if (decidedBy === "cheap" && !(await cheapMayDecide(ctx, phase, prompt))) {
     return notUsed("it was decided by the cheaper judge, which is no longer trusted to decide alone");
   }
-  ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName} uses the review that ran alongside the verifier` });
+  ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName ?? phase.name} uses the review that ran alongside the verifier` });
   return { ok: true, envelope: kept.envelope, sessionId: null, costUsd: 0, decidedBy };
 }

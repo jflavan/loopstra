@@ -5,11 +5,11 @@ import { configPath } from "../../src/config";
 import { Git } from "../../src/git";
 import { readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
-import { othersRunning, release } from "../../src/lanes";
+import { othersRunning } from "../../src/lanes";
 import { PROBE_AFTER, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { fixture, run, TEMPLATES, tempDir, withEnv } from "../helpers";
+import { fixture, TEMPLATES, tempDir, withEnv } from "../helpers";
 import { lanesRepo, statusOf, inTrace, expirePause, payloadOf, numbered, phaseEndId, mergeOrder, holdSession, traceShows, statusShows } from "./lanes-helpers";
 
 afterEach(() => resetStop());

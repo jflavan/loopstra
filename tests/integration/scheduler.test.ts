@@ -7,6 +7,7 @@ import { Git, passOn, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
 import { holdLoop, loopAlreadyRunning, readPause, releaseLoop, thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
+import { othersRunning, othersRunningCommands } from "../../src/lanes";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
@@ -112,11 +113,30 @@ describe("scheduler resilience", () => {
     expect(r.picked).toBe(SLUG);
     expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("designing");
     expect(trace.phases(SLUG).map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
+    // Not the change's fault: nothing about the stop, the snapshot's removal included, is an error of the change.
+    expect(trace.events(SLUG).filter((e) => e.type === "error")).toEqual([]);
 
     resetStop();
     cpSync(join(TEMPLATES, "intake.md"), join(repo.path, "loopstra", "prompts", "intake.md"));
     await tick(repo.path);
     expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    trace.close(); repo.cleanup();
+  }, 60_000);
+
+  test("a design step counts as running none of the project's commands, with think-ahead off too", async () => {
+    const { repo, trace } = await setupRepo("accepted", { config: "speed:\n  think_ahead: false\n" });
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "{{intent}} FIXTURE:hang");
+    // Seen from another change while the design step's session runs.
+    const during: Array<{ running: number; runningCommands: number }> = [];
+    const stopper = (async () => {
+      while (!trace.phases(SLUG).some((p) => p.name === "intake")) await Bun.sleep(50);
+      during.push({ running: othersRunning("another-change"), runningCommands: othersRunningCommands("another-change") });
+      requestStop();
+    })();
+    const r = await tick(repo.path);
+    await stopper;
+    expect(r.stopped).toBe(true);
+    expect(during).toEqual([{ running: 1, runningCommands: 0 }]);
     trace.close(); repo.cleanup();
   }, 60_000);
 

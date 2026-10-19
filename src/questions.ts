@@ -1,12 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { readJson, writeJson } from "./chat/threads";
+import { z } from "zod";
+import { runDir } from "./paths";
+import { readJsonAs, writeJson } from "./fsutil";
 import { phaseKind } from "./console/steerable";
 import { commitForStep, writeForStep, type StepContext } from "./context";
 import { conversationPath, readConversation, withEntryOnce } from "./conversation";
 import { Git } from "./git";
 import { asAtHead, fileHash, matchesHead } from "./headfiles";
-import { hasQuestion, type Intent, type Status } from "./intents";
+import { hasQuestion, STATUSES, type Intent, type Status } from "./intents";
 import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 
@@ -16,27 +18,35 @@ import { errorText } from "./shell";
  * change waits for the answer (the scheduler skips it). The answer resumes the asking session.
  */
 
+/** A person's answer: the text the asking session is resumed with, who gave it, from where, and when. */
+const AnswerSchema = z.object({ text: z.string(), by: z.string(), via: z.string(), at: z.string() });
+
 /** One question a session asked, and its answer once a person gave one. */
-export interface Asked {
-  phase: string;
-  traceName: string;
-  seq: number;
-  sessionId: string | null;
-  text: string;
-  why: string;
-  options: string[];
-  at: string;
-  answer?: { text: string; by: string; via: string; at: string };
-}
+const AskedSchema = z.object({
+  phase: z.string(),
+  traceName: z.string(),
+  seq: z.number(),
+  sessionId: z.string().nullable(),
+  text: z.string(),
+  why: z.string(),
+  options: z.array(z.string()),
+  at: z.string(),
+  answer: AnswerSchema.optional(),
+});
+export type Asked = z.infer<typeof AskedSchema>;
+
+/** A question with its answer: what the asking session is resumed with. */
+type Answered = Asked & { answer: z.infer<typeof AnswerSchema> };
 
 /**
- * `status` and `since`: the change's stay at a status the question and the count belong to (`since`: the
- * id of the trace's newest status change to another status then, 0 when there was none; see stayAt).
- * `count`: the questions asked in that stay; it starts again at 0 once the status changes, even back to
- * the same one (a block and a retry, a send back). A status change to the same status, which only
- * rewrites the note (a spec written again), does not start a stay.
+ * question.json's shape. `status` and `since`: the change's stay at a status the question and the count
+ * belong to (`since`: the id of the trace's newest status change to another status then, 0 when there
+ * was none; see stayAt). `count`: the questions asked in that stay; it starts again at 0 once the status
+ * changes, even back to the same one (a block and a retry, a send back). A status change to the same
+ * status, which only rewrites the note (a spec written again), does not start a stay.
  */
-export interface QuestionState { status: Status; since?: number; count: number; open: Asked | null }
+const QuestionStateSchema = z.object({ status: z.enum(STATUSES), since: z.number().optional(), count: z.number(), open: AskedSchema.nullable() });
+type QuestionState = z.infer<typeof QuestionStateSchema>;
 
 /** A question as an envelope carries it. */
 export interface Question { text: string; why: string; options: string[] }
@@ -47,7 +57,7 @@ export const NO_MORE_QUESTIONS = `You have asked ${MAX_QUESTIONS} questions in t
 export const TOO_MANY_NOTE = "The assistant kept asking questions on this step. Read conversation.md, and add what it needs to the intent.";
 
 function statePath(root: string, slug: string): string {
-  return join(root, ".loopstra", "runs", slug, "question.json");
+  return join(runDir(root, slug), "question.json");
 }
 
 function writeState(root: string, slug: string, state: QuestionState): void {
@@ -56,15 +66,16 @@ function writeState(root: string, slug: string, state: QuestionState): void {
   writeJson(path, state);
 }
 
+/** The change's question state, or null when there is none (or the file is not one). */
 export function readQuestion(root: string, slug: string): QuestionState | null {
-  return readJson<QuestionState>(statePath(root, slug));
+  return readJsonAs(statePath(root, slug), QuestionStateSchema);
 }
 
 /**
  * The change's present stay at its status: the status, and the id of the trace's newest status change
  * to another status (0: none). One to the same status only rewrote the note, so it does not count.
  */
-export function stayAt(ctx: StepContext): { status: Status; since: number } {
+function stayAt(ctx: StepContext): { status: Status; since: number } {
   return { status: ctx.intent.file.frontmatter.status, since: ctx.trace.lastStatusMove(ctx.slug) };
 }
 
@@ -169,8 +180,8 @@ export function takeBackAnswer(root: string, slug: string): void {
 }
 
 /** The prompt that resumes the asking session with its answer. */
-export function answerPrompt(a: Asked): string {
-  return `${a.answer!.by} answered your question: ${a.answer!.text.trim()}\n\nCarry on.`;
+export function answerPrompt(a: Answered): string {
+  return `${a.answer.by} answered your question: ${a.answer.text.trim()}\n\nCarry on.`;
 }
 
 /**
@@ -195,14 +206,14 @@ export function closeQuestion(root: string, slug: string, which?: Asked): void {
  * closeUnusedAnswer). `mayResume`: false for a session that may not ask (a judge, work run alongside):
  * it skips the question, and does not count as the first of its kind.
  */
-export function answerFor(ctx: StepContext, phase: string, mayResume: boolean): Asked | null {
+export function answerFor(ctx: StepContext, phase: string, mayResume: boolean): Answered | null {
   if (!mayResume) return null;
   const kind = phaseKind(phase);
   if (ctx.kindsStarted.has(kind)) return null;
   ctx.kindsStarted.add(kind);
   const s = readQuestion(ctx.root, ctx.slug);
   if (!s?.open?.answer) return null;
-  return inStay(s, stayAt(ctx)) && phaseKind(s.open.phase) === kind ? s.open : null;
+  return inStay(s, stayAt(ctx)) && phaseKind(s.open.phase) === kind ? { ...s.open, answer: s.open.answer } : null;
 }
 
 /**
