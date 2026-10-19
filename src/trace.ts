@@ -102,13 +102,17 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
  * this version does not know). A new database gets the schema and this version at once. An older
  * one gets its migrations first, one at a time, each in its own transaction with the version bump
  * (a kill part way leaves the version true), and then the schema, whose CREATE ... IF NOT EXISTS
- * adds the new tables and indexes, which may name a column a migration just added.
+ * adds the new tables and indexes, which may name a column a migration just added. Each step reads
+ * the version again inside its transaction, which takes the write lock at once: another process (a
+ * second loop, the console) that ran the step meanwhile is not followed by a second run of it.
  * `migrations` is for tests.
  */
 export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS): void {
   const target = migrations.length;
-  const at = (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
-  if (at > target) throw new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${target}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
+  const version = () => (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
+  const newer = (at: number) => new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${target}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
+  const at = version();
+  if (at > target) throw newer(at);
   // Fresh only when it has no tables at all: an older version created them one statement at a time,
   // so a kill could leave some but not `events`, and those must still get every migration.
   const fresh = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table'").get() === null;
@@ -119,11 +123,16 @@ export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS
     })();
     return;
   }
-  for (let v = at; v < target; v++) {
-    db.transaction(() => {
+  for (;;) {
+    const done = db.transaction(() => {
+      const v = version();
+      if (v > target) throw newer(v);
+      if (v === target) return true;
       db.run(migrations[v]!);
       db.run(`PRAGMA user_version = ${v + 1}`);
-    })();
+      return false;
+    }).immediate();
+    if (done) break;
   }
   db.run(SCHEMA);
 }

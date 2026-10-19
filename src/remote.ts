@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config";
-import { chunks, DIFF_CHUNK, Git, GitError, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
+import { Git, GitError, pathChunks, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
 import { onCheckout, oneSync } from "./lanes";
 import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
@@ -241,7 +241,7 @@ async function putBack(git: Git, from: string, to: string): Promise<boolean> {
   const restore: string[] = [];
   const remove: string[] = [];
   const unstage: string[] = [];
-  for (const chunk of chunks(paths, DIFF_CHUNK)) {
+  for (const chunk of pathChunks(paths)) {
     const [was, would, here, staged] = [await blobs(git, from, chunk), await blobs(git, to, chunk), await fileBlobs(git, chunk), await indexBlobs(git, chunk)];
     for (const p of chunk) {
       const [w, t, h, s] = [was.get(p) ?? null, would.get(p) ?? null, here.get(p) ?? null, staged.get(p) ?? null];
@@ -251,9 +251,9 @@ async function putBack(git: Git, from: string, to: string): Promise<boolean> {
   }
   // Each name literal (see Git.putBack): one with * or [ in it names only itself, never a sibling a
   // person may be editing.
-  for (const chunk of chunks(restore, DIFF_CHUNK)) await git.run(["checkout", from, "--", ...literal(chunk)], { cleanup: true });
+  for (const chunk of pathChunks(restore)) await git.run(["checkout", from, "--", ...literal(chunk)], { cleanup: true });
   for (const p of remove) rmSync(join(git.cwd, p), { force: true });
-  for (const chunk of chunks(unstage, DIFF_CHUNK)) await git.run(["reset", "-q", from, "--", ...literal(chunk)], { cleanup: true });
+  for (const chunk of pathChunks(unstage)) await git.run(["reset", "-q", from, "--", ...literal(chunk)], { cleanup: true });
   return true;
 }
 

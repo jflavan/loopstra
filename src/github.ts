@@ -80,6 +80,21 @@ function isPrView(j: unknown): j is PrViewJson {
     && typeof o.createdAt === "string" && (o.mergedAt === null || typeof o.mergedAt === "string");
 }
 
+/** An object, or a field gh left out or printed as null. */
+const objectOrNone = (v: unknown) => v === undefined || v === null || typeof v === "object";
+
+/**
+ * True when the review fields of `j` (see PrJson) have the shape gh prints, so approved can read them:
+ * each left out, null, or of its type, and every latest review an object.
+ */
+function hasReviewShape(j: PrViewJson): boolean {
+  const o = j as Record<string, unknown>;
+  const reviews = o.latestReviews;
+  return (o.reviewDecision === undefined || o.reviewDecision === null || typeof o.reviewDecision === "string")
+    && objectOrNone(o.author)
+    && (reviews === undefined || reviews === null || (Array.isArray(reviews) && reviews.every((r) => typeof r === "object" && r !== null && objectOrNone((r as Record<string, unknown>).author))));
+}
+
 /** The rows gh pr checks --json prints, each read for its state and bucket where they are strings; null when it printed no list. */
 function checkRows(rows: unknown): { state?: string; bucket?: string }[] | null {
   if (!Array.isArray(rows)) return null;
@@ -155,6 +170,8 @@ export class GitHub {
     let j: unknown;
     try { j = JSON.parse(r.out); } catch { return { error: "gh pr view printed something that is not JSON" }; }
     if (!isPrView(j)) return { error: "gh pr view printed something that is not a pull request" };
+    // Reviews that cannot be read are waited on, like checks that cannot be read: approved would throw on them.
+    if (!hasReviewShape(j)) return { error: "gh pr view printed reviews in a shape Loopstra does not read" };
     return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null, draft: j.isDraft === true } };
   }
 
