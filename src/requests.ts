@@ -128,10 +128,16 @@ interface Read { requests: Request[]; unreadable: Unreadable[] }
  * set aside (see setAside), traced when there is a trace. Every other reader (the console, chat) only
  * passes such a file over: it may be half written, or held open for a moment on Windows.
  */
-export interface Tidy { trace?: Trace }
+export interface Tidy { trace?: Trace; badAfterMs?: number }
 
-/** How long a file must have been unreadable before the applier sets it aside: one being written is younger. */
+/**
+ * How long a file must have stayed unreadable, look after look, before the applier sets it aside: a
+ * file half written, or held open for a moment (an antivirus on Windows), reads again well before.
+ */
 const BAD_AFTER_MS = 30_000;
+
+/** When this process first found each request file unreadable, by its path; forgotten once it reads, or is gone. */
+const unreadableSince = new Map<string, number>();
 
 /**
  * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
@@ -145,9 +151,16 @@ function readDir(root: string, dir: string, tidy?: Tidy): Read {
     const file = readJsonAs(join(dir, n), RequestFile);
     // Named for its own id, or claiming, cancelling and finishing it would act on another file.
     if (!file || n !== `${file.id}.json`) {
-      if (tidy && settled(join(dir, n))) setAside(root, dir, n, tidy.trace);
+      const path = join(dir, n);
+      const since = unreadableSince.get(path) ?? Date.now();
+      unreadableSince.set(path, since);
+      if (tidy && Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS)) {
+        setAside(root, dir, n, tidy.trace);
+        unreadableSince.delete(path);
+      }
       continue;
     }
+    unreadableSince.delete(join(dir, n));
     const r = RequestSchema.safeParse(file);
     if (r.success) { read.requests.push(r.data); continue; }
     read.unreadable.push({
@@ -175,11 +188,6 @@ function setAside(root: string, dir: string, name: string, trace?: Trace): void 
     renameSync(join(dir, name), join(badDir(root), name));
     trace?.event("_loop", "error", { where: "request", file: name, error: `${name} is not a request; it was moved to .loopstra/requests/bad/` });
   } catch { /* see above */ }
-}
-
-/** True when the file has not been written for BAD_AFTER_MS (false when it is gone). */
-function settled(path: string): boolean {
-  try { return Date.now() - statSync(path).mtimeMs >= BAD_AFTER_MS; } catch { return false; }
 }
 
 /** Request files not yet claimed. */
@@ -280,9 +288,10 @@ function oldDirs(root: string): ReadonlyArray<readonly [string, string]> {
  * the applier busy), or a folder chat used before still there to drain. An idle applier does next to
  * nothing every 2 s.
  */
-export function anythingToApply(root: string): boolean {
-  const claimed = claimedRequests(root, {});
-  return waitingIds(root, {}).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
+export function anythingToApply(root: string, badAfterMs?: number): boolean {
+  const tidy: Tidy = badAfterMs === undefined ? {} : { badAfterMs };
+  const claimed = claimedRequests(root, tidy);
+  return waitingIds(root, tidy).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
 }
 
 /** Moves what chat left in the folders it used before (`.loopstra/chat/requests|results/`) into the new ones. */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
 import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
@@ -185,6 +185,33 @@ describe("chat with the loop", () => {
       expect(thread.messages.map((m) => m.text)).toEqual([started]);
       expect(thread.since).toEqual([`The loop answered: ${started}`]);
       expect(takeResults(r.root, new Set(["terminal"]))).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a result that can never be posted (a thread gone) is traced once, and given up after the wait, not tried for ever", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft") } });
+    try {
+      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      await tick(r.root).catch(() => {});
+      const t = recorder();
+      t.send = async () => {};
+      const never = async () => { throw new Error("channel_not_found"); };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: never })], { announce: false, pollMs: 60_000, resultGiveUpMs: 200 });
+      const results = join(requestsDir(r.root), "results");
+      const left = () => (existsSync(results) ? readdirSync(results).filter((n) => n.endsWith(".json")).length : 0);
+      await service.poll();
+      await service.poll();
+      expect(left()).toBe(1);
+      await Bun.sleep(250);
+      await service.poll();
+      expect(left()).toBe(0);
+      await service.poll();
+      const trace = Trace.open(r.root);
+      try {
+        const errors = trace.events("_chat").filter((e) => e.type === "error" && e.payload.includes("chat-result"));
+        expect(errors).toHaveLength(2);
+        expect(errors[1]!.payload).toContain("gave up");
+      } finally { trace.close(); }
     } finally { r.cleanup(); }
   });
 

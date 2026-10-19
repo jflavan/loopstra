@@ -255,6 +255,14 @@ describe("the schema version", () => {
       expect(db.query("SELECT name FROM pragma_table_info('events') WHERE name = 'extra'").get()).not.toBeNull();
       // The schema ran after them: the tables an older database lacked are there.
       expect(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'judges'").get()).not.toBeNull();
+      // One an older version left part made (a kill between its CREATE statements: tables, but no events) is old, not new: it is migrated.
+      const partial = new Database(":memory:");
+      try {
+        partial.run("CREATE TABLE phases (slug TEXT NOT NULL, seq INTEGER NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, started TEXT NOT NULL, ended TEXT, cost_usd REAL NOT NULL DEFAULT 0, session_id TEXT, error TEXT, PRIMARY KEY (slug, seq))");
+        migrate(partial, ["ALTER TABLE phases ADD COLUMN extra TEXT"]);
+        expect(partial.query("SELECT name FROM pragma_table_info('phases') WHERE name = 'extra'").get()).not.toBeNull();
+        expect(partial.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get()).not.toBeNull();
+      } finally { partial.close(); }
       // A new database is not migrated: it gets the schema and the version at once.
       const fresh = new Database(":memory:");
       try {

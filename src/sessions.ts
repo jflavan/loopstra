@@ -97,9 +97,10 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
   } catch (e) {
     if (ended) throw e; // what `interrupt` gave: its row is already ended
     if (e instanceof StopRequested || e instanceof Cancelled || e instanceof SessionStopped) {
-      // A session the stop (or a cancel, or a person's stop) killed never reported its cost.
+      // A session the stop (or a cancel, or a person's stop) killed never reported its cost. Its id
+      // comes with what was thrown (see runPhase), so the row still names its transcript.
       const spent = costUsd ?? sessionCost({ costUsd: 0, costReported: false }, Date.now() - started, s.capUsd);
-      end("interrupted", spent, null, e instanceof StopRequested ? s.stoppedNote ?? "stopped by request" : e.message);
+      end("interrupted", spent, e.sessionId, e instanceof StopRequested ? s.stoppedNote ?? "stopped by request" : e.message);
       throw e;
     }
     return failed("crash", `runtime error: ${errorText(e)}`, null, costUsd ?? 0);

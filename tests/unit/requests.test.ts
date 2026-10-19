@@ -102,16 +102,15 @@ describe("request files", () => {
       writeFileSync(join(requestsDir(t.path), "000000000000001-1-0001.json"), JSON.stringify({ id: "000000000000001-1-0002", kind: "accept", slug: "a", transport: CONSOLE, thread: "" }));
       writeFileSync(join(requestsDir(t.path), "000000000000001-1-0004.json"), JSON.stringify({ id: "000000000000001-1-0004", kind: "accept", slug: "a" }));
       writeFileSync(join(requestsDir(t.path), "applying", "claimed.json"), "[]");
-      // Just written, they may be half written: every reader passes them over, and none is moved yet.
-      expect(anythingToApply(t.path)).toBe(false);
-      expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json")).length).toBe(3);
-      // A minute later they are not being written: the applier's look sets them aside; the console's reads never do.
+      // Old files, first found unreadable now: they may be held open for a moment, so every reader passes them over and none is moved yet.
       const old = new Date(Date.now() - 60_000);
       for (const n of ["copy.json", "000000000000001-1-0001.json", "000000000000001-1-0004.json"]) utimesSync(join(requestsDir(t.path), n), old, old);
-      utimesSync(join(requestsDir(t.path), "applying", "claimed.json"), old, old);
+      expect(anythingToApply(t.path)).toBe(false);
+      expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json")).length).toBe(3);
+      // Still unreadable once the wait has passed (none here): the applier's look sets them aside; the console's reads never do.
       expect(pendingRequests(t.path)).toEqual([]);
       expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
-      expect(anythingToApply(t.path)).toBe(false);
+      expect(anythingToApply(t.path, 0)).toBe(false);
       expect(pendingRequests(t.path)).toEqual([]);
       expect(waitingIds(t.path)).toEqual([]);
       expect(requestState(t.path, "000000000000001-1-0001")).toBeNull();
@@ -128,6 +127,30 @@ describe("request files", () => {
       expect(anythingToApply(t.path)).toBe(true);
       expect(claimedRequests(t.path)).toMatchObject({ requests: [], unreadable: [{ id: "000000000000001-1-0003", kind: "explode", slug: "a", transport: CONSOLE, thread: "" }] });
       expect(claimedRequests(t.path).unreadable[0]!.problem).toContain("kind");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a file unreadable for a moment and then readable is never set aside, however old it is", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      const id = "000000000000001-1-0007";
+      const path = join(requestsDir(t.path), `${id}.json`);
+      // Held open (or half written) at the first look: unreadable, though written long ago.
+      writeFileSync(path, "{");
+      const old = new Date(Date.now() - 600_000);
+      utimesSync(path, old, old);
+      expect(anythingToApply(t.path)).toBe(false);
+      // It reads at the next look: the first failure is forgotten, so a later moment's failure starts the wait again.
+      writeFileSync(path, JSON.stringify({ id, kind: "accept", slug: "a", by: "u", byName: "U", via: "chat", transport: CONSOLE, thread: "", at: "x" }));
+      utimesSync(path, old, old);
+      expect(anythingToApply(t.path)).toBe(true);
+      writeFileSync(path, "{");
+      expect(anythingToApply(t.path, 10_000)).toBe(false);
+      expect(existsSync(path)).toBe(true);
+      expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
     } finally {
       t.cleanup();
     }

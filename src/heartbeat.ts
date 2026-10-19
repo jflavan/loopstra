@@ -245,6 +245,14 @@ function young(path: string): boolean {
 
 /** How long a start that made the lock waits before reading it back. */
 const TAKEOVER_SETTLE_MS = 50;
+/**
+ * How long a start whose removal of a lock left behind was refused waits before it reads the lock
+ * again: Windows refuses to remove a file another process is removing at that moment.
+ */
+const REMOVE_RACE_WAIT_MS = 200;
+
+/** Removes a file; for tests, a removal that fails. */
+export type RemoveFile = (path: string) => void;
 
 /**
  * Takes the loop's lock for this process. Returns null when it has it, or the refusal. A live
@@ -254,10 +262,12 @@ const TAKEOVER_SETTLE_MS = 50;
  * (`pollSeconds` judges that). Two starts taking over the same lock can each remove it and make
  * their own (one of them may even remove a lock a third start just made), and two that make it
  * without a hard link can both think they did, so the lock is always read back after a moment and
- * kept only when it still names this process. Only a problem making the file at all refuses with
- * that problem. `link` is for tests.
+ * kept only when it still names this process. A removal refused while another start takes the same
+ * lock over (Windows will not remove a file being removed) is that race, lost: once the lock has
+ * changed or gone, this start goes on as any second start does. Only a problem making or removing
+ * the file that lasts refuses with that problem. `link` and `remove` are for tests.
  */
-export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync): Promise<string | null> {
+export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync, remove: RemoveFile = (p) => rmSync(p, { force: true })): Promise<string | null> {
   const path = loopLockPath(root);
   try {
     mkdirSync(join(root, ".loopstra"), { recursive: true });
@@ -272,7 +282,12 @@ export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFil
       }
       // Another start may have taken it over since it was read.
       if (lockText(path) !== seen) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
-      rmSync(path, { force: true });
+      try {
+        remove(path);
+      } catch (e) {
+        await Bun.sleep(REMOVE_RACE_WAIT_MS);
+        if (lockText(path) === seen) throw e;
+      }
       if (!createLoopLock(path, link)) return loopAlreadyRunning(parseLock(lockText(path))?.pid ?? null);
     }
     // Even a lock made fresh: a start that read the one left behind earlier may still remove it.

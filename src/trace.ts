@@ -109,7 +109,9 @@ export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS
   const target = migrations.length;
   const at = (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
   if (at > target) throw new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${target}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
-  const fresh = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get() === null;
+  // Fresh only when it has no tables at all: an older version created them one statement at a time,
+  // so a kill could leave some but not `events`, and those must still get every migration.
+  const fresh = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table'").get() === null;
   if (fresh) {
     db.transaction(() => {
       db.run(SCHEMA);

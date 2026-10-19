@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { Hub, PING, type HubOptions, type Send } from "../../src/console/hub";
+import { Hub, intentsKey, PING, type HubOptions, type Send } from "../../src/console/hub";
 import type { Sections, StreamMessage } from "../../src/console/types";
 import { holdLoop, writeHeartbeat } from "../../src/heartbeat";
 import { CONSOLE, submitRequest } from "../../src/requests";
@@ -127,6 +127,34 @@ describe("the console's live stream", () => {
       await readAgain(() => Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n"));
       // The same files, but the plan says something else now (which files it touches, say).
       await readAgain(() => Bun.write(join(root, "intent", "one", "plan.md"), "# Plan\n\nTouches src/a.ts.\n"));
+    });
+  });
+
+  test("while intent/ is watched, its folders are fingerprinted when the watch reports a change there, not on every look", async () => {
+    let fingerprints = 0;
+    const fingerprint = (root: string) => { fingerprints++; return intentsKey(root); };
+    await withHub({ ...FAST, fingerprint }, async ({ root, connect }) => {
+      await config(root);
+      await intent(root, "one", "status: accepted");
+      const p = page();
+      await connect(p.send);
+      await Bun.sleep(300); // about fifteen looks
+      // The look the page connected with, and at most one for its own files being seen late.
+      expect(fingerprints).toBeLessThanOrEqual(2);
+      const before = fingerprints;
+      await intent(root, "two", "status: accepted");
+      await until(() => p.messages().some((m) => m.msg.type === "section" && m.msg.name === "changes"));
+      expect(fingerprints).toBeGreaterThan(before);
+    });
+  });
+
+  test("where intent/ cannot be watched (it is not there yet), every look fingerprints it", async () => {
+    let fingerprints = 0;
+    const fingerprint = (root: string) => { fingerprints++; return intentsKey(root); };
+    await withHub({ ...FAST, fingerprint }, async ({ root, connect }) => {
+      await config(root);
+      await connect(page().send);
+      await until(() => fingerprints > 5);
     });
   });
 
