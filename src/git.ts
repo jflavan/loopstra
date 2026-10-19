@@ -132,7 +132,9 @@ function hasOwnSshCommand(cwd: string): boolean {
  * named in the environment is dropped: it would win over RUNTIME_COMMIT_CONFIG's identity, and every
  * commit this git makes is the runtime's (a replayed commit keeps the author it recorded). So is a
  * repository location named in it (see GIT_LOCATION_VARS): the call works on the checkout it is
- * given, even when Loopstra was started from a git hook or alias.
+ * given, even when Loopstra was started from a git hook or alias. So are the hook's pathspec rules,
+ * commit dates and `-c` settings (see GIT_HOOK_VARS in src/shell.ts): a `:(literal)` pathspec stays
+ * literal, and a commit gets its own time.
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = withoutGitLocation({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
@@ -143,13 +145,34 @@ function gitEnv(cwd: string): Record<string, string | undefined> {
   return env;
 }
 
-/** At most this many paths go on one git command line (Windows limits a command line to 32K characters). */
+/** At most this many paths go on one git command line. */
 export const DIFF_CHUNK = 200;
 
-/** `items` in consecutive slices of at most `size`. */
-export function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+/**
+ * At most this many characters of paths go on one git command line, each counted as the literal
+ * pathspec it is passed as: Windows limits a whole command line to 32K characters, and the rest of
+ * the command (git's path, two commits, options) needs room beside them.
+ */
+export const DIFF_CHARS = 24_000;
+
+/** What a path takes on a command line as a literal pathspec, beside its own characters: `:(literal)` and a space. */
+const PATHSPEC_EXTRA = ":(literal) ".length;
+
+/**
+ * `paths` in consecutive slices of at most `size` paths and `chars` characters (see DIFF_CHARS), for
+ * one git command line each. A path longer than `chars` on its own still gets a slice, alone.
+ */
+export function pathChunks(paths: string[], size = DIFF_CHUNK, chars = DIFF_CHARS): string[][] {
+  const out: string[][] = [];
+  let slice: string[] = [];
+  let used = 0;
+  for (const p of paths) {
+    const cost = p.length + PATHSPEC_EXTRA;
+    if (slice.length && (slice.length >= size || used + cost > chars)) { out.push(slice); slice = []; used = 0; }
+    slice.push(p);
+    used += cost;
+  }
+  if (slice.length) out.push(slice);
   return out;
 }
 
@@ -313,7 +336,7 @@ export class Git {
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
     // Each name literal (see putBack), so one with * or [ in it is compared, not every file it matches.
-    for (const chunk of chunks(files, DIFF_CHUNK)) {
+    for (const chunk of pathChunks(files)) {
       if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk.map((f) => `:(literal)${f}`)], true)).code !== 0) return false;
     }
     return true;
@@ -341,7 +364,7 @@ export class Git {
   /** Puts tracked files back as HEAD has them, staged and unstaged edits alike. */
   async putBack(files: string[]): Promise<void> {
     // In chunks, as in containsChanges; each name literal, so one with * or [ in it names only itself.
-    for (const chunk of chunks(files, DIFF_CHUNK)) await this.run(["checkout", "HEAD", "--", ...chunk.map((f) => `:(literal)${f}`)]);
+    for (const chunk of pathChunks(files)) await this.run(["checkout", "HEAD", "--", ...chunk.map((f) => `:(literal)${f}`)]);
   }
 
   /**
@@ -560,23 +583,27 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
 
 /**
  * Removes a worktree directory however it can: git first, then the file system, then git's record
- * of it, unlocked first in case a `worktree add` killed part way left it locked.
+ * of it, unlocked first in case a `worktree add` killed part way left it locked. A stop request met
+ * on the way does not leave the folder (a throwaway checkout with its installed dependencies, say):
+ * it is removed and git's record pruned all the same, and then the stop is thrown.
  */
 export async function removeWorktree(git: Git, dir: string, opts: { cleanup?: boolean } = {}): Promise<void> {
-  const cleanup = opts.cleanup === true;
+  let stop: StopRequested | null = null;
   if (existsSync(dir)) {
     try {
-      await git.worktreeRemove(dir, { cleanup });
+      await git.worktreeRemove(dir, { cleanup: opts.cleanup === true });
     } catch (e) {
-      // A stop request is not a failed removal: the folder goes, and the stop is seen by what comes next.
-      if (e instanceof StopRequested && !cleanup) throw e;
+      if (e instanceof StopRequested) stop = e;
       rmSync(dir, { recursive: true, force: true });
     }
   }
+  // After a stop, the unlock and prune still run (as cleanup calls do), so no record of the folder is left.
+  const cleanup = opts.cleanup === true || stop !== null;
   await worktreeAdmin(git, async () => {
     await git.run(["worktree", "unlock", dir], { allowFail: true, cleanup });
     await git.run(["worktree", "prune"], { allowFail: true, cleanup });
   });
+  if (stop) throw stop;
 }
 
 /** Makes `dir` a detached worktree of `ref` (never the owner's checkout); a leftover directory there is removed first. */
