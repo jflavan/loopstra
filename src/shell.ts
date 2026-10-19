@@ -249,13 +249,16 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   // A throw from the caller's onLine is a bug in the handler, not a hang: reading ends, the process
   // is killed like one that timed out, and the error is thrown once everything is cleaned up.
   let handlerError: unknown;
-  let readingEnded = false;
   const reader = proc.stdout.getReader();
   const outDone = (async () => {
     const dec = new TextDecoder();
     let buffer = "";
     // Where the next newline search starts: a long line arriving in many chunks is not rescanned from its start each time.
     let scanFrom = 0;
+    // The handler's answer; true to stop reading when it threw (its error is kept for the caller).
+    const handle = (line: string): boolean => {
+      try { return o.onLine!(line) === true; } catch (e) { handlerError = e; return true; }
+    };
     try {
       for (;;) {
         const { value, done } = await reader.read();
@@ -269,15 +272,12 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
           const line = buffer.slice(0, nl);
           buffer = buffer.slice(nl + 1);
           scanFrom = 0;
-          if (o.onLine(line)) return;
+          if (handle(line)) return;
         }
         scanFrom = buffer.length;
       }
-      if (o.onLine && buffer.trim()) o.onLine(buffer);
-    } catch (e) {
-      // Once reading or the process has ended the stream is cancelled or broken, and what arrived stands; before that, it is the handler's.
-      if (!readingEnded) handlerError = e;
-    }
+      if (o.onLine && buffer.trim()) handle(buffer);
+    } catch { /* stream cancelled or broken; what arrived stands */ }
   })();
   const errDone = (async () => {
     const dec = new TextDecoder();
@@ -286,7 +286,6 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
 
   // With onLine the deadline bounds the reading; otherwise it bounds the exit.
   const done = await within((o.onLine ? outDone : proc.exited).then(() => true), o.timeoutMs, false);
-  readingEnded = true;
   const timedOut = !done;
   // An open stdin must never keep a finished process waiting.
   closeStdin();
