@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { runDir } from "./paths";
 import { readJsonAs, writeJson } from "./fsutil";
-import { commitRecord } from "./context";
+import { commitRecord, landed } from "./context";
 import type { Trace } from "./trace";
 
 /**
@@ -147,17 +147,21 @@ function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): 
  * Appends one entry and commits it ("loopstra(<slug>): conversation"), through commitRecord's draft.
  * Under commitRecord's lock, so two entries written at once (a message and an answer) both land.
  * `id`: the inbox message the entry is for, whose entry is written once only, wherever it is in the
- * record (see recordedAs). recorded.json names it only once the commit landed, so a failed try leaves
- * nothing that keeps the next try from writing it. `opts.trace`: where commitRecord tells what failed
- * after the record landed.
+ * record (see recordedAs). Its commit is tagged with it (see commitRecord's `opts.request`), and
+ * recorded.json names it only once the commit landed, so a failed try leaves nothing that keeps the
+ * next try from writing it. A try after a kill between the two (the commit landed, recorded.json does
+ * not name it) asks git instead (see landed): while the record still holds the entry, it is not
+ * written again. `opts.trace`: where commitRecord tells what failed after the record landed.
  */
 export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string; trace?: Trace } = {}): Promise<void> {
-  const landed = await commitRecord(root, main, slug, "conversation", async (draft) => {
+  const id = opts.id;
+  const earlier = id ? await landed(root, id, slug) : false;
+  const wrote = await commitRecord(root, main, slug, "conversation", async (draft) => {
     const rel = `intent/${slug}/conversation.md`;
     const current = draft.read(rel) ?? "";
-    if (opts.id && "who" in e && "text" in e && recordedAs(root, slug, opts.id, e, current)) return false;
+    if (id && "who" in e && "text" in e && (recordedAs(root, slug, id, e, current) || (earlier && holdsEntry(current, e)))) return false;
     draft.write(rel, withEntry(current, e));
     return true;
-  }, { trace: opts.trace });
-  if (landed && opts.id) noteRecorded(root, slug, opts.id, e.kind);
+  }, { trace: opts.trace, ...(id ? { request: id } : {}) });
+  if (wrote && id) noteRecorded(root, slug, id, e.kind);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { appendConversation, conversationEntry, conversationPath, readConversation, recordedAs, withEntry, withEntryOnce } from "../../src/conversation";
 import { writeJson } from "../../src/fsutil";
@@ -101,6 +101,25 @@ describe("conversation.md", () => {
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
     } finally {
       Git.prototype.commitFiles = commitFiles;
+      r.cleanup();
+    }
+  });
+
+  test("a message whose entry landed, though the loop was killed before recorded.json named it, is not written again", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const m = { kind: "message" as const, who: "John", via: "the dashboard", phase: "build", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 0) };
+      const id = "000000000000001-1-0001";
+      await appendConversation(r.root, "main", "a", m, { id });
+      // Its commit carries the message's id, so git can tell it landed.
+      expect((await new Git(r.root).run(["log", "-1", "--format=%B"])).out).toContain(`Loopstra-Request: ${id}`);
+      // A kill between HEAD moving and recorded.json being written leaves no note of it.
+      rmSync(join(r.root, ".loopstra", "runs", "a", "recorded.json"));
+      const head = await new Git(r.root).headSha();
+      await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 1) }, { id });
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
+      expect(await new Git(r.root).headSha()).toBe(head);
+    } finally {
       r.cleanup();
     }
   });
