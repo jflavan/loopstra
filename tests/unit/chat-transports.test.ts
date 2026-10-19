@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { ChatService } from "../../src/chat/service";
 import { writeJson } from "../../src/fsutil";
-import { chatDir } from "../../src/chat/threads";
+import { chatDir, ThreadStore } from "../../src/chat/threads";
 import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
@@ -753,5 +753,31 @@ describe("the full review of #47", () => {
       expect(answers.map((a) => a.status)).toEqual([200, 400, 403, 503, 405]);
       expect(answers.map((a) => a.headers.get("cache-control"))).toEqual(Array(5).fill("no-store"));
     } finally { r.cleanup(); }
+  });
+});
+
+describe("a thread file that cannot be read (review of the merged #47 fixes)", () => {
+  test("the dashboard answers 503, not to be kept, to a read and to a post, and posts nothing on", async () => {
+    const r = await chatRepo();
+    const dash = new DashboardTransport(r.root, "ana");
+    const handled: string[] = [];
+    await dash.start(async (m) => { handled.push(m.text); });
+    try {
+      const store = new ThreadStore(r.root, () => {});
+      store.save(store.get("dashboard", "tab-abcdefgh"));
+      const dir = join(chatDir(r.root), "threads");
+      const file = join(dir, readdirSync(dir)[0]!);
+      rmSync(file);
+      mkdirSync(file);
+      const base = "http://127.0.0.1:4000";
+      const get = await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh&after=0`), new URL(`${base}/api/chat?thread=tab-abcdefgh&after=0`));
+      const post = await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`));
+      for (const res of [get, post]) {
+        expect(res.status).toBe(503);
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        expect(await res.json()).toEqual({ error: "This conversation's file cannot be read right now." });
+      }
+      expect(handled).toEqual([]);
+    } finally { await dash.stop(); r.cleanup(); }
   });
 });

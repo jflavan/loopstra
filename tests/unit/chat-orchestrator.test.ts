@@ -963,3 +963,23 @@ describe("the full review of #47", () => {
     } finally { r.cleanup(); }
   });
 });
+
+describe("a thread file that cannot be read (review of the merged #47 fixes)", () => {
+  test("a message to that thread gets a plain reply, and the turn does not fail", async () => {
+    const r = await chatRepo();
+    try {
+      const store = new ThreadStore(r.root, () => {});
+      store.save(store.get("terminal", "local"));
+      const dir = join(r.root, ".loopstra", "chat", "threads");
+      const file = join(dir, readdirSync(dir)[0]!);
+      // A directory where the file was: reading it fails (EISDIR) and it is no damaged file to move aside.
+      fs.rmSync(file);
+      mkdirSync(file);
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent).toEqual(["This conversation's file cannot be read right now; try again in a moment."]);
+      expect(existsSync(file)).toBe(true);
+      expect(r.prompts()).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+});

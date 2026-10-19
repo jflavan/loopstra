@@ -3,6 +3,7 @@ import type { About } from "../about";
 import { AnnouncementLog } from "../announcer";
 import type { OnMessage, Transport } from "../service";
 import { localUser } from "./shared";
+import { StateFileUnavailable } from "../statefile";
 import { ThreadStore } from "../threads";
 
 /** A browser tab's thread id: made by the page, so only a plain shape is accepted. */
@@ -54,10 +55,18 @@ export class DashboardTransport implements Transport {
   /**
    * Handles `/api/chat`. POST needs JSON from the dashboard's own page (the Origin must be this
    * server), so another web page open in the browser cannot post into the chat. No answer is kept by
-   * the browser or anything between: each is a conversation's state at that moment.
+   * the browser or anything between: each is a conversation's state at that moment. A thread whose
+   * file cannot be used now (see readStateFile) is a 503, to a read and to a post (which then passes
+   * nothing on), so the page's poll gets a plain answer and nothing is logged for each one.
    */
   async handle(req: Request, url: URL): Promise<Response> {
-    const res = await this.answer(req, url);
+    let res: Response;
+    try {
+      res = await this.answer(req, url);
+    } catch (e) {
+      if (!(e instanceof StateFileUnavailable)) throw e;
+      res = Response.json({ error: "This conversation's file cannot be read right now." }, { status: 503 });
+    }
     res.headers.set("cache-control", "no-store");
     return res;
   }
@@ -92,6 +101,8 @@ export class DashboardTransport implements Transport {
     if (!THREAD.test(thread) || !text || text.length > MAX_TEXT) return Response.json({ error: "message" }, { status: 400 });
     if (!this.onMessage) return Response.json({ error: "chat is not running" }, { status: 503 });
     if (this.busy.has(thread)) return Response.json({ error: "busy" }, { status: 409 });
+    // Read first: a thread whose file cannot be used now throws here (see handle), before the post is taken.
+    this.store.get(this.name, thread);
     this.busy.add(thread);
     const handle = this.onMessage;
     const about = aboutOf(body.about);

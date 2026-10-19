@@ -19,6 +19,7 @@ import { submitRequest, type RequestBody } from "../requests";
 import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
 import { oneLine } from "../text";
+import { StateFileUnavailable } from "./statefile";
 import { ThreadStore, threadKey, type ThreadState } from "./threads";
 
 /** A message from a person, as a transport delivers it. */
@@ -157,8 +158,23 @@ export class Orchestrator {
     }
   }
 
-  /** Handles one message: a yes to a waiting proposal, or a turn of the conversation. */
+  /**
+   * Handles one message: a yes to a waiting proposal, or a turn of the conversation. When the
+   * thread's file is there but cannot be used now (see readStateFile), the person is told so and
+   * nothing else is done: the file is kept, and no fresh thread is saved over it.
+   */
   handle(m: IncomingMessage, send: Send): Promise<void> {
+    const done = this.turnOn(m, send).catch(async (e: unknown) => {
+      if (!(e instanceof StateFileUnavailable)) throw e;
+      try { await send("This conversation's file cannot be read right now; try again in a moment."); } catch { /* the transport says why itself */ }
+    });
+    // Seen here, as withThread's own promise is: a caller that does not wait for it (a stop request
+    // ending the turn) leaves no unhandled rejection, and one that waits still gets the error.
+    done.catch(() => {});
+    return done;
+  }
+
+  private turnOn(m: IncomingMessage, send: Send): Promise<void> {
     return this.withThread(m.transport, m.thread, async (t) => {
       this.store.addMessage(t, { from: "person", author: m.authorName, text: m.text });
       this.store.save(t);
