@@ -8,7 +8,7 @@ import { templatePath } from "../../src/package";
 import type { Migration } from "../../src/upgrade/migrations";
 import { LOOP_RUNNING, statusPaths, upgradeRepo, type RepoDeps } from "../../src/upgrade/repo";
 import type { ShippedIndex } from "../../src/shipped";
-import { run, tempGitRepo } from "../helpers";
+import { NEVER_A_PID, run, tempGitRepo } from "../helpers";
 
 const OLD_SKILL = "old skill text\n";
 const SKILL = ".claude/skills/loopstra/SKILL.md";
@@ -153,12 +153,10 @@ describe("upgradeRepo", () => {
       writeHeartbeat(repo.path, beat({ lastBeatAt: new Date(Date.now() - 3_600_000).toISOString() }));
       expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(LOOP_RUNNING);
       // Fresh, but written on this machine by a process that is gone (its window closed, say): no loop runs.
-      const dead = Bun.spawn({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      await dead.exited;
-      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: thisHost() }));
+      writeHeartbeat(repo.path, beat({ pid: NEVER_A_PID, host: thisHost() }));
       expect((await upgradeRepo(repo.path, { check: true }, deps())).warnings).not.toContain(LOOP_RUNNING);
       // Fresh from another machine sharing the folder: its process id says nothing here.
-      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: "elsewhere" }));
+      writeHeartbeat(repo.path, beat({ pid: NEVER_A_PID, host: "elsewhere" }));
       expect((await upgradeRepo(repo.path, { check: false }, deps())).refusal).toBe(LOOP_RUNNING);
       writeHeartbeat(repo.path, beat({ stopped: true }));
 

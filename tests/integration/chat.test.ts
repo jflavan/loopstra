@@ -188,6 +188,26 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a bot whose replies never throw still keeps a result it could not post: results go through sendOrThrow", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft") } });
+    try {
+      submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      await tick(r.root).catch(() => {});
+      const t = recorder();
+      let down = true;
+      // Like Slack's and Discord's: a reply's failure is logged, never thrown; the must-arrive variant throws.
+      t.send = async () => {};
+      const sure = async (thread: string, text: string) => { if (down) throw new Error("Slack is unreachable"); t.sent.push([thread, text]); };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: sure })], { announce: false, pollMs: 60_000 });
+      await service.poll();
+      expect(t.sent).toEqual([]);
+      down = false;
+      await service.poll();
+      expect(t.sent).toEqual([["local", "Started a. I will say here when it needs anyone, and when it is done."]]);
+      expect(takeResults(r.root, new Set(["terminal"]))).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
   test("results for another process's transport are left for it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
     try {

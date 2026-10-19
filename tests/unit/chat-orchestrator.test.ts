@@ -743,7 +743,7 @@ describe("the hardening review", () => {
     const r = await chatRepo({ config: "chat:\n  transports:\n    slack:\n      token_env: APP\n      bot_token_env: BOT\n      channel: C1\n    discord:\n      token_env: DISCORD\n      channel: \"5\"\n" });
     try {
       const cfg = await loadConfig(r.root);
-      const env = { PATH: "/bin", HOME: "/home/x", BOT: "xoxb", GH_TOKEN: "g", npm_config_secret: "s", DB_PASSWORD: "p", MY_API_KEY: "m", ssh_private_key: "q", ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "o", AWS_SECRET_ACCESS_KEY: "a", EDITOR: "vi" };
+      const env = { PATH: "/bin", HOME: "/home/x", BOT: "xoxb", GH_TOKEN: "g", npm_config_secret: "s", DB_PASSWORD: "p", MY_API_KEY: "m", ssh_private_key: "q", ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "o", AWS_SECRET_ACCESS_KEY: "a", AZURE_CLIENT_SECRET: "z", EDITOR: "vi" };
       // The config's names whether or not they are set, every name that looks secret, and nothing Claude Code signs in with.
       expect(secretEnvNames(cfg, env).sort()).toEqual(["APP", "BOT", "DISCORD", "DB_PASSWORD", "GH_TOKEN", "MY_API_KEY", "npm_config_secret", "ssh_private_key"].sort());
     } finally { r.cleanup(); }

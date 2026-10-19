@@ -12,7 +12,7 @@ The system takes it from there. Check `queue.md` in this folder to see where eve
 
 ## Or talk it through
 
-If your team has set up Loopstra's chat (in the terminal, the console, Slack or Discord), you can describe what you want there instead. It asks questions until the change is clear, shows you a summary, and when you say yes, writes the change up for you as a draft (usually as a pull request for someone to review and merge). A draft still waits for someone to accept it: set `status: accepted`, or, if you are allowed to, ask in the chat to start it. You can also ask the chat how any change is going, and, if you are allowed to start drafts, to approve, send back, retry, hold, release or close a change.
+If your team has set up Loopstra's chat (in the terminal, the console, Slack or Discord), you can describe what you want there instead. It asks questions until the change is clear and shows you a summary; if you are allowed to start drafts, it writes the change up for you as a draft when you say yes (usually as a pull request for someone to review and merge), and otherwise it tells you who can ask for that. A draft still waits for someone to accept it: set `status: accepted`, or, if you are allowed to, ask in the chat to start it. You can also ask the chat how any change is going, and, if you are allowed to start drafts, to approve, send back, retry, hold, release or close a change.
 
 ## How big a change should be
 

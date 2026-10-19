@@ -203,6 +203,30 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
     s.cleanup();
   }, 180_000);
 
+  test("a marker an earlier build's failed merge left does not delete the branch of a pull request a person merged", async () => {
+    const s = await remoteSetup();
+    const onGitHub = async () => (await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code === 0;
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request #1
+      // Left by a merge Loopstra tried for an earlier pull request of this change, which failed.
+      writeFileSync(join(s.repo, ".loopstra", "runs", SLUG, "gh-merge"), "7");
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      const mergeCommit = (await run(["git", "rev-parse", "HEAD"], other.path)).out.trim();
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true, mergeCommit });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      // A person's merge leaves the branch to them; the stale marker is gone.
+      expect(await onGitHub()).toBe(true);
+      expect(existsSync(join(s.repo, ".loopstra", "runs", SLUG, "gh-merge"))).toBe(false);
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a pull request closed without merging, whose branch a person then deleted on GitHub: a rebuild opens a new one", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {

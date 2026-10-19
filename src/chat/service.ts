@@ -21,7 +21,14 @@ export interface Transport {
   /** In words, for prompts and intents: "the terminal", "Slack". */
   readonly via: string;
   start(onMessage: OnMessage): Promise<void>;
+  /** A reply in a conversation; a failure is logged by the transport, never thrown. */
   send(thread: string, text: string): Promise<void>;
+  /**
+   * A reply that must arrive (what the loop did with a request): throws when it could not, so the
+   * service keeps it and tries again. Absent where a reply cannot fail (the terminal, the dashboard),
+   * and `send` is used. A long one sent in parts may repeat its first parts on the next try.
+   */
+  sendOrThrow?(thread: string, text: string): Promise<void>;
   /** Posts an announcement where this transport shows them; absent when it shows none. Throws when it could not, so it is tried again. */
   announce?(text: string): Promise<void>;
   /**
@@ -136,7 +143,7 @@ export class ChatService {
         if (!t) continue;
         // The agent hears it too, on its next turn: it proposed the request, and would think it still open.
         try {
-          await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => t.send(r.thread, text), `The loop answered: ${r.text}`);
+          await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => (t.sendOrThrow ? t.sendOrThrow(r.thread, text) : t.send(r.thread, text)), `The loop answered: ${r.text}`);
           rmSync(path, { force: true });
         } catch (e) { this.traceError("chat-result", e); }
       }

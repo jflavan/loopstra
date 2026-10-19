@@ -550,11 +550,14 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  */
 async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
   try {
-    if (readMarker(ctx, GH_MERGE) !== null) {
+    // Only for the pull request the marker names: one left by an earlier build's failed merge says
+    // nothing about a later pull request a person merged.
+    const ours = readMarker(ctx, GH_MERGE);
+    if (ours !== null && ours.trim() === String(pr.number)) {
       const deleted = await deleteRemoteBranch(ctx.git, ctx.branch);
       if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
-      clearMarker(ctx, GH_MERGE);
     }
+    if (ours !== null) clearMarker(ctx, GH_MERGE);
     const recorded = await recordRemoteMerge(ctx, pr);
     clearMarker(ctx, FINISH_FAILING);
     return recorded;

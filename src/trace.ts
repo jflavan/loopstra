@@ -97,19 +97,33 @@ const MIGRATIONS: readonly string[] = [];
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
 /**
- * Brings an older database up to this version's schema, one migration at a time, each in its own
- * transaction with the version bump, so a kill part way leaves the version true. A database from a
- * newer Loopstra is refused, plainly: its tables may have columns this version does not know.
+ * Brings the database to this version's schema. The version is read first: a database from a newer
+ * Loopstra is refused, plainly and before anything is written to it (its tables may have columns
+ * this version does not know). A new database gets the schema and this version at once. An older
+ * one gets its migrations first, one at a time, each in its own transaction with the version bump
+ * (a kill part way leaves the version true), and then the schema, whose CREATE ... IF NOT EXISTS
+ * adds the new tables and indexes, which may name a column a migration just added.
+ * `migrations` is for tests.
  */
-export function migrate(db: Database): void {
+export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS): void {
+  const target = migrations.length;
   const at = (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
-  if (at > SCHEMA_VERSION) throw new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${SCHEMA_VERSION}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
-  for (let v = at; v < SCHEMA_VERSION; v++) {
+  if (at > target) throw new Error(`The trace database was written by a newer Loopstra (schema version ${at}; this one knows ${target}). Upgrade Loopstra, or move .loopstra/trace.db aside.`);
+  const fresh = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get() === null;
+  if (fresh) {
     db.transaction(() => {
-      db.run(MIGRATIONS[v]!);
+      db.run(SCHEMA);
+      db.run(`PRAGMA user_version = ${target}`);
+    })();
+    return;
+  }
+  for (let v = at; v < target; v++) {
+    db.transaction(() => {
+      db.run(migrations[v]!);
       db.run(`PRAGMA user_version = ${v + 1}`);
     })();
   }
+  db.run(SCHEMA);
 }
 
 const JUDGE_COLUMNS = ["slug", "judge", "trace_name", "ts", "mode", "how", "cheap_model", "strong_model", "template_sha", "prompt_sha",
@@ -170,7 +184,6 @@ function connect(path: string): { db: Database; note: string | null } {
     db.run("PRAGMA busy_timeout = 5000;");
     const note = useJournal(db);
     db.run("PRAGMA synchronous = NORMAL;");
-    db.run(SCHEMA);
     migrate(db);
     // A read, to meet a damaged file now rather than at the first query. One row, not a count: the console opens a trace per request.
     db.query("SELECT 1 FROM events LIMIT 1").get();

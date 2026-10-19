@@ -62,10 +62,12 @@ export const CHAT_DENIED = [
 /** An environment variable that looks like a secret, by name. */
 const SECRET_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY/i;
 /**
- * What Claude Code signs in and connects with (an API key or OAuth token, Bedrock's or Vertex's
- * credentials, its own settings): kept, or no session could start.
+ * What Claude Code signs in and connects with (an API key or OAuth token, Bedrock's, Vertex's or
+ * Microsoft Foundry's credentials, its own settings): kept, or no session could start. A secret
+ * that only an apiKeyHelper script reads (a vault token, say) is dropped like any other: that setup
+ * needs the helper to find it elsewhere (a file it reads), as the README says.
  */
-const CLAUDE_OWN = /^(ANTHROPIC_|CLAUDE_|AWS_|GOOGLE_|CLOUD_ML_)/;
+const CLAUDE_OWN = /^(ANTHROPIC_|CLAUDE_|AWS_|GOOGLE_|CLOUD_ML_|AZURE_)/;
 
 /**
  * The names of the environment variables a chat session must not inherit: the bot tokens the

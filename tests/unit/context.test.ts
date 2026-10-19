@@ -229,6 +229,30 @@ describe("StepContext", () => {
     }
   });
 
+  test("a write refused because a person changed the change keeps the person's edit, and their deletion", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      const before = await Bun.file(intentMd).text();
+      const theirs = before.replace("status: accepted", "status: closed");
+      // The person saves while the step is about to write; the step's write sees it and refuses.
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        await Bun.write(intentMd, theirs);
+        throw new PersonChangedStatus("accepted", "closed");
+      })).rejects.toBeInstanceOf(PersonChangedStatus);
+      expect(await Bun.file(intentMd).text()).toBe(theirs);
+      // Deleted by the person instead: the folder is not brought back.
+      await run(["git", "checkout", "--", "intent"], repo.path);
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
+        rmSync(ctx.intent.dir, { recursive: true, force: true });
+        throw new PersonChangedStatus("accepted", "deleted");
+      })).rejects.toBeInstanceOf(PersonChangedStatus);
+      expect(existsSync(ctx.intent.dir)).toBe(false);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("a record whose commit landed before its error (git's time limit after the commit) is kept, not put back behind HEAD", async () => {
     const { repo, ctx, trace } = await setup();
     const commitPaths = Git.prototype.commitPaths;

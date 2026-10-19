@@ -102,6 +102,15 @@ describe("request files", () => {
       writeFileSync(join(requestsDir(t.path), "000000000000001-1-0001.json"), JSON.stringify({ id: "000000000000001-1-0002", kind: "accept", slug: "a", transport: CONSOLE, thread: "" }));
       writeFileSync(join(requestsDir(t.path), "000000000000001-1-0004.json"), JSON.stringify({ id: "000000000000001-1-0004", kind: "accept", slug: "a" }));
       writeFileSync(join(requestsDir(t.path), "applying", "claimed.json"), "[]");
+      // Just written, they may be half written: every reader passes them over, and none is moved yet.
+      expect(anythingToApply(t.path)).toBe(false);
+      expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json")).length).toBe(3);
+      // A minute later they are not being written: the applier's look sets them aside; the console's reads never do.
+      const old = new Date(Date.now() - 60_000);
+      for (const n of ["copy.json", "000000000000001-1-0001.json", "000000000000001-1-0004.json"]) utimesSync(join(requestsDir(t.path), n), old, old);
+      utimesSync(join(requestsDir(t.path), "applying", "claimed.json"), old, old);
+      expect(pendingRequests(t.path)).toEqual([]);
+      expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
       expect(anythingToApply(t.path)).toBe(false);
       expect(pendingRequests(t.path)).toEqual([]);
       expect(waitingIds(t.path)).toEqual([]);

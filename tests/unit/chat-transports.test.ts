@@ -568,24 +568,28 @@ describe("Slack (hardening review)", () => {
     }
   });
 
-  test("a connection with no frames for too long is taken for dead and opened again; one with frames is kept", async () => {
+  test("a quiet connection is pinged and kept while it answers, quietly; one that stops answering is taken for dead and opened again", async () => {
     const r = await chatRepo();
     const stub = slackStub();
     const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
     const logged: string[] = [];
-    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: (l) => logged.push(l), quietMs: 150 });
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: (l) => logged.push(l), quietMs: 100, pongMs: 150 });
+    const proto = WebSocket.prototype as unknown as { ping: () => void };
+    const ping = proto.ping;
     try {
       await slack.start(async () => {});
       await until(() => stub.connected());
-      // Frames every 50 ms keep it: nothing is opened again meanwhile.
-      const end = Date.now() + 500;
-      while (Date.now() < end) { stub.event(`e${Date.now()}`, { type: "reaction_added", user: "U1" }); await Bun.sleep(50); }
+      // No frames at all, as in a quiet channel overnight: each ping is answered, so nothing is opened again or said.
+      await Bun.sleep(700);
       expect(stub.opens()).toBe(1);
-      // Silence: the watchdog closes it and a second connection follows.
+      expect(logged).toEqual([]);
+      // The other end stops answering (a laptop that slept): the next ping goes unanswered, and a second connection follows.
+      proto.ping = function () { /* never reaches Slack */ };
       await until(() => stub.opens() >= 2, 5_000);
       expect(stub.sockets.closed).toBeGreaterThanOrEqual(1);
-      expect(logged).toEqual(["Slack has been silent too long; the connection may be dead, so it is opened again."]);
+      expect(logged[0]).toBe("Slack did not answer a ping; the connection may be dead, so it is opened again.");
     } finally {
+      proto.ping = ping;
       await slack.stop();
       void stub.server.stop(true);
       r.cleanup();

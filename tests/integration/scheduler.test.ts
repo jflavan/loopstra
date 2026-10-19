@@ -11,7 +11,7 @@ import { othersRunning, othersRunningCommands } from "../../src/lanes";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
-import { FAKE_CLAUDE, fixture, fixtureDir, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, NEVER_A_PID, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { touchWake, wakeStamp } from "../../src/wake";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -356,9 +356,7 @@ describe("scheduler resilience", () => {
   test("a chat hand-off's throwaway checkout left behind is removed once its process is gone and an hour has passed, not while it runs", async () => {
     const { repo, trace } = await setupRepo("accepted");
     const git = new Git(repo.path);
-    const ended = Bun.spawn({ cmd: [process.execPath, "-e", "0"] });
-    await ended.exited;
-    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${ended.pid}`);
+    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${NEVER_A_PID}`);
     const running = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-2-${process.pid}`);
     await git.run(["worktree", "add", "--detach", left, "main"]);
     await git.run(["worktree", "add", "--detach", running, "main"]);
@@ -461,8 +459,6 @@ describe("scheduler resilience", () => {
 
   test("start refuses while a loop is running in the repository, and not once it stopped", async () => {
     const { repo, trace } = await setupRepo("draft");
-    const dead = Bun.spawn({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    await dead.exited;
     const now = Date.now();
     const at = (msAgo: number) => new Date(now - msAgo).toISOString();
     const beat = (over: Partial<Heartbeat> = {}): Heartbeat =>
@@ -482,14 +478,14 @@ describe("scheduler resilience", () => {
       // Stopped, or gone without shutting down cleanly: it may start.
       writeHeartbeat(repo.path, beat({ stopped: true }));
       expect(await preflight(repo.path)).toBeNull();
-      writeHeartbeat(repo.path, beat({ pid: dead.pid, lastBeatAt: at(3_600_000) }));
+      writeHeartbeat(repo.path, beat({ pid: NEVER_A_PID, lastBeatAt: at(3_600_000) }));
       expect(await preflight(repo.path)).toBeNull();
       // Fresh, but written on this machine by a process that is gone (its window closed, say): it may start at once.
-      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: thisHost() }));
+      writeHeartbeat(repo.path, beat({ pid: NEVER_A_PID, host: thisHost() }));
       expect(await preflight(repo.path)).toBeNull();
       // Fresh from another machine sharing the folder: its process id says nothing here.
-      writeHeartbeat(repo.path, beat({ pid: dead.pid, host: "elsewhere" }));
-      expect(await preflight(repo.path)).toBe(loopAlreadyRunning(dead.pid));
+      writeHeartbeat(repo.path, beat({ pid: NEVER_A_PID, host: "elsewhere" }));
+      expect(await preflight(repo.path)).toBe(loopAlreadyRunning(NEVER_A_PID));
     } finally {
       trace.close(); repo.cleanup();
     }

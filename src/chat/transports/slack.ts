@@ -6,11 +6,15 @@ import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, Reconnector } f
 export const SLACK_API_ENV = "LOOPSTRA_SLACK_API";
 const SLACK_MAX = 3500;
 /**
- * How long a Socket Mode connection may go without a frame before it is taken for dead and opened
- * again. Slack sends frames of its own now and then (a disconnect notice before it refreshes the
- * link), so a healthy quiet connection is opened again at most this often, which costs nothing.
+ * After this long without a frame on a Socket Mode connection, it is pinged; one that does not answer
+ * within SLACK_PONG_MS is taken for dead and opened again. A quiet channel sends no frames for hours,
+ * so silence alone says nothing: a healthy connection answers the ping and is kept, unlogged.
  */
-const SLACK_QUIET_MS = 10 * 60_000;
+const SLACK_QUIET_MS = 2 * 60_000;
+const SLACK_PONG_MS = 15_000;
+
+/** Bun's WebSocket client: the standard one, plus ping() and a "pong" event, which the standard type leaves out. */
+type PingableSocket = WebSocket & { ping(): void };
 
 /**
  * Text as Slack shows it, without pinging anyone: replies carry the agent's words, which a person in
@@ -52,12 +56,13 @@ export class SlackTransport implements Transport {
   private readonly names = new Map<string, string>();
   private readonly reconnect: Reconnector;
   private readonly access: LiveAccess;
-  /** The watchdog: fires after SLACK_QUIET_MS without a frame (see dropSocket). */
+  /** The watchdog: a ping after SLACK_QUIET_MS without a frame, and the wait for its answer (see probe). */
   private quiet: ReturnType<typeof setTimeout> | null = null;
+  private pongWait: ReturnType<typeof setTimeout> | null = null;
   /** The refusal last logged (an error code), so a lasting one is one line. */
   private refusedCode: string | null = null;
 
-  constructor(private readonly cfg: SlackTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void; quietMs?: number }) {
+  constructor(private readonly cfg: SlackTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void; quietMs?: number; pongMs?: number }) {
     this.api = (opts.env ?? process.env)[SLACK_API_ENV] ?? "https://slack.com/api";
     this.reconnect = new Reconnector(() => this.connect(), (e) => this.log(`Slack connection failed, retrying: ${e}`));
     this.access = new LiveAccess(opts.root, "slack", cfg, (l) => this.log(l));
@@ -114,6 +119,8 @@ export class SlackTransport implements Transport {
       this.touch(ws);
       this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Slack message failed: ${e instanceof Error ? e.message : String(e)}`));
     });
+    // An answer to the watchdog's ping: the connection is alive.
+    ws.addEventListener("pong" as keyof WebSocketEventMap, () => this.touch(ws));
     ws.addEventListener("close", () => {
       if (this.ws !== ws) return;
       this.ws = null;
@@ -132,15 +139,25 @@ export class SlackTransport implements Transport {
     this.reconnect.slowly();
   }
 
-  /** A frame came on `ws`: the watchdog starts over. */
+  /** A frame (or an answer to a ping) came on `ws`: the watchdog starts over. */
   private touch(ws: WebSocket): void {
     this.stopWatchdog();
-    this.quiet = setTimeout(() => this.dropSocket(ws, "Slack has been silent too long; the connection may be dead, so it is opened again."), this.opts.quietMs ?? SLACK_QUIET_MS);
+    this.quiet = setTimeout(() => this.probe(ws), this.opts.quietMs ?? SLACK_QUIET_MS);
+  }
+
+  /** Asks a quiet connection whether it is still there; one that does not answer in time is let go (see dropSocket). */
+  private probe(ws: WebSocket): void {
+    if (this.ws !== ws) return;
+    const dead = "Slack did not answer a ping; the connection may be dead, so it is opened again.";
+    try { (ws as PingableSocket).ping(); } catch { this.dropSocket(ws, dead); return; }
+    this.pongWait = setTimeout(() => this.dropSocket(ws, dead), this.opts.pongMs ?? SLACK_PONG_MS);
   }
 
   private stopWatchdog(): void {
     if (this.quiet) clearTimeout(this.quiet);
+    if (this.pongWait) clearTimeout(this.pongWait);
     this.quiet = null;
+    this.pongWait = null;
   }
 
   /**
@@ -152,7 +169,7 @@ export class SlackTransport implements Transport {
     this.ws = null;
     this.stopWatchdog();
     this.log(why);
-    try { ws.close(4000, "no frames"); } catch { /* already gone */ }
+    try { ws.close(4000, "no answer"); } catch { /* already gone */ }
     this.reconnect.schedule();
   }
 
@@ -212,11 +229,15 @@ export class SlackTransport implements Transport {
   }
 
   async send(thread: string, text: string): Promise<void> {
+    try {
+      await this.sendOrThrow(thread, text);
+    } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
+  }
+
+  async sendOrThrow(thread: string, text: string): Promise<void> {
     const [channel, ts] = thread.split(":");
     const keep = await this.keepMentions();
-    try {
-      await chunked(noBroadcast(text, keep), SLACK_MAX, (part) => this.call("chat.postMessage", { channel, thread_ts: ts, text: part }).then(() => {}));
-    } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
+    await chunked(noBroadcast(text, keep), SLACK_MAX, (part) => this.call("chat.postMessage", { channel, thread_ts: ts, text: part }).then(() => {}));
   }
 
   async announce(text: string): Promise<void> {

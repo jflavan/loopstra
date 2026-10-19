@@ -80,7 +80,7 @@ signals:
 # Chat: `loopstra chat` (terminal, plus any bots) and the drawer in `loopstra ui` (the console). The orchestrator
 # answers questions and works out new changes with you; agreed ones are written up as draft intents
 # (through a pull request when there is a remote). It is read-only, except that someone on a bot's
-# acceptors list (or at the terminal or the console) can ask it to start a draft.
+# acceptors list (or at the terminal or the console) can have a change written up and start a draft.
 # `loopstra setup chat` adds Slack or Discord bots under transports, for example:
 #   transports:
 #     slack:                     # Socket Mode; tokens are read from these environment variables
@@ -88,7 +88,7 @@ signals:
 #       bot_token_env: LOOPSTRA_SLACK_BOT_TOKEN
 #       channel: C0123ABCD       # each top-level message starts a conversation in its thread
 #       allow: [U01AAA, U01BBB]  # who may chat; empty means anyone in the channel
-#       acceptors: [U01AAA]      # who may also start drafts; empty means nobody from Slack
+#       acceptors: [U01AAA]      # who may also have changes written up and start drafts; empty means nobody from Slack
 #       announce_to: C0123ABCD   # where blocked / waiting / merged changes are announced
 #     discord:                   # gateway bot with the Message Content intent on
 #       token_env: LOOPSTRA_DISCORD_TOKEN

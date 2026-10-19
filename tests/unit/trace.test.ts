@@ -237,11 +237,31 @@ describe("the schema version", () => {
     } finally { t.cleanup(); }
   });
 
-  test("a database from a newer Loopstra is refused with a plain message", () => {
+  test("a database from a newer Loopstra is refused with a plain message, before anything is written to it", () => {
     const db = new Database(":memory:");
     try {
       db.run(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
       expect(() => migrate(db)).toThrow("written by a newer Loopstra");
+      expect(db.query("SELECT name FROM sqlite_master").all()).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  test("an older database gets its migrations before the schema, so a new index may name a column a migration added", () => {
+    const db = new Database(":memory:");
+    try {
+      db.run("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
+      migrate(db, ["ALTER TABLE events ADD COLUMN extra TEXT", "CREATE INDEX events_extra ON events (extra)"]);
+      expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+      expect(db.query("SELECT name FROM pragma_table_info('events') WHERE name = 'extra'").get()).not.toBeNull();
+      // The schema ran after them: the tables an older database lacked are there.
+      expect(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'judges'").get()).not.toBeNull();
+      // A new database is not migrated: it gets the schema and the version at once.
+      const fresh = new Database(":memory:");
+      try {
+        migrate(fresh, ["ALTER TABLE events ADD COLUMN extra TEXT"]);
+        expect((fresh.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+        expect(fresh.query("SELECT name FROM pragma_table_info('events') WHERE name = 'extra'").get()).toBeNull();
+      } finally { fresh.close(); }
     } finally { db.close(); }
   });
 

@@ -197,3 +197,12 @@ export async function withEnv<T>(vars: Record<string, string>, fn: () => Promise
     restore();
   }
 }
+
+/**
+ * A process id no running process can have, on any system: the pid of a process that ran and
+ * exited is not enough, since Windows hands a freed pid to the next process soon, and with the
+ * suite's other workers starting processes the pid can belong to a live one by the time a test
+ * asks. This one is beyond Linux's highest (4194304) and macOS's (99998), and on Windows, which
+ * ignores a pid's lowest two bits, it is a multiple of 4 far above any pid Windows hands out.
+ */
+export const NEVER_A_PID = 2_147_483_644;
