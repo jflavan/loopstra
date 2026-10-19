@@ -7,7 +7,7 @@ import { readIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE, run, TEMPLATES, tempDir, tempGitRepo } from "../helpers";
 
-export const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
+const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
 export const SLUG = "add-numbers";
 export const BRANCH = `intent/${SLUG}`;

@@ -651,6 +651,6 @@ What the reviewers found, by area, each fixed where it was found and pinned by a
 
 ## Quality and security checks
 
-- `ci.yml`: typecheck, lint, dead-code gate (`bun run deadcode`, knip, fails above 2% of declarations) and a `coverage` job (`bun run coverage`; `scripts/coverage.ts` fails when total lines or functions are under 80%).
+- `ci.yml`: typecheck, lint, dead-code gate (`bun run deadcode`, knip, fails on any unused declaration) and a `coverage` job (`bun run coverage`; `scripts/coverage.ts` fails when total lines or functions are under 80%).
 - `codeql.yml`: CodeQL `security-and-quality` for TypeScript and for the workflows, on push, PR and weekly.
 - `security.yml` (GitHub advanced security checks): dependency review on PRs, OpenSSF Scorecard, zizmor on workflows. Dependabot keeps npm and Actions versions current.

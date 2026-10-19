@@ -104,7 +104,7 @@ export async function upgradeCommand(args: string[], io: UpgradeIo): Promise<num
 }
 
 /** Runs the repository step and prints what it did. */
-export async function runRepoStep(root: string, check: boolean, say: (l: string) => void): Promise<number> {
+async function runRepoStep(root: string, check: boolean, say: (l: string) => void): Promise<number> {
   const r = await upgradeRepo(root, { check }, { ...REAL_DEPS, notes: (from, to) => releaseNotes(from, to) });
   return printResult(r, check, say, (l) => console.error(l));
 }

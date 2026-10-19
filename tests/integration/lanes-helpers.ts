@@ -9,7 +9,7 @@ import { readIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, run, TEMPLATES, tempDir, tempGitRepo } from "../helpers";
 
-export const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
+const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
 
 /**
  * A change in a test repository. `writes`: the files its build writes (path → content); by default
@@ -19,10 +19,10 @@ export const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url
 export interface Change { slug: string; status: string; priority?: string; dependsOn?: string[]; writes?: Record<string, string>; planFiles?: string[] | null }
 
 /** The files a change's build writes. */
-export const writesOf = (c: Change) => c.writes ?? { [`src/${c.slug}.ts`]: "export function add(a: number, b: number): number {\n  return a + b;\n}\n" };
+const writesOf = (c: Change) => c.writes ?? { [`src/${c.slug}.ts`]: "export function add(a: number, b: number): number {\n  return a + b;\n}\n" };
 
 /** A plan that lists the files the change's build writes (or `planFiles`); the change's own file is new. */
-export function planFor(c: Change): string {
+function planFor(c: Change): string {
   const files = c.planFiles === undefined ? Object.keys(writesOf(c)) : c.planFiles;
   const line = (f: string) => `- ${f}${f === `src/${c.slug}.ts` ? " (new)" : ""}`;
   const list = files === null ? "" : `## Files that change\n${files.map(line).join("\n")}\n\n`;
@@ -30,14 +30,14 @@ export function planFor(c: Change): string {
 }
 
 /** The change's build session, as a fake fixture: it writes the change's files. */
-export function buildFixture(c: Change): string {
+function buildFixture(c: Change): string {
   const lines = fixture("build").split("\n").filter((l) => l.trim());
   const writes = Object.entries(writesOf(c)).map(([path, content]) => JSON.stringify({ type: "fake_action", write: { path, content } }));
   return [lines[0], ...writes, lines.at(-1)].join("\n") + "\n";
 }
 
 /** Statuses at which a change already has its spec and plan (a spec-approved one has its spec). */
-export const PLANNED = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
+const PLANNED = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved"]);
 
 /** Writes a change's intent (and spec and plan at the planned statuses), and its own build fixture. Not committed. */
 export async function writeChange(path: string, fixtures: string, c: Change): Promise<void> {
@@ -54,7 +54,7 @@ export async function writeChange(path: string, fixtures: string, c: Change): Pr
 }
 
 /** The change's plan session, as a fake fixture: it writes planFor(c), so changes planned in a test list their own files. */
-export function planFixture(c: Change): string {
+function planFixture(c: Change): string {
   return fixture("plan").split("\n").filter((l) => l.trim()).map((l) => {
     const e = JSON.parse(l) as { type: string; structured_output?: { plan_markdown: string } };
     if (e.type === "result" && e.structured_output) e.structured_output.plan_markdown = planFor(c);
@@ -120,7 +120,7 @@ export type LanesRepo = Awaited<ReturnType<typeof lanesRepo>>;
 export type RemoteRepo = LanesRepo & { remote: string; state: string };
 
 /** The fake gh's settings for a repository whose remote is the bare repository `remote`. */
-export function ghEnv(env: Record<string, string>, remote: string): Record<string, string> {
+function ghEnv(env: Record<string, string>, remote: string): Record<string, string> {
   return { ...env, LOOPSTRA_GH_EXECUTABLE: FAKE_GH, LOOPSTRA_FAKE_GH_STATE: join(remote, "fake-gh.json"), LOOPSTRA_FAKE_GH_REMOTE: remote };
 }
 

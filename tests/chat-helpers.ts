@@ -6,7 +6,7 @@ import { Git } from "../src/git";
 import type { IncomingMessage } from "../src/chat/orchestrator";
 import { FAKE_CLAUDE, run, setEnv, tempDir, tempGitRepo, writeTestStamp } from "./helpers";
 
-export const FAKE_GH = fileURLToPath(new URL("./fake-gh/gh.ts", import.meta.url));
+const FAKE_GH = fileURLToPath(new URL("./fake-gh/gh.ts", import.meta.url));
 
 /** A stream-json fixture: one session that returns `output` as its structured output. */
 export function fixture(output: unknown, opts: { session?: string; cost?: number } = {}): string {

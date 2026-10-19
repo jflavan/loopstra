@@ -9,7 +9,7 @@ import { promptPath } from "../prompts";
 import { issuesText, tracedSession } from "../sessions";
 import type { Trace } from "../trace";
 
-export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
+export { CHAT_SLUG, MIN_SESSION_USD };
 
 type ChatPhase = "orchestrator" | "write-intent";
 

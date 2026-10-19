@@ -64,6 +64,6 @@ function format(e: EventRow): string[] {
 }
 
 /** "2 commands were not allowed: Bash(git tag v1), Bash(git push)". */
-export function deniedText(denied: string[]): string {
+function deniedText(denied: string[]): string {
   return `${denied.length} ${denied.length === 1 ? "command was" : "commands were"} not allowed: ${denied.join(", ")}`;
 }

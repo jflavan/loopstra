@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 // Dead-code gate: knip finds unused files, exports, types and dependencies; this fails when they
-// make up more than MAX_PERCENT of everything declared (source files plus `export` declarations).
+// make up more than MAX_PERCENT (default 0: none allowed) of everything declared (source files plus `export` declarations).
 // Usage: bun run deadcode [--max N]
 import { Glob } from "bun";
 
 const maxArg = process.argv.indexOf("--max");
-const MAX_PERCENT = maxArg >= 0 ? Number(process.argv[maxArg + 1]) : 2;
+const MAX_PERCENT = maxArg >= 0 ? Number(process.argv[maxArg + 1]) : 0;
 
 const proc = Bun.spawn({ cmd: ["bunx", "knip", "--reporter", "json", "--no-exit-code"], stdout: "pipe", stderr: "inherit" });
 const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
