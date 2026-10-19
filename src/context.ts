@@ -139,6 +139,14 @@ export class RecordRaced extends Error {
   }
 }
 
+/** A record a kill cut short could not be finished yet, so commitRecord committed nothing over it; it is tried again. */
+export class RecordUnsettled extends Error {
+  constructor() {
+    super("a record a kill cut short could not be finished yet; it is tried again");
+    this.name = "RecordUnsettled";
+  }
+}
+
 /** The record being brought into the checkout (see commitRecord), so a kill in between is finished (see settleRecord). */
 const RecordMarkerSchema = z.object({ parent: z.string(), commit: z.string(), slug: z.string(), paths: z.array(z.string()) });
 type RecordMarker = z.infer<typeof RecordMarkerSchema>;
@@ -148,7 +156,7 @@ const markerPath = (root: string) => join(loopstraDir(root), "recording.json");
  * Writes a change's record on main and commits it: every record (statuses, artifacts, a person's
  * edits, chat's drafts, the main-health draft) is written this one way, under the checkout lock and
  * only on main (MainCheckoutMoved otherwise). A record a kill cut short is finished first (see
- * settleRecord); while it cannot be, nothing is committed (an error says it is tried again), since a
+ * settleRecord); while it cannot be, nothing is committed (RecordUnsettled), since a
  * commit over a checkout still behind HEAD would undo it. `write` writes into a draft, never the
  * checkout (it may give false: nothing to commit after all). The commit is made first, from main's
  * HEAD, the change's folder and queue.md as they are on disk, and the draft over them (see
@@ -169,7 +177,7 @@ export function commitRecord(root: string, main: string, slug: string, what: str
   return onCheckout(root, async () => {
     const git = new Git(root);
     await assertOnMain(git, main);
-    if (!(await settleRecord(root, main, opts.trace))) throw new Error("a record a kill cut short could not be finished yet; it is tried again");
+    if (!(await settleRecord(root, main, opts.trace))) throw new RecordUnsettled();
     throwIfStopping();
     const paths = [`intent/${slug}`, "intent/queue.md"];
     const message = bookkeeping(`loopstra(${slug}): ${what}`) + (opts.request ? `\n\nLoopstra-Request: ${opts.request}` : "");

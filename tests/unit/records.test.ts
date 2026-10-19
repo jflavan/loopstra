@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { commitRecord, RecordRaced, setStatus, settleRecord } from "../../src/context";
+import { commitRecord, RecordRaced, RecordUnsettled, setStatus, settleRecord } from "../../src/context";
 import { Git } from "../../src/git";
 import { requestStop, resetStop } from "../../src/stop";
 import { run, setupRepo } from "../helpers";
@@ -180,9 +180,11 @@ describe("settleRecord", () => {
       // A person's git holds the index: the checkout cannot be brought up to the landed record.
       writeFileSync(lock, "");
       expect(await settleRecord(repo.path, "main", trace)).toBe(false);
-      await expect(commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+      const refused = await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
         d.write(`intent/${SLUG}/note.md`, "n\n");
-      }, { trace })).rejects.toThrow("a record a kill cut short could not be finished yet; it is tried again");
+      }, { trace }).then(() => null, (e: unknown) => e);
+      expect(refused).toBeInstanceOf(RecordUnsettled);
+      expect((refused as Error).message).toBe("a record a kill cut short could not be finished yet; it is tried again");
       expect(await new Git(repo.path).headSha()).toBe(commit);
       expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
