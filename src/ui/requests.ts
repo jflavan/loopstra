@@ -97,7 +97,9 @@ function follow(id: string, onDone: (d: Done) => void): () => void {
   const ask = async () => {
     if (stopped) return;
     try {
-      const r = await fetch(`/api/requests/${encodeURIComponent(id)}`, { headers: { accept: "application/json" } });
+      // The page sends no Referer (index.html), but this read asks for one to its own origin: a browser
+      // too old to say the request is same-origin is let read the result by it (see ownSite).
+      const r = await fetch(`/api/requests/${encodeURIComponent(id)}`, { headers: { accept: "application/json" }, referrerPolicy: "same-origin" });
       if (r.status === 404) return;
       const s = await r.json() as { state: string } & Partial<Done>;
       if (s.state === "done") {
