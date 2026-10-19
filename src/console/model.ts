@@ -50,7 +50,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   };
 
   // Read once and shared with the inbox: it is the costliest part of a rebuild.
-  const scan = opts.scan ?? await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] } as Scan);
+  const scan = opts.scan ?? await safely("intent folder", () => scanRepo(root), { intents: [], unreadable: [] });
   const ordered = orderQueue(scan.intents);
   const titles = new Map(ordered.map((i) => [i.slug, i.file.title || i.slug]));
   const live = loopNow(root, pollSeconds, now);
@@ -64,7 +64,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
     held: live.held,
   };
   const human = humanGates(cfg);
-  const holds = await safely("same-file waits", () => sameFileHolds(ordered), new Map<string, string>());
+  const holds = await safely("same-file waits", () => sameFileHolds(ordered, root), new Map<string, string>());
   const changes = await safely("changes", () => ordered.map((i) => changeSummary(root, trace, i, ordered, holds.get(i.slug), busy, now, human)), [] as ChangeSummary[]);
   const inbox = await safely("needs attention", () => attention(root, config, trace, now, scan), [] as AttentionItem[]);
   const recent = await safely("finished steps", () => recentPhases(trace), [] as FinishedPhase[]);

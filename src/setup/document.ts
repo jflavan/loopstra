@@ -55,7 +55,9 @@ export class ConfigDocument {
    * digit, where get() gives the number YAML read, already rounded.
    */
   written(path: Path): string | string[] | undefined {
-    const asWritten = (n: unknown) => (!isScalar(n) || n.value === null ? undefined : typeof n.source === "string" ? n.source : String(n.value));
+    // A scalar made by code has no source: its value is a string, number or boolean, written as such.
+    const scalarText = (v: unknown): string | undefined => (typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" || typeof v === "bigint" ? String(v) : undefined);
+    const asWritten = (n: unknown) => (!isScalar(n) || n.value === null ? undefined : typeof n.source === "string" ? n.source : scalarText(n.value));
     const node = this.doc.getIn(path, true);
     if (isSeq(node)) return node.items.map(asWritten).filter((s): s is string => s !== undefined);
     return asWritten(node);

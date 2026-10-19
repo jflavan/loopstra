@@ -30,7 +30,7 @@ describe("stamp", () => {
   test("a prompt the stamp records stays managed after it is deleted", () => {
     const t = tempDir();
     try {
-      const stamp = { loopstra: "0.1.0", files: { "loopstra/prompts/plan.md": { base: "abc", deleted: true as const } } };
+      const stamp = { loopstra: "0.1.0", files: { "loopstra/prompts/plan.md": { base: textSha("plan"), deleted: true as const } } };
       expect(managedFiles(t.path, stamp).map((f) => f.path)).toContain("loopstra/prompts/plan.md");
     } finally { t.cleanup(); }
   });
@@ -39,10 +39,32 @@ describe("stamp", () => {
     const t = tempDir();
     try {
       expect(readStamp(t.path)).toBeNull();
-      writeStamp(t.path, { loopstra: "0.2.0", files: { "REVIEW.md": { base: "abc" } } });
-      expect(readStamp(t.path)).toEqual({ loopstra: "0.2.0", files: { "REVIEW.md": { base: "abc" } } });
+      writeStamp(t.path, { loopstra: "0.2.0", files: { "REVIEW.md": { base: textSha("review") }, "intent/README.md": { base: textSha("guide"), deleted: true } } });
+      expect(readStamp(t.path)).toEqual({ loopstra: "0.2.0", files: { "REVIEW.md": { base: textSha("review") }, "intent/README.md": { base: textSha("guide"), deleted: true } } });
       writeFileSync(join(t.path, STAMP_FILE), "{nope");
       expect(readStamp(t.path)).toBeNull();
+    } finally { t.cleanup(); }
+  });
+
+  test("a stamp not shaped like one is null; an entry not shaped like one is left out, so upgrade works the file out again", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "loopstra"), { recursive: true });
+      const sha = textSha("x");
+      for (const bad of [{ loopstra: "0.2.0", files: [] }, { loopstra: 1, files: {} }, { files: {} }, { loopstra: "0.2.0" }, { loopstra: "0.2.0", files: null }, [], "0.2.0", null]) {
+        writeFileSync(join(t.path, STAMP_FILE), JSON.stringify(bad));
+        expect({ bad, read: readStamp(t.path) }).toEqual({ bad, read: null });
+      }
+      writeFileSync(join(t.path, STAMP_FILE), JSON.stringify({ loopstra: "0.2.0", files: {
+        "REVIEW.md": { base: 5 },
+        "intent/README.md": { base: "abc" },
+        "loopstra/prompts/plan.md": { base: sha, deleted: false },
+        "loopstra/prompts/design.md": "deleted",
+        "loopstra/prompts/review.md": null,
+        "loopstra/prompts/build.md": { base: sha, deleted: true },
+        ".claude/skills/loopstra/SKILL.md": { base: sha },
+      } }));
+      expect(readStamp(t.path)).toEqual({ loopstra: "0.2.0", files: { "loopstra/prompts/build.md": { base: sha, deleted: true }, ".claude/skills/loopstra/SKILL.md": { base: sha } } });
     } finally { t.cleanup(); }
   });
 });

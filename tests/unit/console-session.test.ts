@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { followSession, streamSession } from "../../src/console/session";
 import { TranscriptReader } from "../../src/console/transcript";
-import type { SessionMessage, TranscriptItem } from "../../src/console/types";
+import type { SessionMessage } from "../../src/console/types";
 import { Trace } from "../../src/trace";
 import { parseFrames, until } from "../console-helpers";
 import { tempDir } from "../helpers";
@@ -32,7 +32,7 @@ function page() {
   return p;
 }
 const messages = (frames: string[]) => parseFrames(frames.join("")).map((f) => ({ id: f.id, msg: f.data as SessionMessage }));
-const kinds = (frames: string[]) => messages(frames).flatMap((m) => (m.msg.type === "item" ? [(m.msg.item as TranscriptItem).kind] : []));
+const kinds = (frames: string[]) => messages(frames).flatMap((m) => (m.msg.type === "item" ? [m.msg.item.kind] : []));
 
 describe("a session's stream", () => {
   test("sends the transcript as it is written, says when the phase has ended, and can start from an offset", async () => {

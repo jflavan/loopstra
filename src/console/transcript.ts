@@ -17,6 +17,8 @@ type Raw = Record<string, unknown>;
 type Block = { type?: unknown; text?: unknown; id?: unknown; name?: unknown; input?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
 
 const isObject = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
+/** A tool input's field as text: only a string is shown (a field may hold anything, as a line may). */
+const text = (v: unknown): string => (typeof v === "string" ? v : "");
 
 /** One line of a raw file as an event, or null when it is not one (a cut-off line, a bare value). */
 function rawEvent(line: string): Raw | null {
@@ -47,12 +49,12 @@ const signed = (text: string, sign: "+" | "-"): string[] => text.split(/\r?\n/).
 function editDiff(tool: string, path: string, input: Raw): string {
   const head = [`--- ${path}`, `+++ ${path}`];
   if (tool === "Write") {
-    const all = String(input.content ?? "").split(/\r?\n/);
+    const all = text(input.content).split(/\r?\n/);
     const more = all.length > WRITE_LINES ? [`\\ ${all.length - WRITE_LINES} more lines`] : [];
     return [...head, "@@ new file @@", ...all.slice(0, WRITE_LINES).map((l) => `+${l}`), ...more].join("\n");
   }
   const edits = tool === "MultiEdit" && Array.isArray(input.edits) ? (input.edits as unknown[]).filter(isObject) : [input];
-  return [...head, ...edits.flatMap((e) => ["@@ edit @@", ...signed(String(e.old_string ?? ""), "-"), ...signed(String(e.new_string ?? ""), "+")])].join("\n");
+  return [...head, ...edits.flatMap((e) => ["@@ edit @@", ...signed(text(e.old_string), "-"), ...signed(text(e.new_string), "+")])].join("\n");
 }
 
 const EDITS = new Set(["Edit", "MultiEdit", "Write"]);
@@ -119,9 +121,9 @@ export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
       } else if (e.type === "assistant" && b.type === "tool_use" && typeof b.name === "string" && b.name && typeof b.id === "string" && b.id && !HIDDEN.has(b.name)) {
         const input = isObject(b.input) ? b.input : {};
         if (b.name === "TodoWrite" && Array.isArray(input.todos)) {
-          out.push({ kind: "todos", items: (input.todos as unknown[]).filter(isObject).map((t) => ({ text: String(t.content ?? ""), state: String(t.status ?? "") })) });
+          out.push({ kind: "todos", items: (input.todos as unknown[]).filter(isObject).map((t) => ({ text: text(t.content), state: text(t.status) })) });
         } else if (EDITS.has(b.name)) {
-          const path = relativePath(String(input.file_path ?? ""), cwd);
+          const path = relativePath(text(input.file_path), cwd);
           out.push({ kind: "edit", id: b.id, tool: b.name, path, diff: editDiff(b.name, path, input) });
         } else {
           out.push({ kind: "tool", id: b.id, tool: b.name, target: toolTarget(b.name, input, cwd), input });
@@ -133,7 +135,7 @@ export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
     return out;
   }
   if (e.type === "system" && e.subtype === "permission_denied" && typeof e.tool_use_id === "string") {
-    return [{ kind: "tool-result", id: e.tool_use_id, ok: false, output: `Not allowed: ${String(e.message ?? e.decision_reason ?? "")}` }];
+    return [{ kind: "tool-result", id: e.tool_use_id, ok: false, output: `Not allowed: ${text(e.message) || text(e.decision_reason)}` }];
   }
   if (e.type === "result") {
     const answer = isObject(e.structured_output) ? e.structured_output : undefined;

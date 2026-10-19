@@ -48,7 +48,7 @@ async function withConsole(fn: (base: string, hub: Hub) => Promise<void>, hubOpt
   try {
     await fn(`http://127.0.0.1:${server.port}`, hub);
   } finally {
-    server.stop(true);
+    await server.stop(true);
     await until(() => hub.latest() === null);
     await hub.whenStopped();
     t.cleanup();
@@ -121,7 +121,7 @@ describe("the console's server", () => {
       expect(String(said.mock.calls[0]![0])).not.toContain("\n");
     } finally {
       said.mockRestore();
-      server.stop(true);
+      await server.stop(true);
       await hub.whenStopped();
       t.cleanup();
     }
@@ -147,6 +147,18 @@ describe("the console's server", () => {
       await until(() => hub.latest() === null);
       await hub.whenStopped();
     }, { intervalMs: 60_000, pingMs: 60_000 }); // no look or ping in the meantime finds the page gone by failing to write to it
+  });
+
+  test("a HEAD on a stream answers its headers, opens no stream and leaves no page connected", async () => {
+    await withConsole(async (base, hub) => {
+      for (const path of ["/api/stream", "/api/agents/stream", "/api/sessions/one/1/stream"]) {
+        const r = await fetch(base + path, { method: "HEAD" });
+        expect({ path, status: r.status, type: r.headers.get("content-type") }).toEqual({ path, status: 200, type: "text/event-stream; charset=utf-8" });
+        expect(await r.text()).toBe("");
+      }
+      await Bun.sleep(100);
+      expect(hub.latest()).toBeNull();
+    }, { intervalMs: 60_000, pingMs: 60_000 });
   });
 
   test("a page opening a new stream names the newest event it saw in ?after=, and gets the ones it missed before its snapshot", async () => {
@@ -247,7 +259,7 @@ async function withRepoConsole(fn: (base: string, root: string) => Promise<void>
   try {
     await fn(`http://127.0.0.1:${server.port}`, r.root);
   } finally {
-    server.stop(true);
+    await server.stop(true);
     await until(() => hub.latest() === null);
     await hub.whenStopped();
     r.cleanup();
@@ -277,6 +289,30 @@ describe("writes", () => {
       expect((await fetch(`${base}/api/requests/${id}`, { method: "HEAD" })).status).toBe(405);
       expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toMatchObject({ state: "done", ok: true, status: "plan-approved" });
       expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
+    });
+  }, 30_000);
+
+  test("a result is read by the page's own fetch, not by another site's request, and no answer is cached", async () => {
+    await withRepoConsole(async (base, root) => {
+      const sent = await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" });
+      expect(sent.headers.get("cache-control")).toBe("no-store");
+      const { id } = await sent.json() as { id: string };
+      // The address bar (no site) reads it; a pending result stays.
+      const pending = await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": "none" } });
+      expect({ status: pending.status, cache: pending.headers.get("cache-control") }).toEqual({ status: 200, cache: "no-store" });
+      await applyAll(root);
+      // An <img src> or a link on another site: the browser says where it comes from, and it is refused, so the result is still there for the page.
+      for (const site of ["cross-site", "same-site"]) {
+        const r = await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": site } });
+        expect({ site, status: r.status }).toEqual({ site, status: 403 });
+      }
+      expect(await (await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": "same-origin" } })).json()).toMatchObject({ state: "done", ok: true });
+      expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
+      // The method is checked before the Origin: a GET of the collection is not a write that lacks one.
+      expect((await fetch(`${base}/api/requests`)).status).toBe(405);
+      expect((await fetch(`${base}/api/requests/${id}`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "{}" })).status).toBe(405);
+      const refused = await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" });
+      expect({ status: refused.status, cache: refused.headers.get("cache-control") }).toEqual({ status: 409, cache: "no-store" });
     });
   }, 30_000);
 
@@ -381,7 +417,7 @@ async function withSteerConsole(fn: (base: string, root: string, seqs: { design:
   try {
     await fn(`http://127.0.0.1:${server.port}`, r.root, { design, check, ended });
   } finally {
-    server.stop(true);
+    await server.stop(true);
     await until(() => hub.latest() === null);
     await hub.whenStopped();
     r.cleanup();
@@ -397,6 +433,7 @@ describe("steering", () => {
     await withSteerConsole(async (base, root, { design }) => {
       const r = await post(base, `/api/sessions/d/${design}/message`, { kind: "message", text: " Cover negatives. " });
       expect(r.status).toBe(202);
+      expect(r.headers.get("cache-control")).toBe("no-store");
       const { id } = await r.json() as { id: string };
       expect(inboxFor(root, "d", design)).toEqual([expect.objectContaining({ id, seq: design, kind: "message", text: "Cover negatives.", by: localUser(), via: "the dashboard" })]);
       expect((await post(base, `/api/sessions/d/${design}/message`, { kind: "redirect", text: "Use two steps." })).status).toBe(202);
@@ -497,6 +534,26 @@ describe("steering", () => {
 });
 
 describe("loopstra ui", () => {
+  test("a port that is in use is said in one line, with the way out, and nothing is started", async () => {
+    const r = await chatRepo();
+    const busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy") });
+    const said = spyOn(console, "error").mockImplementation(() => {});
+    const logged = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const port = busy.port!;
+      expect(await ui(r.root, port, false)).toBe(1);
+      expect(said.mock.calls.map((c) => String(c[0]))).toEqual([`Port ${port} is in use: pick another with --port <n>.`]);
+      expect(logged).not.toHaveBeenCalled();
+      expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe("busy");
+    } finally {
+      said.mockRestore();
+      logged.mockRestore();
+      await busy.stop(true);
+      resetStop();
+      r.cleanup();
+    }
+  }, 30_000);
+
   test("ends on a stop request (Ctrl-C), with the console and its chat stopped", async () => {
     const r = await chatRepo();
     const said = spyOn(console, "log").mockImplementation(() => {});

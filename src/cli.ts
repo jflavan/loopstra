@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { parseArgs, type ArgSpec, type Args } from "./commands/args";
 import { renderStatus } from "./commands/status";
 import { configPath, NOT_SET_UP } from "./config";
 import { errorText } from "./shell";
@@ -30,6 +31,25 @@ const HELP = `loopstra <command>
             (no name: list them)
   --version print the installed version
 `;
+
+/** The words each command takes (see parseArgs); the usage line is said when they do not fit. */
+const ARGS: Record<"start" | "tail" | "judges" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
+  start: { usage: "Usage: loopstra start [--once]", flags: ["--once"] },
+  tail: { usage: "Usage: loopstra tail [slug]", names: 1 },
+  judges: { usage: "Usage: loopstra judges" },
+  ui: { usage: "Usage: loopstra ui [--port <number>] [--no-chat]", flags: ["--no-chat"], port: true },
+  chat: { usage: "Usage: loopstra chat [--no-terminal]", flags: ["--no-terminal"] },
+  "apply-lessons": { usage: "Usage: loopstra apply-lessons <slug>", names: 1 },
+  upgrade: { usage: "Usage: loopstra upgrade [--check] [--repo]", flags: ["--check", "--repo"] },
+  customize: { usage: "Usage: loopstra customize [prompt]", names: 1 },
+};
+
+/** The command's words sorted, or null having said the usage line: a word the command does not take stops it before anything else. */
+function args(command: keyof typeof ARGS): Args | null {
+  const parsed = parseArgs(rest, ARGS[command]);
+  if (!parsed) console.error(ARGS[command].usage);
+  return parsed;
+}
 
 /** status, tail, judges, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
@@ -112,6 +132,8 @@ async function main(): Promise<number> {
       return 0;
     }
     case "start": {
+      const a = args("start");
+      if (!a) return 1;
       const { log, preflight, start } = await import("./scheduler");
       const pending = notice();
       const refusal = await preflight(root);
@@ -119,18 +141,19 @@ async function main(): Promise<number> {
       // Printed whenever it arrives, as a line of the loop's output: a slow registry never holds up the loop.
       printNotice(pending, log).catch(() => {});
       // Two starts at once both pass the preflight; only one gets the loop's lock.
-      const refused = await start(root, { once: rest.includes("--once") });
+      const refused = await start(root, { once: a.flags.has("--once") });
       if (refused) { console.error(refused); return 1; }
       return 0;
     }
     case "tail": {
-      if (!setUp()) return 1;
+      const a = args("tail");
+      if (!a || !setUp()) return 1;
       const { tail } = await import("./commands/tail");
-      await tail(root, rest[0]);
+      await tail(root, a.names[0]);
       return 0;
     }
     case "judges": {
-      if (!setUp()) return 1;
+      if (!args("judges") || !setUp()) return 1;
       const { renderJudges } = await import("./commands/judges");
       try {
         process.stdout.write(await renderJudges(root));
@@ -138,36 +161,40 @@ async function main(): Promise<number> {
       } catch (e) { console.error(errorText(e)); return 1; }
     }
     case "ui": {
-      if (!setUp() || olderSetup("run loopstra ui again")) return 1;
-      const flag = rest.indexOf("--port");
-      const port = flag >= 0 ? Number(rest[flag + 1]) : 4646;
-      if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("Usage: loopstra ui [--port <number>]"); return 1; }
+      const a = args("ui");
+      if (!a || !setUp() || olderSetup("run loopstra ui again")) return 1;
       const { ui } = await import("./commands/ui");
-      return ui(root, port, !rest.includes("--no-chat"));
+      return ui(root, a.port ?? 4646, !a.flags.has("--no-chat"));
     }
     case "chat": {
-      if (!setUp() || olderSetup("run loopstra chat again")) return 1;
+      const a = args("chat");
+      if (!a || !setUp() || olderSetup("run loopstra chat again")) return 1;
       const { chat } = await import("./commands/chat");
-      return chat(root, { terminal: !rest.includes("--no-terminal") });
+      return chat(root, { terminal: !a.flags.has("--no-terminal") });
     }
     case "apply-lessons": {
+      const a = args("apply-lessons");
+      if (!a) return 1;
+      const slug = a.names[0];
+      if (!slug) { console.error(ARGS["apply-lessons"].usage); return 1; }
       const { applyLessons } = await import("./commands/apply-lessons");
-      if (!rest[0]) { console.error("Usage: loopstra apply-lessons <slug>"); return 1; }
       try {
-        const r = await applyLessons(root, rest[0]);
+        const r = await applyLessons(root, slug);
         console.log(r.added.length ? `Added to CLAUDE.md:\n${r.added.join("\n")}` : "Nothing new to add.");
         return 0;
       } catch (e) { console.error(errorText(e)); return 1; }
     }
     case "upgrade": {
-      if (!setUp()) return 1;
+      const a = args("upgrade");
+      if (!a || !setUp()) return 1;
       const { realIo, upgradeCommand } = await import("./commands/upgrade");
-      return upgradeCommand(rest, realIo(root));
+      return upgradeCommand([...a.flags], realIo(root));
     }
     case "customize": {
-      if (!setUp()) return 1;
+      const a = args("customize");
+      if (!a || !setUp()) return 1;
       const { customize } = await import("./commands/customize");
-      const r = await customize(root, rest[0]);
+      const r = await customize(root, a.names[0]);
       (r.ok ? console.log : console.error)(r.text);
       return r.ok ? 0 : 1;
     }

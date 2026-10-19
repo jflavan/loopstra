@@ -174,6 +174,6 @@ function report(checks: Check[], out: (line: string) => void): void {
   if (!toFix.length) return;
   // The command takes one section at a time, so each is named as its own command.
   const runs = [...new Set(toFix.map((c) => c.section))].map((name) => (name ? `loopstra setup ${name}` : "loopstra setup"));
-  const which = runs.length > 1 ? `${runs.slice(0, -1).join(", ")} or ${runs.at(-1)}` : runs[0];
+  const which = runs.length > 1 ? `${runs.slice(0, -1).join(", ")} or ${runs.at(-1)!}` : runs[0]!;
   out(`\nTo fix: ${toFix.length} item${toFix.length > 1 ? "s" : ""} above. Run ${which} again once fixed, or loopstra setup --check.`);
 }

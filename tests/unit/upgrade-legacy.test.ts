@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { templatePath } from "../../src/package";
 import { adoptLegacy } from "../../src/upgrade/legacy";
@@ -39,7 +39,12 @@ describe("adoptLegacy", () => {
       expect(existsSync(join(t.path, "loopstra", "prompts", "plan.md"))).toBe(true);
       expect(r.removed).toEqual(["loopstra/prompts/review.md", ".claude/hooks/loopstra-protect-tests.ts"]);
       expect(r.stamp.files["loopstra/prompts/plan.md"]).toEqual({ base: textSha(OLD_PLAN) });
-      expect(r.notes).toEqual(["loopstra/prompts/plan.md is your own; it is merged from the shipped version of commit c1."]);
+      // The fixture has no skill and no intent README either: recorded as removed, as REVIEW.md would be.
+      expect(r.notes).toEqual([
+        ".claude/skills/loopstra/SKILL.md is not in this repository; it is recorded as removed on purpose, and upgrades leave it out.",
+        "intent/README.md is not in this repository; it is recorded as removed on purpose, and upgrades leave it out.",
+        "loopstra/prompts/plan.md is your own; it is merged from the shipped version of commit c1.",
+      ]);
       expect(r.stamp.files["REVIEW.md"]).toEqual({ base: textSha("a review guide\n") });
       expect(JSON.parse(readFileSync(join(t.path, ".claude", "settings.json"), "utf8"))).toEqual({ model: "x" });
       expect(r.changed).toContain(".claude/settings.json");
@@ -114,6 +119,20 @@ describe("adoptLegacy", () => {
       expect(readFileSync(join(t.path, ".claude", "settings.json"), "utf8")).toBe("{ not json, ours");
       expect(r.changed).toEqual([]);
       expect(r.notes.some((n) => n.includes("settings.json"))).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
+  test("a fixed managed file the repository deleted is recorded as removed on purpose, with a note, so upgrade does not bring it back", async () => {
+    const t = legacyRepo();
+    try {
+      rmSync(join(t.path, "REVIEW.md"));
+      const r = await adoptLegacy(t.path, INDEX, fetchText, { write: true });
+      expect(r.stamp.files["REVIEW.md"]).toEqual({ base: textSha(readFileSync(templatePath("REVIEW.md"), "utf8")), deleted: true });
+      expect(r.notes).toContain("REVIEW.md is not in this repository; it is recorded as removed on purpose, and upgrades leave it out.");
+      expect(existsSync(join(t.path, "REVIEW.md"))).toBe(false);
+      // The other fixed files are not there either in this fixture, and get the same; prompt overrides are only ever the ones present.
+      expect(r.stamp.files["intent/README.md"]).toMatchObject({ deleted: true });
+      expect(Object.keys(r.stamp.files).filter((p) => p.startsWith("loopstra/prompts/"))).toEqual(["loopstra/prompts/plan.md"]);
     } finally { t.cleanup(); }
   });
 

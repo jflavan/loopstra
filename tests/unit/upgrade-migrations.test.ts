@@ -27,6 +27,17 @@ describe("migrateConfig", () => {
     expect(() => migrateConfig(V1, ok, () => { throw new Error("commands.test is required"); })).toThrow("commands.test is required");
   });
 
+  test("a file with Windows line endings keeps them; one stray CRLF does not convert the file", () => {
+    const steps: Migration[] = [{ from: 1, run: (doc) => { doc.set("new_key", 7); } }];
+    const crlf = migrateConfig(V1.replace(/\n/g, "\r\n"), steps, () => {}).text;
+    expect(crlf).toContain("# my config\r\nversion: 2\r\n");
+    expect(crlf).toContain("new_key: 7\r\n");
+    expect(crlf.replace(/\r\n/g, "")).not.toContain("\n");
+    const stray = migrateConfig(V1.replace("version: 1\n", "version: 1\r\n"), steps, () => {}).text;
+    expect(stray).toContain("version: 2\n");
+    expect(stray).not.toContain("\r");
+  });
+
   test("a file at the latest version is left as it is", () => {
     const steps: Migration[] = [{ from: 1, run: () => { throw new Error("not run"); } }];
     const v2 = V1.replace("version: 1", "version: 2");

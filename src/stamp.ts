@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import { writeFileAtomic } from "./fsutil";
 import { templatePath } from "./package";
 
@@ -93,14 +94,32 @@ export function managedFiles(root: string, stamp: Stamp | null = null): ManagedF
   return files;
 }
 
-/** The repository's stamp, or null when it has none or it cannot be read. */
+/** One entry as written: a textSha, and "deleted" only as true. */
+const entrySchema = z.object({ base: z.string().regex(/^[0-9a-f]{64}$/), deleted: z.literal(true).optional() });
+/** The file's shape; each entry is checked on its own (see readStamp). */
+const stampSchema = z.object({ loopstra: z.string(), files: z.record(z.string(), z.unknown()) });
+
+/**
+ * The repository's stamp, or null when it has none, it cannot be read (merge conflict markers), or
+ * it is not shaped like one. An entry that is not shaped like one (a base that is no textSha, a
+ * deleted that is not true) is left out, as if the file had never been written: upgrade then works
+ * out the file's base again (see upgradeRepo), instead of leaving the file as it is for ever.
+ */
 export function readStamp(root: string): Stamp | null {
+  let parsed: z.infer<typeof stampSchema>;
   try {
-    const s = JSON.parse(readFileSync(join(root, STAMP_FILE), "utf8")) as Stamp;
-    return typeof s?.loopstra === "string" && s.files && typeof s.files === "object" ? s : null;
+    const r = stampSchema.safeParse(JSON.parse(readFileSync(join(root, STAMP_FILE), "utf8")));
+    if (!r.success) return null;
+    parsed = r.data;
   } catch {
     return null;
   }
+  const files: Record<string, StampEntry> = {};
+  for (const [p, e] of Object.entries(parsed.files)) {
+    const entry = entrySchema.safeParse(e);
+    if (entry.success) files[p] = entry.data.deleted ? { base: entry.data.base, deleted: true } : { base: entry.data.base };
+  }
+  return { loopstra: parsed.loopstra, files };
 }
 
 /** Writes the stamp, its files in path order. */

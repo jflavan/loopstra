@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, rmdirSync } from "node:f
 import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
 import { baseOf, wasShipped, type FetchText, type ShippedIndex } from "../shipped";
-import { isPromptOverride, managedFiles, type Stamp } from "../stamp";
+import { isPromptOverride, managedFiles, textSha, type Stamp } from "../stamp";
 
 /** The hook file init used to write into a repository. */
 export const OLD_HOOK_FILE = ".claude/hooks/loopstra-protect-tests.ts";
@@ -13,7 +13,7 @@ const SETTINGS = ".claude/settings.json";
 
 /** What adopting a repository set up before the stamp did, or would do. */
 export interface Adopted {
-  /** The stamp to start from: a base for every managed file that exists. Its version is filled in by the caller. */
+  /** The stamp to start from: a base for every managed file that exists, and "deleted" for a fixed one that does not. Its version is filled in by the caller. */
   stamp: Stamp;
   /** Files deleted: unedited prompt copies and the old hook. */
   removed: string[];
@@ -51,7 +51,9 @@ function settingsWithOldHook(path: string): Record<string, unknown> | null | "in
 /**
  * Brings a repository set up before the stamp to the new layout: an unedited prompt copy is deleted
  * (the package has it); an edited one is an override, based on the closest shipped version; the
- * other managed files get a base the same way; the old hook file and its settings entry go.
+ * other managed files get a base the same way, and one of them that is not there is recorded as
+ * removed on purpose (as an upgrade records a removal it sees), so the first upgrade does not bring
+ * it back; the old hook file and its settings entry go.
  *
  * Everything is worked out before anything is written. When an edited file has shipped versions but
  * none can be read (offline), it throws and writes nothing, so the upgrade can be run again: taking
@@ -68,7 +70,13 @@ export async function adoptLegacy(root: string, index: ShippedIndex, fetchText: 
   const out: Adopted = { stamp: { loopstra: "", files: {} }, removed: [], changed: [], notes: [], apply };
   for (const file of managedFiles(root)) {
     const path = join(root, file.path);
-    if (!existsSync(path)) continue;
+    if (!existsSync(path)) {
+      // Only the fixed files can be missing: the overrides listed are the ones in the folder.
+      if (isPromptOverride(file.path)) continue;
+      out.stamp.files[file.path] = { base: textSha(readFileSync(file.shipped, "utf8")), deleted: true };
+      out.notes.push(`${file.path} is not in this repository; it is recorded as removed on purpose, and upgrades leave it out.`);
+      continue;
+    }
     const text = readFileSync(path, "utf8");
     if (isPromptOverride(file.path) && wasShipped(index, file.template, text)) {
       writes.push(() => {

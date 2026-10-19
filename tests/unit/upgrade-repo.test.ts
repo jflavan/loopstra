@@ -166,7 +166,7 @@ describe("upgradeRepo", () => {
       r = await upgradeRepo(repo.path, { check: false }, deps());
       expect(r.refusal).toBe("The checkout is on other, not main. Switch to main, then run loopstra upgrade again.");
       // Off main, --check refuses too.
-      expect((await upgradeRepo(repo.path, { check: true }, deps())).refusal).toBe(r.refusal!);
+      expect((await upgradeRepo(repo.path, { check: true }, deps())).refusal).toBe(r.refusal);
     } finally { repo.cleanup(); }
   });
 
@@ -290,6 +290,8 @@ describe("upgradeRepo", () => {
       writeFileSync(join(repo.path, ".claude", "hooks", "loopstra-protect-tests.ts"), "// hook");
       writeFileSync(join(repo.path, ".claude", "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "bun loopstra-protect-tests.ts" }] }] } }));
       rmSync(join(repo.path, "loopstra", "stamp.json"));
+      // REVIEW.md was deleted on purpose back then: the upgrade does not bring it back.
+      rmSync(join(repo.path, "REVIEW.md"));
       await run(["git", "add", "-A"], repo.path);
       await run(["git", "commit", "-qm", "legacy"], repo.path);
       const index: ShippedIndex = { "templates/prompts/review.md": [{ sha: textSha(promptText), commit: "c" }] };
@@ -298,6 +300,10 @@ describe("upgradeRepo", () => {
       expect(r.from).toBeNull();
       expect(r.committed).toBe(true);
       expect(existsSync(join(repo.path, "loopstra", "prompts", "review.md"))).toBe(false);
+      expect(existsSync(join(repo.path, "REVIEW.md"))).toBe(false);
+      expect(r.files.find((f) => f.path === "REVIEW.md")).toMatchObject({ outcome: "unchanged", entry: { deleted: true } });
+      expect(readStamp(repo.path)!.files["REVIEW.md"]).toEqual({ base: textSha(readFileSync(templatePath("REVIEW.md"), "utf8")), deleted: true });
+      expect(r.notes).toContain("REVIEW.md is not in this repository; it is recorded as removed on purpose, and upgrades leave it out.");
       expect(r.removed).toEqual(["loopstra/prompts/review.md", ".claude/hooks/loopstra-protect-tests.ts", ".claude/settings.json"]);
       expect(readStamp(repo.path)!.loopstra).toBe("0.9.0");
       expect((await run(["git", "log", "-1", "--format=%B"], repo.path)).out.trim()).toBe("loopstra: upgrade to 0.9.0");
