@@ -32,7 +32,7 @@ export async function renderJudges(root: string): Promise<string> {
 }
 
 /** The report as plain text: the setting, a table per judge, the spending, and what went wrong. */
-export function judgesText(v: JudgesView): string {
+function judgesText(v: JudgesView): string {
   const setting = `Cheaper judges: ${v.setting} (${settingHow(v)})`;
   const notCompared = reasons(v);
   if (!v.total) {

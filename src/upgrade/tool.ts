@@ -5,12 +5,12 @@ import { writeFileAtomic } from "../fsutil";
 import { DEV_VERSION } from "../package";
 
 /** Where versions are read: npm, unless LOOPSTRA_REGISTRY_URL (for tests only) says otherwise. */
-export function registryUrl(): string {
+function registryUrl(): string {
   return process.env.LOOPSTRA_REGISTRY_URL ?? "https://registry.npmjs.org";
 }
 
 /** Where release notes are read: GitHub's API, unless LOOPSTRA_GITHUB_API (for tests only) says otherwise. */
-export function githubApi(): string {
+function githubApi(): string {
   return process.env.LOOPSTRA_GITHUB_API ?? "https://api.github.com";
 }
 

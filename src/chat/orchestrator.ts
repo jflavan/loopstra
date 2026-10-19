@@ -56,7 +56,7 @@ const ANNOUNCEMENTS_IN_CONTEXT = 10;
 /** How many of the main branch's newest commits go into each message's context. */
 const HISTORY_IN_CONTEXT = 30;
 /** How long a proposal waits for its yes. */
-export const PENDING_TTL_MS = 24 * 60 * 60_000;
+const PENDING_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * A display name is the person's own choice: kept to one line with no tags, wherever it goes, so it
@@ -75,7 +75,7 @@ const CANDIDATE = /<[\s/​-‍⁠﻿]*[a-z​-‍⁠﻿]+/gi;
  * How the loop takes changes, in words, so the orchestrator can say why a change waits without
  * guessing: how many run a step at once, and whether design and plan steps run beside them.
  */
-export function loopRules(cfg: Config): string {
+function loopRules(cfg: Config): string {
   const n = cfg.speed.max_parallel_changes;
   const lanes = n === 1 ? "one change runs a step at a time" : `up to ${n} changes run a step at the same time`;
   const beside = cfg.speed.think_ahead

@@ -12,7 +12,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "types": [
-      "bun-types"
+      "bun"
     ],
     "jsx": "react-jsx",
     "jsxImportSource": "preact",

@@ -1,3 +1,4 @@
 node_modules/
 .loopstra/
 /shipped.json
+coverage/
