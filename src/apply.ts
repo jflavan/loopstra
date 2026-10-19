@@ -239,7 +239,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   }
   let refused = null as Status | null;
   // Its record landed in a pass the loop was killed in: finished as started, not written again.
-  if (!(await landed(root, req.id, req.slug))) {
+  if (!(await landed(root, req.id, req.slug, req.at))) {
     await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async (draft) => {
       const intent = await readIntent(root, req.slug);
       const was = intent.file.frontmatter.status;
@@ -266,7 +266,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const path = join(root, "intent", i.slug, "intent.md");
     // Its record landed in a pass the loop was killed in: the file there is this request's, added already.
-    const done = await landed(root, req.id, i.slug);
+    const done = await landed(root, req.id, i.slug, req.at);
     if (!done && existsSync(path)) {
       let status = "unreadable";
       try { status = parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { /* keep unreadable */ }
@@ -349,7 +349,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Its record landed in a pass the loop was killed in: finished as applied, neither taken for a change
   // that moved on (its own record moved it) nor written again.
-  const done = await landed(root, req.id, req.slug);
+  const done = await landed(root, req.id, req.slug, req.at);
   if (!done && was !== req.expect) return movedOn(trace, req, was);
   const problem = done ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
@@ -407,7 +407,7 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as done already.
-  const done = await landed(root, req.id, req.slug);
+  const done = await landed(root, req.id, req.slug, req.at);
   if (!done && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!done && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
   // A priority of null takes the line out: the change had no stated priority.
@@ -435,7 +435,7 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as answered already.
-  const done = await landed(root, req.id, req.slug);
+  const done = await landed(root, req.id, req.slug, req.at);
   if (!done && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
   // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
   if (!done && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }

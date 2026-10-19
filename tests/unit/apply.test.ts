@@ -52,9 +52,8 @@ const releaseEdit = (d: RecordDraft) => d.write("intent/a/intent.md", d.read("in
  * Claims the request and commits its record with the request's id (see commitRecord), as a pass the
  * loop was killed in after its commit and before it finished the request leaves it.
  */
-async function landedBeforeKill(root: string, req: Request, what: string, write: (d: RecordDraft) => void): Promise<void> {
+async function landedBeforeKill(root: string, req: Request, what: string, write: (d: RecordDraft) => void, slug = "slug" in req ? req.slug : ""): Promise<void> {
   claimRequest(root, req.id);
-  const slug = "slug" in req ? req.slug : "";
   expect(await commitRecord(root, "main", slug, what, async (d) => { write(d); }, { request: req.id })).toBe(true);
 }
 
@@ -114,6 +113,51 @@ describe("applying requests", () => {
         expect(JSON.parse(trace.lastEvent("x", "request")!.payload)).toMatchObject({ kind: "approve", result: "applied", from: "plan-review", to: "plan-approved" });
         expect(trace.events("x").filter((e) => e.type === "status_change")).toHaveLength(1);
       } finally { trace.close(); }
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  /** Each status and field request, killed after its record landed: the change as it then is, the request, and its record's write. */
+  const KILLED_AFTER = [
+    { kind: "priority", start: INTENT("building", "x"), submit: { kind: "priority", slug: "a", expect: "building", priority: "high" }, from: "status: building", to: "status: building\npriority: high", status: "building" },
+    { kind: "retry", start: withNote("blocked", "The build broke. When that is sorted out, set status to plan-approved to try again."), submit: { kind: "retry", slug: "a", expect: "blocked", to: "plan-approved" }, from: "status: blocked", to: "status: plan-approved", status: "plan-approved" },
+    { kind: "close", start: INTENT("building", "x"), submit: { kind: "close", slug: "a", expect: "building" }, from: "status: building", to: "status: closed", status: "closed" },
+    // An undo of a send back: the record moved the change back to the review, so it no longer is where the request expects.
+    { kind: "undo", start: INTENT("spec-approved", "x"), submit: { kind: "undo", slug: "a", expect: "spec-approved", to: "plan-review", note: "" }, from: "status: spec-approved", to: "status: plan-review", status: "plan-review" },
+  ] as const;
+  for (const k of KILLED_AFTER) test(`a ${k.kind} whose record landed before the loop was killed is finished as applied, with no second commit`, async () => {
+    const r = await chatRepo({ intents: { a: k.start }, config: PEOPLE });
+    try {
+      const req = submitRequest(r.root, { ...by, ...k.submit });
+      await landedBeforeKill(r.root, req, "landed", (d) => {
+        const rel = "intent/a/intent.md";
+        d.write(rel, d.read(rel)!.replace(k.from, k.to));
+      });
+      const commits = await commitCount(r.root);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, req.id)).toMatchObject({ state: "done", ok: true, status: k.status });
+      expect(await commitCount(r.root)).toBe(commits);
+      const trace = Trace.open(r.root, () => {});
+      try {
+        expect(JSON.parse(trace.lastEvent("a", "request")!.payload)).toMatchObject({ kind: k.kind, result: "applied" });
+      } finally { trace.close(); }
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a new request with two drafts, the loop killed after the first landed: the next pass adds only the second", async () => {
+    const r = await chatRepo({ intents: {} });
+    try {
+      const req = submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: INTENT("draft", "b"), update: false }, { slug: "c", text: INTENT("draft", "c"), update: false }] });
+      await landedBeforeKill(r.root, req, "open intent from chat", (d) => { d.write("intent/b/intent.md", INTENT("draft", "b")); }, "b");
+      const commits = Number(await commitCount(r.root));
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, req.id)).toMatchObject({ ok: true, text: "Added to the queue as drafts: b, c. Read them in intent/, then set status to accepted, or ask me to start one." });
+      expect(Number(await commitCount(r.root))).toBe(commits + 1);
+      expect(await lastCommit(r.root)).toContain("loopstra(c): open intent from chat");
+      expect(readFileSync(join(r.root, "intent", "c", "intent.md"), "utf8")).toBe(INTENT("draft", "c"));
     } finally {
       r.cleanup();
     }

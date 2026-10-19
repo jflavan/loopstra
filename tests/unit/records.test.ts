@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commitRecord, RecordRaced, RecordUnsettled, setStatus, settleRecord } from "../../src/context";
+import { commitRecord, landed, RecordRaced, RecordUnsettled, setStatus, settleRecord } from "../../src/context";
 import { Git } from "../../src/git";
+import type { RecordDraft } from "../../src/record-draft";
 import { requestStop, resetStop } from "../../src/stop";
 import { run, setupRepo } from "../helpers";
 
@@ -269,5 +271,42 @@ describe("commitRecord after HEAD moved", () => {
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally { Git.prototype.moveHead = moveHead; resetStop(); trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("landed", () => {
+  const ID = "000000000000001-1-0001";
+  /** A record of SLUG that adds one file, so each commits something. */
+  const note = (n: string) => async (d: RecordDraft) => { d.write(`intent/${SLUG}/note-${n}.md`, n); };
+
+  test("only a record whose trailer line is exactly the id landed for it, and only in its change's folder", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      // A subject that names the id (a person's name can say anything), and a longer id the id begins.
+      await commitRecord(repo.path, "main", SLUG, `accepted by Loopstra-Request: ${ID}`, note("1"));
+      await commitRecord(repo.path, "main", SLUG, "a note", note("2"), { request: `${ID}0` });
+      expect(await landed(repo.path, ID, SLUG)).toBe(false);
+      await commitRecord(repo.path, "main", SLUG, "a note", note("3"), { request: ID });
+      expect(await landed(repo.path, ID, SLUG)).toBe(true);
+      expect(await landed(repo.path, ID, "another-change")).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("since bounds the walk to an hour before it; one that is not a date bounds nothing", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      await commitRecord(repo.path, "main", SLUG, "a note", note("1"), { request: ID });
+      expect(await landed(repo.path, ID, SLUG, new Date().toISOString())).toBe(true);
+      // A request made two hours after the record: the record is older than the walk looks.
+      expect(await landed(repo.path, ID, SLUG, new Date(Date.now() + 2 * 3_600_000).toISOString())).toBe(false);
+      expect(await landed(repo.path, ID, SLUG, "not a date")).toBe(true);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a git log that fails throws, never reads as not landed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "loopstra-not-a-repo-"));
+    try {
+      await expect(landed(dir, ID, SLUG)).rejects.toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

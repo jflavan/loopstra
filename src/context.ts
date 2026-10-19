@@ -211,15 +211,24 @@ export function commitRecord(root: string, main: string, slug: string, what: str
   });
 }
 
+/** How far before `since` landed looks: a commit's date is the committing machine's clock, which may be behind. */
+const LANDED_SLACK_MS = 60 * 60_000;
+
 /**
  * True when a record tagged with `id` (see commitRecord's `opts.request`) landed on main for `slug`:
- * HEAD's history of the change's folder has a commit carrying `Loopstra-Request: <id>`. A pass the
- * loop was killed in after that commit and before it finished leaves exactly this; the caller then
- * finishes as if it had just committed, and writes nothing again.
+ * HEAD's history of the change's folder has a commit with the line `Loopstra-Request: <id>`, the
+ * whole line (a subject naming the id, or a longer id it begins, is not it). A pass the loop was
+ * killed in after that commit and before it finished leaves exactly this; the caller then finishes
+ * as if it had just committed, and writes nothing again. `since` (ISO, when the request or message
+ * was made) bounds the walk to an hour before it; one that is not a date bounds nothing. A git that
+ * fails throws: "not landed" would write the record twice.
  */
-export async function landed(root: string, id: string, slug: string): Promise<boolean> {
-  const r = await new Git(root).run(["log", "-1", "--format=%H", "--fixed-strings", `--grep=Loopstra-Request: ${id}`, "HEAD", "--", `intent/${slug}`], { allowFail: true });
-  return r.code === 0 && r.out.trim() !== "";
+export async function landed(root: string, id: string, slug: string, since?: string): Promise<boolean> {
+  const from = since === undefined ? NaN : Date.parse(since);
+  const bound = Number.isFinite(from) ? [`--since=${new Date(from - LANDED_SLACK_MS).toISOString()}`] : [];
+  // An id is digits and hyphens (see ID in src/ids.ts), so it needs no escaping in the pattern.
+  const r = await new Git(root).run(["log", "-1", "--format=%H", ...bound, `--grep=^Loopstra-Request: ${id}$`, "HEAD", "--", `intent/${slug}`]);
+  return r.out.trim() !== "";
 }
 
 /**

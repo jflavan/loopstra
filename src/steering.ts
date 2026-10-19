@@ -49,7 +49,7 @@ function unrecordedDir(root: string, slug: string): string {
  */
 function recordDelivered(ctx: StepContext, m: InboxMessage, phase: string): Promise<void> {
   const at = new Date();
-  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(m, phase, at), { id: m.id, trace: ctx.trace }).catch((err: unknown) => {
+  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(m, phase, at), { id: m.id, since: m.at, trace: ctx.trace }).catch((err: unknown) => {
     if (!(err instanceof StopRequested)) traceError(ctx, { where: "conversation", error: errorText(err) });
     try {
       const marker: Unrecorded = { message: m, phase, at: at.toISOString() };
@@ -79,7 +79,7 @@ async function recordUnrecorded(ctx: StepContext): Promise<void> {
     if (!u) continue;
     try {
       const at = new Date(u.at);
-      await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { id: u.message.id, trace: ctx.trace });
+      await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { id: u.message.id, since: u.message.at, trace: ctx.trace });
       rmSync(path, { force: true });
     } catch (e) {
       // A stopping loop records nothing: the marker waits for the next step's sweep.
@@ -109,7 +109,7 @@ async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
   recording.add(key);
   try {
     const was = recordedAs(ctx.root, ctx.slug, m.id, { who: m.by, via: m.via, text: m.text });
-    if (!was) await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "later", who: m.by, via: m.via, text: m.text, at: new Date() }, { id: m.id, trace: ctx.trace });
+    if (!was) await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "later", who: m.by, via: m.via, text: m.text, at: new Date() }, { id: m.id, since: m.at, trace: ctx.trace });
     markDone(ctx.root, ctx.slug, m, was && was !== "later" ? "delivered" : "next session");
   } catch (e) {
     // A stopping loop records nothing: the message waits for the next step's sweep.

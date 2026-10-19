@@ -119,6 +119,8 @@ describe("conversation.md", () => {
       await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 1) }, { id });
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
       expect(await new Git(r.root).headSha()).toBe(head);
+      // recorded.json names it again, as the entry that landed.
+      expect(recordedAs(r.root, "a", id, m)).toBe("message");
     } finally {
       r.cleanup();
     }
