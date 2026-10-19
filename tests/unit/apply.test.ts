@@ -743,7 +743,7 @@ describe("applying requests", () => {
       const none = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
       const closed = submitRequest(r.root, { ...by, kind: "answer", slug: "c", text: "Leave them out." });
       const blank = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "  " });
-      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(4001) });
+      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_001) });
       await apply(r.root);
       expect(requestState(r.root, none.id)).toMatchObject({ ok: false, text: "a has no question waiting; nothing changed." });
       expect(requestState(r.root, closed.id)).toMatchObject({ ok: false, text: "c is closed; nothing changed." });
@@ -751,7 +751,10 @@ describe("applying requests", () => {
       expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("c", "request")!.payload)).toMatchObject({ kind: "answer", result: "refused" });
+      // The refusal says who asked, from where, as every other request's event does.
+      const refused = trace.lastEvent("a", "request", long.id)?.payload ?? "";
       trace.close();
+      expect(JSON.parse(refused)).toMatchObject({ id: long.id, result: "refused", by: by.byName, byId: by.by, via: by.via });
     } finally {
       r.cleanup();
     }

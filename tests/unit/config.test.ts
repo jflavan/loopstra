@@ -106,6 +106,27 @@ describe("loadConfig", () => {
     expect(problems.map((p) => p.text)).toEqual(["commands.test is required: the single command that runs your tests"]);
   });
 
+  test("an empty optional command reads as none, as it did before the blank-name rule", () => {
+    const cfg = validateConfig({ version: 1, commands: { test: "bun test", lint: "", build: "", run: "", install: "" } });
+    expect([cfg.commands.lint, cfg.commands.build, cfg.commands.run, cfg.commands.install]).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  test("a value of only spaces is as blank as an empty one: a branch, a model name, or a command", () => {
+    const problems = (raw: unknown) => {
+      try { validateConfig(raw); } catch (e) { return (e as ConfigError).problems.map((p) => p.text); }
+      return [];
+    };
+    const ok = { version: 1, commands: { test: "bun test" } };
+    expect(problems({ ...ok, main_branch: " " })).toEqual(["main_branch: must be a branch name, like main"]);
+    expect(problems({ ...ok, claude: { models: { default: "  ", cheap: "\t", strong: " " } } })).toEqual([
+      "claude.models.default: must be a model name", "claude.models.cheap: must be a model name", "claude.models.strong: must be a model name",
+    ]);
+    expect(problems({ ...ok, commands: { test: "bun test", lint: "  " } })).toEqual(["commands.lint: must be a command, or the line removed"]);
+    expect(problems({ version: 1, commands: { test: "   " } })).toEqual(["commands.test is required: the single command that runs your tests"]);
+    // A name around spaces is the name.
+    expect(validateConfig({ ...ok, main_branch: " trunk " }).main_branch).toBe("trunk");
+  });
+
   test("a blank branch, model or command, a version that is not 1, and a missing channel are each refused in plain words", () => {
     const problems = (raw: unknown) => {
       try { validateConfig(raw); } catch (e) { return (e as ConfigError).problems.map((p) => p.text); }
@@ -116,7 +137,7 @@ describe("loadConfig", () => {
     expect(problems({ ...ok, claude: { models: { default: "", cheap: "", strong: "" } } })).toEqual([
       "claude.models.default: must be a model name", "claude.models.cheap: must be a model name", "claude.models.strong: must be a model name",
     ]);
-    expect(problems({ ...ok, commands: { test: "bun test", lint: "", build: "", run: "", install: "" } })).toEqual([
+    expect(problems({ ...ok, commands: { test: "bun test", lint: " ", build: " ", run: " ", install: " " } })).toEqual([
       "commands.lint: must be a command, or the line removed", "commands.build: must be a command, or the line removed",
       "commands.run: must be a command, or the line removed", "commands.install: must be a command, or the line removed",
     ]);

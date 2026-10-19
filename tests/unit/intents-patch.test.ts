@@ -75,6 +75,27 @@ describe("patchFrontmatter", () => {
     expect(out.split("\n").filter((l) => l === "---")).toHaveLength(2);
   });
 
+  test("an empty frontmatter block takes the patched keys: no second block is put in front", () => {
+    expect(patchFrontmatter("---\n---\n# Intent: x\n", { priority: "high" })).toBe("---\npriority: high\n---\n# Intent: x\n");
+    expect(patchFrontmatter("﻿---\r\n---\r\n# Intent: x\r\n", { status: "accepted" })).toBe("﻿---\r\nstatus: accepted\r\n---\r\n# Intent: x\r\n");
+    expect(patchFrontmatter("---\n---\n# Intent: x\n", {}, ["priority"])).toBe("---\n---\n# Intent: x\n");
+  });
+
+  test("an opening fence with spaces before the dashes is refused: a patch never puts a second block in front", () => {
+    for (const text of [" ---\nstatus: building\n---\n# Intent: x\n", "\t---  \nstatus: building\n---\n# Intent: x\n"]) {
+      expect(() => patchFrontmatter(text, { status: "accepted" })).toThrow(FrontmatterProblem);
+    }
+  });
+
+  test("a closing line counts only as the parser counts it: ---- is not one, so no body line is changed", () => {
+    expect(() => patchFrontmatter("---\nstatus: building\n----\n# Intent: x\n", { status: "reviewing" })).toThrow(FrontmatterProblem);
+    // With a --- further down (a rule in the body), the block would run to it: the patch refuses, as the parser does, and leaves the body's line alone.
+    const ruled = "---\nstatus: building\n----\n# Intent: x\nhold: a body line\n---\nmore\n";
+    expect(() => parseIntentFile(ruled)).toThrow();
+    expect(() => patchFrontmatter(ruled, {}, ["hold"])).toThrow();
+    expect(patchFrontmatter("---\nstatus: building\n---  \n# Intent: x\n", { status: "reviewing" })).toBe("---\nstatus: reviewing\n---  \n# Intent: x\n");
+  });
+
   test("an indented comment line after the patched key stays: only a block scalar's lines are its value's", () => {
     const raw = "---\nstatus: building\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n";
     expect(patchFrontmatter(raw, { status: "reviewing" })).toBe("---\nstatus: reviewing\n  # a person's note about priority\npriority: high\n---\n# Intent: x\n");
