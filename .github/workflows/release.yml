@@ -8,8 +8,8 @@ name: release
 on:
   # Safe here, though zizmor flags every workflow_run: only a ci run on a push to main (the branch
   # filter, and the job's `if` on event and conclusion) gets this far, never one on a fork's pull
-  # request, and the job checks out that main commit. A reusable workflow called from ci would
-  # change the workflow npm's trusted publisher names (release.yml).
+  # request, and the job checks out main itself, never a ref the event names. A reusable workflow
+  # called from ci would change the workflow npm's trusted publisher names (release.yml).
   workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [ci]
     types: [completed]
@@ -22,9 +22,8 @@ on:
         type: choice
         options: ["", patch, minor]
 
-permissions:
-  contents: write # push the tag and create the release
-  id-token: write # npm trusted publishing (OIDC) and provenance
+# None at the top level: the job asks for what it needs.
+permissions: {}
 
 # One release at a time, never cancelled half way.
 concurrency:
@@ -38,12 +37,27 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag and create the release
+      id-token: write # npm trusted publishing (OIDC) and provenance
     steps:
+      # The default ref: main as it is now (for a workflow_run, its latest commit; for a manual run,
+      # the commit it was started on), never a ref the triggering event names.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # every commit and tag: the version, the skip check and shipped.json need them
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false # the tag is made through the API, so git needs no token
+      # Only the commit ci passed on is released. If main has moved on since, the newer commit's own
+      # ci run releases it, this one included, so this run releases nothing.
+      - id: tip
+        if: github.event_name == 'workflow_run'
+        env:
+          PASSED: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$PASSED" ]; then
+            echo "main has moved on past $PASSED; the ci run of its latest commit releases that."
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
@@ -52,16 +66,21 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm 11.5.1 or later, and `npm stage` 11.15 or later; the workflow uses
-      # 11.21. No Node release bundles that yet, so npm itself is installed, at one exact version.
-      - run: npm install -g npm@11.21.1 # zizmor: ignore[adhoc-packages]
+      # 11.21. No Node release bundles that yet, so npm itself is installed from the lockfile in
+      # .github/npm (one exact version, checked against its hash) and put first on PATH.
+      - run: |
+          npm ci --prefix .github/npm --ignore-scripts --no-audit --no-fund
+          echo "$GITHUB_WORKSPACE/.github/npm/node_modules/.bin" >> "$GITHUB_PATH"
+      - run: npm --version
       - run: bun install --frozen-lockfile
       - id: plan
+        if: steps.tip.outputs.moved != 'true'
         env:
           BUMP: ${{ inputs.bump }}
           MANUAL: ${{ github.event_name == 'workflow_dispatch' && '--manual' || '' }}
         # Unquoted: an empty one (a workflow_run, or no bump chosen) passes no argument.
         run: bun scripts/release.ts plan $MANUAL $BUMP >> "$GITHUB_OUTPUT"
-      - if: steps.plan.outputs.ship != 'true'
+      - if: steps.plan.outputs.ship == 'false'
         env:
           PREVIOUS: ${{ steps.plan.outputs.previous }}
         run: echo "Nothing to release since v$PREVIOUS."
