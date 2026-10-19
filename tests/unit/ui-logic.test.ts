@@ -18,7 +18,7 @@ import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOAB
 import { follow } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
-import { givesFocusBack } from "../../src/ui/parts/focus";
+import { givesFocusBack, returnTarget } from "../../src/ui/parts/focus";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -221,6 +221,16 @@ describe("where the focus goes when a panel closes", () => {
     // The drawer's box already gone: only a focus that is nowhere is taken back.
     expect(givesFocusBack(elsewhere, body, null)).toBe(false);
     expect(givesFocusBack(body, body, null)).toBe(true);
+  });
+
+  test("a panel opened by a closing dialog gives the focus back to what that dialog would have", () => {
+    const button = { name: "the button the palette was opened from" };
+    const paletteBox = { name: "the palette's box, about to go" };
+    // Nothing handed over: what has the focus as the panel opens.
+    expect(returnTarget(null, elsewhere)).toBe(elsewhere);
+    // The palette's Ask opens the drawer: not the palette's own box, but what had the focus before the palette.
+    expect(returnTarget(button, paletteBox)).toBe(button);
+    expect(returnTarget(button, body)).toBe(button);
   });
 });
 
