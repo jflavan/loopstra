@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git, GitTimeout } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { runStepGuarded, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { fixture, run, tempDir, withEnv } from "../helpers";
+import { fixture, run, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { SLUG, BRANCH, PLAN, remoteSetup, intentOf, elsewhere, onRemoteMain } from "./remote-helpers";
 
 afterEach(() => resetStop());
@@ -102,7 +102,7 @@ describe("the loop with a GitHub remote", () => {
       // while the checks still run, moves that change on in the same tick.
       const clone = await elsewhere(s.remote);
       const other = await readIntent(clone.path, "other");
-      await writeIntent(other, { status: "accepted" });
+      await writeIntentOnDisk(other, { status: "accepted" });
       await run(["git", "commit", "-q", "-am", "person: accepted"], clone.path);
       await run(["git", "push", "-q", "origin", "main"], clone.path);
       clone.cleanup();
@@ -281,7 +281,7 @@ describe("the loop with a GitHub remote", () => {
         expect(blocked.status).toBe("blocked");
         expect(blocked.note).toContain("The pull request merged on GitHub, but recording it here kept failing: fatal: unable to read the repository");
         expect(blocked.note).toContain("set status to merge-review");
-        await writeIntent(await readIntent(s.repo, SLUG), { status: "merge-review", note: "" });
+        await writeIntentOnDisk(await readIntent(s.repo, SLUG), { status: "merge-review", note: "" });
         await new Git(s.repo).commitAll("person: look again");
         expect(await runStepGuarded(new StepContext(s.repo, await loadConfig(s.repo), trace, await readIntent(s.repo, SLUG)))).toEqual({ ok: true });
       } finally { trace.close(); }
@@ -345,7 +345,7 @@ describe("the loop with a GitHub remote", () => {
       expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "checks")).toBe(false);
 
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "merge-approved", note: "" });
+      await writeIntentOnDisk(i, { status: "merge-approved", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: merge-approved");
 
       const r = await tick(s.repo);
@@ -371,7 +371,7 @@ describe("the loop with a GitHub remote", () => {
       // Saved, not committed: the sync skips a main checkout with unsaved tracked files, so the
       // merge step commits the change's own folder before it brings main up to date.
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "merge-approved", note: "" });
+      await writeIntentOnDisk(i, { status: "merge-approved", note: "" });
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merged");
       expect((await new Git(s.repo).run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
@@ -392,7 +392,7 @@ describe("the loop with a GitHub remote", () => {
 
       // Reopened and merged on GitHub by the person: recorded as merged, never merged again.
       const j = await readIntent(s.repo, SLUG);
-      await writeIntent(j, { status: "merge-review", note: "" });
+      await writeIntentOnDisk(j, { status: "merge-review", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
       const other = await elsewhere(s.remote);
       await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);

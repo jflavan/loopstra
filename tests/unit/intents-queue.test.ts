@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, dependencyNote, isRunnable, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn, writeIntent,
+  checkConsistency, dependencyNote, isRunnable, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn,
   type Intent,
 } from "../../src/intents";
 import { sameFileHolds } from "../../src/scheduler";
-import { tempDir } from "../helpers";
+import { tempDir, writeIntentOnDisk } from "../helpers";
 
 async function mk(root: string, slug: string, fm: string, extra: Record<string, string> = {}) {
   const dir = join(root, "intent", slug);
@@ -134,7 +134,7 @@ describe("scan and queue", () => {
     const t = tempDir();
     await mk(t.path, "w", "status: accepted");
     const [i] = (await scanRepo(t.path)).intents;
-    await writeIntent(i!, { status: "blocked", note: "Tests failed three times." });
+    await writeIntentOnDisk(i!, { status: "blocked", note: "Tests failed three times." });
     const again = await readIntent(t.path, "w");
     expect(again.file.frontmatter.status).toBe("blocked");
     expect(again.file.frontmatter.note).toBe("Tests failed three times.");

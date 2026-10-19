@@ -99,11 +99,39 @@ export class LoopBudgetReached extends Error {
 }
 
 /**
- * A stop request, an unavailable assistant, or the loop's used-up day: none is the step's own
- * failure. The step ends, the change keeps its status, and the scheduler handles each. The one list.
+ * Main moved twice while a record was being committed (see commitRecord in src/context.ts). Not the
+ * step's fault: the step ends, the change keeps its status, and the step runs again on the next tick.
+ */
+export class RecordRaced extends Error {
+  constructor(slug: string) {
+    super(`main moved twice while a record of ${slug} was being committed; it is tried again on the next tick`);
+    this.name = "RecordRaced";
+  }
+}
+
+/**
+ * A record a kill cut short could not be finished yet, so commitRecord committed nothing over it.
+ * Not the step's fault: the step ends, the change keeps its status, and it is tried again.
+ */
+export class RecordUnsettled extends Error {
+  constructor() {
+    super("a record a kill cut short could not be finished yet; it is tried again");
+    this.name = "RecordUnsettled";
+  }
+}
+
+/** A record that could not be committed this time (RecordRaced, RecordUnsettled): it is tried again on the next tick. */
+export function recordNotYet(e: unknown): e is RecordRaced | RecordUnsettled {
+  return e instanceof RecordRaced || e instanceof RecordUnsettled;
+}
+
+/**
+ * A stop request, an unavailable assistant, the loop's used-up day, or a record that could not be
+ * committed this time (see recordNotYet): none is the step's own failure. The step ends, the change
+ * keeps its status, and the scheduler handles each. The one list.
  */
 export function notTheStepsFault(e: unknown): boolean {
-  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached;
+  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached || recordNotYet(e);
 }
 
 let requested = false;

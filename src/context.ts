@@ -9,7 +9,7 @@ import { onCheckout } from "./lanes";
 import { effectivePriority, parseIntentFile, readIntent, writeChangeFile, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { RecordDraft, type DraftChange } from "./record-draft";
 import { errorText } from "./shell";
-import { throwIfStopping } from "./stop";
+import { RecordRaced, RecordUnsettled, throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
 /** The folder that holds each change's snapshot of main (see StepContext.snapshot). */
@@ -131,22 +131,6 @@ async function assertOnMain(git: Git, main: string): Promise<void> {
   }
 }
 
-/** Main moved twice while a record was being committed; it is tried again on the next tick. */
-export class RecordRaced extends Error {
-  constructor(slug: string) {
-    super(`main moved twice while a record of ${slug} was being committed; it is tried again on the next tick`);
-    this.name = "RecordRaced";
-  }
-}
-
-/** A record a kill cut short could not be finished yet, so commitRecord committed nothing over it; it is tried again. */
-export class RecordUnsettled extends Error {
-  constructor() {
-    super("a record a kill cut short could not be finished yet; it is tried again");
-    this.name = "RecordUnsettled";
-  }
-}
-
 /** The record being brought into the checkout (see commitRecord), so a kill in between is finished (see settleRecord). */
 const RecordMarkerSchema = z.object({ parent: z.string(), commit: z.string(), slug: z.string(), paths: z.array(z.string()) });
 type RecordMarker = z.infer<typeof RecordMarkerSchema>;
@@ -157,17 +141,21 @@ const markerPath = (root: string) => join(loopstraDir(root), "recording.json");
  * edits, chat's drafts, the main-health draft) is written this one way, under the checkout lock and
  * only on main (MainCheckoutMoved otherwise). A record a kill cut short is finished first (see
  * settleRecord); while it cannot be, nothing is committed (RecordUnsettled), since a
- * commit over a checkout still behind HEAD would undo it. `write` writes into a draft, never the
- * checkout (it may give false: nothing to commit after all). The commit is made first, from main's
- * HEAD, the change's folder and queue.md as they are on disk, and the draft over them (see
- * Git.commitFiles); HEAD moves to it with a compare-and-swap (tried once more from the new HEAD when
+ * commit over a checkout still behind main would undo it. `write` writes into a draft, never the
+ * checkout (it may give false: nothing to commit after all). The commit is made first, from the main
+ * branch (`refs/heads/<main>`, not HEAD: a person may switch branches while the record is made), the
+ * change's folder and queue.md as they are on disk, and the draft over them (see Git.commitFiles);
+ * the main branch moves to it with a compare-and-swap (tried once more from its new commit when
  * someone committed meanwhile, then RecordRaced); only then are the drafted files written to the
  * checkout, each unless a person saved it since the draft read it, or since the write when the draft
  * never read it (theirs then stays, uncommitted, as any edit of theirs), and the index brought up for
- * the paths. A marker (`.loopstra/recording.json`) covers a kill between HEAD moving and the checkout
- * matching. A throw before HEAD moved changed nothing anywhere. Once HEAD moved the record has landed
- * and true is given even when a file or the index cannot be written: every file is still tried, the
- * marker stays for the next settleRecord, and the trace (`opts.trace`) says what failed. A stop
+ * the paths. A marker (`.loopstra/recording.json`) covers a kill between main moving and the checkout
+ * matching. A throw before main moved changed nothing anywhere. Once main moved the record has landed
+ * and true is given whatever fails after: every file is still tried, the marker stays for the next
+ * settleRecord (a marker left over is harmless: settling leaves a file that already holds the
+ * commit's content), and the trace (`opts.trace`) says what failed when it can. A checkout no
+ * longer on main by then is not written at all: the marker stays, and settleRecord finishes the
+ * record once the checkout is back on main. A stop
  * request ends it only before a commit is built (nothing has landed then, on a retry too); from there
  * on it does not stop it. `opts.request` tags the commit with the request it applies
  * (`Loopstra-Request: <id>`), so a later pass can ask git whether it landed. False when nothing was
@@ -180,9 +168,11 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     if (!(await settleRecord(root, main, opts.trace))) throw new RecordUnsettled();
     throwIfStopping();
     const paths = [`intent/${slug}`, "intent/queue.md"];
+    const ref = `refs/heads/${main}`;
     const message = bookkeeping(`loopstra(${slug}): ${what}`) + (opts.request ? `\n\nLoopstra-Request: ${opts.request}` : "");
     for (let attempt = 0; attempt < 2; attempt++) {
-      const parent = await git.headSha();
+      const parent = await git.commitOf(ref);
+      if (!parent) throw new Error(`there is no branch ${main} to record on`);
       const draft = new RecordDraft(root, slug);
       if ((await write(draft)) === false) return false;
       const changes = draft.changes();
@@ -196,19 +186,43 @@ export function commitRecord(root: string, main: string, slug: string, what: str
       if (!commit) return false;
       const marker: RecordMarker = { parent, commit, slug, paths: changes.map((c) => c.rel) };
       writeFileAtomic(markerPath(root), JSON.stringify(marker));
-      if (!(await git.moveHead(parent, commit))) {
-        // Someone committed on main meanwhile: nothing moved, and the record is made again from the new HEAD.
+      if (!(await git.moveRef(ref, parent, commit))) {
+        // Someone committed on main meanwhile: nothing moved, and the record is made again from main's new commit.
         rmSync(markerPath(root), { force: true });
         continue;
       }
-      const failed = await bringUp(git, root, paths, changes, seen);
-      if (failed.length) {
-        opts.trace?.event(slug, "error", { where: "record", commit, error: `the record landed, but the checkout could not be brought up to it (${failed.join("; ")}); it is finished on the next settle` });
-      } else rmSync(markerPath(root), { force: true });
+      await afterLanding(git, root, main, slug, commit, paths, changes, seen, opts.trace);
       return true;
     }
     throw new RecordRaced(slug);
   });
+}
+
+/**
+ * commitRecord once main has moved to the record's commit: the checkout is brought up to it (see
+ * bringUp) and the marker removed, unless the checkout is no longer on main (a person switched
+ * branches meanwhile: their branch is not written, and settleRecord finishes the record once it is
+ * back on main). Never throws: the record has landed whatever fails here, which is traced when the
+ * trace can be written, and leaves the marker for the next settle.
+ */
+async function afterLanding(git: Git, root: string, main: string, slug: string, commit: string, paths: string[], changes: DraftChange[], seen: Map<string, Buffer | null>, trace?: Trace): Promise<void> {
+  const traced = (error: string) => {
+    try { trace?.event(slug, "error", { where: "record", commit, error }); } catch { /* the trace cannot be written either: the marker still stands */ }
+  };
+  try {
+    const branch = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], { allowFail: true, cleanup: true });
+    if (branch.code !== 0 || branch.out.trim() !== main) {
+      try {
+        trace?.event(slug, "command", { command: "record landed while the checkout is on another branch", commit, note: `not written into the checkout; finished once it is back on ${main}` });
+      } catch { /* the marker still stands */ }
+      return;
+    }
+    const failed = await bringUp(git, root, paths, changes, seen);
+    if (failed.length) traced(`the record landed, but the checkout could not be brought up to it (${failed.join("; ")}); it is finished on the next settle`);
+    else rmSync(markerPath(root), { force: true });
+  } catch (e) {
+    traced(`the record landed, but finishing it failed (${errorText(e)}); it is finished on the next settle`);
+  }
 }
 
 /** How far before `since` landed looks: a commit's date is the committing machine's clock, which may be behind. */
@@ -216,23 +230,23 @@ const LANDED_SLACK_MS = 60 * 60_000;
 
 /**
  * True when a record tagged with `id` (see commitRecord's `opts.request`) landed on main for `slug`:
- * HEAD's history of the change's folder has a commit with the line `Loopstra-Request: <id>`, the
- * whole line (a subject naming the id, or a longer id it begins, is not it). A pass the loop was
+ * the main branch's history of the change's folder (`refs/heads/<main>`, not HEAD: a person may
+ * have switched branches) has a commit with the line `Loopstra-Request: <id>`, the whole line (a subject naming the id, or a longer id it begins, is not it). A pass the loop was
  * killed in after that commit and before it finished leaves exactly this; the caller then finishes
  * as if it had just committed, and writes nothing again. `since` (ISO, when the request or message
  * was made) bounds the walk to an hour before it; one that is not a date bounds nothing. A git that
  * fails throws: "not landed" would write the record twice.
  */
-export async function landed(root: string, id: string, slug: string, since?: string): Promise<boolean> {
+export async function landed(root: string, main: string, id: string, slug: string, since?: string): Promise<boolean> {
   const from = since === undefined ? NaN : Date.parse(since);
   const bound = Number.isFinite(from) ? [`--since=${new Date(from - LANDED_SLACK_MS).toISOString()}`] : [];
   // An id is digits and hyphens (see ID in src/ids.ts), so it needs no escaping in the pattern.
-  const r = await new Git(root).run(["log", "-1", "--format=%H", ...bound, `--grep=^Loopstra-Request: ${id}$`, "HEAD", "--", `intent/${slug}`]);
+  const r = await new Git(root).run(["log", "-1", "--format=%H", ...bound, `--grep=^Loopstra-Request: ${id}$`, `refs/heads/${main}`, "--", `intent/${slug}`]);
   return r.out.trim() !== "";
 }
 
 /**
- * Brings the checkout up to a record whose commit HEAD now has: each drafted file is written or
+ * Brings the checkout (on main) up to a record whose commit main now has: each drafted file is written or
  * removed unless a person saved it since `seen` noted it, then the index is reset for the paths. Every
  * file is tried, and the reset too, whatever failed before. What failed, each with its error.
  */
@@ -253,7 +267,7 @@ async function bringUp(git: Git, root: string, paths: string[], changes: DraftCh
   }
   try {
     // The whole folder: the commit also took a person's unstaged edits in it, whose index entries are
-    // now behind HEAD. A path that matches nothing (queue.md not made yet) does not stop the others.
+    // now behind main. A path that matches nothing (queue.md not made yet) does not stop the others.
     await git.run(["reset", "-q", "--", ...paths], { cleanup: true });
   } catch (e) {
     failed.push(`the index: ${errorText(e)}`);
@@ -262,10 +276,10 @@ async function bringUp(git: Git, root: string, paths: string[], changes: DraftCh
 }
 
 /**
- * Finishes a record a kill (or a failure after HEAD moved) left between moving HEAD and writing the
- * checkout (see commitRecord), at the start of each tick and of each record. Only with the checkout on
- * `main`: off it, HEAD is a person's branch, and the marker waits. Main at the marker's parent: HEAD
- * never moved, and the marker goes. Main at the marker's commit or past it: each file the marker names
+ * Finishes a record a kill (or a failure after main moved, or a branch switch) left between moving
+ * main and writing the checkout (see commitRecord), at the start of each tick, of each record and of
+ * a local merge. Only with the checkout on `main`: off it, HEAD is a person's branch, and the marker
+ * waits. Main at the marker's parent: main never moved, and the marker goes. Main at the marker's commit or past it: each file the marker names
  * that still holds what the parent had (as git compares it) is brought up to the commit; one holding
  * anything else is left (a person's edit since, or the commit's own content already written); the
  * index is brought up for the record's paths. Anything else (main reset by a person): the marker goes.
@@ -327,7 +341,7 @@ function readIfThere(abs: string): Buffer | null {
  * disk), so a block that follows starts from the status saved, not from one never saved (which it
  * would take for a person's). Not read again from the file: a status a person set meanwhile must
  * still meet the block as theirs (PersonChangedStatus), not be blocked over. A second try of the
- * write (HEAD moved meanwhile, see commitRecord) starts from the intent as it was before the first.
+ * write (main moved meanwhile, see commitRecord) starts from the intent as it was before the first.
  */
 export async function commitForStep(ctx: StepContext, what: string, write: (draft: RecordDraft) => Promise<boolean | void>): Promise<boolean> {
   const { file, artifacts } = ctx.intent;

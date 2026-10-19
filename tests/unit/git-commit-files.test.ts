@@ -68,20 +68,20 @@ describe("Git.commitFiles", () => {
   });
 });
 
-describe("Git.moveHead", () => {
-  test("moves HEAD only from the commit it expects", async () => {
+describe("Git.moveRef", () => {
+  test("moves the ref only from the commit it expects", async () => {
     const r = await repo();
     try {
       const git = new Git(r.path);
       const parent = await git.headSha();
       const commit = (await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/x.md", text: "x\n" }], "x"))!;
       const other = (await git.commitFiles(parent, ["intent/a"], [{ rel: "intent/a/y.md", text: "y\n" }], "y"))!;
-      expect(await git.moveHead(other, commit)).toBe(false);
+      expect(await git.moveRef("refs/heads/main", other, commit)).toBe(false);
       expect(await git.headSha()).toBe(parent);
-      // A failure that is not a moved HEAD (here, a commit that does not exist) is an error, not a race.
-      await expect(git.moveHead(parent, "1".repeat(40))).rejects.toThrow(GitError);
+      // A failure that is not a moved ref (here, a commit that does not exist) is an error, not a race.
+      await expect(git.moveRef("refs/heads/main", parent, "1".repeat(40))).rejects.toThrow(GitError);
       expect(await git.headSha()).toBe(parent);
-      expect(await git.moveHead(parent, commit)).toBe(true);
+      expect(await git.moveRef("refs/heads/main", parent, commit)).toBe(true);
       expect(await git.headSha()).toBe(commit);
       expect(await git.currentBranch()).toBe("main");
     } finally { r.cleanup(); }

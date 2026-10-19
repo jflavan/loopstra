@@ -3,14 +3,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git, GitError } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
   StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker, PersonChangedStatus,
   readArtifact, setStatus, settleRecord, statusPatch, writeArtifact, writeIntentPriority, clearSession, loadSessions, saveSession,
 } from "../../src/context";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
-import { lastCommit, run, setupRepo, tempGitRepo } from "../helpers";
+import { lastCommit, run, setupRepo, tempGitRepo, writeIntentOnDisk } from "../helpers";
 
 async function setup() {
   const repo = await tempGitRepo();
@@ -51,7 +51,7 @@ describe("StepContext", () => {
     await setStatus(ctx, "spec-approved");
     await ctx.reload();
     // Simulate a person editing the status directly (skipping the runtime), leaving resume_from stale.
-    await writeIntent(ctx.intent, { status: "plan-approved" });
+    await writeIntentOnDisk(ctx.intent, { status: "plan-approved" });
     await ctx.reload();
     await setStatus(ctx, "building");
     const i = await readIntent(repo.path, "x");
@@ -211,18 +211,18 @@ describe("StepContext", () => {
 
   test("a record whose HEAD moved before its error (git's time limit after the move) keeps its marker, and the next settle brings the checkout up", async () => {
     const { repo, ctx, trace } = await setup();
-    const moveHead = Git.prototype.moveHead;
+    const moveRef = Git.prototype.moveRef;
     try {
       const intentMd = join(ctx.intent.dir, "intent.md");
       const before = await Bun.file(intentMd).text();
-      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
-        await moveHead.call(this, from, to);
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
+        await moveRef.call(this, ref, from, to);
         throw new GitError(["update-ref"], "", "", 124, "git update-ref timed out");
       };
       await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async (d) => {
         d.write("intent/x/intent.md", before.replace("status: accepted", "status: designing"));
       })).rejects.toBeInstanceOf(GitError);
-      Git.prototype.moveHead = moveHead;
+      Git.prototype.moveRef = moveRef;
       expect((await run(["git", "show", "HEAD:intent/x/intent.md"], repo.path)).out).toContain("status: designing");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
       expect(await settleRecord(repo.path, "main", trace)).toBe(true);
@@ -230,7 +230,7 @@ describe("StepContext", () => {
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally {
-      Git.prototype.moveHead = moveHead;
+      Git.prototype.moveRef = moveRef;
       trace.close(); repo.cleanup();
     }
   });

@@ -11,7 +11,7 @@ import { tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { chatRepo, draft, INTENT, message, sink, turn } from "../chat-helpers";
-import { lastCommit, run } from "../helpers";
+import { lastCommit, run, writeIntentOnDisk } from "../helpers";
 
 const HANDOFF = { title: "CSV export", brief: "Readers export a report as CSV.", updates: [] };
 
@@ -81,7 +81,7 @@ describe("chat with the loop", () => {
       await o.handle(message("yes"), out.send);
       // A person closes "other" before the loop gets to the request.
       const other = await readIntent(r.root, "other");
-      await writeIntent(other, { status: "closed" });
+      await writeIntentOnDisk(other, { status: "closed" });
       await new Git(r.root).commitAll("person closes other");
       // The loop's own step for the accepted intent fails without a design fixture; that is not under test.
       await tick(r.root).catch(() => {});

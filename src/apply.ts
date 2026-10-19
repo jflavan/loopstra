@@ -51,10 +51,11 @@ export function betweenPasses<T>(root: string, fn: () => Promise<T>): Promise<T>
  * landed): one the loop was killed in after its commit is finished as applied, never written again.
  * One that cannot be done gets a plain result saying why. One that cannot be read (see Unreadable in
  * src/requests.ts) is finished at once, and one that kept failing (see MAX_TRIES) is given up with a
- * plain result (a checkout off main is not a try: it is a reason to wait); nothing is put back then,
- * since a record that never landed wrote nothing. Passes on a root run one after another, never side
- * by side, and at most one waits behind the running one: a call while one waits gets that pass (it
- * has not started, so it sees this caller's requests too). Gives how many were finished.
+ * plain result (a checkout off main is not a try: it is a reason to wait), unless its record landed
+ * (see anyLanded); nothing is put back then, since a record that never landed wrote nothing. Passes
+ * on a root run one after another, never side by side, and at most one waits behind the running one:
+ * a call while one waits gets that pass (it has not started, so it sees this caller's requests too).
+ * Gives how many were finished.
  */
 export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<number> {
   const lane = laneOf(root);
@@ -193,7 +194,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       req.tries = (req.tries ?? 0) + 1;
       if (!Number.isFinite(Date.parse(req.firstFailedAt ?? ""))) req.firstFailedAt = new Date().toISOString();
       const failing = Date.now() - Date.parse(req.firstFailedAt!);
-      if (req.tries < MAX_TRIES || failing < GIVE_UP_MS) { saveApplying(root, req); continue; }
+      if (req.tries < MAX_TRIES || failing < GIVE_UP_MS || (await anyLanded(root, cfg.main_branch, req))) { saveApplying(root, req); continue; }
       // Nothing to put back: a record is committed before anything of it is written to the checkout.
       trace.event("slug" in req ? req.slug : "_loop", "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result: "failed", tries: req.tries });
       finishRequest(root, req, { ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
@@ -201,6 +202,24 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
     }
   }
   return applied;
+}
+
+/**
+ * True when a record of the request landed (see landed): for a new request, for any of its drafts.
+ * Such a request is not given up on: what failed came after its record, and the next pass finishes it
+ * as applied. A git that cannot answer counts as not landed, so a request is still given up on when
+ * git itself keeps failing; a stop request passes through.
+ */
+async function anyLanded(root: string, main: string, req: Request): Promise<boolean> {
+  const slugs = req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug];
+  for (const slug of slugs.filter((x) => SLUG.test(x))) {
+    try {
+      if (await landed(root, main, req.id, slug, req.at)) return true;
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+    }
+  }
+  return false;
 }
 
 /** True for an undo that takes back a send back (not an approve). */
@@ -239,7 +258,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   }
   let refused = null as Status | null;
   // Its record landed in a pass the loop was killed in: finished as started, not written again.
-  if (!(await landed(root, req.id, req.slug, req.at))) {
+  if (!(await landed(root, main, req.id, req.slug, req.at))) {
     await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async (draft) => {
       const intent = await readIntent(root, req.slug);
       const was = intent.file.frontmatter.status;
@@ -266,7 +285,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const path = join(root, "intent", i.slug, "intent.md");
     // Its record landed in a pass the loop was killed in: the file there is this request's, added already.
-    const done = await landed(root, req.id, i.slug, req.at);
+    const done = await landed(root, main, req.id, i.slug, req.at);
     if (!done && existsSync(path)) {
       let status = "unreadable";
       try { status = parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { /* keep unreadable */ }
@@ -349,7 +368,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Its record landed in a pass the loop was killed in: finished as applied, neither taken for a change
   // that moved on (its own record moved it) nor written again.
-  const done = await landed(root, req.id, req.slug, req.at);
+  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
   if (!done && was !== req.expect) return movedOn(trace, req, was);
   const problem = done ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
@@ -407,7 +426,7 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as done already.
-  const done = await landed(root, req.id, req.slug, req.at);
+  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
   if (!done && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!done && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
   // A priority of null takes the line out: the change had no stated priority.
@@ -435,7 +454,7 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as answered already.
-  const done = await landed(root, req.id, req.slug, req.at);
+  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
   if (!done && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
   // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
   if (!done && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }

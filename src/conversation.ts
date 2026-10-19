@@ -157,7 +157,7 @@ function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): 
  */
 export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string; since?: string; trace?: Trace } = {}): Promise<void> {
   const id = opts.id;
-  const earlier = id ? await landed(root, id, slug, opts.since) : false;
+  const earlier = id ? await landed(root, main, id, slug, opts.since) : false;
   let held = false;
   const wrote = await commitRecord(root, main, slug, "conversation", async (draft) => {
     const rel = `intent/${slug}/conversation.md`;

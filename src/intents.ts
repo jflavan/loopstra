@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import type { Config } from "./config";
-import { writeFileAtomic } from "./fsutil";
 import type { RecordDraft } from "./record-draft";
 import { errorText } from "./shell";
 import { andList } from "./text";
@@ -347,15 +346,11 @@ function patched(text: string, patch: Record<string, string>, remove: readonly s
 }
 
 /**
- * Writes a file of a change's folder whole (see writeFileAtomic), so the console, chat or a person's
- * editor never reads half of it. The temp file goes in the root's .loopstra (gitignored), not the
- * change's folder, where one a kill left behind would be committed with the next record. With a
- * draft, the file is written to the draft instead, and reaches disk once the record's commit has
- * landed (see commitRecord).
+ * Writes a file of a change's folder into a record's draft: it reaches disk, whole, once the record's
+ * commit has landed (see commitRecord).
  */
-export function writeChangeFile(intent: Intent, name: string, text: string, draft?: RecordDraft): void {
-  if (draft) { draft.write(`intent/${intent.slug}/${name}`, text); return; }
-  writeFileAtomic(join(intent.dir, name), text, join(intent.dir, "..", "..", ".loopstra"));
+export function writeChangeFile(intent: Intent, name: string, text: string, draft: RecordDraft): void {
+  draft.write(`intent/${intent.slug}/${name}`, text);
 }
 
 /**
@@ -364,18 +359,16 @@ export function writeChangeFile(intent: Intent, name: string, text: string, draf
  * `expectStatus`, nothing is written when the status read is a different one (a person changed
  * it), and nothing when intent.md is gone (a person deleted the change: it is not brought back);
  * the return value says whether it wrote. With `remove`, those keys' lines are taken out.
- * `intent.file` is refreshed from what was written. With a draft, the file is read through it and
- * written to it, and reaches disk once the record's commit has landed (see commitRecord); without
- * one, it is read from disk and written there.
+ * `intent.file` is refreshed from what was written. The file is read through the record's draft and
+ * written to it, and reaches disk once the record's commit has landed (see commitRecord).
  */
-export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> } = {}, draft?: RecordDraft): Promise<boolean> {
-  const path = join(intent.dir, "intent.md");
-  const onDisk = draft ? draft.read(`intent/${intent.slug}/intent.md`) : existsSync(path) ? await Bun.file(path).text() : null;
-  if (onDisk === null) return false;
-  if (opts.expectStatus !== undefined && parseIntentFile(onDisk).frontmatter.status !== opts.expectStatus) return false;
+export async function writeIntent(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> }, draft: RecordDraft): Promise<boolean> {
+  const current = draft.read(`intent/${intent.slug}/intent.md`);
+  if (current === null) return false;
+  if (opts.expectStatus !== undefined && parseIntentFile(current).frontmatter.status !== opts.expectStatus) return false;
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries(patch)) if (v !== undefined) values[k] = String(v);
-  const text = patchFrontmatter(onDisk, values, opts.remove ?? []);
+  const text = patchFrontmatter(current, values, opts.remove ?? []);
   writeChangeFile(intent, "intent.md", text, draft);
   intent.file = parseIntentFile(text);
   return true;

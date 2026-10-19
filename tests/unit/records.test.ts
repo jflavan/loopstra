@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commitRecord, landed, RecordRaced, RecordUnsettled, setStatus, settleRecord } from "../../src/context";
+import { commitRecord, landed, setStatus, settleRecord } from "../../src/context";
 import { Git } from "../../src/git";
 import type { RecordDraft } from "../../src/record-draft";
-import { requestStop, resetStop } from "../../src/stop";
+import { RecordRaced, RecordUnsettled, requestStop, resetStop } from "../../src/stop";
 import { run, setupRepo } from "../helpers";
 
 const SLUG = "add-numbers";
@@ -46,20 +46,20 @@ describe("commitRecord through plumbing", () => {
 
   test("a person's save of a drafted file during the record stays on disk, uncommitted; the commit has the record's", async () => {
     const { repo, trace } = await setupRepo("accepted");
-    const moveHead = Git.prototype.moveHead;
+    const moveRef = Git.prototype.moveRef;
     try {
       const before = readFileSync(md(repo.path), "utf8");
       // The person saves after the commit was built and before HEAD moves.
-      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
         writeFileSync(md(repo.path), "a person's version\n");
-        return moveHead.call(this, from, to);
+        return moveRef.call(this, ref, from, to);
       };
       await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
         d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
       });
       expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
       expect(readFileSync(md(repo.path), "utf8")).toBe("a person's version\n");
-    } finally { Git.prototype.moveHead = moveHead; trace.close(); repo.cleanup(); }
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
   });
 
   test("HEAD moved by a person's commit during the record is tried again from the new HEAD; moved every time, RecordRaced", async () => {
@@ -88,17 +88,17 @@ describe("commitRecord through plumbing", () => {
 
   test("a step's status change that meets a person's commit is tried again from the status it began with", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
-    const moveHead = Git.prototype.moveHead;
+    const moveRef = Git.prototype.moveRef;
     try {
       let moves = 0;
       // A person commits elsewhere on main after the first commit was built and before HEAD moves.
-      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
         if (moves++ === 0) {
           writeFileSync(join(repo.path, "person.txt"), "p\n");
           await run(["git", "add", "person.txt"], repo.path);
           await run(["git", "commit", "-q", "-m", "a person's commit"], repo.path);
         }
-        return moveHead.call(this, from, to);
+        return moveRef.call(this, ref, from, to);
       };
       await setStatus(ctx, "designing", "on it");
       expect(moves).toBe(2);
@@ -107,7 +107,7 @@ describe("commitRecord through plumbing", () => {
       expect(ctx.intent.file.frontmatter.status).toBe("designing");
       // Traced once, for the try that landed.
       expect(trace.events(SLUG).filter((e) => e.type === "status_change")).toHaveLength(1);
-    } finally { Git.prototype.moveHead = moveHead; trace.close(); repo.cleanup(); }
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
   });
 });
 
@@ -118,7 +118,7 @@ describe("settleRecord", () => {
     const text = readFileSync(md(root), "utf8").replace("status: accepted", "status: designing");
     const commit = (await git.commitFiles(parent, [`intent/${SLUG}`], [{ rel: `intent/${SLUG}/intent.md`, text }], "loopstra(add-numbers): killed [skip ci]"))!;
     writeFileSync(join(root, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: SLUG, paths: [`intent/${SLUG}/intent.md`] }));
-    expect(await git.moveHead(parent, commit)).toBe(true);
+    expect(await git.moveRef("refs/heads/main", parent, commit)).toBe(true);
     return { parent, commit };
   }
 
@@ -221,12 +221,12 @@ describe("settleRecord", () => {
 describe("commitRecord after HEAD moved", () => {
   test("a drafted file that cannot be written does not stop the others; the record is reported landed, the marker stays and the trace says so", async () => {
     const { repo, trace } = await setupRepo("accepted");
-    const moveHead = Git.prototype.moveHead;
+    const moveRef = Git.prototype.moveRef;
     try {
       // A folder appears where the first drafted file goes, after the commit was built.
-      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
         mkdirSync(join(repo.path, "intent", SLUG, "note.md"), { recursive: true });
-        return moveHead.call(this, from, to);
+        return moveRef.call(this, ref, from, to);
       };
       expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
         d.write(`intent/${SLUG}/note.md`, "n\n");
@@ -236,7 +236,7 @@ describe("commitRecord after HEAD moved", () => {
       expect(readFileSync(join(repo.path, "intent", SLUG, "other.md"), "utf8")).toBe("o\n");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
       expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes("note.md"))).toBe(true);
-    } finally { Git.prototype.moveHead = moveHead; trace.close(); repo.cleanup(); }
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
   });
 
   test("a person's save between the draft reading a file and writing it stays on disk, uncommitted", async () => {
@@ -255,11 +255,11 @@ describe("commitRecord after HEAD moved", () => {
 
   test("a stop asked for once the commit is built does not stop the record: it lands and the checkout matches", async () => {
     const { repo, trace } = await setupRepo("accepted");
-    const moveHead = Git.prototype.moveHead;
+    const moveRef = Git.prototype.moveRef;
     try {
-      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
         requestStop();
-        return moveHead.call(this, from, to);
+        return moveRef.call(this, ref, from, to);
       };
       const before = readFileSync(md(repo.path), "utf8");
       expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
@@ -270,7 +270,83 @@ describe("commitRecord after HEAD moved", () => {
       expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
-    } finally { Git.prototype.moveHead = moveHead; resetStop(); trace.close(); repo.cleanup(); }
+    } finally { Git.prototype.moveRef = moveRef; resetStop(); trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("commitRecord beside a person's branch switch", () => {
+  const marker = (root: string) => join(root, ".loopstra", "recording.json");
+  const sha = async (root: string, ref: string) => (await run(["git", "rev-parse", ref], root)).out.trim();
+
+  for (const how of ["a new branch", "a branch that exists"] as const) {
+    test(`a switch to ${how} during the record: it lands on main, their branch is left as it was, the checkout is not written off main, and back on main a settle finishes it`, async () => {
+      const { repo, trace } = await setupRepo("accepted");
+      try {
+        if (how === "a branch that exists") {
+          await run(["git", "switch", "-q", "-c", "theirs"], repo.path);
+          writeFileSync(join(repo.path, "theirs.txt"), "t\n");
+          await run(["git", "add", "theirs.txt"], repo.path);
+          await run(["git", "commit", "-q", "-m", "their work"], repo.path);
+          await run(["git", "switch", "-q", "main"], repo.path);
+        }
+        const parent = await sha(repo.path, "main");
+        const theirs = how === "a branch that exists" ? await sha(repo.path, "theirs") : parent;
+        const before = readFileSync(md(repo.path), "utf8");
+        expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+          d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
+          await run(how === "a new branch" ? ["git", "switch", "-q", "-c", "theirs"] : ["git", "switch", "-q", "theirs"], repo.path);
+        }, { trace })).toBe(true);
+        expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+        expect(await sha(repo.path, "main^")).toBe(parent);
+        expect(await sha(repo.path, "theirs")).toBe(theirs);
+        expect((await run(["git", "symbolic-ref", "--short", "HEAD"], repo.path)).out.trim()).toBe("theirs");
+        // Off main the checkout is the person's branch: nothing of the record is written there.
+        expect(readFileSync(md(repo.path), "utf8")).toContain("status: accepted");
+        expect(existsSync(marker(repo.path))).toBe(true);
+        await run(["git", "switch", "-q", "main"], repo.path);
+        expect(await settleRecord(repo.path, "main", trace)).toBe(true);
+        expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+        expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+        expect(existsSync(marker(repo.path))).toBe(false);
+      } finally { trace.close(); repo.cleanup(); }
+    });
+  }
+
+  test("a failure after main moved (the marker cannot be removed) does not make the record a failed one", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveRef = Git.prototype.moveRef;
+    try {
+      // A folder stands where the marker was once main has moved, so removing the marker throws.
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
+        const moved = await moveRef.call(this, ref, from, to);
+        if (moved) { rmSync(marker(repo.path)); mkdirSync(join(marker(repo.path), "x"), { recursive: true }); }
+        return moved;
+      };
+      const before = readFileSync(md(repo.path), "utf8");
+      expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
+      }, { trace })).toBe(true);
+      expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+      expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes('"where":"record"'))).toBe(true);
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
+  });
+
+  test("two records of different changes made at once both land, one after the other, and the checkout matches both", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      mkdirSync(join(repo.path, "intent", "other"), { recursive: true });
+      const parent = await sha(repo.path, "main");
+      const landedBoth = await Promise.all([
+        commitRecord(repo.path, "main", SLUG, "one", async (d) => { d.write(`intent/${SLUG}/one.md`, "1\n"); }, { trace }),
+        commitRecord(repo.path, "main", "other", "two", async (d) => { d.write("intent/other/two.md", "2\n"); }, { trace }),
+      ]);
+      expect(landedBoth).toEqual([true, true]);
+      expect((await run(["git", "rev-list", "--count", `${parent}..main`], repo.path)).out.trim()).toBe("2");
+      expect((await run(["git", "show", `main:intent/${SLUG}/one.md`], repo.path)).out).toBe("1\n");
+      expect((await run(["git", "show", "main:intent/other/two.md"], repo.path)).out).toBe("2\n");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+    } finally { trace.close(); repo.cleanup(); }
   });
 });
 
@@ -285,10 +361,20 @@ describe("landed", () => {
       // A subject that names the id (a person's name can say anything), and a longer id the id begins.
       await commitRecord(repo.path, "main", SLUG, `accepted by Loopstra-Request: ${ID}`, note("1"));
       await commitRecord(repo.path, "main", SLUG, "a note", note("2"), { request: `${ID}0` });
-      expect(await landed(repo.path, ID, SLUG)).toBe(false);
+      expect(await landed(repo.path, "main", ID, SLUG)).toBe(false);
       await commitRecord(repo.path, "main", SLUG, "a note", note("3"), { request: ID });
-      expect(await landed(repo.path, ID, SLUG)).toBe(true);
-      expect(await landed(repo.path, ID, "another-change")).toBe(false);
+      expect(await landed(repo.path, "main", ID, SLUG)).toBe(true);
+      expect(await landed(repo.path, "main", ID, "another-change")).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("it asks the main branch, not the branch a person has the checkout on", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      await commitRecord(repo.path, "main", SLUG, "a note", note("1"), { request: ID });
+      // A branch from before the record: its history does not have it, main's does.
+      await run(["git", "switch", "-q", "-c", "theirs", "main^"], repo.path);
+      expect(await landed(repo.path, "main", ID, SLUG)).toBe(true);
     } finally { trace.close(); repo.cleanup(); }
   });
 
@@ -296,17 +382,17 @@ describe("landed", () => {
     const { repo, trace } = await setupRepo("accepted");
     try {
       await commitRecord(repo.path, "main", SLUG, "a note", note("1"), { request: ID });
-      expect(await landed(repo.path, ID, SLUG, new Date().toISOString())).toBe(true);
+      expect(await landed(repo.path, "main", ID, SLUG, new Date().toISOString())).toBe(true);
       // A request made two hours after the record: the record is older than the walk looks.
-      expect(await landed(repo.path, ID, SLUG, new Date(Date.now() + 2 * 3_600_000).toISOString())).toBe(false);
-      expect(await landed(repo.path, ID, SLUG, "not a date")).toBe(true);
+      expect(await landed(repo.path, "main", ID, SLUG, new Date(Date.now() + 2 * 3_600_000).toISOString())).toBe(false);
+      expect(await landed(repo.path, "main", ID, SLUG, "not a date")).toBe(true);
     } finally { trace.close(); repo.cleanup(); }
   });
 
   test("a git log that fails throws, never reads as not landed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "loopstra-not-a-repo-"));
     try {
-      await expect(landed(dir, ID, SLUG)).rejects.toThrow();
+      await expect(landed(dir, "main", ID, SLUG)).rejects.toThrow();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

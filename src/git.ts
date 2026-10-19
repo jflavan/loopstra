@@ -439,15 +439,16 @@ export class Git {
   }
 
   /**
-   * Moves HEAD (its branch) from `from` to `to`, as a compare-and-swap: false when HEAD is no longer
-   * `from`. Any other failure (a missing object, a ref another git process has locked) throws a
-   * GitError, so a real error is never taken for a race.
+   * Moves `ref` (a full name, such as `refs/heads/main`) from `from` to `to`, as a
+   * compare-and-swap: false when the ref is no longer `from`. A branch is named, not HEAD, so a
+   * person switching branches meanwhile never has theirs moved. Any other failure (a missing object,
+   * a ref another git process has locked) throws a GitError, so a real error is never taken for a race.
    */
-  async moveHead(from: string, to: string): Promise<boolean> {
-    const args = ["update-ref", "-m", "loopstra: record", "HEAD", to, from];
+  async moveRef(ref: string, from: string, to: string): Promise<boolean> {
+    const args = ["update-ref", "-m", "loopstra: record", ref, to, from];
     const r = await this.run(args, { allowFail: true, cleanup: true });
     if (r.code === 0) return true;
-    // git's words when the ref holds another value (LC_ALL=C, see gitEnv): "cannot lock ref 'HEAD': is at <sha> but expected <sha>".
+    // git's words when the ref holds another value (LC_ALL=C, see gitEnv): "cannot lock ref '<ref>': is at <sha> but expected <sha>".
     if (/: is at [0-9a-f]+ but expected [0-9a-f]+/.test(r.err)) return false;
     throw new GitError(args, r.out, r.err, r.code);
   }

@@ -3,13 +3,13 @@ import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv, writeIntentOnDisk } from "../helpers";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
 import { oneMerge } from "../../src/lanes";
@@ -106,7 +106,7 @@ async function landSquash(git: Git, branch: string, message: string): Promise<vo
 /** A person edits the status line by hand and commits it. */
 async function personSets(ctx: StepContext, to: "merge-approved" | "done"): Promise<void> {
   await ctx.reload();
-  await writeIntent(ctx.intent, { status: to, note: "" });
+  await writeIntentOnDisk(ctx.intent, { status: to, note: "" });
   await ctx.git.commitPaths([`intent/${ctx.slug}`], `person: ${to}`);
   await ctx.reload();
 }
@@ -157,7 +157,7 @@ describe("review", () => {
     expect(prompt).toContain("## Files that change\n- src/add.ts (new)");
     expect(prompt).not.toContain("from the branch");
 
-    await writeIntent(ctx.intent, { status: "reviewing" });
+    await writeIntentOnDisk(ctx.intent, { status: "reviewing" });
     await new Git(repo.path).commitAll("review again");
     await ctx.reload();
     await Bun.write(join(ctx.runDir, "plan.reconciled.md"), "# Plan: reconciled for this build\n");
@@ -431,6 +431,65 @@ describe("merge", () => {
     trace.close(); repo.cleanup();
   });
 
+  /**
+   * While the merge checks run (the first look at the change's worktree), another change's record
+   * lands on main and is cut short before the checkout matched it: the marker is left, and the index
+   * lags behind main for its file (see commitRecord). With `holdIndex`, a person's git then holds the
+   * index, so the record cannot be finished yet either.
+   */
+  function recordCutShortDuringChecks(ctx: StepContext, holdIndex: boolean): () => void {
+    const isDirty = Git.prototype.isDirty;
+    let done = false;
+    Git.prototype.isDirty = async function (this: Git) {
+      if (!done && this.cwd === ctx.worktreeDir) {
+        done = true;
+        const main = new Git(ctx.root);
+        const parent = await main.headSha();
+        const rel = "intent/other/intent.md";
+        const commit = (await main.commitFiles(parent, ["intent/other"], [{ rel, text: "other\n" }], "loopstra(other): cut short [skip ci]"))!;
+        writeFileSync(join(ctx.root, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: "other", paths: [rel] }));
+        await main.moveRef("refs/heads/main", parent, commit);
+        if (holdIndex) writeFileSync(join(ctx.root, ".git", "index.lock"), "");
+      }
+      return isDirty.call(this);
+    };
+    return () => { Git.prototype.isDirty = isDirty; };
+  }
+
+  test("a record another change left cut short during the merge checks is finished first, and the merge goes on", async () => {
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
+    await personSets(ctx, "merge-approved");
+    const restore = recordCutShortDuringChecks(ctx, false);
+    try {
+      await runMergeStep(ctx);
+    } finally { restore(); }
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
+    expect(await onMain(repo.path, "intent/other/intent.md")).toBe(true);
+    expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
+    expect(await new Git(repo.path).isDirty()).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a record cut short that cannot be finished yet makes the merge wait, not block; once it can be, the merge goes on", async () => {
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
+    await personSets(ctx, "merge-approved");
+    const restore = recordCutShortDuringChecks(ctx, true);
+    let result;
+    try {
+      result = await runMergeStep(ctx);
+    } finally { restore(); rmSync(join(repo.path, ".git", "index.lock"), { force: true }); }
+    expect(result).toEqual({ ok: true, waiting: true });
+    expect(await status(repo.path)).toBe("merge-approved");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+    await ctx.reload();
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
+    expect(await new Git(repo.path).isDirty()).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("merge-approved reads the newest review verdict", async () => {
     const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
     await personSets(ctx, "merge-approved");
@@ -550,7 +609,7 @@ describe("merge", () => {
     await landSquash(git, ctx.branch, "add-numbers: add numbers");
     mkdirSync(ctx.runDir, { recursive: true });
     writeFileSync(join(ctx.runDir, "merging"), marker(base, await git.headSha()));
-    await writeIntent(ctx.intent, { status: "merge-approved", note: "Looked at it again." });
+    await writeIntentOnDisk(ctx.intent, { status: "merge-approved", note: "Looked at it again." });
     await git.commitPaths([`intent/${ctx.slug}`], "person: a note");
     await ctx.reload();
     const merges = async () => (await git.run(["log", "--format=%s", "main"])).out.split("\n").filter((l) => l.startsWith("add-numbers:")).length;

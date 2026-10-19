@@ -401,6 +401,29 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("a request due to be given up whose record landed is kept for the next pass, which finishes it as applied", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    const kept = join(r.root, ".loopstra", "runs", "a", "sent-back.md");
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      claimRequest(r.root, q.id);
+      failedLongAgo(r.root, 5);
+      // The record lands, then keeping the note fails: a folder stands where it goes.
+      mkdirSync(join(kept, "x"), { recursive: true });
+      expect(await apply(r.root)).toBe(0);
+      expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
+      expect((await run(["git", "show", "HEAD:intent/a/intent.md"], r.root)).out).toContain("status: spec-approved");
+      rmSync(kept, { recursive: true });
+      const commits = await commitCount(r.root);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: true, status: "spec-approved" });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(readFileSync(kept, "utf8")).toBe("Split step 3.");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a request the loop was killed in before its commit, then given up on, leaves the change as HEAD has it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
