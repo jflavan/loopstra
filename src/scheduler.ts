@@ -1,5 +1,5 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
@@ -460,16 +460,15 @@ async function afterLanes(root: string, cfg: Config, trace: Trace, out: TickResu
  * the lane would otherwise build another change on the same files, and the two would clash at merge.
  * A plan that cannot be read counts as one with no file list. A change past plan-approved also holds
  * the files its build's drift reconcile added (the run folder's plan.reconciled.md; a plan-approved
- * change's is an earlier build's, which its next build drops). `root` is the repository; a caller
- * that leaves it out (the console's) has it taken from the changes' own folders, `<root>/intent/<slug>`.
+ * change's is an earlier build's, which its next build drops).
  */
-export async function sameFileHolds(ordered: Intent[], root?: string): Promise<Map<string, string>> {
+export async function sameFileHolds(ordered: Intent[], root: string): Promise<Map<string, string>> {
   const files = new Map<string, string[] | null>();
   const paths = (plan: string | null) => (plan === null ? null : (parsePlanFiles(plan)?.map((f) => f.path) ?? null));
   for (const i of ordered.filter((x) => planFilesNeeded(x.file.frontmatter.status))) {
     const plan = i.artifacts.has("plan.md") ? await Bun.file(join(i.dir, "plan.md")).text().catch(() => null) : null;
     const reconciled = i.file.frontmatter.status === "plan-approved" ? null
-      : await Bun.file(join(runDir(root ?? dirname(dirname(i.dir)), i.slug), RECONCILED_PLAN)).text().catch(() => null);
+      : await Bun.file(join(runDir(root, i.slug), RECONCILED_PLAN)).text().catch(() => null);
     const listed = paths(plan), added = paths(reconciled);
     files.set(i.slug, listed === null && added === null ? null : [...new Set([...(listed ?? []), ...(added ?? [])])]);
   }
