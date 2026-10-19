@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { configPath } from "../../src/config";
 import type { StepContext } from "../../src/context";
@@ -546,6 +546,23 @@ describe("scheduler resilience", () => {
       chmodSync(exe, 0o755);
       expect(claudeOverrideProblem({ LOOPSTRA_CLAUDE_EXECUTABLE: exe })).toBeNull();
     } finally { t.cleanup(); }
+  });
+
+  test("a record a kill left between HEAD and the checkout is finished before the tick does anything else", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    try {
+      const git = new Git(repo.path);
+      const parent = await git.headSha();
+      const md = join(repo.path, "intent", SLUG, "intent.md");
+      const text = readFileSync(md, "utf8").replace("status: draft", "status: closed");
+      const commit = (await git.commitFiles(parent, [`intent/${SLUG}`], [{ rel: `intent/${SLUG}/intent.md`, text }], "loopstra(x): killed [skip ci]"))!;
+      writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: SLUG, paths: [`intent/${SLUG}/intent.md`] }));
+      await git.moveHead(parent, commit);
+      await tick(repo.path);
+      expect(readFileSync(md, "utf8")).toContain("status: closed");
+      // The change's folder: queue.md, which every tick renders, is committed with the next record.
+      expect((await run(["git", "status", "--porcelain", "--", `intent/${SLUG}`], repo.path)).out.trim()).toBe("");
+    } finally { trace.close(); repo.cleanup(); }
   });
 });
 

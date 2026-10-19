@@ -4,7 +4,7 @@ import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { writeFileAtomic } from "./fsutil";
-import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, settleRecord, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release, runsNoCommands } from "./lanes";
@@ -93,6 +93,9 @@ export async function tick(root: string): Promise<TickResult> {
       out.paused = cutShort;
       return out;
     }
+
+    // A record a kill left between moving HEAD and writing the checkout is finished first (see commitRecord).
+    await settleRecord(root, trace);
 
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).
