@@ -46,7 +46,7 @@ jobs:
     steps:
       # The default ref: main as it is now (for a workflow_run, its latest commit; for a manual run,
       # the commit it was started on), never a ref the triggering event names.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # every commit and tag: the version, the skip check and shipped.json need them
           persist-credentials: false # the tag is made through the API, so git needs no token
