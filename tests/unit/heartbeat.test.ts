@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderStatus } from "../../src/commands/status";
 import { configPath } from "../../src/config";
 import {
-  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, readHeartbeat, readLoopHold, readPause, releaseLoop, runningLoopPid, startHeartbeat, takeLoopLock, thisHost, writeHeartbeat, type Heartbeat, type LinkFile,
+  activePause, clearPause, dropLoopLock, heartbeatDoneWith, heartbeatState, heartbeatWorkingOn, holdLoop, loopAlreadyRunning, loopHoldText, loopLockPath, loopStatusLine, pauseAfterUnavailable, pidAlive, readHeartbeat, readLoopHold, readPause, releaseLoop, runningLoopPid, startHeartbeat, takeLoopLock, thisHost, writeHeartbeat, type Heartbeat, type LinkFile,
 } from "../../src/heartbeat";
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -17,12 +17,21 @@ afterEach(() => resetStop());
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 const ago = (s: number) => new Date(NOW.getTime() - s * 1000).toISOString();
 
-/** The pid of a process that ran and has exited: gone on every system (a made-up number might be in use). */
-const DEAD_PID = await (async () => {
-  const p = Bun.spawn({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  await p.exited;
-  return p.pid;
-})();
+/**
+ * The pid of a process that ran and has exited, so gone on every system (a made-up number might be
+ * in use). Taken afresh before each test and checked: Windows hands a freed pid to the next process
+ * soon, and with the suite's other workers starting processes, one picked when the file loaded could
+ * belong to a live process by the time a test asks.
+ */
+function deadPid(): number {
+  for (let tries = 0; tries < 20; tries++) {
+    const pid = Bun.spawnSync({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" }).pid;
+    if (!pidAlive(pid)) return pid;
+  }
+  throw new Error("no exited process id could be found that is not in use again");
+}
+let DEAD_PID = deadPid();
+beforeEach(() => { DEAD_PID = deadPid(); });
 
 /** A heartbeat written by this (live) process. */
 function hb(over: Partial<Heartbeat> = {}): Heartbeat {
