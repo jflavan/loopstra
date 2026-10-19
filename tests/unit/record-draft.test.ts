@@ -39,4 +39,21 @@ describe("RecordDraft", () => {
     expect(() => d.write("intent/a/sub/x.md", "x")).not.toThrow();
     expect(() => d.write("intent/queue.md", "q")).not.toThrow();
   });
+
+  test("remembers what a file held on disk when first read there, and nothing for one never read", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "intent", "a"), { recursive: true });
+      writeFileSync(join(t.path, "intent", "a", "intent.md"), "first\n");
+      const d = new RecordDraft(t.path, "a");
+      d.read("intent/a/intent.md");
+      writeFileSync(join(t.path, "intent", "a", "intent.md"), "second\n");
+      expect(d.read("intent/a/intent.md")).toBe("second\n");
+      expect(d.readFromDisk("intent/a/intent.md")?.toString()).toBe("first\n");
+      d.read("intent/a/spec.md");
+      expect(d.readFromDisk("intent/a/spec.md")).toBeNull();
+      d.write("intent/a/plan.md", "# Plan\n");
+      expect(d.readFromDisk("intent/a/plan.md")).toBeUndefined();
+    } finally { t.cleanup(); }
+  });
 });

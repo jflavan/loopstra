@@ -30,15 +30,15 @@ A record left written but not committed holds up every sync and local merge, so 
 
 `commitRecord` with a draft, under the checkout lock:
 
-1. On main (`MainCheckoutMoved` otherwise); a marker left behind is settled first (`settleRecord`); `throwIfStopping`.
+1. On main (`MainCheckoutMoved` otherwise); a marker left behind is settled first (`settleRecord`), and while one survives the settle nothing is committed (see Recovery); `throwIfStopping`.
 2. `parent` = HEAD.
 3. `write(draft)`. A throw goes on as it is: nothing was written anywhere, so nothing is put back, `PersonChangedStatus` included. `false`, or a draft with no changes and nothing of a person's to take along, commits nothing.
 4. What each drafted file holds on disk now is noted (to tell a person's save at step 8).
 5. From here the record is not stopped by a stop request (as `finish: true` is today). `commit = commitFiles(parent, [intent/<slug>, intent/queue.md], draft.changes(), message)`: what is on disk under those paths, with the draft over it. Null (the tree is `parent`'s): nothing is committed (false).
 6. The marker is written (`writeFileAtomic`).
 7. `moveHead(parent, commit)`. False (someone committed on main meanwhile, a person in the main checkout): the marker goes, and steps 2 to 7 run once more from the new HEAD, the callback included (its reads see the new state; `expectStatus` refuses as it would). False again: `RecordRaced` ("main moved twice while a record was being committed; it is tried again on the next tick"), which callers meet like a failed commit today.
-8. The checkout is brought up to the commit: each drafted file is written (`writeFileAtomic`, temp file in `.loopstra`) or removed, unless the file on disk changed since step 4 saw it (a person saved it in between; for a file the draft made, one that appeared since): then the person's version stays on disk, uncommitted, as any edit of theirs would, and the next record takes it along. Then `reset -q <commit> -- intent/<slug> intent/queue.md`, so the index matches HEAD for those paths.
-9. The marker goes. True.
+8. The checkout is brought up to the commit: each drafted file is written (`writeFileAtomic`, temp file in `.loopstra`) or removed, unless the file on disk changed since the draft read it, or since step 4 saw it for one the draft never read (a person saved it in between; for a file the draft made, one that appeared since): then the person's version stays on disk, uncommitted, as any edit of theirs would, and the next record takes it along. Every file is tried, whatever failed before. Then `reset -q <commit> -- intent/<slug> intent/queue.md`, so the index matches HEAD for those paths.
+9. The marker goes (it stays when anything in step 8 failed; see Errors). True.
 
 The request applier passes its request id: the commit message gains a trailer, `Loopstra-Request: <id>`, so a later pass can ask git whether a request's record landed (see Callers).
 
@@ -50,7 +50,7 @@ A kill can land in three places:
 - **After HEAD moved, before the checkout matched** (steps 7 to 9): HEAD has the record, the checkout does not; seen alone, the checkout's files look like a person's edit undoing it.
 - **After the marker went**: done.
 
-`settleRecord` runs at the start of each tick, beside `settleCutShortMove` and before anything reads the checkout, and at the start of `commitRecord`. With a marker:
+`settleRecord` runs at the start of each tick, beside `settleCutShortMove` and before anything reads the checkout, and at the start of `commitRecord`, under the checkout lock. It acts only with the checkout on `main_branch` and compares `refs/heads/<main>`: off main, HEAD is a person's branch, and the marker waits. It says whether a marker is left; while one survives its settle (off main, or a git call that fails: an index lock held, say), `commitRecord` refuses ("a record a kill cut short could not be finished yet; it is tried again"), since a commit over a checkout still behind HEAD would undo the landed record. With a marker:
 
 - HEAD is the marker's `parent`: HEAD never moved; the marker goes.
 - HEAD is the marker's `commit`, or has it as an ancestor: each file the marker names is brought up to the commit (`checkout <commit> -- <path>`, or removed when the commit has none) when it still holds what `parent` had, by git's own comparison (`diff --quiet <parent> -- <path>`, so line endings compare as git sees them): the run was killed before writing it. One that already holds the commit's content is left. One that holds anything else is a person's edit since, and is left. Then the index for the marker's paths is reset to HEAD; the marker goes; the trace says the record was finished.
@@ -69,7 +69,7 @@ A kill can land in three places:
 - **The callback throws**: nothing to undo; the error goes on.
 - **A git call fails before HEAD moved** (a full disk, a timeout): nothing to undo; the marker goes if it was written; the error goes on.
 - **HEAD moved under the record**: tried once more (step 7); then `RecordRaced`.
-- **The checkout cannot be brought up** (step 8: Windows refusing a file held open, past `writeFileAtomic`'s retries): the marker stays, the trace says which file, and the error goes on; the next tick's `settleRecord` finishes it. Until then the sync sees unsaved changes and waits, as it would for any held file.
+- **The checkout cannot be brought up** (step 8: Windows refusing a file held open, past `writeFileAtomic`'s retries, or the index held by a person's git): the record has landed, so it is reported as committed (true); every other file is still written, the marker stays, the trace names what failed, and the next settle (the tick's, or the next record's) finishes it. Until then the sync sees unsaved changes and waits, as it would for any held file.
 - **The temporary index** is in a fresh folder under the system temporary directory, removed in a `finally`; one a kill leaves there is outside the repository and harmless, and the system clears it.
 
 ## Testing

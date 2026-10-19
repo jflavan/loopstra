@@ -95,7 +95,7 @@ export async function tick(root: string): Promise<TickResult> {
     }
 
     // A record a kill left between moving HEAD and writing the checkout is finished first (see commitRecord).
-    await settleRecord(root, trace);
+    await settleRecord(root, cfg.main_branch, trace);
 
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).

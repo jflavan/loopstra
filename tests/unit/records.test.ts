@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { commitRecord, RecordRaced, setStatus, settleRecord } from "../../src/context";
 import { Git } from "../../src/git";
+import { requestStop, resetStop } from "../../src/stop";
 import { run, setupRepo } from "../helpers";
 
 const SLUG = "add-numbers";
@@ -102,6 +103,8 @@ describe("commitRecord through plumbing", () => {
       expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
       expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
       expect(ctx.intent.file.frontmatter.status).toBe("designing");
+      // Traced once, for the try that landed.
+      expect(trace.events(SLUG).filter((e) => e.type === "status_change")).toHaveLength(1);
     } finally { Git.prototype.moveHead = moveHead; trace.close(); repo.cleanup(); }
   });
 });
@@ -121,7 +124,7 @@ describe("settleRecord", () => {
     const { repo, trace } = await setupRepo("accepted");
     try {
       await killedAfterHeadMoved(repo.path);
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
@@ -133,7 +136,7 @@ describe("settleRecord", () => {
     try {
       await killedAfterHeadMoved(repo.path);
       writeFileSync(md(repo.path), "a person's version\n");
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(readFileSync(md(repo.path), "utf8")).toBe("a person's version\n");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
@@ -146,7 +149,7 @@ describe("settleRecord", () => {
       const parent = await git.headSha();
       writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit: "1".repeat(40), slug: SLUG, paths: [`intent/${SLUG}/intent.md`] }));
       const before = readFileSync(md(repo.path), "utf8");
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(readFileSync(md(repo.path), "utf8")).toBe(before);
       expect(await git.headSha()).toBe(parent);
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
@@ -162,10 +165,107 @@ describe("settleRecord", () => {
       await run(["git", "add", "person.txt"], repo.path);
       await run(["git", "commit", "-q", "-m", "a person's commit"], repo.path);
       const before = readFileSync(md(repo.path), "utf8");
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(readFileSync(md(repo.path), "utf8")).toBe(before);
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a record a kill cut short that cannot be finished yet stops the next record, which commits nothing over it", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const lock = join(repo.path, ".git", "index.lock");
+    try {
+      const { commit } = await killedAfterHeadMoved(repo.path);
+      // A person's git holds the index: the checkout cannot be brought up to the landed record.
+      writeFileSync(lock, "");
+      expect(await settleRecord(repo.path, "main", trace)).toBe(false);
+      await expect(commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/note.md`, "n\n");
+      }, { trace })).rejects.toThrow("a record a kill cut short could not be finished yet; it is tried again");
+      expect(await new Git(repo.path).headSha()).toBe(commit);
+      expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
+      rmSync(lock);
+      expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/note.md`, "n\n");
+      }, { trace })).toBe(true);
+      expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+    } finally { rmSync(lock, { force: true }); trace.close(); repo.cleanup(); }
+  });
+
+  test("off main, the marker and the files are left alone; back on main, the record is finished", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      await killedAfterHeadMoved(repo.path);
+      const before = readFileSync(md(repo.path), "utf8");
+      await run(["git", "checkout", "-q", "-b", "elsewhere"], repo.path);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(false);
+      expect(readFileSync(md(repo.path), "utf8")).toBe(before);
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
+      expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("commitRecord after HEAD moved", () => {
+  test("a drafted file that cannot be written does not stop the others; the record is reported landed, the marker stays and the trace says so", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveHead = Git.prototype.moveHead;
+    try {
+      // A folder appears where the first drafted file goes, after the commit was built.
+      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+        mkdirSync(join(repo.path, "intent", SLUG, "note.md"), { recursive: true });
+        return moveHead.call(this, from, to);
+      };
+      expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/note.md`, "n\n");
+        d.write(`intent/${SLUG}/other.md`, "o\n");
+      }, { trace })).toBe(true);
+      expect((await run(["git", "log", "-1", "--format=%s"], repo.path)).out).toContain("loopstra(add-numbers): a note");
+      expect(readFileSync(join(repo.path, "intent", SLUG, "other.md"), "utf8")).toBe("o\n");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
+      expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes("note.md"))).toBe(true);
+    } finally { Git.prototype.moveHead = moveHead; trace.close(); repo.cleanup(); }
+  });
+
+  test("a person's save between the draft reading a file and writing it stays on disk, uncommitted", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        const read = d.read(`intent/${SLUG}/intent.md`)!;
+        // The person saves after the draft read the file, while the callback is still running.
+        writeFileSync(md(repo.path), "a person's version\n");
+        d.write(`intent/${SLUG}/intent.md`, read.replace("status: accepted", "status: designing"));
+      });
+      expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(readFileSync(md(repo.path), "utf8")).toBe("a person's version\n");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a stop asked for once the commit is built does not stop the record: it lands and the checkout matches", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveHead = Git.prototype.moveHead;
+    try {
+      Git.prototype.moveHead = async function (this: Git, from: string, to: string) {
+        requestStop();
+        return moveHead.call(this, from, to);
+      };
+      const before = readFileSync(md(repo.path), "utf8");
+      expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
+      })).toBe(true);
+      // (Read with plain git: Loopstra's own git calls refuse to start after a stop.)
+      expect((await run(["git", "show", `HEAD:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
+    } finally { Git.prototype.moveHead = moveHead; resetStop(); trace.close(); repo.cleanup(); }
   });
 });

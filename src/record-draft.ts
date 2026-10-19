@@ -12,6 +12,8 @@ export interface DraftChange { rel: string; text: string | null }
  */
 export class RecordDraft {
   private readonly drafted = new Map<string, string | null>();
+  /** What each file held on disk when the draft first read it there (null: not there). */
+  private readonly onDisk = new Map<string, Buffer | null>();
 
   constructor(readonly root: string, readonly slug: string) {}
 
@@ -30,12 +32,23 @@ export class RecordDraft {
   read(rel: string): string | null {
     this.check(rel);
     if (this.drafted.has(rel)) return this.drafted.get(rel) ?? null;
+    let bytes: Buffer | null;
     try {
-      return readFileSync(join(this.root, rel), "utf8");
+      bytes = readFileSync(join(this.root, rel));
     } catch (e) {
-      if ((e as { code?: string }).code === "ENOENT") return null;
-      throw e;
+      if ((e as { code?: string }).code !== "ENOENT") throw e;
+      bytes = null;
     }
+    if (!this.onDisk.has(rel)) this.onDisk.set(rel, bytes);
+    return bytes === null ? null : bytes.toString("utf8");
+  }
+
+  /**
+   * What the file held on disk when the draft first read it there (null: it was not there), or
+   * undefined when the draft never read it from disk. commitRecord tells a person's save by it.
+   */
+  readFromDisk(rel: string): Buffer | null | undefined {
+    return this.onDisk.get(rel);
   }
 
   write(rel: string, text: string): void {

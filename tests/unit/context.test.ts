@@ -225,7 +225,7 @@ describe("StepContext", () => {
       Git.prototype.moveHead = moveHead;
       expect((await run(["git", "show", "HEAD:intent/x/intent.md"], repo.path)).out).toContain("status: designing");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(await Bun.file(intentMd).text()).toContain("status: designing");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
@@ -281,7 +281,7 @@ describe("StepContext", () => {
     }
   });
 
-  test("a record that meets a held index lock lands with a person's uncommitted edit, keeps its marker, and the next settle brings the index up", async () => {
+  test("a record that meets a held index lock lands with a person's uncommitted edit and says so, keeps its marker, and the next settle brings the index up", async () => {
     const { repo, ctx, trace } = await setup();
     const lock = join(repo.path, ".git", "index.lock");
     try {
@@ -290,15 +290,18 @@ describe("StepContext", () => {
       const persons = (await Bun.file(intentMd).text()).replace("## Problem\np", "## Problem\nthe person's words");
       await Bun.write(intentMd, persons);
       await Bun.write(lock, "");
-      // The commit is made in an index of its own, so the lock holds up only the checkout's index.
-      await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(GitError);
+      // The commit is made in an index of its own, so the lock holds up only the checkout's index:
+      // the record landed, and is reported so.
+      await setStatus(ctx, "designing");
+      expect(ctx.intent.file.frontmatter.status).toBe("designing");
+      expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("could not be brought up"))).toBe(true);
       const committed = (await run(["git", "show", "HEAD:intent/x/intent.md"], repo.path)).out;
       expect(committed).toContain("status: designing");
       expect(committed).toContain("the person's words");
       expect(await Bun.file(intentMd).text()).toBe(committed);
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
       rmSync(lock);
-      await settleRecord(repo.path, trace);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
       expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally {
