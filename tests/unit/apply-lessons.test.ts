@@ -49,6 +49,23 @@ describe("applyLessons", () => {
     }
   });
 
+  test("a CLAUDE.md with one stray CRLF stays as it is, and the added bullets take the ending most of its lines have", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "intent", "one"), { recursive: true });
+      await Bun.write(join(t.path, "intent", "one", "lessons.md"), "## Proposed CLAUDE.md additions\n- New.\n");
+      await Bun.write(join(t.path, "CLAUDE.md"), "# Project\r\n\n## Lessons\n- Old.\n\n## Commands\n- bun test\n");
+      await applyLessons(t.path, "one");
+      expect(await Bun.file(join(t.path, "CLAUDE.md")).text()).toBe("# Project\r\n\n## Lessons\n- Old.\n- New.\n\n## Commands\n- bun test\n");
+      // Mostly CRLF with one LF line: that line keeps its LF, and the new bullet is CRLF.
+      await Bun.write(join(t.path, "CLAUDE.md"), "# Project\r\n\r\n## Lessons\n- Old.\r\n");
+      await applyLessons(t.path, "one");
+      expect(await Bun.file(join(t.path, "CLAUDE.md")).text()).toBe("# Project\r\n\r\n## Lessons\n- Old.\r\n- New.\r\n");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("adds to an existing Lessons section even when another section follows it", async () => {
     const t = tempDir();
     try {
