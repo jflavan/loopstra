@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { Trace } from "../../src/trace";
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -150,6 +150,42 @@ describe("request files", () => {
       expect(claimedRequests(t.path)).toMatchObject({ requests: [], unreadable: [{ id: "000000000000001-1-0003", kind: "explode", slug: "a", transport: CONSOLE, thread: "" }] });
       expect(claimedRequests(t.path).unreadable[0]!.problem).toContain("kind");
     } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a file that cannot be set aside does not start a pass on every look: it waits a minute, or until it changes", () => {
+    const t = tempDir();
+    const clock = spyOn(Date, "now");
+    try {
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      // A file where requests/bad/ would go: every move into it fails, as for a file Windows holds open.
+      writeFileSync(join(requestsDir(t.path), "bad"), "");
+      const copy = join(requestsDir(t.path), "copy.json");
+      writeFileSync(copy, "{ not json");
+      const traced: unknown[] = [];
+      const trace = { event: (...args: unknown[]) => { traced.push(args); } } as unknown as Trace;
+      const start = Date.now();
+      clock.mockImplementation(() => start);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(existsSync(copy)).toBe(true);
+      expect(traced).toEqual([]);
+      // The failed move is remembered: the next looks start no pass for it.
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      clock.mockImplementation(() => start + 30_000);
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      // A minute on, it is tried again.
+      clock.mockImplementation(() => start + 61_000);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      // So is a file that changed since.
+      const later = new Date(start + 5 * 60_000);
+      utimesSync(copy, later, later);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+    } finally {
+      clock.mockRestore();
       t.cleanup();
     }
   });

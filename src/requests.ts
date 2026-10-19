@@ -139,6 +139,30 @@ const BAD_AFTER_MS = 30_000;
 const unreadableSince = new Map<string, number>();
 
 /**
+ * How long a file that could not be set aside (see setAside) is left before it is tried again,
+ * unless it changes: each try is a whole pass (the config, the trace, the old folders), and the
+ * applier looks every 2 s.
+ */
+const SET_ASIDE_RETRY_MS = 60_000;
+
+/** The last failed set-aside of each file, by its path: when it was, and the file's modification time then. */
+const setAsideFailed = new Map<string, { at: number; mtimeMs: number }>();
+
+/** The file's modification time, or null when it cannot be read (gone meanwhile). */
+function mtimeOf(path: string): number | null {
+  try { return statSync(path).mtimeMs; } catch { return null; }
+}
+
+/** True while a set-aside of the file at `path` failed less than SET_ASIDE_RETRY_MS ago and the file has not changed since. */
+function setAsideWaits(path: string): boolean {
+  const failed = setAsideFailed.get(path);
+  if (!failed) return false;
+  if (Date.now() - failed.at < SET_ASIDE_RETRY_MS && mtimeOf(path) === failed.mtimeMs) return true;
+  setAsideFailed.delete(path);
+  return false;
+}
+
+/**
  * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
  * not requests the loop knows (see Unreadable). A file that is not a request at all is passed over,
  * and set aside by the applier (see Tidy).
@@ -153,13 +177,18 @@ function readDir(root: string, dir: string, tidy?: Tidy): Read {
       const path = join(dir, n);
       const since = unreadableSince.get(path) ?? Date.now();
       unreadableSince.set(path, since);
-      if (tidy && Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS)) {
+      if (tidy && Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS) && !setAsideWaits(path)) {
         if (!tidy.trace) read.due = true;
-        else if (setAside(root, dir, n, tidy.trace)) unreadableSince.delete(path);
+        else {
+          const mtimeMs = mtimeOf(path);
+          if (setAside(root, dir, n, tidy.trace)) unreadableSince.delete(path);
+          else if (mtimeMs !== null) setAsideFailed.set(path, { at: Date.now(), mtimeMs });
+        }
       }
       continue;
     }
     unreadableSince.delete(join(dir, n));
+    setAsideFailed.delete(join(dir, n));
     const r = RequestSchema.safeParse(file);
     if (r.success) { read.requests.push(r.data); continue; }
     read.unreadable.push({
@@ -181,7 +210,8 @@ function readDir(root: string, dir: string, tidy?: Tidy): Read {
  * Moves a file in a requests folder that is not a request (not JSON, no id of its own, not named
  * for it) to `requests/bad/<name>`, once. Left where it is, every pass would read it again every
  * 2 s, and the console would say its request is pending for ever. Traced. A file that cannot be
- * moved (held open) is left for the next pass; true once it is moved.
+ * moved (held open) is left, and tried again after SET_ASIDE_RETRY_MS or once it changes (see
+ * setAsideWaits); true once it is moved.
  */
 function setAside(root: string, dir: string, name: string, trace: Trace): boolean {
   try {
