@@ -129,20 +129,12 @@ export function openQuestions(root: string, intents: Intent[]): Map<string, stri
   return out;
 }
 
-/** Stores the answer for the session that asked (the `answer` request does this, with the record; see src/apply.ts). */
+/** Stores the answer for the session that asked (the `answer` request does this once its record landed; see src/apply.ts). */
 export function answerQuestion(root: string, slug: string, answer: { text: string; by: string; via: string }): boolean {
   const s = readQuestion(root, slug);
   if (!s?.open) return false;
   writeState(root, slug, { ...s, open: { ...s.open, answer: { ...answer, at: new Date().toISOString() } } });
   return true;
-}
-
-/** Takes back a stored answer that never landed (an `answer` request given up on; see src/apply.ts): the question waits again. */
-export function takeBackAnswer(root: string, slug: string): void {
-  const s = readQuestion(root, slug);
-  if (!s?.open?.answer) return;
-  const { answer: _, ...open } = s.open;
-  writeState(root, slug, { ...s, open });
 }
 
 /** The prompt that resumes the asking session with its answer. */

@@ -212,6 +212,17 @@ export function commitRecord(root: string, main: string, slug: string, what: str
 }
 
 /**
+ * True when a record tagged with `id` (see commitRecord's `opts.request`) landed on main for `slug`:
+ * HEAD's history of the change's folder has a commit carrying `Loopstra-Request: <id>`. A pass the
+ * loop was killed in after that commit and before it finished leaves exactly this; the caller then
+ * finishes as if it had just committed, and writes nothing again.
+ */
+export async function landed(root: string, id: string, slug: string): Promise<boolean> {
+  const r = await new Git(root).run(["log", "-1", "--format=%H", "--fixed-strings", `--grep=Loopstra-Request: ${id}`, "HEAD", "--", `intent/${slug}`], { allowFail: true });
+  return r.code === 0 && r.out.trim() !== "";
+}
+
+/**
  * Brings the checkout up to a record whose commit HEAD now has: each drafted file is written or
  * removed unless a person saved it since `seen` noted it, then the index is reset for the paths. Every
  * file is tried, and the reset too, whatever failed before. What failed, each with its error.

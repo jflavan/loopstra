@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
+import { commitRecord } from "../../src/context";
 import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { ChatService, type OnMessage, type Transport } from "../../src/chat/service";
 import { Git } from "../../src/git";
-import { fileHash } from "../../src/headfiles";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
@@ -103,27 +103,28 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
-  test("a request the loop was killed in before its commit is finished on the next tick, not mistaken for someone else's edit", async () => {
+  test("requests whose records landed before the loop was killed are finished on the next tick as applied, never written again", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
     try {
       const { writeJson } = await import("../../src/fsutil");
       const accept = submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
       const added = submitRequest(r.root, { kind: "new", title: "t", intents: [{ slug: "c", text: INTENT("draft", "c"), update: false }], by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
-      // As if the loop was killed after an earlier tick wrote both files, before it committed them.
-      await writeIntent(await readIntent(r.root, "a"), { status: "accepted" });
-      await Bun.write(join(r.root, "intent", "c", "intent.md"), INTENT("draft", "c"));
-      // Each with the hash of what it wrote, as markWritten keeps it: only a file that still holds that is the request's own.
-      const hash = (slug: string) => ({ [slug]: fileHash(join(r.root, "intent", slug, "intent.md"))! });
-      writeJson(join(requestsDir(r.root), `${accept.id}.json`), { ...accept, written: ["a"], writtenHash: hash("a") });
-      writeJson(join(requestsDir(r.root), `${added.id}.json`), { ...added, written: ["c"], writtenHash: hash("c") });
+      // As if the loop was killed after an earlier tick committed both records, each with its request's id.
+      await commitRecord(r.root, "main", "a", "accepted by U from the terminal", async (d) => { await writeIntent(await readIntent(r.root, "a"), { status: "accepted" }, {}, d); }, { request: accept.id });
+      await commitRecord(r.root, "main", "c", "open intent from chat", async (d) => { d.write("intent/c/intent.md", INTENT("draft", "c")); }, { request: added.id });
+      // Claimed by an older loop, which kept what it wrote to put it back: those keys are read past.
+      writeJson(join(requestsDir(r.root), "applying", `${accept.id}.json`), { ...accept, written: ["a"], writtenHash: { a: "0".repeat(64) } });
+      writeJson(join(requestsDir(r.root), "applying", `${added.id}.json`), { ...added, written: ["c"], writtenHash: { c: "0".repeat(64) }, recordHash: "0".repeat(64) });
+      rmSync(join(requestsDir(r.root), `${accept.id}.json`));
+      rmSync(join(requestsDir(r.root), `${added.id}.json`));
       await tick(r.root).catch(() => {});
       expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
         "Started a. I will say here when it needs anyone, and when it is done.",
         "Added to the queue as drafts: c. Read them in intent/, then set status to accepted, or ask me to start one.",
       ]);
-      const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
-      expect(log).toContain("loopstra(a): accepted by U from the terminal");
-      expect(log).toContain("loopstra(c): open intent from chat");
+      const log = (await new Git(r.root).run(["log", "--format=%s"])).out.split("\n");
+      expect(log.filter((l) => l.includes("loopstra(a): accepted by U from the terminal"))).toHaveLength(1);
+      expect(log.filter((l) => l.includes("loopstra(c): open intent from chat"))).toHaveLength(1);
     } finally { r.cleanup(); }
   });
 
