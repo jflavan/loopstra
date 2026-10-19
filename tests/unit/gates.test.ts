@@ -66,7 +66,7 @@ describe("checks", () => {
     ]);
   });
 
-  test("parsePlanFiles keeps a path's own underscores, and a back-quoted path's spaces", () => {
+  test("parsePlanFiles keeps a path's own underscores (a back-quoted one's at both ends too), and a back-quoted path's spaces", () => {
     const plan = [
       "# Plan", "", "## Files that change",
       "- `src/pkg/__init__.py` (new)",
@@ -82,6 +82,8 @@ describe("checks", () => {
       "- ``src/e.ts``",
       "- `` `src/f.ts` ``: a code span holding back-quotes",
       "- *`src/g.ts`*",
+      "- `src/__tests__` (new)",
+      "- **`__pycache__`**",
       "", "## Order of work", "1. x", "",
     ].join("\n");
     expect(parsePlanFiles(plan)).toEqual([
@@ -90,6 +92,7 @@ describe("checks", () => {
       { path: "src/d.ts", new: true },
       { path: "__init__.py", new: false }, { path: "__main__.py", new: true }, { path: "tests/__snapshots__", new: false },
       { path: "src/__init__.py", new: false }, { path: "src/e.ts", new: false }, { path: "src/f.ts", new: false }, { path: "src/g.ts", new: false },
+      { path: "src/__tests__", new: true }, { path: "__pycache__", new: false },
     ]);
   });
 

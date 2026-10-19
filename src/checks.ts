@@ -48,7 +48,8 @@ export function parsePlanFiles(plan: string): PlanFile[] | null {
     const quoted = /^(?:\*{1,2}|_{1,2})?(`+) ?(.+?) ?\1(?!`)/.exec(rest);
     const token = quoted ? quoted[2]!.replace(/^`+|`+$/g, "") : (rest.split(/\s+/)[0] ?? "");
     const trimmed = token.replace(/[:,;]+$/, "");
-    const bare = (/^(\*\*|__)(.+)\1$/.exec(trimmed)?.[2] ?? trimmed).replace(/[:,;]+$/, "");
+    // Inside back-quotes, `__` at both ends is the path's own (`__tests__`), not emphasis.
+    const bare = quoted ? trimmed : (/^(\*\*|__)(.+)\1$/.exec(trimmed)?.[2] ?? trimmed).replace(/[:,;]+$/, "");
     const path = normalizePath(bare);
     if (!path || /:\d+(?:-\d+)?$/.test(bare)) continue; // a file:line reference
     out.push({ path, new: /\(new\)/i.test(line) });
