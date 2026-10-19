@@ -116,10 +116,10 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
   /** The hash of what was written, by file, for each that held nothing but HEAD's before the write. */
   const written = new Map<string, string>();
   try {
-    await commitForStep(ctx, `${a.phase} asks a question`, async () => {
+    await commitForStep(ctx, `${a.phase} asks a question`, async (draft) => {
       const own = await Promise.all(files.map((f) => matchesHead(ctx.root, f)));
       // Never over a status a person set while the session ran (PersonChangedStatus instead).
-      await writeForStep(ctx, { question: "open" });
+      await writeForStep(ctx, { question: "open" }, draft);
       // An earlier try whose put back failed left the entry on disk: it is not added twice.
       await Bun.write(conversationPath(ctx.root, ctx.slug), withEntryOnce(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
       files.forEach((f, i) => {
