@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { ActivityItem } from "../../console/types";
+import { fitsFeed, mergeFeed } from "../feed";
 import { clock } from "../format";
 import { Link } from "../parts/Link";
 import { activity, changes, gaps, getJson, now } from "../store";
@@ -16,7 +17,11 @@ export function Activity() {
   const [failed, setFailed] = useState(false);
   // Only the newest request may fill the list, so a slow answer for an earlier filter does not replace it.
   const request = useRef(0);
-  const load = async (before: number, reset: boolean) => {
+  /**
+   * Reads a page of history. `how`: "reset" shows the page alone (a new filter, Refresh), "more" adds it
+   * below (Older), "merge" merges the newest page into what is shown (the stream said this page missed events).
+   */
+  const load = async (before: number, how: "reset" | "more" | "merge") => {
     const mine = ++request.current;
     setLoading(true);
     try {
@@ -25,8 +30,15 @@ export function Activity() {
       if (technical) q.set("technical", "1");
       const page = await getJson<{ items: ActivityItem[]; next: number | null }>(`/api/events?${q}`);
       if (mine !== request.current) return;
-      setOlder((o) => (reset ? page.items : [...o, ...page.items]));
-      setNext(page.next);
+      if (how === "merge") {
+        const merged = mergeFeed(older, page.items, { slug, technical });
+        setOlder(merged.items);
+        // Joined, the Older cursor still points below what is shown; not joined, the page stands alone with its own.
+        if (!merged.joined) setNext(page.next);
+      } else {
+        setOlder((o) => (how === "reset" ? page.items : [...o, ...page.items]));
+        setNext(page.next);
+      }
       setFailed(false);
     } catch {
       if (mine !== request.current) return;
@@ -46,12 +58,12 @@ export function Activity() {
       shownFilter.current = filter;
       setOlder([]);
       setNext(0);
-    }
-    void load(0, true);
+      void load(0, "reset");
+    } else void load(0, "merge");
   }, [slug, technical, missed]);
   // The live stream carries only events in plain words; the technical view loads again on Refresh.
   const newest = older[0]?.id ?? 0;
-  const fresh = technical ? [] : activity.value.filter((a) => a.id > newest && (!slug || a.slug === slug)).reverse();
+  const fresh = technical ? [] : activity.value.filter((a) => a.id > newest && fitsFeed(a, { slug, technical })).reverse();
   const items = [...fresh, ...older];
   const t = now.value;
   return (
@@ -65,9 +77,9 @@ export function Activity() {
           <option value="_loop">The loop</option>
         </select>
         <label><input type="checkbox" checked={technical} onChange={(e) => setTechnical(e.currentTarget.checked)} /> Technical</label>
-        {technical && <button class="btn" onClick={() => void load(0, true)}>Refresh</button>}
+        {technical && <button class="btn" onClick={() => void load(0, "reset")}>Refresh</button>}
       </div>
-      {failed && <p class="muted">The history could not be read. <button class="link" type="button" onClick={() => void load(0, true)}>Try again</button></p>}
+      {failed && <p class="muted">The history could not be read. <button class="link" type="button" onClick={() => void load(0, "reset")}>Try again</button></p>}
       {/* A page can come back empty with older ones still to read (a long run of events only an engineer would care about). */}
       {!items.length && !loading && !failed && next === null && <p class="muted">Nothing has happened yet.</p>}
       {items.length > 0 && (
@@ -84,7 +96,7 @@ export function Activity() {
           ))}
         </ul>
       )}
-      {next !== null && <p><button class="btn" disabled={loading} onClick={() => void load(next, false)}>{loading ? "Loading…" : "Older"}</button></p>}
+      {next !== null && <p><button class="btn" disabled={loading} onClick={() => void load(next, "more")}>{loading ? "Loading…" : "Older"}</button></p>}
     </section>
   );
 }

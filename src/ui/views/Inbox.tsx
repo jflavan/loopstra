@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { AttentionItem } from "../../attention";
 import { navigate } from "../nav";
+import { stepAt } from "../palette";
 import { Actions } from "../parts/Actions";
+import { Connecting } from "../parts/Connecting";
 import { Link } from "../parts/Link";
 import { act, beforeOf, bodyFor } from "../requests";
 import { screenKeys } from "../shortcuts";
@@ -17,9 +19,9 @@ export function Inbox() {
   const sel = Math.min(at, Math.max(0, (items?.length ?? 1) - 1));
   atRef.current = sel;
   useEffect(() => {
-    const last = () => Math.max(0, (inbox.value?.length ?? 1) - 1);
-    screenKeys.set("j", () => setAt((k) => Math.min(k + 1, last())));
-    screenKeys.set("k", () => setAt((k) => Math.max(Math.min(k, last()) - 1, 0)));
+    const length = () => inbox.value?.length ?? 0;
+    screenKeys.set("j", () => setAt((k) => stepAt(k, 1, length())));
+    screenKeys.set("k", () => setAt((k) => stepAt(k, -1, length())));
     screenKeys.set("o", () => {
       const it = inbox.value?.[atRef.current];
       if (it?.slug) navigate(`/c/${it.slug}`);
@@ -34,7 +36,7 @@ export function Inbox() {
     return () => { for (const k of ["j", "k", "o", "a"]) screenKeys.delete(k); };
   }, []);
   useEffect(() => { document.getElementById(`inbox-${sel}`)?.scrollIntoView({ block: "nearest" }); }, [sel]);
-  if (!items) return <section class="view"><p class="muted">Connecting…</p></section>;
+  if (!items) return <Connecting />;
   return (
     <section class="view">
       <div class="view-head">

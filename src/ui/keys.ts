@@ -36,13 +36,42 @@ export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; al
 }
 
 /**
- * Whether a key press in a message box sends it: Ctrl or Cmd with Enter. Never while an input method
- * (Japanese, Chinese, ...) is picking a character: there Enter confirms the character. Some browsers
- * say so only with keyCode 229.
+ * Whether an input method (Japanese, Chinese, ...) is picking a character with this key: there Enter
+ * confirms the character, not the message. Some browsers say so only with keyCode 229.
  */
+const composing = (e: { isComposing: boolean; keyCode: number }): boolean => e.isComposing || e.keyCode === 229;
+
+/** Whether a key press in a message box sends it: Ctrl or Cmd with Enter, never while an input method is picking a character. */
 export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }): boolean {
-  if (e.isComposing || e.keyCode === 229) return false;
-  return e.key === "Enter" && (e.ctrlKey || e.metaKey);
+  return !composing(e) && e.key === "Enter" && (e.ctrlKey || e.metaKey);
+}
+
+/**
+ * Whether a key press in a box where Enter alone sends (the orchestrator's, a tile's one-line box)
+ * sends it: Enter without Shift (Shift with Enter is a line break), never while an input method is
+ * picking a character.
+ */
+export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number }): boolean {
+  return !composing(e) && e.key === "Enter" && !e.shiftKey;
+}
+
+/** What a key press does: one of the page's actions, the screen's own handler for that key, or nothing. */
+export type Decision = { kind: "action"; action: string } | { kind: "screen" } | { kind: "nothing" };
+
+const NOTHING: Decision = { kind: "nothing" };
+
+/**
+ * Decides what a key press does. `press` is the page's matcher, asked only for keys that may count
+ * (it keeps the sequence in progress). In a text box letters are typing, so only Ctrl or Cmd
+ * shortcuts and Escape count there. A screen's keys (the inbox's j, k, o, a) count only outside a
+ * box and while nothing is in front of the screen (`overlay`: the palette or the keys help).
+ */
+export function decide(name: string | null, press: (name: string) => string | null, at: { typing: boolean; overlay: boolean; screenKey: boolean }): Decision {
+  if (!name) return NOTHING;
+  if (at.typing && !name.startsWith("mod+") && name !== "escape") return NOTHING;
+  const action = press(name);
+  if (action) return { kind: "action", action };
+  return at.screenKey && !at.typing && !at.overlay ? { kind: "screen" } : NOTHING;
 }
 
 /** Something that can take the keyboard's focus: a button, or a box with tabIndex -1. */

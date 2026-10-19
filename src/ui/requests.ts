@@ -133,7 +133,8 @@ export async function act(b: ActionBody, before: Before, label: string, opts: { 
     return false;
   }
   const id = String(sent.data.id);
-  const loop = String(sent.data.loop ?? "");
+  // The loop's state as the server named it; anything else reads as unknown, which the toast treats as running.
+  const loop = typeof sent.data.loop === "string" ? sent.data.loop : "";
   let done: Done | null = null;
   // Set by Undo: what to do with the answer instead of showing it.
   let afterUndo: ((d: Done) => void) | null = null;

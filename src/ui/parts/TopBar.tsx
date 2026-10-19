@@ -3,6 +3,7 @@ import { keyLabel, onMac } from "../keys";
 import { setLoopHeld } from "../requests";
 import { inbox, loop, openDrawer, paletteOpen, totals } from "../store";
 import { cycleTheme, theme } from "../theme";
+import { CONNECTING } from "./Connecting";
 import { Icon } from "./Icon";
 import { Link } from "./Link";
 
@@ -15,7 +16,7 @@ export function TopBar() {
       <Link href="/" class="brand"><Icon name="logo" class="logo" /><span class="hide-narrow">Loopstra</span></Link>
       <span class={`pill ${l?.state ?? ""}`} title={l?.text ?? "Connecting to the console…"}>
         <span class="dot" aria-hidden="true" />
-        <span class="pill-text">{l ? pillText(l) : "Connecting…"}</span>
+        <span class="pill-text">{l ? pillText(l) : CONNECTING}</span>
       </span>
       <span class="grow" />
       {t && <span class="muted hide-narrow" title="Spent today, chat included">{usd(t.todayUsd)} today</span>}

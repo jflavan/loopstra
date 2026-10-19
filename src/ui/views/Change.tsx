@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { ChangeDetail, DiffView, PhaseView, Stage } from "../../console/types";
 import { clock, duration, stepWord, usd } from "../format";
-import { barEnd, codeKey, detailKey } from "../change-key";
+import { barGeometry, codeKey, detailKey } from "../change-key";
 import { stripFrontmatter } from "../markdown";
 import { Actions } from "../parts/Actions";
 import { Diff } from "../parts/Diff";
@@ -93,7 +93,7 @@ function useText(url: string | null, version: string | null): string | null {
     let live = true;
     setText(null);
     const failed = "This document could not be read.";
-    fetch(url).then((r) => (r.ok ? r.text() : failed)).catch(() => failed).then((t) => { if (live) setText(t); });
+    void fetch(url).then((r) => (r.ok ? r.text() : failed)).catch(() => failed).then((t) => { if (live) setText(t); });
     return () => { live = false; };
   }, [url, version]);
   return text;
@@ -133,16 +133,13 @@ function Documents({ d }: { d: ChangeDetail }) {
 function Timeline({ d }: { d: ChangeDetail }) {
   const t = now.value;
   if (!d.phases.length) return <p class="muted">No steps yet.</p>;
-  const ends = d.phases.map((p) => barEnd(p, t));
-  const start = Math.min(...d.phases.map((p) => Date.parse(p.started)));
-  const span = Math.max(1, Math.max(...ends) - start);
+  const bars = barGeometry(d.phases, t);
   const took = (p: PhaseView) => duration(p.status === "running" ? t - Date.parse(p.started) : p.durationMs);
   return (
     <div class="stack">
       <div class="timeline">
         {d.phases.map((p, k) => {
-          const left = ((Date.parse(p.started) - start) / span) * 100;
-          const width = Math.min(100 - left, Math.max(0.4, ((ends[k]! - Date.parse(p.started)) / span) * 100));
+          const { left, width } = bars[k]!;
           const row = (
             <>
               <span class="tl-name" title={p.name}>{p.name}</span>
@@ -211,8 +208,8 @@ function Gates({ d }: { d: ChangeDetail }) {
       <table class="list">
         <thead><tr><th>Gate</th><th>Check</th><th>Result</th><th>When</th><th>Evidence</th></tr></thead>
         <tbody>
-          {[...d.gates].reverse().map((g, k) => (
-            <tr key={k}>
+          {[...d.gates].reverse().map((g) => (
+            <tr key={`${g.ts}:${g.gate}:${g.check}`}>
               <td>{g.gate}</td>
               <td>{g.check}</td>
               <td><span class={`status ${g.result}`}>{g.result}</span></td>

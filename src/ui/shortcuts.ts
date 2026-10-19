@@ -1,4 +1,4 @@
-import { keyMatcher, keyName, typingIn, type Binding } from "./keys";
+import { decide, keyMatcher, keyName, typingIn, type Binding } from "./keys";
 import { navigate } from "./nav";
 import { drawer, helpOpen, paletteOpen } from "./store";
 
@@ -24,20 +24,14 @@ export function installKeys(): void {
     // Keys that pick a character in an input method (Japanese, Chinese, ...) are not shortcuts.
     if (e.isComposing) return;
     const name = keyName(e);
-    if (!name) return;
-    const typing = typingIn(e.target);
-    // In a text box, letters are typing: only Ctrl or Cmd shortcuts and Escape count there.
-    if (typing && !name.startsWith("mod+") && name !== "escape") return;
-    const action = press(name, Date.now());
-    if (!action) {
-      const handler = screenKeys.get(name);
-      if (handler && !typing && !paletteOpen.value && !helpOpen.value) {
-        e.preventDefault();
-        handler();
-      }
+    const what = decide(name, (n) => press(n, Date.now()), { typing: typingIn(e.target), overlay: paletteOpen.value || helpOpen.value, screenKey: !!name && screenKeys.has(name) });
+    if (what.kind === "nothing") return;
+    e.preventDefault();
+    if (what.kind === "screen") {
+      screenKeys.get(name!)?.();
       return;
     }
-    e.preventDefault();
+    const action = what.action;
     if (action === "palette") paletteOpen.value = !paletteOpen.value;
     else if (action === "drawer") drawer.value = { ...drawer.value, open: !drawer.value.open };
     else if (action === "help") helpOpen.value = !helpOpen.value;

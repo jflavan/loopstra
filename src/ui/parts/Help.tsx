@@ -3,7 +3,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { keyLabel, onMac } from "../keys";
 import { SHORTCUTS } from "../shortcuts";
 import { helpOpen } from "../store";
-import { useReturnFocus } from "./focus";
+import { useInertPage, useReturnFocus } from "./focus";
 
 export function Help() {
   return helpOpen.value ? <HelpBox /> : null;
@@ -12,6 +12,7 @@ export function Help() {
 function HelpBox() {
   const box = useRef<HTMLDivElement>(null);
   useReturnFocus();
+  useInertPage();
   // Focus moves into the dialog so the keys behind it are not read as if the page were still in front.
   useEffect(() => { box.current?.focus(); }, []);
   const close = () => { helpOpen.value = false; };

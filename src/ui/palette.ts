@@ -36,3 +36,12 @@ export function filterCommands<T extends { title: string }>(items: T[], query: s
 export function clampAt(at: number, length: number): number {
   return Math.max(0, Math.min(at, length - 1));
 }
+
+/**
+ * The highlighted row after a step down (`by` 1) or up (-1) through a list of `length` rows: the
+ * ends stop it, and a row left beyond the list (it shrank) is brought back in first, so a step up
+ * from there lands on the row before the last and not somewhere past it.
+ */
+export function stepAt(at: number, by: 1 | -1, length: number): number {
+  return clampAt(clampAt(at, length) + by, length);
+}

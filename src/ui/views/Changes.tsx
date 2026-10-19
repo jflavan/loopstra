@@ -3,8 +3,9 @@ import type { ChangeSummary, Stage } from "../../console/types";
 import { splitFinished } from "../board";
 import { usd } from "../format";
 import { fuzzyScore } from "../palette";
+import { Connecting } from "../parts/Connecting";
 import { Link } from "../parts/Link";
-import { changes } from "../store";
+import { changes, now } from "../store";
 
 export const COLUMNS: Array<{ stage: Stage; label: string }> = [
   { stage: "draft", label: "Draft" }, { stage: "design", label: "Design" }, { stage: "plan", label: "Plan" }, { stage: "build", label: "Build" },
@@ -22,13 +23,14 @@ export function Changes() {
   const all = changes.value;
   const [query, setQuery] = useState("");
   const [view, setView] = useState<View>(readView);
-  if (!all) return <section class="view"><p class="muted">Connecting…</p></section>;
+  if (!all) return <Connecting />;
   const shown = query.trim() ? all.filter((c) => fuzzyScore(query, `${c.title} ${c.slug}`) !== null) : all;
   const pick = (v: View) => {
     setView(v);
     try { localStorage.setItem(VIEW_KEY, v); } catch { /* kept for this visit only */ }
   };
-  const { open, earlier, closed } = splitFinished(shown, Date.now());
+  // The page's clock, so the fold moves with its tick and not with every draw.
+  const { open, earlier, closed } = splitFinished(shown, now.value);
   const blocked = open.filter((c) => c.stage === "blocked");
   const folded = [...earlier, ...closed];
   return (

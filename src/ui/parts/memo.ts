@@ -13,7 +13,7 @@ export function memo<P extends object>(Inner: FunctionComponent<P>): FunctionCom
       return keys.length !== Object.keys(a).length || keys.some((k) => a[k] !== b[k]);
     }
     override render(): ComponentChild {
-      return h(Inner as FunctionComponent<P>, this.props);
+      return h(Inner, this.props);
     }
   }
   return Memo as unknown as FunctionComponent<P>;
