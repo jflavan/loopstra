@@ -36,7 +36,18 @@ export function renderMarkdown(text: string): string {
   return md.parse(text) as string;
 }
 
-/** intent.md without its status block, which the page shows on its own. */
+/**
+ * intent.md without its status block, which the page shows on its own. The block is the one the
+ * parser reads, by the same rule (closingFence in src/intents.ts, which the page cannot import: that
+ * module reads the disk): a byte order mark dropped, `---` alone on the first line, and the first
+ * later line that is `---` with nothing but spaces after it, so an empty block (`---` then `---`)
+ * goes too. A line of more dashes (`----`) or an indented `---` closes nothing, and text without a
+ * block is shown whole. tests/unit/ui-logic.test.ts checks that the two agree.
+ */
 export function stripFrontmatter(text: string): string {
-  return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  const t = text.replace(/^\uFEFF/, "");
+  const parts = t.split(/(?<=\n)/);
+  if (!/^---\r?\n$/.test(parts[0] ?? "")) return t;
+  const close = parts.findIndex((p, i) => i > 0 && p.replace(/\r?\n$/, "").trimEnd() === "---");
+  return close < 0 ? t : parts.slice(close + 1).join("");
 }
