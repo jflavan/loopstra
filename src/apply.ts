@@ -8,7 +8,7 @@ import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, write
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
 import { errorText } from "./shell";
-import { StopRequested, stopRequested } from "./stop";
+import { recordNotYet, StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
@@ -51,11 +51,11 @@ export function betweenPasses<T>(root: string, fn: () => Promise<T>): Promise<T>
  * landed): one the loop was killed in after its commit is finished as applied, never written again.
  * One that cannot be done gets a plain result saying why. One that cannot be read (see Unreadable in
  * src/requests.ts) is finished at once, and one that kept failing (see MAX_TRIES) is given up with a
- * plain result (a checkout off main is not a try: it is a reason to wait), unless its record landed
- * (see anyLanded); nothing is put back then, since a record that never landed wrote nothing. Passes
- * on a root run one after another, never side by side, and at most one waits behind the running one:
- * a call while one waits gets that pass (it has not started, so it sees this caller's requests too).
- * Gives how many were finished.
+ * plain result (a checkout off main, RecordRaced and RecordUnsettled are not tries: each is a reason
+ * to wait), unless its record landed (see anyLanded); nothing is put back then, since a record that
+ * never landed wrote nothing. Passes on a root run one after another, never side by side, and at most
+ * one waits behind the running one: a call while one waits gets that pass (it has not started, so it
+ * sees this caller's requests too). Gives how many were finished.
  */
 export function applyRequests(root: string, cfg: Config, trace: Trace): Promise<number> {
   const lane = laneOf(root);
@@ -188,9 +188,11 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       applied++;
     } catch (e) {
       if (e instanceof StopRequested) throw e;
-      // Traced once while it stays the same: a checkout off main would otherwise add a line every 2 s.
-      trace.eventOnChange("_loop", "error", `"where":"request","id":"${req.id}"`, { where: "request", id: req.id, kind: req.kind, error: e instanceof MainCheckoutMoved ? e.message : errorText(e) }, "error");
-      if (e instanceof MainCheckoutMoved) continue;
+      // A checkout off main, main moving twice, or a record a kill cut short not finished yet: a reason
+      // to wait, not a try. Traced once while it stays the same: a wait would otherwise add a line every 2 s.
+      const waits = e instanceof MainCheckoutMoved || recordNotYet(e);
+      trace.eventOnChange("_loop", "error", `"where":"request","id":"${req.id}"`, { where: "request", id: req.id, kind: req.kind, error: waits ? e.message : errorText(e) }, "error");
+      if (waits) continue;
       req.tries = (req.tries ?? 0) + 1;
       if (!Number.isFinite(Date.parse(req.firstFailedAt ?? ""))) req.firstFailedAt = new Date().toISOString();
       const failing = Date.now() - Date.parse(req.firstFailedAt!);

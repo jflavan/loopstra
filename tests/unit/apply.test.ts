@@ -424,6 +424,40 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
+  test("a request whose record meets a record a kill cut short that cannot be finished yet only waits: not a try, never given up", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    const lock = join(r.root, ".git", "index.lock");
+    try {
+      // A record a kill cut short after main moved, and a person's git holding the index: it cannot be finished yet.
+      const git = new Git(r.root);
+      const parent = await git.headSha();
+      const rel = "intent/a/note.md";
+      const commit = (await git.commitFiles(parent, ["intent/a"], [{ rel, text: "n\n" }], "loopstra(a): killed [skip ci]"))!;
+      mkdirSync(join(r.root, ".loopstra"), { recursive: true });
+      writeFileSync(join(r.root, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: "a", paths: [rel] }));
+      expect(await git.moveRef("refs/heads/main", parent, commit)).toBe(true);
+      writeFileSync(lock, "");
+      const q = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "wait" });
+      claimRequest(r.root, q.id);
+      // Due to be given up on, were it a try.
+      failedLongAgo(r.root, 5);
+      for (let i = 0; i < 6; i++) expect(await apply(r.root)).toBe(0);
+      expect(requestState(r.root, q.id)).toEqual({ state: "pending" });
+      expect(applyingRequests(r.root)[0]!.tries).toBe(5);
+      const trace = Trace.open(r.root, () => {});
+      try {
+        expect(trace.events("_loop").filter((e) => e.type === "error" && e.payload.includes(`"id":"${q.id}"`))).toHaveLength(1);
+      } finally { trace.close(); }
+      rmSync(lock);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: true });
+      expect((await readIntent(r.root, "a")).file.frontmatter.hold).toContain("wait");
+    } finally {
+      rmSync(lock, { force: true });
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a request the loop was killed in before its commit, then given up on, leaves the change as HEAD has it", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {

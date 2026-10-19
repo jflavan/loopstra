@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commitRecord, landed, setStatus, settleRecord } from "../../src/context";
+import { commitRecord, landed, MainCheckoutMoved, setStatus, settleRecord } from "../../src/context";
 import { Git } from "../../src/git";
 import type { RecordDraft } from "../../src/record-draft";
 import { RecordRaced, RecordUnsettled, requestStop, resetStop } from "../../src/stop";
@@ -279,7 +279,7 @@ describe("commitRecord beside a person's branch switch", () => {
   const sha = async (root: string, ref: string) => (await run(["git", "rev-parse", ref], root)).out.trim();
 
   for (const how of ["a new branch", "a branch that exists"] as const) {
-    test(`a switch to ${how} during the record: it lands on main, their branch is left as it was, the checkout is not written off main, and back on main a settle finishes it`, async () => {
+    test(`a switch to ${how} inside the callback: MainCheckoutMoved, and main, their branch and the checkout are as they were, with no marker`, async () => {
       const { repo, trace } = await setupRepo("accepted");
       try {
         if (how === "a branch that exists") {
@@ -292,25 +292,68 @@ describe("commitRecord beside a person's branch switch", () => {
         const parent = await sha(repo.path, "main");
         const theirs = how === "a branch that exists" ? await sha(repo.path, "theirs") : parent;
         const before = readFileSync(md(repo.path), "utf8");
-        expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
-          d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
+        // The draft read the file from the checkout, which is now their branch's: nothing may be committed from it.
+        await expect(commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+          d.write(`intent/${SLUG}/intent.md`, d.read(`intent/${SLUG}/intent.md`)!.replace("status: accepted", "status: designing"));
           await run(how === "a new branch" ? ["git", "switch", "-q", "-c", "theirs"] : ["git", "switch", "-q", "theirs"], repo.path);
-        }, { trace })).toBe(true);
-        expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
-        expect(await sha(repo.path, "main^")).toBe(parent);
+        }, { trace })).rejects.toBeInstanceOf(MainCheckoutMoved);
+        expect(await sha(repo.path, "main")).toBe(parent);
         expect(await sha(repo.path, "theirs")).toBe(theirs);
-        expect((await run(["git", "symbolic-ref", "--short", "HEAD"], repo.path)).out.trim()).toBe("theirs");
-        // Off main the checkout is the person's branch: nothing of the record is written there.
-        expect(readFileSync(md(repo.path), "utf8")).toContain("status: accepted");
-        expect(existsSync(marker(repo.path))).toBe(true);
-        await run(["git", "switch", "-q", "main"], repo.path);
-        expect(await settleRecord(repo.path, "main", trace)).toBe(true);
-        expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
-        expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+        expect(readFileSync(md(repo.path), "utf8")).toBe(before);
         expect(existsSync(marker(repo.path))).toBe(false);
       } finally { trace.close(); repo.cleanup(); }
     });
   }
+
+  test("a switch between a try that met main moved and the next one: MainCheckoutMoved before the callback runs again", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveRef = Git.prototype.moveRef;
+    try {
+      const parent = await sha(repo.path, "main");
+      // The first try meets main moved (nothing moves), and the person switches branches meanwhile.
+      Git.prototype.moveRef = async function () {
+        await run(["git", "switch", "-q", "-c", "theirs"], repo.path);
+        return false;
+      };
+      let calls = 0;
+      await expect(commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        calls++;
+        d.write(`intent/${SLUG}/note.md`, "n\n");
+      }, { trace })).rejects.toBeInstanceOf(MainCheckoutMoved);
+      expect(calls).toBe(1);
+      expect(await sha(repo.path, "main")).toBe(parent);
+      expect(existsSync(marker(repo.path))).toBe(false);
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
+  });
+
+  test("a switch once main moved: the record lands on main, the checkout is not written off main, and back on main a settle finishes it", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveRef = Git.prototype.moveRef;
+    try {
+      const parent = await sha(repo.path, "main");
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
+        const moved = await moveRef.call(this, ref, from, to);
+        await run(["git", "switch", "-q", "-c", "theirs"], repo.path);
+        return moved;
+      };
+      const before = readFileSync(md(repo.path), "utf8");
+      expect(await commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/intent.md`, before.replace("status: accepted", "status: designing"));
+      }, { trace })).toBe(true);
+      Git.prototype.moveRef = moveRef;
+      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: designing");
+      expect(await sha(repo.path, "main^")).toBe(parent);
+      expect((await run(["git", "symbolic-ref", "--short", "HEAD"], repo.path)).out.trim()).toBe("theirs");
+      // Off main the checkout is the person's branch: nothing of the record is written there.
+      expect(readFileSync(md(repo.path), "utf8")).toBe(before);
+      expect(existsSync(marker(repo.path))).toBe(true);
+      await run(["git", "switch", "-q", "main"], repo.path);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
+      expect(readFileSync(md(repo.path), "utf8")).toContain("status: designing");
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect(existsSync(marker(repo.path))).toBe(false);
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
+  });
 
   test("a failure after main moved (the marker cannot be removed) does not make the record a failed one", async () => {
     const { repo, trace } = await setupRepo("accepted");

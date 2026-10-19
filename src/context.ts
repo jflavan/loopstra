@@ -121,6 +121,26 @@ export class MainCheckoutMoved extends Error {
   }
 }
 
+/**
+ * The branch the checkout at `git` is on (`symbolic-ref --short HEAD`), or null when it is on none
+ * (detached) or git cannot say. Asked even after a stop request (see GitRunOptions' `cleanup`): a
+ * stop that lands once a record has drafted does not stop it (see commitRecord).
+ */
+async function checkoutBranch(git: Git): Promise<string | null> {
+  const r = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], { allowFail: true, cleanup: true });
+  return r.code === 0 ? r.out.trim() : null;
+}
+
+/**
+ * Throws MainCheckoutMoved unless the checkout is still on `main`, once a record has drafted (see
+ * commitRecord): a person switched branches meanwhile, so what the draft read and the folder as it is
+ * on disk may be their branch's. Nothing has landed then.
+ */
+async function assertStillOnMain(git: Git, root: string, main: string): Promise<void> {
+  const branch = await checkoutBranch(git);
+  if (branch !== main) throw new MainCheckoutMoved(`the checkout at ${root} moved to ${branch ?? "no branch"} while a record was made, not ${main}`);
+}
+
 /** Throws MainCheckoutMoved unless the checkout at `git` is on `main` (a stop request or a git error passes through). */
 async function assertOnMain(git: Git, main: string): Promise<void> {
   try {
@@ -142,11 +162,13 @@ const markerPath = (root: string) => join(loopstraDir(root), "recording.json");
  * only on main (MainCheckoutMoved otherwise). A record a kill cut short is finished first (see
  * settleRecord); while it cannot be, nothing is committed (RecordUnsettled), since a
  * commit over a checkout still behind main would undo it. `write` writes into a draft, never the
- * checkout (it may give false: nothing to commit after all). The commit is made first, from the main
- * branch (`refs/heads/<main>`, not HEAD: a person may switch branches while the record is made), the
- * change's folder and queue.md as they are on disk, and the draft over them (see Git.commitFiles);
- * the main branch moves to it with a compare-and-swap (tried once more from its new commit when
- * someone committed meanwhile, then RecordRaced); only then are the drafted files written to the
+ * checkout (it may give false: nothing to commit after all). Once it has drafted, and before each
+ * further try, the checkout must still be on main (MainCheckoutMoved otherwise, with nothing landed:
+ * what the draft read and the folder on disk may be another branch's). The commit is made first, from
+ * the main branch (`refs/heads/<main>`, not HEAD, so a switch after this point never moves a person's
+ * branch), the change's folder and queue.md as they are on disk, and the draft over them (see
+ * Git.commitFiles); the main branch moves to it with a compare-and-swap (tried once more from its
+ * new commit when someone committed meanwhile, then RecordRaced); only then are the drafted files written to the
  * checkout, each unless a person saved it since the draft read it, or since the write when the draft
  * never read it (theirs then stays, uncommitted, as any edit of theirs), and the index brought up for
  * the paths. A marker (`.loopstra/recording.json`) covers a kill between main moving and the checkout
@@ -171,10 +193,12 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     const ref = `refs/heads/${main}`;
     const message = bookkeeping(`loopstra(${slug}): ${what}`) + (opts.request ? `\n\nLoopstra-Request: ${opts.request}` : "");
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await assertStillOnMain(git, root, main);
       const parent = await git.commitOf(ref);
       if (!parent) throw new Error(`there is no branch ${main} to record on`);
       const draft = new RecordDraft(root, slug);
       if ((await write(draft)) === false) return false;
+      await assertStillOnMain(git, root, main);
       const changes = draft.changes();
       // What each drafted file held on disk when the draft read it, or now for one it never read: a
       // file that holds anything else when the checkout is written is a person's save.
@@ -210,8 +234,7 @@ async function afterLanding(git: Git, root: string, main: string, slug: string, 
     try { trace?.event(slug, "error", { where: "record", commit, error }); } catch { /* the trace cannot be written either: the marker still stands */ }
   };
   try {
-    const branch = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], { allowFail: true, cleanup: true });
-    if (branch.code !== 0 || branch.out.trim() !== main) {
+    if ((await checkoutBranch(git)) !== main) {
       try {
         trace?.event(slug, "command", { command: "record landed while the checkout is on another branch", commit, note: `not written into the checkout; finished once it is back on ${main}` });
       } catch { /* the marker still stands */ }
