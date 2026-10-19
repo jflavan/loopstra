@@ -25,14 +25,10 @@ const MAX_ANSWER = 4000;
 /**
  * What every request carries. `via`: where the person was, in words ("the dashboard", "Slack"), for
  * the commit and the trace; requests chat left before it existed came from chat.
- * `written`: the slugs whose intent.md the loop already wrote for this request. A request whose
- * commit failed is tried again, and must not then read its own write as someone else's.
- * `writtenHash`: for each of those slugs, the sha256 (hex) of the exact text the loop wrote, so a
- * request given up on puts back only a file nobody else changed, before or since (older requests have none).
- * `recordHash`: likewise for the conversation.md entry a send back, an undo of one or an answer wrote:
- * kept only when the file held no uncommitted edit before the write (see writeRecord in src/apply.ts).
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
- * applyRequests, which gives up after a few, and not before some minutes).
+ * applyRequests, which gives up after a few, and not before some minutes). A key the schema does not
+ * name is dropped as the file is read: a claimed request an older loop saved with `written`,
+ * `writtenHash` or `recordHash` (what it kept to put back an uncommitted write) still reads.
  */
 const base = z.object({
   id: z.string().regex(ID),
@@ -42,9 +38,6 @@ const base = z.object({
   transport: z.string(),
   thread: z.string(),
   at: z.string(),
-  written: z.array(z.string()).optional(),
-  writtenHash: z.record(z.string(), z.string()).optional(),
-  recordHash: z.string().optional(),
   tries: z.number().optional(),
   firstFailedAt: z.string().optional(),
 });
@@ -87,7 +80,7 @@ type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type RequestBody = OmitEach<Request, keyof z.infer<typeof base>>;
 
 /** What submitRequest takes: everything but the id and the time, and what the loop notes while applying. */
-export type Submission = OmitEach<Request, "id" | "at" | "written" | "writtenHash" | "recordHash" | "tries" | "firstFailedAt">;
+export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt">;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
@@ -222,7 +215,7 @@ export function claimRequest(root: string, id: string): boolean {
   }
 }
 
-/** Writes a claimed request back (its `written` list or its `tries` changed). */
+/** Writes a claimed request back (its `tries` changed). */
 export function saveApplying(root: string, req: Request): void {
   writeJson(join(applyingDir(root), `${req.id}.json`), req);
 }

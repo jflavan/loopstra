@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { claim, release } from "../../src/lanes";
 import { runStepGuarded, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
-import { run, tempDir, withEnv } from "../helpers";
+import { run, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { writeChange, statusOf, inTrace, payloadOf, numbered, type RemoteRepo, remoteLanesRepo, copyRemoteRepo, checksPass, commitWithLanes, personPushes, holdSession, traceShows } from "./lanes-helpers";
 
 afterEach(() => resetStop());
@@ -327,7 +327,7 @@ describe("more than one change at a time, with a GitHub remote", () => {
       // has GitHub's copy, so it is pushed over it, and the pull request keeps the fix.
       const wt = join(both.path, ".loopstra", "worktrees", "alpha");
       expect((await run(["git", "-c", "user.name=Engineer", "-c", "user.email=engineer@example.com", "merge", "-q", "--no-edit", "refs/remotes/origin/intent/alpha"], wt)).code).toBe(0);
-      await writeIntent(await readIntent(both.path, "alpha"), { status: "merge-review", note: "" });
+      await writeIntentOnDisk(await readIntent(both.path, "alpha"), { status: "merge-review", note: "" });
       await new Git(both.path).commitPaths(["intent/alpha"], "person: retry");
       await withEnv(both.env, async () => {
         const trace = Trace.open(both.path);

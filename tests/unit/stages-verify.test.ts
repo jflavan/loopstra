@@ -3,12 +3,12 @@ import { copyFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { claim, release } from "../../src/lanes";
 import { NEEDS_PERSON_DONE_NOTE, runVerifyStep } from "../../src/stages/verify";
 import { AssistantUnavailable } from "../../src/stop";
 import type { PhaseRow, Trace } from "../../src/trace";
-import { setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 
 async function merged(opts: { config?: string; doneCheck?: string; commands?: Record<string, string> } = {}) {
   const s = await setupRepo("merged", { config: opts.config, commands: opts.commands });
@@ -259,7 +259,7 @@ describe("verify stage", () => {
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("verifying");
     expect(trace.phases("add-numbers")).toHaveLength(3);
 
-    await writeIntent(ctx.intent, { status: "done", note: "" });
+    await writeIntentOnDisk(ctx.intent, { status: "done", note: "" });
     i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("done");
     trace.close(); repo.cleanup();
@@ -317,7 +317,7 @@ describe("verify stage", () => {
   test("verifying with nobody on the done gate finishes as done", async () => {
     const { repo, ctx, trace } = await merged();
     await Bun.write(join(repo.path, "intent", "add-numbers", "outcome.md"), "# Outcome\n");
-    await writeIntent(ctx.intent, { status: "verifying" });
+    await writeIntentOnDisk(ctx.intent, { status: "verifying" });
     await new Git(repo.path).commitAll("verifying");
     await ctx.reload();
     await runVerifyStep(ctx);

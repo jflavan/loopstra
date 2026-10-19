@@ -63,6 +63,29 @@ describe("main_health", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a draft whose commit fails traces no signal on it and leaves no folder for it", async () => {
+    const { repo, cfg, trace } = await setup("  test: echo ok\n");
+    const commitFiles = Git.prototype.commitFiles;
+    try {
+      await runMainHealth(repo.path, cfg, trace, ["add-numbers"]);
+      const red = await recommit(repo.path, "  test: echo the-failing-output && exit 1\n");
+      let thrown = false;
+      Git.prototype.commitFiles = async function (this: Git, ...args: Parameters<Git["commitFiles"]>) {
+        if (thrown) return commitFiles.apply(this, args);
+        thrown = true;
+        throw new Error("the disk is full");
+      };
+      await expect(runMainHealth(repo.path, red, trace, ["add-numbers"])).rejects.toThrow("the disk is full");
+      expect(thrown).toBe(true);
+      expect(trace.events("fix-tests-after-add-numbers").filter((e) => e.type === "signal")).toEqual([]);
+      expect(existsSync(join(repo.path, "intent", "fix-tests-after-add-numbers"))).toBe(false);
+      expect(await new Git(repo.path).isDirty()).toBe(false);
+    } finally {
+      Git.prototype.commitFiles = commitFiles;
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("two merges leave both changes pending, once each, and a failing check opens one draft that names both", async () => {
     const { repo, cfg, trace } = await setup("  test: echo ok\n");
     await runMainHealth(repo.path, cfg, trace, []);

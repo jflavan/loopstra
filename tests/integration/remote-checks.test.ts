@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { attention } from "../../src/attention";
 import { loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
 import { PR_PUSHING } from "../../src/stages/shared";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
-import { fixture, fixtureDir, run, withEnv } from "../helpers";
+import { fixture, fixtureDir, run, withEnv, writeIntentOnDisk } from "../helpers";
 import { SLUG, BRANCH, remoteSetup, intentOf, elsewhere, onRemoteMain, headOn, inTrace, personPushesOnce } from "./remote-helpers";
 
 afterEach(() => resetStop());
@@ -100,7 +100,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
 
       // Retry: back to waiting; this time a person closes the pull request.
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "merge-review", note: "" });
+      await writeIntentOnDisk(i, { status: "merge-review", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
       await s.setPr({ state: "CLOSED", checks: "pass" });
       await tick(s.repo);
@@ -111,7 +111,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
 
       // Someone merged it on GitHub meanwhile: the loop records it without merging again.
       const j = await readIntent(s.repo, SLUG);
-      await writeIntent(j, { status: "merge-review", note: "" });
+      await writeIntentOnDisk(j, { status: "merge-review", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
       const other = await elsewhere(s.remote);
       await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
@@ -147,7 +147,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       await Bun.write(join(wt.cwd, "src", "fix.ts"), "export const fixed = true;\n");
       await wt.commitAll("fix: after the review");
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "reviewing" });
+      await writeIntentOnDisk(i, { status: "reviewing" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
       await tick(s.repo);
       const after = await intentOf(s.repo);
@@ -241,7 +241,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       expect((await run(["git", "branch", "-D", BRANCH], s.remote)).code).toBe(0);
       expect((await run(["git", "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${BRANCH}`], s.repo)).code).toBe(0);
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "plan-approved", note: "" });
+      await writeIntentOnDisk(i, { status: "plan-approved", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: rebuild");
 
       await tick(s.repo); // build again
@@ -334,7 +334,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       // The owner closes it while the change goes round the review once more (as anotherRound sends it).
       await s.setPr({ state: "CLOSED" });
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "reviewing" });
+      await writeIntentOnDisk(i, { status: "reviewing" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
       await tick(s.repo);
       expect(await intentOf(s.repo)).toMatchObject({ status: "blocked" });
@@ -353,7 +353,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       await s.setPr({ state: "CLOSED" });
       rmSync(join(s.repo, ".loopstra", "runs", SLUG, "pr-number"));
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "reviewing" });
+      await writeIntentOnDisk(i, { status: "reviewing" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
       await tick(s.repo);
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review" });
@@ -385,7 +385,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
 
       // A person asks for a rebuild. Its review passes while GitHub cannot be reached, so no pull request opens.
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "plan-approved", note: "" });
+      await writeIntentOnDisk(i, { status: "plan-approved", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: rebuild");
       await tick(s.repo); // build again
       expect((await intentOf(s.repo)).status).toBe("reviewing");
@@ -396,7 +396,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       // GitHub is back and the person retries the merge: #1 is not this build's, so a new pull request opens.
       await run(["git", "remote", "set-url", "origin", s.remote], s.repo);
       const j = await readIntent(s.repo, SLUG);
-      await writeIntent(j, { status: "merge-review", note: "" });
+      await writeIntentOnDisk(j, { status: "merge-review", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merge-review");
@@ -444,7 +444,7 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
       // GitHub is back and a person retries: the push goes over Loopstra's own commit.
       await run(["git", "remote", "set-url", "origin", s.remote], s.repo);
       const i = await readIntent(s.repo, SLUG);
-      await writeIntent(i, { status: "merge-review", note: "" });
+      await writeIntentOnDisk(i, { status: "merge-review", note: "" });
       await new Git(s.repo).commitPaths([`intent/${SLUG}`], "person: retry");
       await tick(s.repo);
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: "" });

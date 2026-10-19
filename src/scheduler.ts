@@ -4,7 +4,7 @@ import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp
 import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
 import { writeFileAtomic } from "./fsutil";
-import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, snapshotsDir, type StepResult } from "./context";
+import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, settleRecord, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release, runsNoCommands } from "./lanes";
@@ -29,7 +29,7 @@ import { clearChangeStop } from "./inbox";
 import { repositoryTop, uncommittedSetup } from "./init";
 import { loopstraDir, runDir } from "./paths";
 import { olderSetupRefusal } from "./stamp";
-import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, recordNotYet, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
 import { chatDir } from "./chat/threads";
@@ -57,9 +57,13 @@ export interface TickResult {
 
 /**
  * One step a lane (or the pull request watcher) ran: the change, what the step gave, and how long it
- * took. No result when a stop, an outage or the day's budget ended it (`stopped` says it was a stop).
+ * took. No result when a stop, an outage, the day's budget or a record not committed this time ended it
+ * (`stopped` says it was a stop).
  */
 export interface LaneStep { slug: string; result?: StepResult; durationMs: number; stopped?: boolean }
+
+/** Why the tick paused when a record a kill cut short could not be finished yet (see settleRecord). */
+const RECORD_UNSETTLED_NOTE = "A record the loop was writing when it stopped could not be finished yet; it is tried again on the next tick.";
 
 /** What ended a lane's step without a result. Handled once for the whole tick, after every lane has ended. */
 interface LaneProblem { slug: string; error: unknown }
@@ -94,6 +98,9 @@ export async function tick(root: string): Promise<TickResult> {
       return out;
     }
 
+    // A record a kill left between moving main and writing the checkout is finished first (see commitRecord).
+    const recordSettled = await settleRecord(root, cfg.main_branch, trace);
+
     // Every artifact commit goes to main_branch. If the checkout is elsewhere, do nothing at all:
     // no signals, no queue, no steps (each would write into someone else's branch).
     const branch = await new Git(root).currentBranch();
@@ -102,6 +109,13 @@ export async function tick(root: string): Promise<TickResult> {
       out.paused = OFF_MAIN_NOTE;
       // Off main is the reason now (start logs it), not a day pause an earlier tick recorded.
       heartbeatDayPause(root, null);
+      return out;
+    }
+
+    // On main and still not finished (the failure is traced): every record would refuse to start over
+    // it, and the index lags behind main for its files, so nothing runs until it is finished.
+    if (!recordSettled) {
+      out.paused = RECORD_UNSETTLED_NOTE;
       return out;
     }
 
@@ -414,10 +428,11 @@ async function readFresh(root: string, trace: Trace, slug: string): Promise<Inte
 }
 
 /**
- * A step ended with a stop, an outage, the day's budget, or (never expected) another problem. No
- * lane starts another step. A stop, and a problem that is not an outage or the day's budget, are
- * traced for the change now; an outage and the day's budget are handled once the lanes have ended
- * (afterLanes).
+ * A step ended with a stop, an outage, the day's budget, a record that could not be committed this
+ * time, or (never expected) another problem. No lane starts another step. A stop, a record not
+ * committed (the change keeps its status, and the step runs again on the next tick), and a problem
+ * that is none of these are traced for the change now; an outage and the day's budget are handled
+ * once the lanes have ended (afterLanes).
  */
 function laneProblem(trace: Trace, shared: TickLanes, slug: string, e: unknown, durationMs: number): LaneStep {
   shared.halt = true;
@@ -427,7 +442,8 @@ function laneProblem(trace: Trace, shared: TickLanes, slug: string, e: unknown, 
     trace.event(slug, "stop", { note: STOPPED_NOTE });
     return { slug, durationMs, stopped: true };
   }
-  if (!notTheStepsFault(e)) trace.event(slug, "error", { where: "lane", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
+  if (recordNotYet(e)) trace.event(slug, "error", { where: "record", error: e.message, note: "the change keeps its status; the step runs again on the next tick" });
+  else if (!notTheStepsFault(e)) trace.event(slug, "error", { where: "lane", error: errorText(e), stack: e instanceof Error ? e.stack : undefined });
   return { slug, durationMs };
 }
 
@@ -676,13 +692,14 @@ function stepEnded(out: TickResult, slug: string, result: StepResult): void {
 
 /**
  * Runs one step for an intent. A problem the step did not handle itself blocks the intent with a
- * plain note (the detail goes to the trace); only a stop request passes through. A session a person
- * stopped, or a question an agent asked, ends the step quietly: the change keeps its status. First,
- * what was left in the change's inbox (see sweepInbox) goes to conversation.md for the sessions to come,
+ * plain note (the detail goes to the trace); only what is not its fault (see notTheStepsFault) passes
+ * through. A session a person stopped, or a question an agent asked, ends the step quietly: the
+ * change keeps its status. First, what was left in the change's inbox (see sweepInbox) goes to
+ * conversation.md for the sessions to come,
  * a question from another stay at a status is closed (see closeStaleQuestion), and a stop of the change
  * is cleared: the step it was for has ended (see writeChangeStop in src/inbox.ts). Once it ends, an
- * answered question nothing in it used is closed (see closeUnusedAnswer), unless a stop request, an
- * outage or the day's budget cut it short: the change then does the step again, and that step may use it.
+ * answered question nothing in it used is closed (see closeUnusedAnswer), unless it was not the step's
+ * fault (see notTheStepsFault): the change then does the step again, and that step may use it.
  */
 export async function runStepGuarded(ctx: StepContext): Promise<StepResult> {
   let cutShort = false;
@@ -946,12 +963,13 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
   }
 }
 
-/** What a step gave, for the console line. */
-function stepText(r: StepResult): string {
+/** What a step gave, for the console line. A step that waits says for what: GitHub unless it names something else. */
+export function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
   if (r.stoppedBy) return `stopped by ${r.stoppedBy}`;
   if (r.asked) return "asked a person a question";
-  return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
+  if (r.waiting) return `waiting for ${r.waitingFor ?? "GitHub"}`;
+  return r.personChanged ? "a person changed the status; it is picked up next" : "step done";
 }
 
 /** Prints a line of the loop's console output, after the time. */

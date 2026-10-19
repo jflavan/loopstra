@@ -6,8 +6,9 @@ import { FAKE_CLAUDE_ENV } from "../src/claude";
 import { configPath, loadConfig } from "../src/config";
 import { StepContext } from "../src/context";
 import { Git, NO_AUTO_MAINTENANCE } from "../src/git";
-import { readIntent } from "../src/intents";
+import { readIntent, writeIntent, type Frontmatter, type Intent, type Status } from "../src/intents";
 import { templateSha, type JudgeName } from "../src/judges";
+import { RecordDraft } from "../src/record-draft";
 import { writeStamp } from "../src/stamp";
 import { requestStop } from "../src/stop";
 import { Trace, type NewJudgeRow } from "../src/trace";
@@ -103,6 +104,19 @@ export async function setupRepo(status: string, opts: SetupOptions = {}) {
   await Bun.write(join(repo.path, "intent", "add-numbers", "intent.md"), `---\nstatus: ${status}\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n`);
   await new Git(repo.path).commitAll("intent");
   return { repo, ...(await openRepo(repo.path)) };
+}
+
+/**
+ * Writes frontmatter keys into a change's intent.md on disk, uncommitted, as a person's own edit is:
+ * writeIntent through a draft, whose files are then written straight into the checkout. For setting
+ * up a test's state; the loop itself writes only through commitRecord.
+ */
+export async function writeIntentOnDisk(intent: Intent, patch: Partial<Frontmatter>, opts: { expectStatus?: Status; remove?: Array<keyof Frontmatter> } = {}): Promise<boolean> {
+  const root = join(intent.dir, "..", "..");
+  const draft = new RecordDraft(root, intent.slug);
+  const wrote = await writeIntent(intent, patch, opts, draft);
+  for (const c of draft.changes()) if (c.text !== null) writeFileSync(join(root, c.rel), c.text);
+  return wrote;
 }
 
 /** A fresh Trace and a StepContext on the `add-numbers` intent of a repository setupRepo made (or a copy of one). */

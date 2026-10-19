@@ -5,10 +5,10 @@ import { CHAT_SLUG, startOfToday } from "../../src/budget";
 import { configPath } from "../../src/config";
 import { OFF_MAIN_NOTE } from "../../src/context";
 import { Git } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
 import { Trace } from "../../src/trace";
-import { FAKE_CLAUDE as FAKE, TEMPLATES, tempGitRepo, withEnv } from "../helpers";
+import { FAKE_CLAUDE as FAKE, TEMPLATES, tempGitRepo, withEnv, writeIntentOnDisk } from "../helpers";
 
 const INTENT = "---\nstatus: accepted\n---\n# Intent: add numbers\n\n## Problem\nNo add.\n\n## Proposed outcome\nAn add function.\n\n## Done when\n- add(1, 2) returns 3.\n";
 
@@ -47,7 +47,7 @@ async function statusOf(repo: string, slug = "add-numbers"): Promise<string> {
 /** A person edits the status line in intent.md and commits it. */
 async function personSets(repo: string, status: "merge-approved" | "done"): Promise<void> {
   const i = await readIntent(repo, "add-numbers");
-  await writeIntent(i, { status, note: "" });
+  await writeIntentOnDisk(i, { status, note: "" });
   await new Git(repo).commitPaths(["intent/add-numbers"], `person: ${status}`);
 }
 

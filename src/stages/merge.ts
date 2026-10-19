@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, settleRecord, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { GitHub, recordGitHub, type PrInfo } from "../github";
@@ -733,8 +733,17 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
   return landed === true ? finishMerge(ctx) : landed;
 }
 
-/** mergeNow's section: true when the merge landed, else the block it recorded. */
+/**
+ * mergeNow's section: true when the merge landed, else the block it recorded, or a wait. A record
+ * another change's step or a request left between moving main and writing the checkout (see
+ * settleRecord) is finished first: until it is, the index lags behind main for its files, which
+ * would read as a person's staged changes. One that cannot be finished yet (traced) makes the step
+ * wait for the next tick, on main; off main the checkout is not ready, as before.
+ */
 async function mergeIntoMain(ctx: StepContext): Promise<true | StepResult> {
+  if (!(await settleRecord(ctx.root, ctx.cfg.main_branch, ctx.trace)) && (await ctx.git.currentBranch()) === ctx.cfg.main_branch) {
+    return { ok: true, waiting: true, waitingFor: "a record the loop was writing to be finished" };
+  }
   const root = await rootReady(ctx);
   if (!root.ok) return block(ctx, DIRTY_ROOT_NOTE, { detail: root.detail });
 

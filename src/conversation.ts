@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import { runDir } from "./paths";
 import { readJsonAs, writeJson } from "./fsutil";
-import { commitRecord } from "./context";
+import { commitRecord, landed } from "./context";
+import type { Trace } from "./trace";
 
 /**
  * `intent/<slug>/conversation.md`: one readable record per change of what people told its agents and
@@ -81,8 +82,8 @@ const timeless = (entry: string) => entry.trim().replace(/^## \S+ \S+ · /, "## 
 const entriesOf = (current: string) => current.trim().split(/\n(?=## )/).map(timeless);
 
 /**
- * The record with one more entry, unless it already ends with that same entry (whatever its time): an
- * earlier try whose commit failed left it on disk.
+ * The record with one more entry, unless it already ends with that same entry (whatever its time): a
+ * try whose commit landed but whose work after it failed may be made again.
  */
 export function withEntryOnce(current: string, e: ConversationEntry): string {
   const last = entriesOf(current).at(-1) ?? "";
@@ -112,7 +113,8 @@ interface Recorded { who: string; via: string; text: string }
  * True when the record holds the inbox message's entry: one by the same person from the same place
  * (its header), addressed to a phase or to the next session (which of them is not known to every
  * caller), whose body is exactly the message's text. The whole entry, never the words alone: "ok" is
- * in many a record, and a message whose first commit failed must still be written.
+ * in many a record, and a message whose entry is not in it (a person took it out, or recorded.json
+ * outlived it) must still be written.
  */
 function holdsEntry(current: string, m: Recorded): boolean {
   const head = `## ${one(m.who)} (${one(m.via)}) `;
@@ -127,8 +129,7 @@ function holdsEntry(current: string, m: Recorded): boolean {
 
 /**
  * The kind of entry an inbox message got in conversation.md ("message", "redirect", "later"), or null
- * when it has none: never written, or its entry is no longer in the record (a failed write put back;
- * see holdsEntry).
+ * when it has none: never written, or its entry is no longer in the record (see holdsEntry).
  */
 export function recordedAs(root: string, slug: string, id: string, m: Recorded, current = readConversation(root, slug)): EntryKind | null {
   const kind = readJsonAs(recordedPath(root, slug), RecordedSchema)?.[id];
@@ -143,17 +144,32 @@ function noteRecorded(root: string, slug: string, id: string, kind: EntryKind): 
 }
 
 /**
- * Appends one entry and commits it ("loopstra(<slug>): conversation"). Under commitRecord's lock, so two
- * entries written at once (a message and an answer) both land. `id`: the inbox
- * message the entry is for, whose entry is written once only, wherever it is in the record (see
- * recordedAs): an earlier try whose commit failed wrote it, and a later entry's commit may have taken it
- * along. What is on disk is committed either way.
+ * Appends one entry and commits it ("loopstra(<slug>): conversation"), through commitRecord's draft.
+ * Under commitRecord's lock, so two entries written at once (a message and an answer) both land.
+ * `id`: the inbox message the entry is for, whose entry is written once only, wherever it is in the
+ * record (see recordedAs). Its commit is tagged with it (see commitRecord's `opts.request`), and
+ * recorded.json names it only once the commit landed, so a failed try leaves nothing that keeps the
+ * next try from writing it. A try after a kill between the two (the commit landed, recorded.json does
+ * not name it) asks git instead (see landed; `opts.since`, when the message was sent, bounds the
+ * walk): while the record still holds the entry, it is not written again, and recorded.json names it
+ * once more. A git that fails throws, as a failed record does. `opts.trace`: where commitRecord tells
+ * what failed after the record landed.
  */
-export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string } = {}): Promise<void> {
-  await commitRecord(root, main, slug, "conversation", async () => {
-    const current = readConversation(root, slug);
-    if (opts.id && "who" in e && "text" in e && recordedAs(root, slug, opts.id, e, current)) return;
-    await Bun.write(conversationPath(root, slug), withEntry(current, e));
-    if (opts.id) noteRecorded(root, slug, opts.id, e.kind);
-  });
+export async function appendConversation(root: string, main: string, slug: string, e: ConversationEntry, opts: { id?: string; since?: string; trace?: Trace } = {}): Promise<void> {
+  const id = opts.id;
+  const earlier = id ? await landed(root, main, id, slug, opts.since) : false;
+  let held = false;
+  const wrote = await commitRecord(root, main, slug, "conversation", async (draft) => {
+    const rel = `intent/${slug}/conversation.md`;
+    const current = draft.read(rel) ?? "";
+    held = false;
+    if (id && "who" in e && "text" in e) {
+      if (recordedAs(root, slug, id, e, current)) return false;
+      // Its entry landed and is still there: the one being written now.
+      if (earlier && holdsEntry(current, e)) { held = true; return false; }
+    }
+    draft.write(rel, withEntry(current, e));
+    return true;
+  }, { trace: opts.trace, ...(id ? { request: id } : {}) });
+  if ((wrote || held) && id) noteRecorded(root, slug, id, e.kind);
 }

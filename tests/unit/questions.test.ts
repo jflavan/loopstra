@@ -381,7 +381,7 @@ describe("questions", () => {
       const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
       expect(e).toBeInstanceOf(Error);
       expect(existsSync(questionPath(repo.path))).toBe(false);
-      // What it wrote is put back, so the next commit (a block, say) never commits an open question without question.json.
+      // Nothing was written (the commit is made first), so the next commit (a block, say) never commits an open question without question.json.
       expect((await readIntent(repo.path, SLUG)).file.frontmatter.question).toBe("");
       expect(readConversation(repo.path, SLUG)).toBe("");
       expect((await new Git(repo.path).run(["status", "--porcelain", "--", "intent"])).out.trim()).toBe("");
@@ -401,7 +401,7 @@ describe("questions", () => {
       const e = await recordQuestion(ctx, { phase: "design", traceName: "design", seq: 1, sessionId: "s1", ...ASKS }).then(() => null, (err: unknown) => err);
       expect(e).toBeInstanceOf(Error);
       expect(readFileSync(path, "utf8")).toContain("A line a person added.");
-      // conversation.md held nothing of the person's: it is put back.
+      // Nothing was written to conversation.md either.
       expect(readConversation(repo.path, SLUG)).toBe("");
     } finally { trace.close(); repo.cleanup(); }
   }, 90_000);

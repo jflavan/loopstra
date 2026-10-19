@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { claim, release } from "../../src/lanes";
 import { runStepGuarded } from "../../src/scheduler";
 import { runBuildStep } from "../../src/stages/build";
@@ -13,7 +13,7 @@ import { readMarker, writeMarker, writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
-import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv } from "../helpers";
+import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
@@ -246,7 +246,7 @@ describe("build stage", () => {
     // A person retries from plan-approved: the branch and worktree are reused, and the new build is
     // compared with main's plan again, not with the plan reconciled for the earlier build.
     await Bun.write(reconciled, "# Plan: stale\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n");
-    await writeIntent(ctx.intent, { status: "plan-approved" });
+    await writeIntentOnDisk(ctx.intent, { status: "plan-approved" });
     await new Git(repo.path).commitAll("retry");
     await ctx.reload();
     const before = phaseNames(trace).length;

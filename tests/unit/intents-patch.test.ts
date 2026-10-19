@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FrontmatterProblem, parseIntentFile, patchFrontmatter, readIntent, writeIntent } from "../../src/intents";
-import { tempDir } from "../helpers";
+import { commitRecord } from "../../src/context";
+import { Git } from "../../src/git";
+import { RecordDraft } from "../../src/record-draft";
+import { tempDir, tempGitRepo } from "../helpers";
 
 const OWNER = `---
 status: draft
@@ -113,29 +116,33 @@ describe("removing a line", () => {
       mkdirSync(join(t.path, "intent", "a"), { recursive: true });
       await Bun.write(join(t.path, "intent", "a", "intent.md"), "---\nstatus: building\nhold: x\n---\n# Intent: a\n");
       const i = await readIntent(t.path, "a");
-      expect(await writeIntent(i, {}, { expectStatus: "reviewing", remove: ["hold"] })).toBe(false);
-      expect(await writeIntent(i, {}, { expectStatus: "building", remove: ["hold"] })).toBe(true);
-      expect(await Bun.file(join(t.path, "intent", "a", "intent.md")).text()).toBe("---\nstatus: building\n---\n# Intent: a\n");
+      const draft = new RecordDraft(t.path, "a");
+      expect(await writeIntent(i, {}, { expectStatus: "reviewing", remove: ["hold"] }, draft)).toBe(false);
+      expect(await writeIntent(i, {}, { expectStatus: "building", remove: ["hold"] }, draft)).toBe(true);
+      expect(draft.read("intent/a/intent.md")).toBe("---\nstatus: building\n---\n# Intent: a\n");
       expect(i.file.frontmatter.hold).toBe("");
+      // Written to the draft only: the file reaches disk once a record commits it (see commitRecord).
+      expect(await Bun.file(join(t.path, "intent", "a", "intent.md")).text()).toBe("---\nstatus: building\nhold: x\n---\n# Intent: a\n");
       // A deleted change is not written back.
       rmSync(join(t.path, "intent", "a"), { recursive: true });
-      expect(await writeIntent(i, { status: "closed" })).toBe(false);
+      expect(await writeIntent(i, { status: "closed" }, {}, new RecordDraft(t.path, "a"))).toBe(false);
       expect(existsSync(join(t.path, "intent", "a"))).toBe(false);
     } finally {
       t.cleanup();
     }
   });
 
-  test("writeIntent replaces intent.md whole, never rewrites it in place, and leaves no temp file in the change's folder", async () => {
-    const t = tempDir();
+  test("a record of writeIntent replaces intent.md whole, never rewrites it in place, and leaves no temp file in the change's folder", async () => {
+    const t = await tempGitRepo();
     try {
       const path = join(t.path, "intent", "a", "intent.md");
       const before = "---\nstatus: building\n---\n# Intent: a\n";
       mkdirSync(dirname(path), { recursive: true });
       await Bun.write(path, before);
+      await new Git(t.path).commitAll("a change");
       const i = await readIntent(t.path, "a");
       const id = statSync(path, { bigint: true }).ino;
-      expect(await writeIntent(i, { status: "reviewing" })).toBe(true);
+      expect(await commitRecord(t.path, "main", "a", "status", (d) => writeIntent(i, { status: "reviewing" }, {}, d))).toBe(true);
       // Another file was renamed over it: a reader (the console, chat, a person's editor) never sees it emptied and half written.
       // Renamed over, so a new file: where a rename can be refused (Windows, while something holds a file open)
       // writeFileAtomic may fall back to a plain write, so the identity is only certain elsewhere.

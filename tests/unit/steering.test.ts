@@ -185,7 +185,7 @@ describe("steering a running session", () => {
     try {
       await appendConversation(repo.path, "main", SLUG, { kind: "message", who: "John", via: "Slack", phase: "design", text: "use bun, ok", at: new Date() });
       const m = sendToSession(repo.path, SLUG, { seq: 7, kind: "message", text: "ok", by: "John", via: "Slack" });
-      // A lock on main's ref: the record's commit fails, its entry is put back, and recorded.json keeps the id.
+      // A lock on main's ref: the record's commit fails, and nothing is written (recorded.json does not name the id).
       const lock = join(repo.path, ".git", "refs", "heads", "main.lock");
       writeFileSync(lock, "");
       await sweepInbox(ctx);

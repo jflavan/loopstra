@@ -5,9 +5,9 @@ import { AnnouncementLog, announce, holdAnnouncerLock } from "../../src/chat/ann
 import { ChatService, type Transport } from "../../src/chat/service";
 import { writeJson } from "../../src/fsutil";
 import { chatDir } from "../../src/chat/threads";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { chatRepo, INTENT } from "../chat-helpers";
-import { tempDir } from "../helpers";
+import { tempDir, writeIntentOnDisk } from "../helpers";
 import { Trace } from "../../src/trace";
 
 function bot(name: string, from: "now" | "kept"): Transport & { announced: string[] } {
@@ -25,19 +25,19 @@ describe("announcements", () => {
       expect(await announce(r.root, log)).toEqual([]);
       // going merges, then is done; a draft appears and waits for a person.
       const going = await readIntent(r.root, "going");
-      await writeIntent(going, { status: "merged" });
+      await writeIntentOnDisk(going, { status: "merged" });
       mkdirSync(join(r.root, "intent", "new-one"), { recursive: true });
       await Bun.write(join(r.root, "intent", "new-one", "intent.md"), INTENT("draft", "new one"));
       const second = (await announce(r.root, log)).map((a) => a.text);
       expect(second).toContain("Merged: going one. It is in the main code now.");
       expect(second.some((t) => t.startsWith("Waiting for you: new one."))).toBe(true);
-      await writeIntent(going, { status: "done" });
+      await writeIntentOnDisk(going, { status: "done" });
       expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Done: going one. It is finished and checked."]);
       // An item that goes away and comes back is news again.
       const stuck = await readIntent(r.root, "stuck");
-      await writeIntent(stuck, { status: "closed" });
+      await writeIntentOnDisk(stuck, { status: "closed" });
       expect(await announce(r.root, log)).toEqual([]);
-      await writeIntent(stuck, { status: "blocked" });
+      await writeIntentOnDisk(stuck, { status: "blocked" });
       expect((await announce(r.root, log)).map((a) => a.slug)).toEqual(["stuck"]);
       expect(log.all().map((a) => a.id)).toEqual(log.all().map((_, i) => i + 1));
     } finally { r.cleanup(); }
@@ -49,14 +49,14 @@ describe("announcements", () => {
       const log = new AnnouncementLog(r.root);
       await announce(r.root, log);
       const going = await readIntent(r.root, "going");
-      await writeIntent(going, { status: "merged" });
+      await writeIntentOnDisk(going, { status: "merged" });
       await announce(r.root, log);
-      await writeIntent(going, { status: "verifying" });
+      await writeIntentOnDisk(going, { status: "verifying" });
       await announce(r.root, log);
       // The done-check blocks it; its code stays in main (resume_from says so), and a person retries.
-      await writeIntent(going, { status: "blocked", resume_from: "merged", note: "Not done yet. When that is sorted out, set status to merged." });
+      await writeIntentOnDisk(going, { status: "blocked", resume_from: "merged", note: "Not done yet. When that is sorted out, set status to merged." });
       expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Blocked: going one. Not done yet. When that is sorted out, set status to merged."]);
-      await writeIntent(going, { status: "verifying", note: "" });
+      await writeIntentOnDisk(going, { status: "verifying", note: "" });
       expect(await announce(r.root, log)).toEqual([]);
       expect(log.all().filter((a) => a.text.startsWith("Merged:"))).toHaveLength(1);
     } finally { r.cleanup(); }
@@ -181,7 +181,7 @@ describe("the announcer's state (hardening review)", () => {
       expect(readdirSync(chatDir(r.root)).filter((n) => n.startsWith("announcer.json.bad-"))).toHaveLength(1);
       // A fresh state: the first poll after it compares nothing, so a merge noticed then is not news.
       const going = await readIntent(r.root, "going");
-      await writeIntent(going, { status: "merged" });
+      await writeIntentOnDisk(going, { status: "merged" });
       expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Merged: going one. It is in the main code now."]);
     } finally { r.cleanup(); }
   });

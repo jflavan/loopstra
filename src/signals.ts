@@ -117,16 +117,17 @@ function brokeWhen(afterSlugs: string[]): string {
   return `after the changes ${andList([first, ...rest])} merged`;
 }
 
-/** Opens a draft for the failing tests, named after the first change merged since the last check. */
+/**
+ * Opens a draft for the failing tests, named after the first change merged since the last check. The
+ * signal is traced on the draft's change once its record landed.
+ */
 async function openFailureIntent(root: string, main: string, trace: Trace, afterSlugs: string[], output: string): Promise<void> {
   const today = localDate();
   const slug = afterSlugs[0] ? `fix-tests-after-${afterSlugs[0]}` : `fix-tests-on-main-${today}`;
-  const dir = join(root, "intent", slug);
-  if (existsSync(dir)) return;
+  if (existsSync(join(root, "intent", slug))) return;
   const what = brokeWhen(afterSlugs);
-  await commitRecord(root, main, slug, "open intent for failing tests on main", async () => {
-    mkdirSync(dir, { recursive: true });
-    await Bun.write(join(dir, "intent.md"), `---
+  const landed = await commitRecord(root, main, slug, "open intent for failing tests on main", async (draft) => {
+    draft.write(`intent/${slug}/intent.md`, `---
 status: draft
 priority: high
 author: loopstra
@@ -150,6 +151,6 @@ Everyone working on this repository.
 ## Open questions
 Should the change be reverted, or fixed forward?
 `);
-    trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlugs, output });
-  });
+  }, { trace });
+  if (landed) trace.event(slug, "signal", { name: SIGNAL, result: "fail", after: afterSlugs, output });
 }

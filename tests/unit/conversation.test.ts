@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { appendConversation, conversationEntry, conversationPath, readConversation, recordedAs, withEntry, withEntryOnce } from "../../src/conversation";
 import { writeJson } from "../../src/fsutil";
+import { Git } from "../../src/git";
 import { lastCommit } from "../helpers";
 import { chatRepo, INTENT } from "../chat-helpers";
 
@@ -45,7 +47,7 @@ describe("conversation.md", () => {
       // The same words from another message are its own entry.
       await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 4) }, { id: "000000000000001-1-0003" });
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(2);
-      // Its text gone from the record (a failed write put back): written again.
+      // Its text gone from the record (a person took it out): written again.
       await Bun.write(conversationPath(r.root, "a"), "# Conversation\n");
       expect(recordedAs(r.root, "a", "000000000000001-1-0001", m)).toBeNull();
       await appendConversation(r.root, "main", "a", m, { id: "000000000000001-1-0001" });
@@ -60,7 +62,7 @@ describe("conversation.md", () => {
     try {
       const at = new Date(2026, 9, 17, 9, 0);
       await appendConversation(r.root, "main", "a", { kind: "message", who: "John", via: "the dashboard", phase: "build", text: "use bun, ok", at }, { id: "000000000000001-1-0001" });
-      // A second message's first commit failed: recorded.json kept its id, and the put back took its entry out of the record.
+      // recorded.json names a second message whose entry is not in the record (a person took it out).
       writeJson(join(r.root, ".loopstra", "runs", "a", "recorded.json"), { "000000000000001-1-0001": "message", "000000000000001-1-0002": "message" });
       const m = { who: "Ana", via: "Slack", text: "ok" };
       expect(recordedAs(r.root, "a", "000000000000001-1-0002", m)).toBeNull();
@@ -76,6 +78,49 @@ describe("conversation.md", () => {
       // A recorded.json that is not the shape reads as nothing recorded.
       writeJson(join(r.root, ".loopstra", "runs", "a", "recorded.json"), { "000000000000001-1-0002": 7 });
       expect(recordedAs(r.root, "a", "000000000000001-1-0002", m)).toBeNull();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a message's id is noted in recorded.json only once its commit landed: a failed commit writes nothing", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    const commitFiles = Git.prototype.commitFiles;
+    try {
+      const m = { kind: "message" as const, who: "John", via: "the dashboard", phase: "build", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 0) };
+      const id = "000000000000001-1-0001";
+      const recorded = join(r.root, ".loopstra", "runs", "a", "recorded.json");
+      Git.prototype.commitFiles = async function () { throw new Error("the disk is full"); };
+      await expect(appendConversation(r.root, "main", "a", m, { id })).rejects.toThrow("the disk is full");
+      Git.prototype.commitFiles = commitFiles;
+      expect(existsSync(recorded) ? readFileSync(recorded, "utf8") : "").not.toContain(id);
+      expect(existsSync(conversationPath(r.root, "a"))).toBe(false);
+      // The next try writes it, and only then is the id noted.
+      await appendConversation(r.root, "main", "a", m, { id });
+      expect(readFileSync(recorded, "utf8")).toContain(id);
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
+    } finally {
+      Git.prototype.commitFiles = commitFiles;
+      r.cleanup();
+    }
+  });
+
+  test("a message whose entry landed, though the loop was killed before recorded.json named it, is not written again", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const m = { kind: "message" as const, who: "John", via: "the dashboard", phase: "build", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 0) };
+      const id = "000000000000001-1-0001";
+      await appendConversation(r.root, "main", "a", m, { id });
+      // Its commit carries the message's id, so git can tell it landed.
+      expect((await new Git(r.root).run(["log", "-1", "--format=%B"])).out).toContain(`Loopstra-Request: ${id}`);
+      // A kill between HEAD moving and recorded.json being written leaves no note of it.
+      rmSync(join(r.root, ".loopstra", "runs", "a", "recorded.json"));
+      const head = await new Git(r.root).headSha();
+      await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 1) }, { id });
+      expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
+      expect(await new Git(r.root).headSha()).toBe(head);
+      // recorded.json names it again, as the entry that landed.
+      expect(recordedAs(r.root, "a", id, m)).toBe("message");
     } finally {
       r.cleanup();
     }

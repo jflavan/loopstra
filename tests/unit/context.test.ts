@@ -3,14 +3,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { loadConfig, configPath } from "../../src/config";
 import { Git, GitError } from "../../src/git";
-import { readIntent, writeIntent } from "../../src/intents";
+import { readIntent } from "../../src/intents";
 import { Trace } from "../../src/trace";
 import {
   StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker, PersonChangedStatus,
-  readArtifact, setStatus, statusPatch, writeArtifact, writeIntentPriority, clearSession, loadSessions, saveSession,
+  readArtifact, setStatus, settleRecord, statusPatch, writeArtifact, writeIntentPriority, clearSession, loadSessions, saveSession,
 } from "../../src/context";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
-import { lastCommit, run, setupRepo, tempGitRepo } from "../helpers";
+import { lastCommit, run, setupRepo, tempGitRepo, writeIntentOnDisk } from "../helpers";
 
 async function setup() {
   const repo = await tempGitRepo();
@@ -51,7 +51,7 @@ describe("StepContext", () => {
     await setStatus(ctx, "spec-approved");
     await ctx.reload();
     // Simulate a person editing the status directly (skipping the runtime), leaving resume_from stale.
-    await writeIntent(ctx.intent, { status: "plan-approved" });
+    await writeIntentOnDisk(ctx.intent, { status: "plan-approved" });
     await ctx.reload();
     await setStatus(ctx, "building");
     const i = await readIntent(repo.path, "x");
@@ -185,17 +185,17 @@ describe("StepContext", () => {
     }
   });
 
-  test("a record whose commit fails is put back as it was, nothing staged, and the error surfaces", async () => {
+  test("a record whose commit fails leaves the files as they were, nothing staged, and the error surfaces", async () => {
     const { repo, ctx, trace } = await setup();
+    const commitFiles = Git.prototype.commitFiles;
     try {
       const intentMd = join(ctx.intent.dir, "intent.md");
       const before = await Bun.file(intentMd).text();
-      // Runtime commits skip the commit hooks, but not this one: the commit itself fails.
-      writeFileSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
-        await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
-        await Bun.write(join(repo.path, "intent", "queue.md"), "# Queue\n");
+      Git.prototype.commitFiles = async function () { throw new GitError(["commit-tree"], "", "", 128, "fatal: the disk is full"); };
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async (d) => {
+        d.write("intent/x/intent.md", before.replace("status: accepted", "status: designing"));
+        d.write("intent/x/note.md", "# Note\n");
+        d.write("intent/queue.md", "# Queue\n");
       })).rejects.toBeInstanceOf(GitError);
       expect(await Bun.file(intentMd).text()).toBe(before);
       expect(existsSync(join(ctx.intent.dir, "note.md"))).toBe(false);
@@ -204,142 +204,84 @@ describe("StepContext", () => {
       expect((await run(["git", "diff", "--cached", "--name-only"], repo.path)).out.trim()).toBe("");
       expect(await lastCommit(repo.path)).toContain("intent");
     } finally {
+      Git.prototype.commitFiles = commitFiles;
       trace.close(); repo.cleanup();
     }
   });
 
-  test("a write that throws after writing (a trace that cannot be written) is put back as it was, nothing staged, and the error surfaces", async () => {
+  test("a record whose HEAD moved before its error (git's time limit after the move) keeps its marker, and the next settle brings the checkout up", async () => {
     const { repo, ctx, trace } = await setup();
+    const moveRef = Git.prototype.moveRef;
     try {
       const intentMd = join(ctx.intent.dir, "intent.md");
       const before = await Bun.file(intentMd).text();
-      const head = await new Git(repo.path).headSha();
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
-        await Bun.write(join(ctx.intent.dir, "note.md"), "# Note\n");
-        throw new Error("SQLITE_BUSY: the trace could not be written");
-      })).rejects.toThrow("SQLITE_BUSY");
-      expect(await Bun.file(intentMd).text()).toBe(before);
-      expect(existsSync(join(ctx.intent.dir, "note.md"))).toBe(false);
-      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
-      expect((await run(["git", "diff", "--cached", "--name-only"], repo.path)).out.trim()).toBe("");
-      expect(await new Git(repo.path).headSha()).toBe(head);
-    } finally {
-      trace.close(); repo.cleanup();
-    }
-  });
-
-  test("a write refused because a person changed the change keeps the person's edit, and their deletion", async () => {
-    const { repo, ctx, trace } = await setup();
-    try {
-      const intentMd = join(ctx.intent.dir, "intent.md");
-      const before = await Bun.file(intentMd).text();
-      const theirs = before.replace("status: accepted", "status: closed");
-      // The person saves while the step is about to write; the step's write sees it and refuses.
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, theirs);
-        throw new PersonChangedStatus("accepted", "closed");
-      })).rejects.toBeInstanceOf(PersonChangedStatus);
-      expect(await Bun.file(intentMd).text()).toBe(theirs);
-      // Deleted by the person instead: the folder is not brought back.
-      await run(["git", "checkout", "--", "intent"], repo.path);
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        rmSync(ctx.intent.dir, { recursive: true, force: true });
-        throw new PersonChangedStatus("accepted", "deleted");
-      })).rejects.toBeInstanceOf(PersonChangedStatus);
-      expect(existsSync(ctx.intent.dir)).toBe(false);
-    } finally {
-      trace.close(); repo.cleanup();
-    }
-  });
-
-  test("a record whose commit landed before its error (git's time limit after the commit) is kept, not put back behind HEAD", async () => {
-    const { repo, ctx, trace } = await setup();
-    const commitPaths = Git.prototype.commitPaths;
-    try {
-      const intentMd = join(ctx.intent.dir, "intent.md");
-      const before = await Bun.file(intentMd).text();
-      Git.prototype.commitPaths = async function (this: Git, ...args: Parameters<Git["commitPaths"]>) {
-        await commitPaths.apply(this, args);
-        throw new GitError(["commit"], "", "", 124, "git commit timed out");
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
+        await moveRef.call(this, ref, from, to);
+        throw new GitError(["update-ref"], "", "", 124, "git update-ref timed out");
       };
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async (d) => {
+        d.write("intent/x/intent.md", before.replace("status: accepted", "status: designing"));
       })).rejects.toBeInstanceOf(GitError);
+      Git.prototype.moveRef = moveRef;
+      expect((await run(["git", "show", "HEAD:intent/x/intent.md"], repo.path)).out).toContain("status: designing");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
       expect(await Bun.file(intentMd).text()).toContain("status: designing");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
-      expect(await lastCommit(repo.path)).toContain("a note");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally {
-      Git.prototype.commitPaths = commitPaths;
+      Git.prototype.moveRef = moveRef;
       trace.close(); repo.cleanup();
     }
   });
 
-  test("a record whose commit failed while HEAD cannot be read is left written: it may have landed", async () => {
+  test("a record whose commit failed while a person committed in the main checkout leaves the files as they were: only the person's commit landed", async () => {
     const { repo, ctx, trace } = await setup();
-    const commitPaths = Git.prototype.commitPaths;
-    const headFile = join(repo.path, ".git", "HEAD");
-    const head = readFileSync(headFile, "utf8");
+    const commitFiles = Git.prototype.commitFiles;
     try {
       const intentMd = join(ctx.intent.dir, "intent.md");
       const before = await Bun.file(intentMd).text();
-      Git.prototype.commitPaths = async function () {
-        writeFileSync(headFile, "not a ref\n");
-        throw new GitError(["commit"], "", "", 124, "git commit timed out");
-      };
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
-      })).rejects.toBeInstanceOf(GitError);
-      expect(await Bun.file(intentMd).text()).toContain("status: designing");
-    } finally {
-      Git.prototype.commitPaths = commitPaths;
-      writeFileSync(headFile, head);
-      trace.close(); repo.cleanup();
-    }
-  });
-
-  test("a record whose commit failed while a person committed in the main checkout is put back: only its own commit counts as landed", async () => {
-    const { repo, ctx, trace } = await setup();
-    const commitPaths = Git.prototype.commitPaths;
-    try {
-      const intentMd = join(ctx.intent.dir, "intent.md");
-      const before = await Bun.file(intentMd).text();
-      Git.prototype.commitPaths = async function () {
+      Git.prototype.commitFiles = async function () {
         writeFileSync(join(repo.path, "notes.txt"), "the person's\n");
         await run(["git", "add", "notes.txt"], repo.path);
         await run(["git", "commit", "-q", "-m", "the person's commit"], repo.path);
-        throw new GitError(["commit"], "", "", 128, "fatal: Unable to create '.git/index.lock': File exists.");
+        throw new GitError(["commit-tree"], "", "", 128, "fatal: the disk is full");
       };
-      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async () => {
-        await Bun.write(intentMd, before.replace("status: accepted", "status: designing"));
+      await expect(commitRecord(repo.path, ctx.cfg.main_branch, "x", "a note", async (d) => {
+        d.write("intent/x/intent.md", before.replace("status: accepted", "status: designing"));
       })).rejects.toBeInstanceOf(GitError);
       expect(await Bun.file(intentMd).text()).toBe(before);
       expect(await lastCommit(repo.path)).toContain("the person's commit");
       expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
     } finally {
-      Git.prototype.commitPaths = commitPaths;
+      Git.prototype.commitFiles = commitFiles;
       trace.close(); repo.cleanup();
     }
   });
 
   test("a status a person set while a step's commit failed is kept: the step's intent goes back to before its write, so a block after meets the person's status", async () => {
     const { repo, ctx, trace } = await setup();
+    const commitFiles = Git.prototype.commitFiles;
     try {
-      // The person sets closed while the commit runs; the commit then fails, and leaves their status.
-      const sed = "sed 's/^status: .*/status: closed/' intent/x/intent.md > .git/edited && mv .git/edited intent/x/intent.md";
-      writeFileSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"), `#!/bin/sh\n${sed}\nexit 1\n`, { mode: 0o755 });
+      // The person sets closed while the commit is made; the commit then fails, and leaves their status.
+      const intentMd = join(ctx.intent.dir, "intent.md");
+      Git.prototype.commitFiles = async function () {
+        writeFileSync(intentMd, readFileSync(intentMd, "utf8").replace(/^status: .*$/m, "status: closed"));
+        throw new GitError(["commit-tree"], "", "", 128, "fatal: the disk is full");
+      };
       await expect(setStatus(ctx, "designing", "go")).rejects.toBeInstanceOf(GitError);
-      rmSync(join(repo.path, ".git", "hooks", "prepare-commit-msg"));
+      Git.prototype.commitFiles = commitFiles;
       expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("closed");
       expect(ctx.intent.file.frontmatter.status).toBe("accepted");
       await expect(block(ctx, "Something went wrong.")).rejects.toBeInstanceOf(PersonChangedStatus);
       expect((await readIntent(repo.path, "x")).file.frontmatter.status).toBe("closed");
     } finally {
+      Git.prototype.commitFiles = commitFiles;
       trace.close(); repo.cleanup();
     }
   });
 
-  test("a record whose commit meets a held index lock goes back to what was there, a person's uncommitted edit included", async () => {
+  test("a record that meets a held index lock lands with a person's uncommitted edit and says so, keeps its marker, and the next settle brings the index up", async () => {
     const { repo, ctx, trace } = await setup();
     const lock = join(repo.path, ".git", "index.lock");
     try {
@@ -348,10 +290,20 @@ describe("StepContext", () => {
       const persons = (await Bun.file(intentMd).text()).replace("## Problem\np", "## Problem\nthe person's words");
       await Bun.write(intentMd, persons);
       await Bun.write(lock, "");
-      await expect(setStatus(ctx, "designing")).rejects.toBeInstanceOf(GitError);
-      expect(await Bun.file(intentMd).text()).toBe(persons);
+      // The commit is made in an index of its own, so the lock holds up only the checkout's index:
+      // the record landed, and is reported so.
+      await setStatus(ctx, "designing");
+      expect(ctx.intent.file.frontmatter.status).toBe("designing");
+      expect(trace.events("x").some((e) => e.type === "error" && e.payload.includes("could not be brought up"))).toBe(true);
+      const committed = (await run(["git", "show", "HEAD:intent/x/intent.md"], repo.path)).out;
+      expect(committed).toContain("status: designing");
+      expect(committed).toContain("the person's words");
+      expect(await Bun.file(intentMd).text()).toBe(committed);
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(true);
       rmSync(lock);
-      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("M intent/x/intent.md");
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
+      expect((await run(["git", "status", "--porcelain"], repo.path)).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
     } finally {
       rmSync(lock, { force: true });
       trace.close(); repo.cleanup();

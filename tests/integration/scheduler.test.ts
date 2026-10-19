@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { configPath } from "../../src/config";
+import { applyRequests } from "../../src/apply";
+import { configPath, loadConfig } from "../../src/config";
 import type { StepContext } from "../../src/context";
 import { Git, passOn, removeStaleLocks } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileURLToPath } from "node:url";
 import { holdLoop, loopAlreadyRunning, readPause, releaseLoop, thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { othersRunning, othersRunningCommands } from "../../src/lanes";
-import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
+import { CONSOLE, requestState, submitRequest } from "../../src/requests";
+import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, stepText, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
 import { FAKE_CLAUDE, fixture, fixtureDir, NEVER_A_PID, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
@@ -546,6 +548,113 @@ describe("scheduler resilience", () => {
       chmodSync(exe, 0o755);
       expect(claudeOverrideProblem({ LOOPSTRA_CLAUDE_EXECUTABLE: exe })).toBeNull();
     } finally { t.cleanup(); }
+  });
+
+  test("a record a kill left between HEAD and the checkout is finished before the tick does anything else", async () => {
+    const { repo, trace } = await setupRepo("draft");
+    try {
+      const git = new Git(repo.path);
+      const parent = await git.headSha();
+      const md = join(repo.path, "intent", SLUG, "intent.md");
+      const text = readFileSync(md, "utf8").replace("status: draft", "status: closed");
+      const commit = (await git.commitFiles(parent, [`intent/${SLUG}`], [{ rel: `intent/${SLUG}/intent.md`, text }], "loopstra(x): killed [skip ci]"))!;
+      writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: SLUG, paths: [`intent/${SLUG}/intent.md`] }));
+      await git.moveRef("refs/heads/main", parent, commit);
+      await tick(repo.path);
+      expect(readFileSync(md, "utf8")).toContain("status: closed");
+      // The change's folder: queue.md, which every tick renders, is committed with the next record.
+      expect((await run(["git", "status", "--porcelain", "--", `intent/${SLUG}`], repo.path)).out.trim()).toBe("");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+  test("a record a kill left that cannot be finished yet pauses the tick, which starts no step; once it can be, the tick goes on", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const lock = join(repo.path, ".git", "index.lock");
+    try {
+      const git = new Git(repo.path);
+      const parent = await git.headSha();
+      const rel = `intent/${SLUG}/note.md`;
+      const commit = (await git.commitFiles(parent, [`intent/${SLUG}`], [{ rel, text: "n\n" }], "loopstra(x): killed [skip ci]"))!;
+      writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: SLUG, paths: [rel] }));
+      await git.moveRef("refs/heads/main", parent, commit);
+      // A person's git holds the index: the checkout cannot be brought up to the landed record.
+      writeFileSync(lock, "");
+      const r = await tick(repo.path);
+      expect(r.paused).toBe("A record the loop was writing when it stopped could not be finished yet; it is tried again on the next tick.");
+      expect(r.picked).toBeNull();
+      expect(r.steps ?? []).toEqual([]);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("accepted");
+      rmSync(lock);
+      const again = await tick(repo.path);
+      expect(again.paused).toBeUndefined();
+      expect(again.picked).toBe(SLUG);
+      expect(readFileSync(join(repo.path, rel), "utf8").replaceAll("\r\n", "\n")).toBe("n\n");
+    } finally { rmSync(lock, { force: true }); trace.close(); repo.cleanup(); }
+  }, 60_000);
+
+  test("a step whose record meets main moving twice keeps the change's status, is not blocked, and the tick reports it without crashing", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const moveRef = Git.prototype.moveRef;
+    try {
+      // The first record's two tries both meet main moved by someone else: nothing moves.
+      let tries = 0;
+      Git.prototype.moveRef = async function (this: Git, ref: string, from: string, to: string) {
+        if (tries++ < 2) return false;
+        return moveRef.call(this, ref, from, to);
+      };
+      const r = await tick(repo.path);
+      expect(r.crashed).toBeUndefined();
+      expect(r.picked).toBe(SLUG);
+      expect(r.steps?.map((s) => s.slug)).toEqual([SLUG]);
+      expect(r.steps?.[0]?.result).toBeUndefined();
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("accepted");
+      expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes('"where":"step"'))).toBe(false);
+      expect(trace.events(SLUG).some((e) => e.type === "error" && e.payload.includes('"where":"record"'))).toBe(true);
+      Git.prototype.moveRef = moveRef;
+      await tick(repo.path);
+      expect((await readIntent(repo.path, SLUG)).file.frontmatter.status).toBe("spec-approved");
+    } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
+  }, 60_000);
+
+  test("a request the applier applies while a lane's step records: both land on main, one after the other, and the checkout is clean", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      mkdirSync(join(repo.path, "intent", "other"), { recursive: true });
+      writeFileSync(join(repo.path, "intent", "other", "intent.md"), readFileSync(join(repo.path, "intent", SLUG, "intent.md"), "utf8").replace("status: accepted", "status: draft"));
+      await new Git(repo.path).commitAll("another change");
+      // Once the lane's design step has started (its status recorded, its first session running),
+      // the applier applies a start of the other change beside it.
+      const applying = (async () => {
+        while (!trace.phases(SLUG).some((p) => p.name === "intake")) await Bun.sleep(20);
+        const q = submitRequest(repo.path, { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "accept", slug: "other" });
+        expect(await applyRequests(repo.path, await loadConfig(repo.path), trace)).toBe(1);
+        return q.id;
+      })();
+      const r = await tick(repo.path);
+      const id = await applying;
+      expect(r.crashed).toBeUndefined();
+      expect(requestState(repo.path, id)).toMatchObject({ state: "done", ok: true, status: "accepted" });
+      expect((await run(["git", "show", "main:intent/other/intent.md"], repo.path)).out).toContain("status: accepted");
+      expect((await run(["git", "show", `main:intent/${SLUG}/intent.md`], repo.path)).out).toContain("status: spec-approved");
+      expect((await run(["git", "show", `main:intent/${SLUG}/spec.md`], repo.path)).code).toBe(0);
+      // Newest first: the step recorded both before the request's commit and after it.
+      const subjects = (await run(["git", "log", "--format=%s", "main"], repo.path)).out.split("\n");
+      const request = subjects.findIndex((l) => l.startsWith("loopstra(other): accepted by John from the dashboard"));
+      const step = subjects.flatMap((l, k) => (l.startsWith(`loopstra(${SLUG}): `) ? [k] : []));
+      expect(request).toBeGreaterThan(0);
+      expect(step.some((k) => k < request)).toBe(true);
+      expect(step.some((k) => k > request)).toBe(true);
+      // queue.md is rendered every tick and committed with the next record (see writeQueue).
+      expect((await run(["git", "status", "--porcelain", "--", ".", ":(exclude)intent/queue.md"], repo.path)).out.trim()).toBe("");
+      expect(existsSync(join(repo.path, ".loopstra", "recording.json"))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  }, 60_000);
+
+});
+
+describe("the console line for a step", () => {
+  test("a step that waits says what for: GitHub, unless it names something else", () => {
+    expect(stepText({ ok: true, waiting: true })).toBe("waiting for GitHub");
+    expect(stepText({ ok: true, waiting: true, waitingFor: "a record the loop was writing to be finished" })).toBe("waiting for a record the loop was writing to be finished");
   });
 });
 
