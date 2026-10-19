@@ -30,7 +30,7 @@
     "test:serial": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "coverage": "bun test --timeout 30000 --coverage --coverage-reporter=text --coverage-reporter=lcov",
+    "coverage": "bun scripts/coverage.ts",
     "deadcode": "bun scripts/deadcode.ts",
     "check": "bun run typecheck && bun run lint && bun run deadcode && bun run test"
   },

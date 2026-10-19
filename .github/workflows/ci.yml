@@ -65,7 +65,7 @@ jobs:
           git config --global user.email "ci@example.com"
           git config --global init.defaultBranch main
       - run: bun install --frozen-lockfile
-      # bunfig.toml sets the threshold; bun exits non-zero when line or function coverage is under 80%.
+      # scripts/coverage.ts fails when total line or function coverage is under 80%.
       - run: bun run coverage
       - uses: actions/upload-artifact@v4
         if: always()
