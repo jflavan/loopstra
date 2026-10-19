@@ -535,6 +535,7 @@ describe("live sessions", () => {
       let ctl: SessionControl | null = null;
       let sent = false;
       let echoed = false;
+      let echoedMore = false;
       const run = runPhase({
         ...base(t.path), prompt: "write it", env: { LOOPSTRA_PHASE: "design", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path },
         live: { attach: (c) => { ctl = c; return () => {}; }, echoWaitMs: 200 },
@@ -542,12 +543,16 @@ describe("live sessions", () => {
           // After the first result: the queued turn holds at the gate, quiet, once it has echoed the message.
           if (e.type === "result" && !sent) { rmSync(gate); sent = ctl!.message("and zero"); }
           if (e.type === "user" && e.isReplay === true && JSON.stringify(e).includes("and zero")) echoed = true;
+          if (e.type === "user" && e.isReplay === true && JSON.stringify(e).includes("one more")) echoedMore = true;
         },
       });
       await until(() => echoed);
       // Well past the echo wait, with nothing from the session meanwhile.
       await Bun.sleep(1_500);
       expect(ctl!.message("one more")).toBe(true);
+      // The gate opens once the held turn has taken the message: opened sooner, the turn could end before
+      // the fake reads it from stdin, and the message would get a turn of its own.
+      await until(() => echoedMore);
       writeFileSync(gate, "");
       const r = await run;
       expect(r.ok).toBe(true);

@@ -1,6 +1,7 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  # The project itself: Bun manages it (bun.lock), and the npm ecosystem refuses a Bun project.
+  - package-ecosystem: bun
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
