@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
@@ -81,6 +82,10 @@ export interface GitRunOptions {
    * half-way. Still bounded by the timeout.
    */
   cleanup?: boolean;
+  /** Variables added to the command's environment (a temporary index's GIT_INDEX_FILE, say). */
+  env?: Record<string, string>;
+  /** Text written to the command's stdin, which is then closed. */
+  stdin?: string;
 }
 
 /** Commands that write, or refresh, the index or the files of the checkout they run in: the checkout lock's. */
@@ -185,8 +190,9 @@ export class Git {
     const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
     const timeoutMs = o.timeoutMs ?? this.timeoutMs;
     const spawn = () => spawnBounded({
-      cmd: ["git", ...args], cwd: this.cwd, env: gitEnv(this.cwd), timeoutMs,
+      cmd: ["git", ...args], cwd: this.cwd, env: { ...gitEnv(this.cwd), ...o.env }, timeoutMs,
       onStop: o.cleanup ? "ignore" : "grace", graceMs: this.stopGraceMs,
+      ...(o.stdin !== undefined ? { stdin: o.stdin } : {}),
     });
     const sub = subcommand(args);
     const key = this.lockKey;
@@ -345,7 +351,20 @@ export class Git {
    */
   async commitPaths(paths: string[], message: string, opts: { finish?: boolean } = {}): Promise<boolean> {
     const o = { cleanup: opts.finish === true };
-    const names = (out: string) => out.split("\0").filter(Boolean);
+    const toCommit = await this.stagePaths(paths, o);
+    if (!toCommit) return false;
+    await this.runtime("commit", ["-q", "-m", message, "--", ...toCommit], o);
+    return true;
+  }
+
+  /**
+   * Stages `paths` as they are on disk into the index `o.env` names (the checkout's by default), by the
+   * rules commitPaths has always used: an ignored, untracked file is left out, a removal is taken
+   * along, and a path that matches nothing is not named. The paths to commit, or null when none
+   * differs from what HEAD has.
+   */
+  async stagePaths(paths: string[], o: GitRunOptions = {}): Promise<string[] | null> {
+    const names =(out: string) => out.split("\0").filter(Boolean);
     const covers = (list: string[]) => (p: string) => list.some((l) => l === p || l.startsWith(`${p.replace(/\/$/, "")}/`));
     // `git add -A -- <pathspec>` errors on a path that matches nothing it can stage, so these are left out:
     // - one on disk that is ignored and untracked (a repository that ignores .claude/, say);
@@ -381,11 +400,47 @@ export class Git {
     if (tracked.length) await this.run(["add", "-u", "--", ...tracked], o);
     if (others.length) await this.run(["add", "-A", "--", ...others], o);
     // Never a commit without paths: that would take everything staged.
-    if (!toCommit.length) return false;
+    if (!toCommit.length) return null;
     const staged = (await this.run(["diff", "--cached", "--name-only", "--", ...toCommit], o)).out.trim();
-    if (!staged) return false;
-    await this.runtime("commit", ["-q", "-m", message, "--", ...toCommit], o);
-    return true;
+    return staged ? toCommit : null;
+  }
+
+  /**
+   * A commit made from `parent` without touching the checkout's index or files: `paths` as they are
+   * on disk (see stagePaths), with `changes` over them, in a temporary index. Each content is hashed
+   * with `--path`, so the repository's line-ending and attribute rules apply as `git add` applies
+   * them. Made as the runtime (no hooks, the records' identity). Null when the tree is `parent`'s.
+   */
+  async commitFiles(parent: string, paths: string[], changes: ReadonlyArray<{ rel: string; text: string | null }>, message: string): Promise<string | null> {
+    const dir = mkdtempSync(join(tmpdir(), "loopstra-index-"));
+    const o: GitRunOptions = { env: { GIT_INDEX_FILE: join(dir, "index") }, cleanup: true };
+    try {
+      await this.run(["read-tree", parent], o);
+      // Its answer compares the temporary index with HEAD, not with `parent`: the trees are compared below instead.
+      await this.stagePaths(paths, o);
+      for (const c of changes) {
+        if (c.text === null) {
+          await this.run(["update-index", "--force-remove", "--", c.rel], o);
+          continue;
+        }
+        const blob = (await this.run(["hash-object", "-w", `--path=${c.rel}`, "--stdin"], { ...o, stdin: c.text })).out.trim();
+        // A file `parent` has keeps its mode (an executable stays one); a new one is a plain file.
+        const mode = (await this.run(["ls-tree", parent, "--", c.rel], o)).out.split(/\s/)[0] || "100644";
+        await this.run(["update-index", "--add", "--cacheinfo", `${mode},${blob},${c.rel}`], o);
+      }
+      const tree = (await this.run(["write-tree"], o)).out.trim();
+      const parentTree = (await this.run(["rev-parse", `${parent}^{tree}`], o)).out.trim();
+      if (tree === parentTree) return null;
+      return (await this.runtime("commit-tree", [tree, "-p", parent, "-m", message], o)).out.trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** Moves HEAD (its branch) from `from` to `to`, as a compare-and-swap: false when HEAD is no longer `from`. */
+  async moveHead(from: string, to: string): Promise<boolean> {
+    const r = await this.run(["update-ref", "-m", "loopstra: record", "HEAD", to, from], { allowFail: true, cleanup: true });
+    return r.code === 0;
   }
 
   /** The commit a ref names, or null when it names none. */
