@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import type { z } from "zod";
 
 /**
  * Writes a file whole: a temp file, then a rename over it, so a reader never sees half of it. Makes
@@ -27,4 +28,16 @@ export function writeJson(path: string, value: unknown): void {
 /** A JSON file's value as the caller expects it, or null when it is missing or not JSON. The shape is the caller's to check. */
 export function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }
+}
+
+/**
+ * A JSON file's value checked against `schema` (with its defaults filled in), or null when the file
+ * is missing, not JSON, or not that shape: a file someone else wrote, or half of one, is never read
+ * as the real thing.
+ */
+export function readJsonAs<T>(path: string, schema: z.ZodType<T>): T | null {
+  const raw = readJson<unknown>(path);
+  if (raw === null) return null;
+  const r = schema.safeParse(raw);
+  return r.success ? r.data : null;
 }

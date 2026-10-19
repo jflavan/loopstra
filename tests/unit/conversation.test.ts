@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { appendConversation, conversationEntry, conversationPath, readConversation, recordedAs, withEntry, withEntryOnce } from "../../src/conversation";
+import { writeJson } from "../../src/fsutil";
 import { lastCommit } from "../helpers";
 import { chatRepo, INTENT } from "../chat-helpers";
 
@@ -39,15 +41,41 @@ describe("conversation.md", () => {
       // Kept for the next session after it reached its session: written once all the same, as what it was.
       await appendConversation(r.root, "main", "a", { kind: "later", who: "John", via: "the dashboard", text: "Cover negatives.", at: new Date(2026, 9, 17, 9, 3) }, { id: "000000000000001-1-0001" });
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
-      expect(recordedAs(r.root, "a", "000000000000001-1-0001", "Cover negatives.")).toBe("message");
+      expect(recordedAs(r.root, "a", "000000000000001-1-0001", m)).toBe("message");
       // The same words from another message are its own entry.
       await appendConversation(r.root, "main", "a", { ...m, at: new Date(2026, 9, 17, 9, 4) }, { id: "000000000000001-1-0003" });
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(2);
       // Its text gone from the record (a failed write put back): written again.
       await Bun.write(conversationPath(r.root, "a"), "# Conversation\n");
-      expect(recordedAs(r.root, "a", "000000000000001-1-0001", "Cover negatives.")).toBeNull();
+      expect(recordedAs(r.root, "a", "000000000000001-1-0001", m)).toBeNull();
       await appendConversation(r.root, "main", "a", m, { id: "000000000000001-1-0001" });
       expect(readConversation(r.root, "a").match(/Cover negatives/g)).toHaveLength(1);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a message whose words are already in the record, in another entry, is still written when its first commit failed", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
+    try {
+      const at = new Date(2026, 9, 17, 9, 0);
+      await appendConversation(r.root, "main", "a", { kind: "message", who: "John", via: "the dashboard", phase: "build", text: "use bun, ok", at }, { id: "000000000000001-1-0001" });
+      // A second message's first commit failed: recorded.json kept its id, and the put back took its entry out of the record.
+      writeJson(join(r.root, ".loopstra", "runs", "a", "recorded.json"), { "000000000000001-1-0001": "message", "000000000000001-1-0002": "message" });
+      const m = { who: "Ana", via: "Slack", text: "ok" };
+      expect(recordedAs(r.root, "a", "000000000000001-1-0002", m)).toBeNull();
+      await appendConversation(r.root, "main", "a", { kind: "message", phase: "build", at, ...m }, { id: "000000000000001-1-0002" });
+      expect(readConversation(r.root, "a")).toContain("· Ana (Slack) → build\nok\n");
+      // With its entry there it is written no more, whether it is looked for as delivered or as kept for the next session.
+      expect(recordedAs(r.root, "a", "000000000000001-1-0002", m)).toBe("message");
+      await appendConversation(r.root, "main", "a", { kind: "later", at, ...m }, { id: "000000000000001-1-0002" });
+      expect(readConversation(r.root, "a").match(/\nok\n/g)).toHaveLength(1);
+      // The same words by someone else, or from somewhere else, are not its entry.
+      expect(recordedAs(r.root, "a", "000000000000001-1-0002", { ...m, who: "John" })).toBeNull();
+      expect(recordedAs(r.root, "a", "000000000000001-1-0002", { ...m, via: "the dashboard" })).toBeNull();
+      // A recorded.json that is not the shape reads as nothing recorded.
+      writeJson(join(r.root, ".loopstra", "runs", "a", "recorded.json"), { "000000000000001-1-0002": 7 });
+      expect(recordedAs(r.root, "a", "000000000000001-1-0002", m)).toBeNull();
     } finally {
       r.cleanup();
     }

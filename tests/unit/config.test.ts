@@ -106,6 +106,32 @@ describe("loadConfig", () => {
     expect(problems.map((p) => p.text)).toEqual(["commands.test is required: the single command that runs your tests"]);
   });
 
+  test("a blank branch, model or command, a version that is not 1, and a missing channel are each refused in plain words", () => {
+    const problems = (raw: unknown) => {
+      try { validateConfig(raw); } catch (e) { return (e as ConfigError).problems.map((p) => p.text); }
+      return [];
+    };
+    const ok = { version: 1, commands: { test: "bun test" } };
+    expect(problems({ ...ok, main_branch: "" })).toEqual(["main_branch: must be a branch name, like main"]);
+    expect(problems({ ...ok, claude: { models: { default: "", cheap: "", strong: "" } } })).toEqual([
+      "claude.models.default: must be a model name", "claude.models.cheap: must be a model name", "claude.models.strong: must be a model name",
+    ]);
+    expect(problems({ ...ok, commands: { test: "bun test", lint: "", build: "", run: "", install: "" } })).toEqual([
+      "commands.lint: must be a command, or the line removed", "commands.build: must be a command, or the line removed",
+      "commands.run: must be a command, or the line removed", "commands.install: must be a command, or the line removed",
+    ]);
+    expect(problems({ commands: { test: "bun test" } })).toEqual(["version: must be 1"]);
+    expect(problems({ ...ok, version: 2 })).toEqual(["version: must be 1"]);
+    const id = "must be a user or channel id; put long numeric ids in quotes";
+    expect(problems({ ...ok, chat: { transports: { slack: {} } } })).toEqual([`chat.transports.slack.channel: ${id}`]);
+    expect(problems({ ...ok, chat: { transports: { discord: { channel: "", allow: [12345678901234567890] } } } })).toEqual([
+      `chat.transports.discord.channel: ${id}`, `chat.transports.discord.allow.0: ${id}`,
+    ]);
+    // Quoted long ids, and short numbers, read as the same text either way.
+    const cfg = validateConfig({ ...ok, chat: { transports: { discord: { channel: "12345678901234567890", allow: [42] } } } });
+    expect(cfg.chat.transports.discord).toMatchObject({ channel: "12345678901234567890", allow: ["42"] });
+  });
+
   test("reports a missing file plainly", async () => {
     const t = tempDir();
     await expect(loadConfig(t.path)).rejects.toThrow(/loopstra\/config\.yaml/);

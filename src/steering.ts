@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
-import { readJson, writeJson } from "./fsutil";
+import { z } from "zod";
+import { readJsonAs, writeJson } from "./fsutil";
 import type { SessionControl } from "./claude";
 import { MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL, steerable as isSteerable } from "./console/steerable";
 import { appendConversation, recordedAs, type ConversationEntry } from "./conversation";
 import type { StepContext } from "./context";
-import { inboxDir, inboxFor, leaveDelivered, markDone, waitingIn, type Done, type InboxMessage } from "./inbox";
+import { inboxDir, InboxMessageSchema, leaveDelivered, markDone, waitingIn, type Done, type InboxMessage } from "./inbox";
 import { errorText } from "./shell";
 import { StopRequested, stopRequested } from "./stop";
 
@@ -34,7 +35,8 @@ function traceError(ctx: StepContext, more: Record<string, unknown>): void {
  * stopping, the main checkout moved, git failed), with the phase it went to and when. The next step's
  * sweep records it (see sweepInbox).
  */
-interface Unrecorded { message: InboxMessage; phase: string; at: string }
+const UnrecordedSchema = z.object({ message: InboxMessageSchema, phase: z.string(), at: z.string() });
+type Unrecorded = z.infer<typeof UnrecordedSchema>;
 
 function unrecordedDir(root: string, slug: string): string {
   return join(inboxDir(root, slug), "unrecorded");
@@ -73,8 +75,8 @@ async function recordUnrecorded(ctx: StepContext): Promise<void> {
   if (!existsSync(dir)) return;
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
     const path = join(dir, name);
-    const u = readJson<Unrecorded>(path);
-    if (!u?.message || typeof u.message.text !== "string" || typeof u.phase !== "string") continue;
+    const u = readJsonAs(path, UnrecordedSchema);
+    if (!u) continue;
     try {
       const at = new Date(u.at);
       await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { id: u.message.id });
@@ -106,7 +108,7 @@ async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
   if (recording.has(key)) return;
   recording.add(key);
   try {
-    const was = recordedAs(ctx.root, ctx.slug, m.id, m.text);
+    const was = recordedAs(ctx.root, ctx.slug, m.id, { who: m.by, via: m.via, text: m.text });
     if (!was) await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "later", who: m.by, via: m.via, text: m.text, at: new Date() }, { id: m.id });
     markDone(ctx.root, ctx.slug, m, was && was !== "later" ? "delivered" : "next session");
   } catch (e) {
@@ -136,6 +138,19 @@ function keepDelivered(ctx: StepContext, seq: number, m: InboxMessage): void {
   }
 }
 
+/** The sessions being watched (see deliverInbox), as root|slug|seq: a message for one of them is that watcher's. */
+const watched = new Set<string>();
+
+const watchKey = (ctx: StepContext, seq: number) => `${resolve(ctx.root)}|${ctx.slug}|${seq}`;
+
+/**
+ * True when the message is for a session of this change that ended before the one at `seq` (nothing
+ * watches it any more): a person sent it to the session they saw running, just as it ended.
+ */
+function forEndedSession(ctx: StepContext, m: InboxMessage, seq: number): boolean {
+  return m.seq < seq && !watched.has(watchKey(ctx, m.seq));
+}
+
 /**
  * Delivers what waits in the inbox for session `seq` (phase `name`) while it runs: a message is written
  * to it (a work session only; a check's is kept for the next session), a stop ends it, a redirect resumes
@@ -145,12 +160,17 @@ function keepDelivered(ctx: StepContext, seq: number, m: InboxMessage): void {
  * was written meanwhile is looked for again, until a look finds nothing new (at most END_LOOKS). After a
  * stop request what is left stays where it is, for the next step's sweep: the loop records nothing while it stops.
  *
+ * A message for a session of the change that ended (see forEndedSession) is kept for the next session
+ * by whichever look finds it, and a stop for one is dropped: held until the next step's sweep, it would
+ * wait hours at a human gate. One for a session yet to come waits for it.
+ *
  * A message is written to the session once only: when its move to delivered/ fails (a file held open on
  * Windows), the error is traced once and the next look tries the move again. It is traced and recorded
  * once moved.
  */
 export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: SessionControl): () => Promise<void> {
   const steerable = isSteerable(name);
+  watched.add(watchKey(ctx, seq));
   /** The records started while watching. */
   const pending: Promise<void>[] = [];
   /** The messages already written to the session (or the stops already given to it), by id. */
@@ -175,8 +195,17 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
     ctx.trace.event(ctx.slug, "steer", { kind: m.kind, by: m.by, via: m.via, seq, text: m.text });
     pending.push(recordDelivered(ctx, m, name));
   };
+  /** A message for a session that ended: kept for the next session, as the sweep would; a stop for it came too late. */
+  const forNext = (m: InboxMessage) => {
+    if (m.kind === "stop") markDone(ctx.root, ctx.slug, m, "dropped");
+    else pending.push(keepForNext(ctx, m));
+  };
   const look = () => {
-    for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
+    for (const m of waitingIn(ctx.root, ctx.slug)) {
+      if (m.seq !== seq) {
+        if (forEndedSession(ctx, m, seq)) forNext(m);
+        continue;
+      }
       // Given to the session once only: a loop killed before the move delivers it again, at worst twice.
       if (!sent.has(m.id)) {
         if (m.kind === "stop") {
@@ -214,13 +243,15 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
     if (stopRequested()) return false;
     let found = false;
     try {
-      for (const m of inboxFor(ctx.root, ctx.slug, seq)) {
+      for (const m of waitingIn(ctx.root, ctx.slug)) {
+        if (m.seq !== seq && !forEndedSession(ctx, m, seq)) continue;
         if (ended.has(m.id)) continue;
         ended.add(m.id);
         found = true;
+        if (m.seq !== seq) forNext(m);
         // Given to the session already, but not moved: one more try, else its delivered copy is left. The
         // session got it either way, so it is traced and recorded as delivered (stops are not recorded).
-        if (sent.has(m.id)) {
+        else if (sent.has(m.id)) {
           if (!settle(m, "delivered")) keepDelivered(ctx, seq, m);
           delivered(m);
         }
@@ -243,6 +274,8 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
       await Promise.all(pending.splice(0));
       if (!found) break;
     }
+    // Only now, once its own messages are dealt with: a session watched alongside takes the ones from here on.
+    watched.delete(watchKey(ctx, seq));
   };
 }
 

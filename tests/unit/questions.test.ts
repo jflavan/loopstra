@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { block, PersonChangedStatus, setStatus, StepContext } from "../../src/context";
 import { readConversation } from "../../src/conversation";
@@ -54,6 +54,30 @@ function questionPath(root: string): string {
 function questionEvents(trace: Trace): Array<{ seq: number | null; question: string }> {
   return trace.events(SLUG).filter((e) => e.type === "question").map((e) => ({ seq: e.phase_seq, ...(JSON.parse(e.payload) as { question: string }) }));
 }
+
+describe("question.json", () => {
+  test("a file that is not the shape (an answer with no text, a count that is not a number) reads as no question", () => {
+    const t = tempDir();
+    try {
+      const path = questionPath(t.path);
+      const open = { phase: "design", traceName: "design", seq: 1, sessionId: null, text: "Archived too?", why: "", options: [], at: "2026-10-17T12:00:00.000Z" };
+      mkdirSync(join(t.path, ".loopstra", "runs", SLUG), { recursive: true });
+      writeFileSync(path, JSON.stringify({ status: "designing", count: 1, open }));
+      expect(readQuestion(t.path, SLUG)).toEqual({ status: "designing", count: 1, open });
+      // The answer's text is what the asking session is resumed with: without it there is no answer, and no question to answer.
+      writeFileSync(path, JSON.stringify({ status: "designing", count: 1, open: { ...open, answer: { by: "John", via: "Slack", at: "2026-10-17T12:30:00.000Z" } } }));
+      expect(readQuestion(t.path, SLUG)).toBeNull();
+      expect(answerQuestion(t.path, SLUG, ANSWER)).toBe(false);
+      writeFileSync(path, JSON.stringify({ status: "designing", count: "1", open: null }));
+      expect(readQuestion(t.path, SLUG)).toBeNull();
+      writeFileSync(path, JSON.stringify({ status: "flying", count: 1, open: null }));
+      expect(readQuestion(t.path, SLUG)).toBeNull();
+      // A stored answer reads whole.
+      writeFileSync(path, JSON.stringify({ status: "designing", since: 4, count: 1, open: { ...open, answer: { text: "No.", by: "John", via: "Slack", at: "2026-10-17T12:30:00.000Z" } } }));
+      expect(readQuestion(t.path, SLUG)?.open?.answer?.text).toBe("No.");
+    } finally { t.cleanup(); }
+  });
+});
 
 describe("questions", () => {
   test("a design session that asks: the phase is asked, the question is recorded, question: open is set, and the step ends quietly", async () => {

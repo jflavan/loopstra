@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { anythingToApply, applyingRequests, cancelRequest, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults } from "../../src/requests";
+import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults, waitingIds } from "../../src/requests";
 import { wakeStamp } from "../../src/wake";
 import { tempDir } from "../helpers";
 
@@ -89,6 +89,36 @@ describe("request files", () => {
       writeFileSync(join(requestsDir(t.path), "copy.json"), JSON.stringify(a));
       writeFileSync(join(requestsDir(t.path), "000000000000001-1-0001.json"), JSON.stringify(a));
       expect(pendingRequests(t.path).map((r) => r.id)).toEqual([a.id]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a file that is not a request is set aside in requests/bad/ once: nothing counts it, claims it, or says it is pending", () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(requestsDir(t.path), "applying"), { recursive: true });
+      writeFileSync(join(requestsDir(t.path), "copy.json"), "{ not json");
+      writeFileSync(join(requestsDir(t.path), "000000000000001-1-0001.json"), JSON.stringify({ id: "000000000000001-1-0002", kind: "accept", slug: "a", transport: CONSOLE, thread: "" }));
+      writeFileSync(join(requestsDir(t.path), "000000000000001-1-0004.json"), JSON.stringify({ id: "000000000000001-1-0004", kind: "accept", slug: "a" }));
+      writeFileSync(join(requestsDir(t.path), "applying", "claimed.json"), "[]");
+      expect(anythingToApply(t.path)).toBe(false);
+      expect(pendingRequests(t.path)).toEqual([]);
+      expect(waitingIds(t.path)).toEqual([]);
+      expect(requestState(t.path, "000000000000001-1-0001")).toBeNull();
+      expect(readdirSync(join(requestsDir(t.path), "bad")).sort()).toEqual(["000000000000001-1-0001.json", "000000000000001-1-0004.json", "claimed.json", "copy.json"]);
+      expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json"))).toEqual([]);
+      expect(readdirSync(join(requestsDir(t.path), "applying"))).toEqual([]);
+      // One someone waits on (its id, transport and thread are right) whose body is not a request the loop knows is
+      // claimed and gets a plain result from the pass (see src/apply.ts), so the page that asked hears back.
+      writeFileSync(join(requestsDir(t.path), "000000000000001-1-0003.json"), JSON.stringify({ id: "000000000000001-1-0003", kind: "explode", slug: "a", by: "u", byName: "U", via: "chat", transport: CONSOLE, thread: "", at: "x" }));
+      expect(anythingToApply(t.path)).toBe(true);
+      expect(waitingIds(t.path)).toEqual(["000000000000001-1-0003"]);
+      expect(requestState(t.path, "000000000000001-1-0003")).toEqual({ state: "pending" });
+      expect(claimRequest(t.path, "000000000000001-1-0003")).toBe(true);
+      expect(anythingToApply(t.path)).toBe(true);
+      expect(claimedRequests(t.path)).toMatchObject({ requests: [], unreadable: [{ id: "000000000000001-1-0003", kind: "explode", slug: "a", transport: CONSOLE, thread: "" }] });
+      expect(claimedRequests(t.path).unreadable[0]!.problem).toContain("kind");
     } finally {
       t.cleanup();
     }

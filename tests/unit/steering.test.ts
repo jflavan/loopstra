@@ -180,6 +180,69 @@ describe("steering a running session", () => {
     }
   }, 30_000);
 
+  test("a message kept for the next session whose words are already in the record is still recorded once its first commit failed", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      await appendConversation(repo.path, "main", SLUG, { kind: "message", who: "John", via: "Slack", phase: "design", text: "use bun, ok", at: new Date() });
+      const m = sendToSession(repo.path, SLUG, { seq: 7, kind: "message", text: "ok", by: "John", via: "Slack" });
+      // A lock on main's ref: the record's commit fails, its entry is put back, and recorded.json keeps the id.
+      const lock = join(repo.path, ".git", "refs", "heads", "main.lock");
+      writeFileSync(lock, "");
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m)).toBeNull();
+      expect(readConversation(repo.path, SLUG)).not.toContain("the next session");
+      rmSync(lock);
+      await sweepInbox(ctx);
+      expect(howDone(repo.path, m)).toBe("next session");
+      expect(readConversation(repo.path, SLUG)).toContain("· John (Slack) → the next session\nok\n");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a message for a session that ended is kept for the next session by the session running now, not held until the next step", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      const ctl = { message: () => true, stop: () => false, redirect: () => false };
+      const detach = deliverInbox(ctx, 6, "design", ctl);
+      const late = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      const stop = sendToSession(repo.path, SLUG, { seq: 5, kind: "stop", text: "", by: "John", via: "the dashboard" });
+      const ahead = sendToSession(repo.path, SLUG, { seq: 7, kind: "message", text: "later still", by: "John", via: "the dashboard" });
+      await until(() => howDone(repo.path, late) === "next session");
+      expect(howDone(repo.path, stop)).toBe("dropped");
+      await detach();
+      expect(readConversation(repo.path, SLUG)).toContain("· John (the dashboard) → the next session\ncover negatives");
+      expect(steers(trace)).toEqual([]);
+      // One for a session yet to come waits for it.
+      expect(howDone(repo.path, ahead)).toBeNull();
+      expect(inboxFor(repo.path, SLUG, 7).map((x) => x.id)).toEqual([ahead.id]);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
+  test("a message for an earlier session still running alongside is left to that session", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    try {
+      // The earlier session cannot take a message just now (a redirect is resuming it).
+      const busy = { message: () => false, stop: () => false, redirect: () => false };
+      const detachEarlier = deliverInbox(ctx, 5, "design", busy);
+      const detachLater = deliverInbox(ctx, 6, "spec-check", busy);
+      const m = sendToSession(repo.path, SLUG, { seq: 5, kind: "message", text: "cover negatives", by: "John", via: "the dashboard" });
+      await Bun.sleep(1500);
+      expect(howDone(repo.path, m)).toBeNull();
+      await detachLater();
+      expect(howDone(repo.path, m)).toBeNull();
+      expect(inboxFor(repo.path, SLUG, 5).map((x) => x.id)).toEqual([m.id]);
+      // Its own session's end keeps it for the next one.
+      await detachEarlier();
+      expect(howDone(repo.path, m)).toBe("next session");
+      expect(readConversation(repo.path, SLUG).match(/cover negatives/g)).toHaveLength(1);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 30_000);
+
   test("a message kept for the next session stays in the inbox when the loop starts stopping before its record lands", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted");
     try {

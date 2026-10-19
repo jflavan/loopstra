@@ -1,20 +1,30 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import { runDir } from "./paths";
 import { ID, newId } from "./ids";
-import { readJson, writeJson } from "./fsutil";
+import { readJsonAs, writeJson } from "./fsutil";
 
 /**
  * A running session's inbox, `.loopstra/runs/<slug>/inbox/`: what people send a session while it
  * runs (a message, a stop, a redirect). The console writes; the session's runner reads and delivers
  * (see src/steering.ts). Done ones move to `delivered/`, with how they ended.
  */
-export interface InboxMessage { id: string; seq: number; kind: "message" | "stop" | "redirect"; text: string; by: string; via: string; at: string }
+export const InboxMessageSchema = z.object({
+  id: z.string().regex(ID),
+  /** The session it is for (a phase's seq). */
+  seq: z.number(),
+  kind: z.enum(["message", "stop", "redirect"]),
+  text: z.string(),
+  /** Who sent it, and from where ("the dashboard"): the session is told both. */
+  by: z.string(),
+  via: z.string(),
+  at: z.string(),
+});
+export type InboxMessage = z.infer<typeof InboxMessageSchema>;
 
 /** How an inbox message ended: written to its session, kept in conversation.md for the next one, or dropped (a stop that came too late). */
 export type Done = "delivered" | "next session" | "dropped";
-
-const KINDS = new Set(["message", "stop", "redirect"]);
 
 export function inboxDir(root: string, slug: string): string {
   return join(runDir(root, slug), "inbox");
@@ -54,9 +64,10 @@ export function waitingIn(root: string, slug: string): InboxMessage[] {
       try { rmSync(join(dir, n), { force: true }); } catch { /* held open: passed over all the same */ }
       return false;
     })
-    .map((n) => [n, readJson<InboxMessage>(join(dir, n))] as const)
-    .filter(([n, m]) => !!m && typeof m.id === "string" && ID.test(m.id) && n === `${m.id}.json` && KINDS.has(m.kind) && typeof m.seq === "number" && typeof m.text === "string")
-    .map(([, m]) => m!);
+    .map((n) => [n, readJsonAs(join(dir, n), InboxMessageSchema)] as const)
+    // Named for its own id, or marking it done would move another file.
+    .filter((x): x is readonly [string, InboxMessage] => !!x[1] && x[0] === `${x[1].id}.json`)
+    .map(([, m]) => m);
 }
 
 /** The messages waiting for one session (a phase's seq), oldest first. */
@@ -74,17 +85,20 @@ function changeStopPath(root: string, slug: string): string {
   return join(runDir(root, slug), "stop.json");
 }
 
+/** stop.json's shape (see changeStopPath). */
+const StopSchema = z.object({ by: z.string(), at: z.string() });
+
 /** Leaves the change's stop (see changeStopPath). */
 export function writeChangeStop(root: string, slug: string, by: string): void {
-  writeJson(changeStopPath(root, slug), { by, at: new Date().toISOString() });
+  writeJson(changeStopPath(root, slug), { by, at: new Date().toISOString() } satisfies z.infer<typeof StopSchema>);
 }
 
-/** Who stopped the change, while its stop stands; null when none does. */
+/** Who stopped the change, while its stop stands; null when none does. A stop that does not say is a person's: the file is the stop. */
 export function changeStoppedBy(root: string, slug: string): string | null {
   const path = changeStopPath(root, slug);
   if (!existsSync(path)) return null;
-  const s = readJson<{ by?: unknown }>(path);
-  return typeof s?.by === "string" && s.by.trim() ? s.by : "a person";
+  const by = readJsonAs(path, StopSchema)?.by.trim();
+  return by || "a person";
 }
 
 /** Clears the change's stop: the step it was for has ended. */
