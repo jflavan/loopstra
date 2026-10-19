@@ -78,20 +78,25 @@ const chat = z.object({
 export type SlackTransportConfig = z.infer<typeof slackTransport>;
 export type DiscordTransportConfig = z.infer<typeof discordTransport>;
 
-/** An optional project command: present, it runs, so a blank one is a mistake, not none. */
-const command = z.string().min(1, "must be a command, or the line removed").optional();
-/** The CLI name of a model, like sonnet. */
-const modelName = (fallback: string) => z.string().min(1, "must be a model name").default(fallback);
+/** True when a value has more than spaces in it. */
+const filled = (s: string) => s.trim() !== "";
+const TEST_REQUIRED = "commands.test is required: the single command that runs your tests";
+/**
+ * An optional project command. Empty (`lint: ""`) is none, as every reader takes it and as configs
+ * written before the blank-name rule have it. One of only spaces would be run as a command, so it is
+ * a mistake and is refused.
+ */
+const command = z.preprocess((v) => (v === "" ? undefined : v), z.string().refine(filled, "must be a command, or the line removed").optional());
+/** The CLI name of a model, like sonnet. Spaces around it are not part of it. */
+const modelName = (fallback: string) => z.string().trim().min(1, "must be a model name").default(fallback);
 
 export const ConfigSchema = z.object({
   version: z.literal(1, { error: "must be 1" }),
-  main_branch: z.string().min(1, "must be a branch name, like main").default("main"),
+  main_branch: z.string().trim().min(1, "must be a branch name, like main").default("main"),
   poll_seconds: z.number().int().positive().default(60),
   // Empty prefault is deliberate: a missing `commands` block should still report `commands.test`, not `commands`.
   commands: z.object({
-    test: z
-      .string({ error: "commands.test is required: the single command that runs your tests" })
-      .min(1, "commands.test is required: the single command that runs your tests"),
+    test: z.string({ error: TEST_REQUIRED }).refine(filled, TEST_REQUIRED),
     lint: command,
     build: command,
     run: command,
