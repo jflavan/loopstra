@@ -70,7 +70,7 @@ A kill can land in three places:
 - **A git call fails before HEAD moved** (a full disk, a timeout): nothing to undo; the marker goes if it was written; the error goes on.
 - **HEAD moved under the record**: tried once more (step 7); then `RecordRaced`.
 - **The checkout cannot be brought up** (step 8: Windows refusing a file held open, past `writeFileAtomic`'s retries): the marker stays, the trace says which file, and the error goes on; the next tick's `settleRecord` finishes it. Until then the sync sees unsaved changes and waits, as it would for any held file.
-- **The temporary index** is removed in a `finally`; one left by a kill is under `.loopstra/`, ignored by git, and removed by the next `commitFiles` that finds it older than a day.
+- **The temporary index** is in a fresh folder under the system temporary directory, removed in a `finally`; one a kill leaves there is outside the repository and harmless, and the system clears it.
 
 ## Testing
 
