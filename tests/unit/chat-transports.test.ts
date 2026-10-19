@@ -8,7 +8,7 @@ import { chatDir } from "../../src/chat/threads";
 import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
-import { chunkText, fetchJson, openSocket, retryAfterSeconds } from "../../src/chat/transports/shared";
+import { chunkText, fetchJson, openSocket, prefixOf, retryAfterSeconds } from "../../src/chat/transports/shared";
 import { noBroadcast, SlackTransport } from "../../src/chat/transports/slack";
 import { TerminalTransport } from "../../src/chat/transports/terminal";
 import { Hub } from "../../src/console/hub";
@@ -714,6 +714,44 @@ describe("Discord (hardening review)", () => {
       await discord.onDiscordMessage({ id: "m", channel_id: "100", content: "hi", author: { id: "1" } });
       expect(got).toBeNull();
       expect(logged).toHaveLength(2);
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the full review of #47", () => {
+  test("fetchJson gives up on a server that takes the call and never answers, with a plain error", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    try {
+      const started = Date.now();
+      await expect(fetchJson(`http://127.0.0.1:${server.port}/api/chat.postMessage`, { method: "POST" }, () => 1, 200)).rejects.toThrow(`no answer from 127.0.0.1:${server.port} within`);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally { void server.stop(true); }
+  });
+
+  test("a message is never cut between the two halves of a character", () => {
+    const emoji = "\u{1F600}";
+    const parts = chunkText(`${"a".repeat(9)}${emoji}b`, 10);
+    expect(parts).toEqual(["a".repeat(9), `${emoji}b`]);
+    expect(chunkText(emoji.repeat(6), 5)).toEqual([emoji.repeat(2), emoji.repeat(2), emoji.repeat(2)]);
+    expect(prefixOf(`${"a".repeat(79)}${emoji}`, 80)).toBe("a".repeat(79));
+    expect(prefixOf(`${"a".repeat(78)}${emoji}`, 80)).toBe(`${"a".repeat(78)}${emoji}`);
+    expect(prefixOf("short", 80)).toBe("short");
+  });
+
+  test("every answer of /api/chat says not to keep it", async () => {
+    const r = await chatRepo();
+    const dash = new DashboardTransport(r.root, "ana");
+    try {
+      const base = "http://127.0.0.1:4000";
+      const answers = [
+        await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh`), new URL(`${base}/api/chat?thread=tab-abcdefgh`)),
+        await dash.handle(new Request(`${base}/api/chat?thread=bad`), new URL(`${base}/api/chat?thread=bad`)),
+        await dash.handle(new Request("http://evil.test/api/chat"), new URL("http://evil.test/api/chat")),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`)),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "PUT" }), new URL(`${base}/api/chat`)),
+      ];
+      expect(answers.map((a) => a.status)).toEqual([200, 400, 403, 503, 405]);
+      expect(answers.map((a) => a.headers.get("cache-control"))).toEqual(Array(5).fill("no-store"));
     } finally { r.cleanup(); }
   });
 });

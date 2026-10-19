@@ -39,10 +39,19 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
  * Code allows read-only git by itself, so CHAT_DENIED also denies it.
  */
 const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
-/** Files that hold secrets wherever they are: denied by their relative glob and by the absolute one (`//` is the file system's root). */
-const SECRET_FILES = [".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", ".git/**"];
-/** Places in the home folder that hold secrets or sign-ins (shell rc files and the profile export them; ~/.claude.json holds Claude Code's own). */
-const SECRET_HOMES = [".ssh/**", ".aws/**", ".config/**", ".claude/**", ".claude.json", ".gnupg/**", ".netrc", ".npmrc", ".git-credentials", ".*rc", ".profile", ".docker/**", ".kube/**", ".azure/**"];
+/**
+ * Files that hold secrets wherever they are: denied by their relative glob and by the absolute one
+ * (`//` is the file system's root). direnv's .envrc and a project's .npmrc export or hold tokens; the
+ * PowerShell profiles (under Documents, which may sit in OneDrive) set them on Windows.
+ */
+const SECRET_FILES = [".env", ".env.*", ".envrc", ".npmrc", "*.pem", "*.key", "id_rsa*", "id_ed25519*", ".git/**", "Documents/PowerShell/*profile*.ps1", "Documents/WindowsPowerShell/*profile*.ps1"];
+/**
+ * Places in the home folder that hold secrets or sign-ins: the shells' start-up files export them
+ * (`.*rc` and .profile, and the login shells' .zshenv, .zprofile, .bash_profile and .bash_login),
+ * ~/.claude.json holds Claude Code's own, and on Windows _netrc and the GitHub CLI's folder in
+ * %APPDATA% hold sign-ins (elsewhere it is under .config).
+ */
+const SECRET_HOMES = [".ssh/**", ".aws/**", ".config/**", ".claude/**", ".claude.json", ".gnupg/**", ".netrc", "_netrc", ".npmrc", ".git-credentials", ".*rc", ".profile", ".zshenv", ".zprofile", ".bash_profile", ".bash_login", ".docker/**", ".kube/**", ".azure/**", "AppData/Roaming/GitHub CLI/**"];
 /**
  * Chat agents take instructions from whoever is in a chat channel, so on top of the write tools,
  * reading the usual places secrets are kept is denied (Read rules also cover Grep and Glob), and so
@@ -67,17 +76,25 @@ const SECRET_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY/i;
  * that only an apiKeyHelper script reads (a vault token, say) is dropped like any other: that setup
  * needs the helper to find it elsewhere (a file it reads), as the README says.
  */
-const CLAUDE_OWN = /^(ANTHROPIC_|CLAUDE_|AWS_|GOOGLE_|CLOUD_ML_|AZURE_)/;
+const CLAUDE_OWN = "^(ANTHROPIC_|CLAUDE_|AWS_|GOOGLE_|CLOUD_ML_|AZURE_)";
 
 /**
  * The names of the environment variables a chat session must not inherit: the bot tokens the
  * config names (`loopstra chat` has them in its environment), and anything else that looks like a
- * secret by name. Everything else (PATH, HOME, the editor's settings) is passed on as usual.
+ * secret by name. Everything else (PATH, HOME, the editor's settings) is passed on as usual. On
+ * Windows a variable's name is the same whatever its case, so there both the config's names and
+ * Claude Code's own are matched without it: `discord_bot` is the variable `DISCORD_BOT` names, and
+ * `anthropic_api_key` is Claude Code's key.
  */
-export function secretEnvNames(cfg: Config, env: Record<string, string | undefined> = process.env): string[] {
+export function secretEnvNames(cfg: Config, env: Record<string, string | undefined> = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  const anyCase = platform === "win32";
+  const same = (a: string, b: string) => (anyCase ? a.toUpperCase() === b.toUpperCase() : a === b);
+  const claudeOwn = new RegExp(CLAUDE_OWN, anyCase ? "i" : "");
   const named = [cfg.chat.transports.slack?.token_env, cfg.chat.transports.slack?.bot_token_env, cfg.chat.transports.discord?.token_env].filter((n): n is string => !!n);
-  const looksSecret = Object.keys(env).filter((k) => SECRET_NAME.test(k) && !CLAUDE_OWN.test(k));
-  return [...new Set([...named, ...looksSecret])];
+  const keys = Object.keys(env);
+  const namedHere = keys.filter((k) => named.some((n) => same(k, n)));
+  const looksSecret = keys.filter((k) => SECRET_NAME.test(k) && !claudeOwn.test(k));
+  return [...new Set([...named, ...namedHere, ...looksSecret])];
 }
 
 type ChatAgentResult<T> =

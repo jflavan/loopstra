@@ -41,14 +41,36 @@ export function fromPerson(m: { thread: string; authorId: string; authorName: st
   };
 }
 
-/** Splits a message into parts of at most `max` characters, at line breaks where it can. */
+/** True when the UTF-16 unit at `i` is the first half of a character written as two (an emoji, say). */
+function firstHalf(text: string, i: number): boolean {
+  const c = text.charCodeAt(i);
+  return c >= 0xd800 && c <= 0xdbff;
+}
+
+/**
+ * Where to end a part of `text` of at most `max` UTF-16 units: `max`, or one less when that would
+ * cut a character written as two in half (a lone half shows as a broken character, and a platform
+ * may refuse it). Never 0 while there is text: a first character wider than `max` is kept whole.
+ */
+function cutAt(text: string, max: number): number {
+  if (text.length <= max) return text.length;
+  const cut = max > 0 && firstHalf(text, max - 1) ? max - 1 : max;
+  return cut > 0 ? cut : Math.min(text.length, firstHalf(text, 0) ? 2 : 1);
+}
+
+/** The start of `text`, at most `max` UTF-16 units, never ending inside a character (see cutAt). */
+export function prefixOf(text: string, max: number): string {
+  return text.slice(0, cutAt(text, max));
+}
+
+/** Splits a message into parts of at most `max` characters, at line breaks where it can, and never inside a character. */
 export function chunkText(text: string, max: number): string[] {
   const parts: string[] = [];
   let rest = text;
   while (rest.length > max) {
     let cut = rest.lastIndexOf("\n", max);
     if (cut < max / 2) cut = rest.lastIndexOf(" ", max);
-    if (cut < max / 2) cut = max;
+    if (cut < max / 2) cut = cutAt(rest, max);
     parts.push(rest.slice(0, cut).trimEnd());
     rest = rest.slice(cut).trimStart();
   }
@@ -83,15 +105,27 @@ export function retryAfterSeconds(said: unknown): number {
   return Number.isFinite(s) && s > 0 ? Math.min(30, s) : 1;
 }
 
+/** How long one HTTP call (its answer and its body) may take: Bun's fetch has no limit of its own. */
+const FETCH_TIMEOUT_MS = 30_000;
+
 /**
  * One HTTP call with a JSON answer, waiting out a rate limit (429) up to twice: `retryAfter` reads
  * how long from the response. Gives the response, its text, and the text as a JSON object (null when
- * it is not one). Throws only when the call itself fails (no connection).
+ * it is not one). Throws only when the call itself fails (no connection), or gets no whole answer
+ * within `timeoutMs`: one call that never answers must not hold up the chat service's poll, which
+ * waits for it, for good.
  */
-export async function fetchJson(url: string, init: RequestInit, retryAfter: (res: Response, json: JsonObject | null) => unknown): Promise<{ res: Response; text: string; json: JsonObject | null }> {
+export async function fetchJson(url: string, init: RequestInit, retryAfter: (res: Response, json: JsonObject | null) => unknown, timeoutMs = FETCH_TIMEOUT_MS): Promise<{ res: Response; text: string; json: JsonObject | null }> {
+  const timedOut = () => new Error(`no answer from ${new URL(url).host} within ${timeoutMs / 1000} seconds`);
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, init);
+    const signal = AbortSignal.timeout(timeoutMs);
+    let res: Response;
+    try { res = await fetch(url, { ...init, signal }); } catch (e) {
+      if (signal.aborted) throw timedOut();
+      throw e;
+    }
     const text = await res.text().catch(() => "");
+    if (signal.aborted) throw timedOut();
     let json: JsonObject | null = null;
     try { const v: unknown = JSON.parse(text); if (isObject(v)) json = v; } catch { /* not JSON: the caller reads the status */ }
     if (res.status === 429 && attempt < 2) {

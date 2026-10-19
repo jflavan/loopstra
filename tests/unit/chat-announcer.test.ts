@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AnnouncementLog, announce, holdAnnouncerLock } from "../../src/chat/announcer";
 import { ChatService, type Transport } from "../../src/chat/service";
@@ -183,6 +183,41 @@ describe("the announcer's state (hardening review)", () => {
       const going = await readIntent(r.root, "going");
       await writeIntentOnDisk(going, { status: "merged" });
       expect((await announce(r.root, log)).map((a) => a.text)).toEqual(["Merged: going one. It is in the main code now."]);
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the full review of #47", () => {
+  test("a change named constructor that appears done is not news, as any other new change", async () => {
+    const r = await chatRepo({ intents: { going: INTENT("reviewing", "going one") } });
+    try {
+      const log = new AnnouncementLog(r.root);
+      await announce(r.root, log);
+      mkdirSync(join(r.root, "intent", "constructor"), { recursive: true });
+      await Bun.write(join(r.root, "intent", "constructor", "intent.md"), INTENT("done", "built in"));
+      expect((await announce(r.root, log)).map((a) => a.text)).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a bot's cursor file that cannot be read is said in the trace and left, not silently started again", async () => {
+    const r = await chatRepo();
+    try {
+      const log = new AnnouncementLog(r.root);
+      log.append("old news", null);
+      const path = join(chatDir(r.root), "announced-slack.json");
+      writeFileSync(path, '{"id":"7"}');
+      const slack = bot("slack", "kept");
+      const s = new ChatService(r.root, [slack], { announce: false, pollMs: 60_000 });
+      await s.start();
+      await s.poll();
+      await s.stop();
+      // From the end of the log, so nothing is posted twice; the file is a person's to look at.
+      expect(slack.announced).toEqual([]);
+      expect(readFileSync(path, "utf8")).toBe('{"id":"7"}');
+      const trace = Trace.open(r.root);
+      try {
+        expect(trace.events("_chat").filter((e) => e.type === "error").map((e) => e.payload).join("\n")).toContain("announced-slack.json");
+      } finally { trace.close(); }
     } finally { r.cleanup(); }
   });
 });

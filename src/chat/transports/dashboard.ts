@@ -53,9 +53,16 @@ export class DashboardTransport implements Transport {
 
   /**
    * Handles `/api/chat`. POST needs JSON from the dashboard's own page (the Origin must be this
-   * server), so another web page open in the browser cannot post into the chat.
+   * server), so another web page open in the browser cannot post into the chat. No answer is kept by
+   * the browser or anything between: each is a conversation's state at that moment.
    */
   async handle(req: Request, url: URL): Promise<Response> {
+    const res = await this.answer(req, url);
+    res.headers.set("cache-control", "no-store");
+    return res;
+  }
+
+  private async answer(req: Request, url: URL): Promise<Response> {
     // Only on a local host name: a page on another name that resolves here gets nothing.
     if (!LOCAL_HOSTS.has(url.hostname)) return new Response("Forbidden", { status: 403 });
     if (req.method === "GET" || req.method === "HEAD") {
