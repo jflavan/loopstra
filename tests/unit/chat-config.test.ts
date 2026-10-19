@@ -97,8 +97,8 @@ describe("loopstra chat", () => {
     try {
       await r.answer("orchestrator", 1, turn("Nothing is running."));
       const proc = Bun.spawn({ cmd: [process.execPath, CLI, "chat"], cwd: r.root, env: { ...process.env }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-      proc.stdin.write("what's going on?\n");
-      proc.stdin.end();
+      void proc.stdin.write("what's going on?\n");
+      void proc.stdin.end();
       const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
       expect(code).toBe(0);
       expect(out).toContain("Loopstra chat.");
@@ -125,7 +125,7 @@ describe("loopstra chat", () => {
       for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
       env.PATH = "";
       const proc = Bun.spawn({ cmd: [process.execPath, CLI, "chat"], cwd: r.root, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-      proc.stdin.end();
+      void proc.stdin.end();
       const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
       expect(code).toBe(1);
       expect(err).toContain("Claude Code is not installed (claude is not on PATH).");
@@ -145,7 +145,7 @@ describe("loopstra chat", () => {
 
 describe("platform ids (review fix)", () => {
   test("a long numeric id must be quoted, since YAML would round it", async () => {
-    await expect(configWith("chat:\n  transports:\n    discord:\n      channel: \"1\"\n      acceptors: [123456789012345678]\n")).rejects.toThrow("is too long to be read as a number: put it in quotes");
+    await expect(configWith("chat:\n  transports:\n    discord:\n      channel: \"1\"\n      acceptors: [123456789012345678]\n")).rejects.toThrow("must be a user or channel id; put long numeric ids in quotes");
     expect((await configWith("chat:\n  transports:\n    discord:\n      channel: \"1\"\n      acceptors: [\"123456789012345678\"]\n")).chat.transports.discord!.acceptors).toEqual(["123456789012345678"]);
   });
 });

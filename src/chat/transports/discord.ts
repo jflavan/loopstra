@@ -1,9 +1,11 @@
 import { join } from "node:path";
+import { z } from "zod";
 import type { DiscordTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
-import { readJson, writeJson } from "../../fsutil";
+import { writeJson } from "../../fsutil";
+import { readStateFile } from "../statefile";
 import { chatDir } from "../threads";
-import { chunkText, LiveAccess, mentionList, Reconnector } from "./shared";
+import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, Reconnector } from "./shared";
 
 /** The Discord REST API; tests point it at a stub server (which also hands out the gateway address). */
 export const DISCORD_API_ENV = "LOOPSTRA_DISCORD_API";
@@ -28,7 +30,10 @@ class DiscordHttpError extends Error {
 }
 
 interface DiscordMessage { id: string; channel_id: string; content?: string; author?: { id: string; username?: string; global_name?: string | null; bot?: boolean } }
-interface GatewayFrame { op: number; d?: unknown; s?: number | null; t?: string | null }
+const GatewayFrame = z.object({ op: z.number(), d: z.unknown().optional(), s: z.number().nullable().optional(), t: z.string().nullable().optional() });
+
+/** The threads this bot started (see DiscordTransport.knownThreads), as the file keeps them. */
+const KnownThreads = z.array(z.string());
 
 /**
  * A bot in one Discord channel, over the gateway (an outbound websocket). Each top-level message in
@@ -46,6 +51,8 @@ export class DiscordTransport implements Transport {
   private ws: WebSocket | null = null;
   private seq: number | null = null;
   private beat: ReturnType<typeof setInterval> | null = null;
+  /** Whether the last heartbeat sent was acknowledged (op 11); one that was not means the connection is dead. */
+  private acked = true;
   private onMessage: OnMessage | null = null;
   private readonly reconnect: Reconnector;
   private readonly access: LiveAccess;
@@ -61,9 +68,9 @@ export class DiscordTransport implements Transport {
 
   private log(line: string): void { (this.opts.log ?? ((l) => console.error(l)))(line); }
 
-  /** Threads this bot started, kept across restarts so a conversation carries on. */
+  /** Threads this bot started, kept across restarts so a conversation carries on. A damaged file is moved aside and starts over. */
   private threadsPath(): string { return join(chatDir(this.opts.root), "discord-threads.json"); }
-  private knownThreads(): string[] { return readJson<string[]>(this.threadsPath()) ?? []; }
+  private knownThreads(): string[] { return readStateFile(this.threadsPath(), KnownThreads, (l) => this.log(l)) ?? []; }
   private remember(thread: string): void {
     const all = [...this.knownThreads().filter((t) => t !== thread), thread].slice(-1000);
     writeJson(this.threadsPath(), all);
@@ -71,20 +78,13 @@ export class DiscordTransport implements Transport {
 
   /** One REST call, waiting out a rate limit once or twice. Throws on any other failure. */
   async call(method: "GET" | "POST", path: string, body?: unknown): Promise<Record<string, unknown>> {
-    for (let attempt = 0; ; attempt++) {
-      const res = await fetch(`${this.api}${path}`, {
-        method,
-        headers: { authorization: `Bot ${this.token}`, "content-type": "application/json", "user-agent": "DiscordBot (loopstra, 1)" },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      if (res.status === 429 && attempt < 2) {
-        const j = await res.json().catch(() => ({})) as { retry_after?: number };
-        await Bun.sleep(Math.min(30, j.retry_after ?? 1) * 1000);
-        continue;
-      }
-      if (!res.ok) throw new DiscordHttpError(`Discord ${method} ${path} failed: HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`, res.status);
-      return await res.json().catch(() => ({})) as Record<string, unknown>;
-    }
+    const { res, text, json } = await fetchJson(`${this.api}${path}`, {
+      method,
+      headers: { authorization: `Bot ${this.token}`, "content-type": "application/json", "user-agent": "DiscordBot (loopstra, 1)" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }, (_r, j) => j?.retry_after);
+    if (!res.ok) throw new DiscordHttpError(`Discord ${method} ${path} failed: HTTP ${res.status} ${text.slice(0, 200)}`, res.status);
+    return json ?? {};
   }
 
   async start(onMessage: OnMessage): Promise<void> {
@@ -94,9 +94,13 @@ export class DiscordTransport implements Transport {
     await this.connect(true);
   }
 
-  /** `starting`: a token Discord refuses is an error for start to throw, not a refusal to wait out. */
+  /**
+   * Opens the gateway connection. `starting`: a token Discord refuses is an error for start to
+   * throw, not a refusal to wait out. A stop that comes during one of its waits is honoured after
+   * it: nothing opened then is kept.
+   */
   private async connect(starting = false): Promise<void> {
-    if (!this.onMessage) return;
+    if (this.reconnect.cancelled) return;
     let gw: Record<string, unknown>;
     try {
       gw = await this.call("GET", "/gateway/bot");
@@ -110,19 +114,18 @@ export class DiscordTransport implements Transport {
       this.reconnect.schedule();
       return;
     }
-    const ws = new WebSocket(`${String(gw.url)}/?v=10&encoding=json`);
+    if (this.reconnect.cancelled) return;
+    const ws = await openSocket(`${String(gw.url)}/?v=10&encoding=json`);
+    if (this.reconnect.cancelled) { ws.close(); return; }
     this.ws = ws;
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(), { once: true });
-      ws.addEventListener("error", () => reject(new Error("the gateway connection failed")), { once: true });
-    });
-    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e) => this.log(`Discord message failed: ${e instanceof Error ? e.message : String(e)}`)); });
+    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Discord message failed: ${e instanceof Error ? e.message : String(e)}`)); });
     ws.addEventListener("close", (ev) => {
       if (this.ws !== ws) return;
+      this.ws = null;
       this.stopBeat();
       const refused = refusal(ev.code, this.cfg.token_env);
       if (refused) this.refused(ev.code, refused);
-      if (this.onMessage) this.reconnect.schedule();
+      this.reconnect.schedule();
     });
   }
 
@@ -138,29 +141,54 @@ export class DiscordTransport implements Transport {
     this.beat = null;
   }
 
+  /**
+   * Lets go of a connection taken for dead (a heartbeat went unanswered) and opens another. Not
+   * left to the close event: a half-open socket (the machine slept, the network changed) may never
+   * deliver one.
+   */
+  private dropSocket(ws: WebSocket, why: string): void {
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.stopBeat();
+    this.log(why);
+    try { ws.close(4000, "no heartbeat ack"); } catch { /* already gone */ }
+    this.reconnect.schedule();
+  }
+
   private async onFrame(ws: WebSocket, data: string): Promise<void> {
-    let f: GatewayFrame;
-    try { f = JSON.parse(data); } catch { return; }
+    let raw: unknown;
+    try { raw = JSON.parse(data); } catch { return; }
+    const parsed = GatewayFrame.safeParse(raw);
+    if (!parsed.success) return;
+    const f = parsed.data;
     if (typeof f.s === "number") this.seq = f.s;
     switch (f.op) {
       case 10: { // hello: start the heartbeat, then identify
-        const every = (f.d as { heartbeat_interval?: number })?.heartbeat_interval ?? 41_250;
+        const every = (f.d as { heartbeat_interval?: number } | undefined)?.heartbeat_interval ?? 41_250;
         this.stopBeat();
-        this.beat = setInterval(() => { try { ws.send(JSON.stringify({ op: 1, d: this.seq })); } catch { /* closing */ } }, every);
+        this.acked = true;
+        this.beat = setInterval(() => {
+          // The last beat got no ACK: the socket is dead, however open it looks (see dropSocket).
+          if (!this.acked) { this.dropSocket(ws, "Discord did not answer a heartbeat; the connection may be dead, so it is opened again."); return; }
+          this.acked = false;
+          try { ws.send(JSON.stringify({ op: 1, d: this.seq })); } catch { /* closing */ }
+        }, every);
         ws.send(JSON.stringify({ op: 2, d: { token: this.token, intents: DISCORD_INTENTS, properties: { os: process.platform, browser: "loopstra", device: "loopstra" } } }));
         return;
       }
       case 1: ws.send(JSON.stringify({ op: 1, d: this.seq })); return;
+      case 11: this.acked = true; return; // heartbeat ACK: the connection is alive
       case 7: case 9: ws.close(); return; // reconnect, or a session that is no longer valid: start over
       case 0:
         if (f.t === "READY") {
           // Connected only now: the gateway refuses a bad token or a missing intent after the socket opens.
-          this.botUser = String((f.d as { user?: { id?: string } })?.user?.id ?? "");
+          this.botUser = String((f.d as { user?: { id?: string } } | undefined)?.user?.id ?? "");
           this.reconnect.succeeded();
           this.refusedCode = null;
         }
         if (f.t === "MESSAGE_CREATE") await this.onDiscordMessage(f.d as DiscordMessage);
         return;
+      default: return;
     }
   }
 
@@ -197,23 +225,25 @@ export class DiscordTransport implements Transport {
     } else {
       thread = m.channel_id;
     }
-    await this.onMessage({
-      thread, authorId: m.author.id, authorName: m.author.global_name || m.author.username || m.author.id, text,
-      canAccept: access.acceptors.includes(m.author.id),
-      acceptors: mentionList(access.acceptors.map((id) => `<@${id}>`), "chat.transports.discord.acceptors"),
-    });
+    await this.onMessage(fromPerson({ thread, authorId: m.author.id, authorName: m.author.global_name || m.author.username || m.author.id, text }, access, "chat.transports.discord.acceptors"));
+  }
+
+  /** Posts one part of a message to a channel, with mentions turned off: the agent's words ping nobody. */
+  private post(channel: string, content: string): Promise<void> {
+    return this.call("POST", `/channels/${channel}/messages`, { content, allowed_mentions: { parse: [] } }).then(() => {});
   }
 
   async send(thread: string, text: string): Promise<void> {
-    for (const part of chunkText(text, DISCORD_MAX)) {
-      try { await this.call("POST", `/channels/${thread}/messages`, { content: part, allowed_mentions: { parse: [] } }); } catch (e) { this.log(e instanceof Error ? e.message : String(e)); return; }
-    }
+    try {
+      await chunked(text, DISCORD_MAX, (part) => this.post(thread, part));
+    } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
   }
 
   async announce(text: string): Promise<void> {
     if (!this.cfg.announce_to) return;
     // A failure is thrown so the service tries it again.
-    for (const part of chunkText(text, DISCORD_MAX)) await this.call("POST", `/channels/${this.cfg.announce_to}/messages`, { content: part, allowed_mentions: { parse: [] } });
+    const to = this.cfg.announce_to;
+    await chunked(text, DISCORD_MAX, (part) => this.post(to, part));
   }
 
   async stop(): Promise<void> {

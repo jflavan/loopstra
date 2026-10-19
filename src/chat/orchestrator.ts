@@ -30,7 +30,11 @@ export interface IncomingMessage {
   authorId: string;
   authorName: string;
   text: string;
-  /** Whether this person may start drafts (on the transport's acceptors list, or local). */
+  /**
+   * Whether this person may have a hand-off written up (a branch, a pull request, the writer's
+   * cost), start drafts, and act on changes: on the transport's acceptors list, or local. Anyone
+   * else may talk, and is told who can ask for those.
+   */
   canAccept: boolean;
   /** Who may, in words, for telling someone who may not. */
   acceptors: string;
@@ -120,16 +124,18 @@ export class Orchestrator {
   }
 
   /**
-   * Puts a message from Loopstra into a thread's log (not through the agent) and sends it. `since`:
-   * a line for the agent's next turn about it (see ThreadState.since), as for a request's result.
+   * Sends a message from Loopstra into a thread (not through the agent) and puts it in the thread's
+   * log. Sent first: a send that fails throws before anything is recorded, so the caller can try
+   * the whole delivery again later without the log showing it twice. `since`: a line for the
+   * agent's next turn about it (see ThreadState.since), as for a request's result.
    */
   async deliver(transport: string, thread: string, text: string, send: Send, since?: string): Promise<void> {
+    await send(text);
     await this.withThread(transport, thread, async (t) => {
       this.store.addMessage(t, { from: "loopstra", text });
       if (since) this.store.noteSince(t, since);
       this.store.save(t);
     });
-    await send(text);
   }
 
   /** Handles one message: a yes to a waiting proposal, or a turn of the conversation. */
@@ -247,7 +253,12 @@ export class Orchestrator {
     return heartbeatState(readHeartbeat(this.root), cfg.poll_seconds, new Date(), { pause: readPause(this.root), hold: readLoopHold(this.root) }).text;
   }
 
-  /** The context Loopstra vouches for, then the person's own words, delimited. */
+  /**
+   * The context Loopstra vouches for, then the person's own words, delimited. Much of the context
+   * carries people's words (hand-off titles, commit subjects, announcements made from intents, the
+   * note of a proposal that was declined, a change's files), so the whole block goes through
+   * `untagged` in one place at the end: no line of it can end the block or open another.
+   */
   private async messageBlock(cfg: Config, t: ThreadState, m: IncomingMessage, declined: string | null, upTo: number): Promise<string> {
     const remote = await new Git(this.root).remoteName().catch(() => null);
     const log = new AnnouncementLog(this.root);
@@ -257,7 +268,7 @@ export class Orchestrator {
     const name = plainName(m.authorName);
     const history = await this.recentHistory(cfg);
     const lines = [
-      `From: ${name}, ${m.canAccept ? "who may ask you to start drafts and to act on changes" : `who may not start drafts or act on changes (${m.acceptors} may)`}`,
+      `From: ${name}, ${m.canAccept ? "who may ask you to hand off, to start drafts and to act on changes" : `who may not hand off, start drafts or act on changes (${m.acceptors} may)`}`,
       `Where: ${m.via}`,
       `Today: ${localDate()}`,
       `Main branch: ${cfg.main_branch}; ${remote ? "intents are added through a pull request" : "no GitHub remote, so intents are added to the queue directly"}`,
@@ -268,14 +279,14 @@ export class Orchestrator {
       `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
     ];
     if (m.about) {
-      // Read from the change's own files, which hold people's words: never able to end the context block.
+      // Read from the change's own files, which hold people's words (made harmless below, with the rest).
       const about = await aboutContext(this.root, m.about).catch(() => "");
-      if (about) lines.push(`About this change (from where the person opened chat):\n${untagged(about)}`);
+      if (about) lines.push(`About this change (from where the person opened chat):\n${about}`);
     }
-    if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${untagged(oneLine(l, 1000))}`).join("\n")}`);
+    if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${oneLine(l, 1000)}`).join("\n")}`);
     if (declined) lines.push(declined);
     const text = untagged(m.text);
-    return `<context>\n${lines.join("\n")}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
+    return `<context>\n${untagged(lines.join("\n"))}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
   }
 
   /**
@@ -295,7 +306,15 @@ export class Orchestrator {
     try { return parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { return "unreadable"; }
   }
 
+  /**
+   * Shows what would go to the writer and waits for the person's yes. Only someone who may accept
+   * is asked: a hand-off pushes a branch, opens a pull request and spends the day's chat budget.
+   */
   private async proposeHandoff(t: ThreadState, m: IncomingMessage, h: Handoff, say: Send): Promise<void> {
+    if (!m.canAccept) {
+      await say(`I cannot write that up for you from here; ${m.acceptors} can ask me to. Tell them, or ask them to say so here.`);
+      return;
+    }
     const updates = [...new Set(h.updates.map((s) => s.trim()).filter(Boolean))];
     const bad: string[] = [];
     for (const s of updates) {
@@ -325,6 +344,8 @@ export class Orchestrator {
   }
 
   private async doHandoff(cfg: Config, trace: Trace, t: ThreadState, m: IncomingMessage, h: Handoff, say: Send): Promise<void> {
+    // Checked again at the yes: the person may have been taken off the acceptors since the question.
+    if (!m.canAccept) { await say(`Only ${m.acceptors} can have that written up, so I have not.`); return; }
     if (this.budgetLeft(cfg, trace) < MIN_SESSION_USD) {
       await say(`I have used today's chat budget, so I cannot write this up until tomorrow. Say yes again then, or an engineer can raise or remove the limit with \`loopstra setup budgets\`.`);
       t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };

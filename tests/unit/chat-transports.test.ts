@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { ChatService } from "../../src/chat/service";
@@ -7,8 +8,8 @@ import { chatDir } from "../../src/chat/threads";
 import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
-import { chunkText } from "../../src/chat/transports/shared";
-import { SlackTransport } from "../../src/chat/transports/slack";
+import { chunkText, fetchJson, openSocket, retryAfterSeconds } from "../../src/chat/transports/shared";
+import { noBroadcast, SlackTransport } from "../../src/chat/transports/slack";
 import { TerminalTransport } from "../../src/chat/transports/terminal";
 import { Hub } from "../../src/console/hub";
 import { serveConsole } from "../../src/console/server";
@@ -106,7 +107,7 @@ describe("the dashboard panel", () => {
       const [first] = await sseFrames(`${base}/api/stream`, 1);
       expect(first!.data).toMatchObject({ type: "snapshot", meta: { chat: true } });
     } finally {
-      server.stop(true);
+      void server.stop(true);
       await until(() => hub.latest() === null);
       await hub.whenStopped();
       await service.stop();
@@ -144,16 +145,23 @@ describe("the dashboard panel", () => {
       const server = serveConsole(r.root, 0);
       try {
         expect((await fetch(`http://127.0.0.1:${server.port}/api/chat?thread=tab-abcdefgh`)).status).toBe(404);
-      } finally { server.stop(true); }
+      } finally { void server.stop(true); }
     } finally { r.cleanup(); }
   });
 });
 
-/** A stub Slack: the Web API methods Loopstra calls, and a Socket Mode websocket. */
-function slackStub() {
+/**
+ * A stub Slack: the Web API methods Loopstra calls, and a Socket Mode websocket. `openDelayMs`:
+ * how long apps.connections.open takes to answer (a stop can come meanwhile).
+ */
+function slackStub(opts: { openDelayMs?: number } = {}) {
   const calls: Array<{ method: string; body: Record<string, unknown>; auth: string }> = [];
   const acks: string[] = [];
-  let socket: { send: (s: string) => void } | null = null;
+  let socket: { send: (s: string) => void; close: (code?: number) => void } | null = null;
+  /** Sockets opened and closed so far. */
+  const sockets = { opened: 0, closed: 0 };
+  /** When set, apps.connections.open answers ok: false with this error code. */
+  let refuse: string | null = null;
   const server: ReturnType<typeof Bun.serve> = Bun.serve({
     port: 0,
     async fetch(req, srv): Promise<Response | undefined> {
@@ -162,19 +170,30 @@ function slackStub() {
       const method = url.pathname.replace("/api/", "");
       const body = await req.json().catch(() => ({})) as Record<string, unknown>;
       calls.push({ method, body, auth: req.headers.get("authorization") ?? "" });
-      if (method === "apps.connections.open") return Response.json({ ok: true, url: `ws://127.0.0.1:${server.port}/socket` });
+      if (method === "apps.connections.open") {
+        if (opts.openDelayMs) await Bun.sleep(opts.openDelayMs);
+        return refuse ? Response.json({ ok: false, error: refuse }) : Response.json({ ok: true, url: `ws://127.0.0.1:${server.port}/socket` });
+      }
       if (method === "auth.test") return Response.json({ ok: true, user_id: "UBOT" });
       if (method === "users.info") return Response.json({ ok: true, user: { real_name: body.user === "U1" ? "Ana Real" : "Someone", profile: { display_name: body.user === "U1" ? "ana" : "" } } });
       if (method === "chat.postMessage") return Response.json({ ok: true, ts: "9.9" });
       return Response.json({ ok: false, error: "unknown_method" });
     },
     websocket: {
-      open(ws) { socket = ws; ws.send(JSON.stringify({ type: "hello" })); },
+      open(ws) { socket = ws; sockets.opened++; ws.send(JSON.stringify({ type: "hello" })); },
       message(_ws, data) { acks.push(JSON.parse(String(data)).envelope_id); },
+      close() { sockets.closed++; },
     },
   });
   const event = (id: string, ev: Record<string, unknown>) => socket!.send(JSON.stringify({ envelope_id: id, type: "events_api", payload: { event: ev } }));
-  return { server, calls, acks, event, connected: () => socket !== null };
+  return {
+    server, calls, acks, event, sockets, connected: () => socket !== null,
+    opens: () => calls.filter((c) => c.method === "apps.connections.open").length,
+    /** From now on the app-level token is refused with this error code. */
+    refuseToken: (code = "token_revoked") => { refuse = code; },
+    /** Slack drops the connection, as it does now and then. */
+    drop: () => socket!.close(1000),
+  };
 }
 
 describe("Slack", () => {
@@ -209,8 +228,8 @@ describe("Slack", () => {
       const ps = r.prompts();
       expect(ps.length).toBe(2);
       expect(ps[0]!.prompt).toContain("<message from=\"ana\">\nhello\n</message>");
-      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts and to act on changes");
-      expect(ps[1]!.prompt).toContain("From: Someone, who may not start drafts or act on changes (<@U1> may)");
+      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to hand off, to start drafts and to act on changes");
+      expect(ps[1]!.prompt).toContain("From: Someone, who may not hand off, start drafts or act on changes (<@U1> may)");
       expect(service.orchestrator.store.get("slack", "C1:1.0").messages.length).toBe(4);
       await slack.announce("Blocked: x.");
       expect(stub.calls.at(-1)!.body).toEqual({ channel: "C9", text: "Blocked: x." });
@@ -220,7 +239,7 @@ describe("Slack", () => {
       expect(stub.calls.slice(before).filter((c) => c.method === "chat.postMessage").length).toBe(2);
     } finally {
       await service.stop();
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -270,13 +289,17 @@ describe("Slack", () => {
 });
 
 /**
- * A stub Discord: the REST calls Loopstra makes, and a gateway that says hello and checks identify.
- * `closeOnIdentify`: the gateway closes with this code instead of answering READY.
+ * A stub Discord: the REST calls Loopstra makes, and a gateway that says hello, checks identify and
+ * answers heartbeats. `closeOnIdentify`: the gateway closes with this code instead of answering
+ * READY. `heartbeatMs`: the interval hello asks for. `noAck`: heartbeats go unanswered (a dead
+ * connection). `gatewayDelayMs`: how long GET /gateway/bot takes (a stop can come meanwhile).
  */
-function discordStub(closeOnIdentify?: number) {
+function discordStub(closeOnIdentify?: number, opts: { heartbeatMs?: number; noAck?: boolean; gatewayDelayMs?: number } = {}) {
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | null; auth: string }> = [];
   const frames: Array<{ op: number; d: unknown }> = [];
   let socket: { send: (s: string) => void; close: (code?: number) => void } | null = null;
+  /** Sockets opened and closed so far, and the codes they were closed with. */
+  const sockets = { opened: 0, closed: 0, codes: [] as number[] };
   let threadN = 100;
   /** What GET /gateway/bot answers: 200, or 401 for a token Discord does not accept. */
   let gatewayStatus = 200;
@@ -288,23 +311,29 @@ function discordStub(closeOnIdentify?: number) {
       const body = req.method === "POST" ? await req.json().catch(() => null) as Record<string, unknown> | null : null;
       const path = url.pathname.replace("/api", "");
       calls.push({ method: req.method, path, body, auth: req.headers.get("authorization") ?? "" });
-      if (path === "/gateway/bot") return gatewayStatus === 200 ? Response.json({ url: `ws://127.0.0.1:${server.port}/gw` }) : Response.json({ message: "401: Unauthorized", code: 0 }, { status: gatewayStatus });
+      if (path === "/gateway/bot") {
+        if (opts.gatewayDelayMs) await Bun.sleep(opts.gatewayDelayMs);
+        return gatewayStatus === 200 ? Response.json({ url: `ws://127.0.0.1:${server.port}/gw` }) : Response.json({ message: "401: Unauthorized", code: 0 }, { status: gatewayStatus });
+      }
       if (/\/threads$/.test(path)) return Response.json({ id: String(threadN++) });
       return Response.json({ id: "m" });
     },
     websocket: {
-      open(ws) { socket = ws; ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 60_000 } })); },
+      open(ws) { socket = ws; sockets.opened++; ws.send(JSON.stringify({ op: 10, d: { heartbeat_interval: opts.heartbeatMs ?? 60_000 } })); },
       message(ws, data) {
         const f = JSON.parse(String(data));
         frames.push(f);
         if (f.op === 2 && closeOnIdentify) ws.close(closeOnIdentify, "closed by the stub");
         else if (f.op === 2) ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: { user: { id: "42" } } }));
+        else if (f.op === 1 && !opts.noAck) ws.send(JSON.stringify({ op: 11 }));
       },
+      close(_ws, code) { sockets.closed++; sockets.codes.push(code); },
     },
   });
   const message = (d: Record<string, unknown>) => socket!.send(JSON.stringify({ op: 0, s: 2, t: "MESSAGE_CREATE", d }));
   return {
-    server, calls, frames, message, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length,
+    server, calls, frames, message, sockets, ready: () => frames.some((f) => f.op === 2), identifies: () => frames.filter((f) => f.op === 2).length,
+    beats: () => frames.filter((f) => f.op === 1).length,
     /** From now on the token is refused: GET /gateway/bot answers `status`. */
     refuseToken: (status = 401) => { gatewayStatus = status; },
     /** The gateway drops the connection, as it does now and then. */
@@ -349,8 +378,8 @@ describe("Discord", () => {
       ]);
       expect(stub.calls[0]!.auth).toBe("Bot t-1");
       const ps = r.prompts();
-      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to start drafts and to act on changes");
-      expect(ps[1]!.prompt).toContain("From: Bo, who may not start drafts or act on changes (<@7> may)");
+      expect(ps[0]!.prompt).toContain("From: ana, who may ask you to hand off, to start drafts and to act on changes");
+      expect(ps[1]!.prompt).toContain("From: Bo, who may not hand off, start drafts or act on changes (<@7> may)");
       // Only the bot's own mention is taken out; someone else's is part of what was asked.
       expect(ps[1]!.prompt).toContain("with dates please, and tell <@7>\n</message>");
       // The thread is remembered, so a restarted bot carries on in it.
@@ -363,7 +392,7 @@ describe("Discord", () => {
       expect(stub.calls.at(-1)).toMatchObject({ path: "/channels/501/messages", body: { content: "Merged: x." } });
     } finally {
       await service.stop();
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -381,7 +410,7 @@ describe("Discord", () => {
       expect(Date.now() - second).toBeGreaterThanOrEqual(1_500);
     } finally {
       await discord.stop();
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -397,7 +426,7 @@ describe("Discord", () => {
       expect(logged).toEqual(["Discord refused the bot (4014): the Message Content intent is off. Turn it on for the bot in the Discord Developer Portal (Bot, Privileged Gateway Intents). Trying again every 5 minutes."]);
     } finally {
       await discord.stop();
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -409,7 +438,7 @@ describe("Discord", () => {
     try {
       await expect(startDiscord(stub, r.root)).rejects.toThrow(/^Discord refused the bot \(HTTP 401\): the bot token was not accepted\. Check the token in TOKEN\.$/);
     } finally {
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -429,7 +458,7 @@ describe("Discord", () => {
       expect(logged).toEqual(["Discord refused the bot (HTTP 403): the bot token was not accepted. Check the token in TOKEN. Trying again every 5 minutes."]);
     } finally {
       await discord.stop();
-      stub.server.stop(true);
+      void stub.server.stop(true);
       r.cleanup();
     }
   });
@@ -480,6 +509,207 @@ describe("Discord", () => {
       expect(logged).toEqual([]);
       await discord.onDiscordMessage({ id: "m3", channel_id: "100", content: "hi", author: { id: "1" } });
       expect(logged).toHaveLength(1);
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the shared transport pieces (hardening review)", () => {
+  test("a rate limit's wait is read as seconds, never NaN, and never more than 30", () => {
+    expect(["abc", undefined, null, "", NaN, -5, 0].map(retryAfterSeconds)).toEqual([1, 1, 1, 1, 1, 1, 1]);
+    expect(retryAfterSeconds("2.5")).toBe(2.5);
+    expect(retryAfterSeconds(120)).toBe(30);
+  });
+
+  test("fetchJson waits out a 429 as the response says, then gives the answer and its JSON", async () => {
+    let hits = 0;
+    const server = Bun.serve({ port: 0, fetch: () => (++hits === 1 ? new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } }) : Response.json({ ok: true })) });
+    try {
+      const started = Date.now();
+      const { res, json } = await fetchJson(`http://127.0.0.1:${server.port}/x`, { method: "GET" }, (r) => r.headers.get("retry-after"));
+      expect([res.status, json, hits]).toEqual([200, { ok: true }, 2]);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+    } finally { void server.stop(true); }
+  });
+
+  test("a websocket handshake that never completes is given up on after the timeout, not waited for forever", async () => {
+    // The server takes the request and never answers it.
+    const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    try {
+      const started = Date.now();
+      await expect(openSocket(`ws://127.0.0.1:${server.port}/socket`, 200)).rejects.toThrow("did not open within");
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally { void server.stop(true); }
+  });
+
+  test("noBroadcast shows broadcasts and other people's mentions as text, and keeps the acceptors' mentions", () => {
+    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and &lt;@U2|bob>");
+    expect(noBroadcast("ping <@U1>")).toBe("ping &lt;@U1>");
+    expect(noBroadcast("a <#C1|general> link and x < y")).toBe("a <#C1|general> link and x < y");
+  });
+});
+
+describe("Slack (hardening review)", () => {
+  test("a stop during a reconnect's call to Slack leaves no socket open, and start ends at once", async () => {
+    const r = await chatRepo();
+    const stub = slackStub({ openDelayMs: 300 });
+    const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: () => {} });
+    try {
+      const starting = slack.start(async () => {});
+      await until(() => stub.opens() === 1);
+      await slack.stop();
+      await starting;
+      await Bun.sleep(500);
+      expect(stub.sockets).toEqual({ opened: 0, closed: 0 });
+    } finally {
+      await slack.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a connection with no frames for too long is taken for dead and opened again; one with frames is kept", async () => {
+    const r = await chatRepo();
+    const stub = slackStub();
+    const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
+    const logged: string[] = [];
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: (l) => logged.push(l), quietMs: 150 });
+    try {
+      await slack.start(async () => {});
+      await until(() => stub.connected());
+      // Frames every 50 ms keep it: nothing is opened again meanwhile.
+      const end = Date.now() + 500;
+      while (Date.now() < end) { stub.event(`e${Date.now()}`, { type: "reaction_added", user: "U1" }); await Bun.sleep(50); }
+      expect(stub.opens()).toBe(1);
+      // Silence: the watchdog closes it and a second connection follows.
+      await until(() => stub.opens() >= 2, 5_000);
+      expect(stub.sockets.closed).toBeGreaterThanOrEqual(1);
+      expect(logged).toEqual(["Slack has been silent too long; the connection may be dead, so it is opened again."]);
+    } finally {
+      await slack.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("an app-level token Slack refuses at start is a plain error naming its variable", async () => {
+    const r = await chatRepo();
+    const stub = slackStub();
+    stub.refuseToken("invalid_auth");
+    const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: () => {} });
+    try {
+      await expect(slack.start(async () => {})).rejects.toThrow(/^Slack refused the app \(invalid_auth\): the app-level token was not accepted\. Check the token in APP\.$/);
+    } finally {
+      await slack.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a token revoked while the bot runs says what to fix, once, and is tried again only every 5 minutes", async () => {
+    const r = await chatRepo();
+    const stub = slackStub();
+    const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
+    const logged: string[] = [];
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: [] }, { root: r.root, env, log: (l) => logged.push(l) });
+    try {
+      await slack.start(async () => {});
+      await until(() => stub.connected());
+      await Bun.sleep(200);
+      stub.refuseToken("token_revoked");
+      stub.drop();
+      // The first try is a second after the drop; without the slow wait, more would follow at 3 seconds.
+      await Bun.sleep(3_500);
+      expect(stub.opens()).toBe(2);
+      expect(logged).toEqual(["Slack refused the app (token_revoked): the app-level token was not accepted. Check the token in APP. Trying again every 5 minutes."]);
+    } finally {
+      await slack.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a reply mentions nobody but the acceptors, and never a channel", async () => {
+    const r = await chatRepo({ config: SLACK([], ["U1"]) });
+    const stub = slackStub();
+    const env = { LOOPSTRA_SLACK_API: `http://127.0.0.1:${stub.server.port}/api`, APP: "xapp-1", BOT: "xoxb-1" };
+    const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: ["U1"] }, { root: r.root, env, log: () => {} });
+    try {
+      await slack.start(async () => {});
+      await slack.send("C1:1.0", "<!channel> ask <@U1> or <@U2>");
+      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1> or &lt;@U2>");
+    } finally {
+      await slack.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+});
+
+describe("Discord (hardening review)", () => {
+  test("a stop during a reconnect's call to Discord leaves no socket open and no heartbeat running", async () => {
+    const r = await chatRepo();
+    const stub = discordStub(undefined, { gatewayDelayMs: 300 });
+    const env = { LOOPSTRA_DISCORD_API: `http://127.0.0.1:${stub.server.port}/api`, TOKEN: "t-1" };
+    const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root: r.root, env, log: () => {} });
+    try {
+      const starting = discord.start(async () => {});
+      await until(() => stub.gatewayLooks() === 1);
+      await discord.stop();
+      await starting;
+      await Bun.sleep(500);
+      expect(stub.sockets.opened).toBe(0);
+      expect((discord as unknown as { beat: unknown }).beat).toBeNull();
+    } finally {
+      await discord.stop();
+      void stub.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a heartbeat that gets no ACK means a dead connection: it is closed and opened again; answered ones keep it", async () => {
+    const r = await chatRepo();
+    const live = discordStub(undefined, { heartbeatMs: 100 });
+    const dead = discordStub(undefined, { heartbeatMs: 100, noAck: true });
+    const { discord: a } = await startDiscord(live, r.root);
+    const { discord: b, logged } = await startDiscord(dead, r.root);
+    try {
+      await until(() => live.beats() >= 3 && dead.beats() >= 1);
+      await until(() => dead.identifies() >= 2, 5_000);
+      expect(dead.sockets.codes[0]).toBe(4000);
+      expect(logged[0]).toBe("Discord did not answer a heartbeat; the connection may be dead, so it is opened again.");
+      expect(live.identifies()).toBe(1);
+    } finally {
+      await a.stop();
+      await b.stop();
+      void live.server.stop(true);
+      void dead.server.stop(true);
+      r.cleanup();
+    }
+  });
+
+  test("a damaged discord-threads.json is moved aside and said once, not read as empty and written over", async () => {
+    const r = await chatRepo({ config: DISCORD([], []) });
+    try {
+      const logged: string[] = [];
+      const discord = new DiscordTransport({ token_env: "TOKEN", channel: "500", allow: [], acceptors: [] }, { root: r.root, env: { LOOPSTRA_DISCORD_API: "http://127.0.0.1:9/none" }, log: (l) => logged.push(l) });
+      let got: string | null = null;
+      (discord as unknown as { onMessage: unknown }).onMessage = async (m: { thread: string }) => { got = m.thread; };
+      mkdirSync(chatDir(r.root), { recursive: true });
+      const path = join(chatDir(r.root), "discord-threads.json");
+      writeFileSync(path, "{ not json");
+      await discord.onDiscordMessage({ id: "m", channel_id: "100", content: "hi", author: { id: "1" } });
+      expect(got).toBeNull();
+      expect(existsSync(path)).toBe(false);
+      expect(readdirSync(chatDir(r.root)).filter((n) => n.startsWith("discord-threads.json.bad-"))).toHaveLength(1);
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toContain("moved to");
+      // The wrong shape is as bad as no JSON.
+      writeJson(path, { threads: ["100"] });
+      await discord.onDiscordMessage({ id: "m", channel_id: "100", content: "hi", author: { id: "1" } });
+      expect(got).toBeNull();
+      expect(logged).toHaveLength(2);
     } finally { r.cleanup(); }
   });
 });

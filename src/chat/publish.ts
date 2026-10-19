@@ -65,8 +65,9 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
   // (tracing, removing the throwaway checkout) is recorded, never reported as nothing being opened,
   // which would invite a second, duplicate hand-off.
   let done: HandoffOutcome | null = null;
-  // A branch pushed without its pull request: said, so nobody is told nothing happened.
-  let pushed: string | null = null;
+  // A branch pushed without its pull request: said, so nobody is told nothing happened. Boxed: it is
+  // set inside the worktree callback, which the compiler cannot follow from the catch below.
+  const pushed: { branch: string | null } = { branch: null };
   const note = (what: Record<string, unknown>) => {
     try { o.trace.event(CHAT_SLUG, what.error ? "error" : what.kind === "new" ? "chat-request" : "chat-pr", what); } catch { /* the outcome stands without its trace line */ }
   };
@@ -100,7 +101,7 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
       await there.runtime("commit", ["-q", "-m", subject]);
       const branch = await freeBranch(git, remote, first);
       await there.run(["push", "-q", remote, `HEAD:refs/heads/${branch}`]);
-      pushed = branch;
+      pushed.branch = branch;
       const pr = await new GitHub(wt).createPr({ head: branch, base: main, title: oneLine(o.handoff.title, 100) || subject, body: prBody(o.handoff, w.intents, w.summary, o.author, o.via) });
       done = { kind: "pr", number: pr.number, url: pr.url, branch, intents: w.intents };
       note({ kind: "pr", number: pr.number, url: pr.url, branch, slugs: w.intents.map((i) => i.slug), by: o.author });
@@ -108,9 +109,10 @@ export async function handOff(o: HandoffInput): Promise<HandoffOutcome> {
     }, (e) => note({ where: "handoff cleanup", error: errorText(e), dir }));
   } catch (e) {
     if (e instanceof StopRequested && !done) throw e;
-    note({ where: "handoff", error: errorText(e), afterPublishing: done !== null, pushed });
+    note({ where: "handoff", error: errorText(e), afterPublishing: done !== null, pushed: pushed.branch });
     if (done) return done;
-    if (pushed) return { kind: "failed", pushed, problem: `The intents were pushed to the branch ${pushed}, but the pull request could not be opened (${errorText(e).split("\n")[0]}). An engineer can open it from that branch, or delete the branch.` };
-    return { kind: "failed", problem: `Something went wrong while opening the pull request (${errorText(e).split("\n")[0]}). An engineer can find the details in the trace.` };
+    const why = errorText(e).split("\n")[0] ?? "";
+    if (pushed.branch) return { kind: "failed", pushed: pushed.branch, problem: `The intents were pushed to the branch ${pushed.branch}, but the pull request could not be opened (${why}). An engineer can open it from that branch, or delete the branch.` };
+    return { kind: "failed", problem: `Something went wrong while opening the pull request (${why}). An engineer can find the details in the trace.` };
   }
 }

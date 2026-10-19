@@ -48,10 +48,16 @@ function isStreamEvent(v: unknown): v is StreamEvent {
   return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { type?: unknown }).type === "string";
 }
 
+/** The result event's fields the runner reads. Each is checked where it is used: the CLI's shape is not Loopstra's to trust. */
+interface ResultEvent extends StreamEvent {
+  structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
+  permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
+}
+
 /** Accumulates `--output-format stream-json` lines into one result. A notification's result is not the result. */
 export class StreamCollector {
   private sessionId: string | null = null;
-  private result: StreamEvent | null = null;
+  private result: ResultEvent | null = null;
   readonly events: StreamEvent[] = [];
 
   push(line: string): StreamEvent | null {
@@ -69,10 +75,7 @@ export class StreamCollector {
   }
 
   finish(): Collected {
-    const r = this.result as (StreamEvent & {
-      structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
-      permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
-    }) | null;
+    const r = this.result;
     return {
       sessionId: this.sessionId ?? r?.session_id ?? null,
       subtype: r?.subtype ?? "missing_result",
@@ -159,6 +162,8 @@ export interface RunPhaseInput {
   maxBudgetUsd?: number;
   resume?: string;
   env?: Record<string, string>;
+  /** Names of this process's environment variables the session must not inherit (a chat session: the bot tokens). `env` is added after. */
+  dropEnv?: string[];
   /** Override the executable (tests). Defaults to $LOOPSTRA_CLAUDE_EXECUTABLE or `claude` on PATH. */
   executable?: string;
   onEvent?: (e: StreamEvent) => void;
@@ -374,7 +379,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
-  const env = withBunOnPath({ ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
+  const env = withBunOnPath({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
 
   // A session that ended having answered only notifications (one started before background tasks
   // were turned off) gets the prompt again on the same session, within the same deadline. A session
@@ -495,13 +500,13 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
     const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr))
-      ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus}` : null);
+      ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus ?? ""}` : null);
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
   }
   if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {
     return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   }
-  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
+  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode ?? "without an exit code"} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
   if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
   if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);
