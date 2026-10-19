@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,28 +10,15 @@ import {
 import { start } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { touchWake, wakeStamp } from "../../src/wake";
-import { setupRepo, tempDir } from "../helpers";
+import { NEVER_A_PID, setupRepo, tempDir } from "../helpers";
 
 afterEach(() => resetStop());
 
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 const ago = (s: number) => new Date(NOW.getTime() - s * 1000).toISOString();
 
-/**
- * The pid of a process that ran and has exited, so gone on every system (a made-up number might be
- * in use). Taken afresh before each test and checked: Windows hands a freed pid to the next process
- * soon, and with the suite's other workers starting processes, one picked when the file loaded could
- * belong to a live process by the time a test asks.
- */
-function deadPid(): number {
-  for (let tries = 0; tries < 20; tries++) {
-    const pid = Bun.spawnSync({ cmd: [process.execPath, "-e", ""], stdin: "ignore", stdout: "ignore", stderr: "ignore" }).pid;
-    if (!pidAlive(pid)) return pid;
-  }
-  throw new Error("no exited process id could be found that is not in use again");
-}
-let DEAD_PID = deadPid();
-beforeEach(() => { DEAD_PID = deadPid(); });
+/** A process that is not running (see NEVER_A_PID). */
+const DEAD_PID = NEVER_A_PID;
 
 /** A heartbeat written by this (live) process. */
 function hb(over: Partial<Heartbeat> = {}): Heartbeat {
@@ -533,6 +520,12 @@ describe("the loop lock", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+describe("the process id the tests use for a process that is not running", () => {
+  test("is not alive here, whatever this system has started", () => {
+    expect(pidAlive(DEAD_PID)).toBe(false);
   });
 });
 

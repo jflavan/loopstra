@@ -11,7 +11,7 @@ import { othersRunning, othersRunningCommands } from "../../src/lanes";
 import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
-import { FAKE_CLAUDE, fixture, fixtureDir, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { FAKE_CLAUDE, fixture, fixtureDir, NEVER_A_PID, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { touchWake, wakeStamp } from "../../src/wake";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -356,9 +356,7 @@ describe("scheduler resilience", () => {
   test("a chat hand-off's throwaway checkout left behind is removed once its process is gone and an hour has passed, not while it runs", async () => {
     const { repo, trace } = await setupRepo("accepted");
     const git = new Git(repo.path);
-    const ended = Bun.spawn({ cmd: [process.execPath, "-e", "0"] });
-    await ended.exited;
-    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${ended.pid}`);
+    const left = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-1-${NEVER_A_PID}`);
     const running = join(repo.path, ".loopstra", "chat", "worktrees", `handoff-2-${process.pid}`);
     await git.run(["worktree", "add", "--detach", left, "main"]);
     await git.run(["worktree", "add", "--detach", running, "main"]);
