@@ -6,7 +6,8 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { EARLY_REVIEW } from "../../src/stages/early-review";
-import { cleanupChange, DIRTY_ROOT_NOTE, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
+import { cleanupChange, DIRTY_ROOT_NOTE, fixesNotMerged, MERGE_WAIT_NOTE, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
+import type { PrInfo } from "../../src/github";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv, writeIntentOnDisk } from "../helpers";
@@ -648,6 +649,69 @@ describe("merge", () => {
     expect(await status(repo.path)).toBe("merged");
     expect(phaseNames(trace).slice(before)).toEqual([]);
     expect(await git.branchExists(ctx.branch)).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a merging marker from before the merge commit was known does not take a branch that changed nothing outside intent/ for merged once main moves", async () => {
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
+    await personSets(ctx, "merge-approved");
+    const git = new Git(repo.path);
+    const wt = new Git(ctx.worktreeDir);
+    // The branch's own work outside intent/ undone: what it changed is its record of the change (a note in the intent).
+    const outside = (await wt.run(["diff", "--name-only", "-z", "main...HEAD"])).out.split("\0").filter((f) => f && !f.startsWith("intent/"));
+    expect(outside.length).toBeGreaterThan(0);
+    for (const f of outside) {
+      if ((await git.run(["cat-file", "-e", `main:${f}`], true)).code === 0) await wt.run(["checkout", "main", "--", f]);
+      else await wt.run(["rm", "-q", "--", f]);
+    }
+    const intent = join(ctx.worktreeDir, "intent", "add-numbers", "intent.md");
+    await Bun.write(intent, `${await Bun.file(intent).text()}\nA note the build left.\n`);
+    await wt.commitAll("only the record");
+    // Stopped before the merge (the marker names main's commit only), and a record lands on main since.
+    mkdirSync(ctx.runDir, { recursive: true });
+    writeFileSync(join(ctx.runDir, "merging"), await git.headSha());
+    await Bun.write(join(repo.path, "intent", "queue.md"), "# Queue\n");
+    await git.commitPaths(["intent/queue.md"], "loopstra: a record");
+    await ctx.reload();
+    const before = phaseNames(trace).length;
+    await runMergeStep(ctx);
+    // The merge that never landed is not skipped: the merge checks run (the record is never taken for a merge), and the branch stays.
+    expect(phaseNames(trace).slice(before).length).toBeGreaterThan(0);
+    expect(await status(repo.path)).not.toBe("merged");
+    expect(await git.branchExists(ctx.branch)).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a pull request merged on GitHub at its old head counts as having the branch's fixes when the branch was only brought up to date since", async () => {
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
+    const git = new Git(repo.path);
+    const wt = new Git(ctx.worktreeDir);
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i}\n`).join("");
+    await Bun.write(join(repo.path, "shared.md"), lines);
+    await git.commitPaths(["shared.md"], "a shared file");
+    expect(await wt.rebaseOnto("main")).toBe(true);
+    // The pull request's head on GitHub: the change edits the end of the shared file.
+    await Bun.write(join(ctx.worktreeDir, "shared.md"), `${lines}the change's line\n`);
+    await wt.commitAll("the change's edit");
+    const head = await wt.headSha();
+    // Another change lands on main, editing the start of the same file.
+    await Bun.write(join(repo.path, "shared.md"), `another change's line\n${lines}`);
+    await git.commitPaths(["shared.md"], "another change");
+    const main = await git.headSha();
+    // The merge checks bring the branch up to date (a rebase onto main) while a person squash-merges the old head on GitHub.
+    expect(await wt.rebaseOnto("main")).toBe(true);
+    const tree = (await git.run(["merge-tree", "--write-tree", main, head])).out.trim().split("\n")[0]!;
+    const squash = (await git.run(["commit-tree", tree, "-p", main, "-m", "add-numbers (#1)"])).out.trim();
+    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, merged: true, mergeCommit: squash, url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
+    expect(await fixesNotMerged(ctx, pr)).toBe(false);
+    // The pull request's head still counts when the branch was not brought up to date.
+    await wt.run(["reset", "-q", "--hard", head]);
+    expect(await fixesNotMerged(ctx, pr)).toBe(false);
+    // A fix committed on the branch since, which neither has, is still seen.
+    await Bun.write(join(ctx.worktreeDir, "src", "fix.ts"), "export const fixed = true;\n");
+    await wt.commitAll("fix: after the review");
+    expect(await fixesNotMerged(ctx, pr)).toBe(true);
+    expect(await fixesNotMerged(ctx, { ...pr, mergeCommit: null })).toBe(true);
     trace.close(); repo.cleanup();
   });
 
