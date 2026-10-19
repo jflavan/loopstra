@@ -11,7 +11,7 @@ const proc = Bun.spawn({ cmd: ["bunx", "knip", "--reporter", "json", "--no-exit-
 const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 
 type Item = { name: string };
-interface Issue { file: string; files: Item[]; exports: Item[]; types: Item[]; dependencies: Item[]; devDependencies: Item[]; unlisted: Item[] }
+interface Issue { file: string; files: Item[]; exports: Item[]; types: Item[]; dependencies: Item[]; devDependencies: Item[]; unlisted: Item[]; unresolved: Item[] }
 const { issues } = JSON.parse(out) as { issues: Issue[] };
 
 const dead: string[] = [];
@@ -21,6 +21,7 @@ for (const i of issues) {
   for (const t of i.types) dead.push(`unused type      ${i.file}: ${t.name}`);
   for (const d of [...i.dependencies, ...i.devDependencies]) dead.push(`unused dependency ${d.name}`);
   for (const u of i.unlisted) dead.push(`unlisted import  ${i.file}: ${u.name}`);
+  for (const u of i.unresolved) dead.push(`unresolved import ${i.file}: ${u.name}`);
 }
 
 let declared = 0;
