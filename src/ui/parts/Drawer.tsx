@@ -34,13 +34,17 @@ export function Drawer() {
   return drawer.value.open ? <DrawerBox /> : null;
 }
 
-/** The drawer itself, mounted only while it is open, so closing it gives the focus back to where it was. */
+/**
+ * The drawer itself, mounted only while it is open, so closing it gives the focus back to where it
+ * was. It is not modal, so that happens only when the focus is in the drawer (or nowhere) as it closes.
+ */
 function DrawerBox() {
   const d = drawer.value;
-  useReturnFocus();
+  const box = useRef<HTMLElement>(null);
+  useReturnFocus(box);
   const close = () => { drawer.value = { ...d, open: false }; };
   return (
-    <aside class="drawer" aria-label="The orchestrator">
+    <aside ref={box} class="drawer" aria-label="The orchestrator">
       <header>
         <b>Orchestrator</b>
         <span class="muted about">{d.about ? `About ${d.about.title}` : "Ask how things are going, or talk through a new change."}</span>

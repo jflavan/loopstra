@@ -18,6 +18,7 @@ import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOAB
 import { follow } from "../../src/ui/stream";
 import { mergeFeed } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
+import { givesFocusBack } from "../../src/ui/parts/focus";
 
 describe("formatting", () => {
   test("money, durations, running costs, models and the loop pill", () => {
@@ -181,6 +182,27 @@ describe("diffs", () => {
       { kind: "file", text: "added.ts" }, { kind: "meta", text: "new file mode 100644" }, { kind: "hunk", text: "@@ -0,0 +1 @@" }, { kind: "add", text: "x" },
       { kind: "file", text: "gone.ts" }, { kind: "meta", text: "deleted file mode 100644" }, { kind: "hunk", text: "@@ -1 +0,0 @@" }, { kind: "del", text: "x" },
     ]);
+  });
+});
+
+describe("where the focus goes when a panel closes", () => {
+  const body = { name: "body" };
+  const inside = { name: "the drawer's box" };
+  const elsewhere = { name: "a box on the page" };
+  const drawer = { contains: (n: unknown) => n === inside };
+
+  test("a modal dialog always gives the focus back to what had it", () => {
+    for (const active of [inside, elsewhere, body, null]) expect(givesFocusBack(active, body)).toBe(true);
+  });
+
+  test("the drawer gives it back only when the focus is in the drawer or nowhere, not when the person went on to something else", () => {
+    expect(givesFocusBack(inside, body, drawer)).toBe(true);
+    expect(givesFocusBack(body, body, drawer)).toBe(true);
+    expect(givesFocusBack(null, body, drawer)).toBe(true);
+    expect(givesFocusBack(elsewhere, body, drawer)).toBe(false);
+    // The drawer's box already gone: only a focus that is nowhere is taken back.
+    expect(givesFocusBack(elsewhere, body, null)).toBe(false);
+    expect(givesFocusBack(body, body, null)).toBe(true);
   });
 });
 
