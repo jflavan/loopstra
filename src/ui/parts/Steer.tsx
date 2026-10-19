@@ -60,14 +60,14 @@ export function Steer({ slug, seq, offer, compact = false, extra }: { slug: stri
       {stopping ? "Stopping…" : compact ? "Stop" : "Stop session"}
     </button>
   );
-  // On a tile the box is one line, and Enter sends: there is no room, or need, for a long message there.
+  // On a tile the box is one line, and Enter sends, with or without Shift: there is no room, or need, for a long message there.
   const field = compact ? (
     <input
       type="text" value={text} maxLength={4000} disabled={stopping}
       placeholder="Tell the agent something"
       aria-label="Tell the agent something"
       onInput={(e) => setText(e.currentTarget.value)}
-      onKeyDown={(e) => { if (sendsOnEnter(e)) { e.preventDefault(); void send("message"); } }}
+      onKeyDown={(e) => { if (sendsOnEnter(e, { oneLine: true })) { e.preventDefault(); void send("message"); } }}
     />
   ) : (
     <textarea

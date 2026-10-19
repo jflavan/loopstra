@@ -53,11 +53,12 @@ export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolea
 
 /**
  * Whether a key press in a box where Enter alone sends (the orchestrator's, a tile's one-line box)
- * sends it: Enter without Shift (Shift with Enter is a line break), never while an input method is
- * picking a character.
+ * sends it, never while an input method is picking a character. In a box of several lines it is Enter
+ * without Shift (Shift with Enter is a line break); in a one-line box (`oneLine`), which has no line
+ * to break, Enter sends with or without Shift.
  */
-export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number }): boolean {
-  return !composing(e) && e.key === "Enter" && !e.shiftKey;
+export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number }, { oneLine = false } = {}): boolean {
+  return enterPressed(e) && (oneLine || !e.shiftKey);
 }
 
 /** What a key press does: one of the page's actions, the screen's own handler for that key, or nothing. */

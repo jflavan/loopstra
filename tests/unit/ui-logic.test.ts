@@ -128,6 +128,16 @@ describe("keys", () => {
     expect(sendsOnEnter(enter({ keyCode: 229 }))).toBe(false);
   });
 
+  test("in a one-line box Enter sends with or without Shift, since there is no line to break, but not an input method's", () => {
+    const enter = (mods: Partial<{ shiftKey: boolean; isComposing: boolean; keyCode: number }> = {}) => ({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, ...mods });
+    const oneLine = { oneLine: true };
+    expect(sendsOnEnter(enter(), oneLine)).toBe(true);
+    expect(sendsOnEnter(enter({ shiftKey: true }), oneLine)).toBe(true);
+    expect(sendsOnEnter({ ...enter(), key: "a" }, oneLine)).toBe(false);
+    expect(sendsOnEnter(enter({ isComposing: true }), oneLine)).toBe(false);
+    expect(sendsOnEnter(enter({ shiftKey: true, keyCode: 229 }), oneLine)).toBe(false);
+  });
+
   test("Enter that picks the palette's row is any Enter but an input method's", () => {
     const enter = (mods: Partial<{ isComposing: boolean; keyCode: number }> = {}) => ({ key: "Enter", isComposing: false, keyCode: 13, ...mods });
     expect(enterPressed(enter())).toBe(true);
