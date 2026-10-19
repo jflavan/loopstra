@@ -76,6 +76,31 @@ describe("intent frontmatter", () => {
     expect(parseIntentFile("﻿---\r\nstatus: accepted\r\n---").frontmatter.status).toBe("accepted");
   });
 
+  test("an empty frontmatter block (--- straight after ---) is an empty frontmatter: the file is a draft", () => {
+    // An older Loopstra wrote exactly this (a priority set, then undone, on a draft with no frontmatter).
+    for (const text of ["---\n---\n# Intent: x\n", "﻿---\r\n---\r\n# Intent: x\r\n", "---\n--- \n# Intent: x\n", "---\n---"]) {
+      expect(parseIntentFile(text).frontmatter.status).toBe("draft");
+    }
+    expect(parseIntentFile("---\n---\n# Intent: x\n").title).toBe("x");
+  });
+
+  test("an opening fence with spaces before the dashes is refused, never read as a draft", () => {
+    for (const text of [" ---\nstatus: building\n---\n# Intent: x\n", "\t---  \nstatus: building\n---\n# Intent: x\n", "\n  ---\nstatus: building\n---\n"]) {
+      expect(() => parseIntentFile(text)).toThrow(FrontmatterProblem);
+    }
+  });
+
+  test("a closing line counts only when it is three dashes with nothing but spaces after them", () => {
+    // ---- is not a closing fence: read as one, the fourth dash went into the body.
+    for (const text of ["---\nstatus: building\n----\n# Intent: x\n", "---\nstatus: building\n---x\n# Intent: x\n"]) {
+      expect(() => parseIntentFile(text)).toThrow(FrontmatterProblem);
+    }
+    const f = parseIntentFile("---\nstatus: building\n---  \n# Intent: x\n");
+    expect([f.frontmatter.status, f.title]).toEqual(["building", "x"]);
+    // A --- inside a block value is indented, so it is the value's, not a fence.
+    expect(parseIntentFile("---\nnote: |\n  a\n  ---\n  b\n---\n# Intent: x\n").frontmatter.note).toBe("a\n---\nb\n");
+  });
+
   test("scanRepo lists a change whose fence is wrong under the ones a person needs to fix, with how", async () => {
     const t = tempDir();
     try {
