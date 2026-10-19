@@ -156,6 +156,29 @@ describe("GitHub", () => {
     } finally { t.cleanup(); }
   });
 
+  test("review data in a shape gh does not print is an error to wait on, not a throw that blocks the change", async () => {
+    const t = tempDir();
+    try {
+      const pr = { number: 1, state: "OPEN", mergedAt: null, url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z" };
+      const shapes = [
+        { latestReviews: { state: "APPROVED" } },
+        { latestReviews: [null] },
+        { latestReviews: ["APPROVED"] },
+        { reviewDecision: 1 },
+        { author: "someone" },
+      ];
+      for (const [i, extra] of shapes.entries()) {
+        const fake = join(t.path, `odd-gh-${i}.ts`);
+        await Bun.write(fake, `if (Bun.argv[3] === "view") console.log(${JSON.stringify(JSON.stringify({ ...pr, ...extra }))});\n`);
+        expect(await new GitHub(t.path, { executable: fake }).lookupPr("intent/x")).toEqual({ error: "gh pr view printed reviews in a shape Loopstra does not read" });
+      }
+      // The shapes gh does print still read: no reviews at all, or null fields.
+      const plain = join(t.path, "plain-gh.ts");
+      await Bun.write(plain, `if (Bun.argv[3] === "view") console.log(${JSON.stringify(JSON.stringify({ ...pr, reviewDecision: null, latestReviews: [{ author: null, state: "APPROVED", authorAssociation: "OWNER" }], author: null }))});\n`);
+      expect(await new GitHub(t.path, { executable: plain }).lookupPr("intent/x")).toMatchObject({ pr: { number: 1, approved: true } });
+    } finally { t.cleanup(); }
+  });
+
   test("createPr takes the number from the pull request's link when GitHub cannot be asked for it right after", async () => {
     const t = tempDir();
     try {
