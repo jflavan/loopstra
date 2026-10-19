@@ -179,7 +179,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
   const claimed = claimedRequests(root, { trace });
   // A request with a wrong field would otherwise fail the same way every pass: finished at once, under its slug when it has a real one.
   for (const u of claimed.unreadable) {
-    trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, transport: u.transport, result: "refused", problem: u.problem });
+    trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, by: u.byName, byId: u.by, via: u.via, transport: u.transport, result: "refused", problem: u.problem });
     finishRequest(root, u, { ok: false, status: null, text: "That request could not be read, so nothing changed." });
     applied++;
   }

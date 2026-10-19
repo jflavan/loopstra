@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Trace } from "../../src/trace";
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults, waitingIds } from "../../src/requests";
@@ -81,6 +82,19 @@ describe("request files", () => {
     }
   });
 
+  test("an answer as long as chat may send (up to 20,000 characters) is a request; a longer one is not", () => {
+    const t = tempDir();
+    try {
+      const long = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(5000) });
+      const longest = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_000) });
+      const over = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_001) });
+      expect(pendingRequests(t.path).map((r) => r.id)).toEqual([long.id, longest.id]);
+      expect(waitingIds(t.path)).toContain(over.id);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a file not named for the id inside it is not a request", () => {
     const t = tempDir();
     try {
@@ -107,9 +121,17 @@ describe("request files", () => {
       for (const n of ["copy.json", "000000000000001-1-0001.json", "000000000000001-1-0004.json"]) utimesSync(join(requestsDir(t.path), n), old, old);
       expect(anythingToApply(t.path)).toBe(false);
       expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json")).length).toBe(3);
-      // Still unreadable once the wait has passed (none here): the applier's look sets them aside; the console's reads never do.
+      // Still unreadable once the wait has passed (none here): the applier's look starts a pass for them, and the
+      // pass, which has the trace, sets them aside and traces each once; the console's reads never do.
       expect(pendingRequests(t.path)).toEqual([]);
       expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
+      const traced: unknown[] = [];
+      const trace = { event: (...args: unknown[]) => { traced.push(args); } } as unknown as Trace;
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(claimedRequests(t.path, { trace, badAfterMs: 0 }).requests).toEqual([]);
+      expect(traced).toHaveLength(4);
       expect(anythingToApply(t.path, 0)).toBe(false);
       expect(pendingRequests(t.path)).toEqual([]);
       expect(waitingIds(t.path)).toEqual([]);
