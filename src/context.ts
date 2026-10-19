@@ -154,7 +154,9 @@ export function commitRecord(root: string, main: string, slug: string, what: str
     try {
       wrote = await write();
     } catch (e) {
-      await putBackRecord(git, root, paths, before, filesUnder(root, paths));
+      // A person's change (a status edit, or the change deleted) refuses the write before it writes
+      // anything: what differs on disk is theirs, and must stay.
+      if (!(e instanceof PersonChangedStatus)) await putBackRecord(git, root, paths, before, filesUnder(root, paths));
       throw e;
     }
     if (wrote === false) return false;

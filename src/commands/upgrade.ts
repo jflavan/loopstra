@@ -1,5 +1,5 @@
 import { DEV_VERSION, packageVersion } from "../package";
-import { errorText } from "../shell";
+import { errorText, withoutGitLocation } from "../shell";
 import type { FileOutcome } from "../upgrade/files";
 import { readStamp } from "../stamp";
 import { REAL_DEPS, upgradeRepo, type RepoResult } from "../upgrade/repo";
@@ -27,7 +27,8 @@ export interface UpgradeIo {
 /** Runs a command with this terminal; its exit code. `what` names it when it cannot be started. */
 async function spawnInherit(cmd: string[], cwd: string, what: string): Promise<number> {
   try {
-    return await Bun.spawn({ cmd, cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
+    // The install and the new version's --repo step run git on this repository, not on one a hook named.
+    return await Bun.spawn({ cmd, cwd, env: withoutGitLocation(process.env), stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
   } catch (e) {
     console.error(`${what} could not be started: ${errorText(e)}`);
     return 1;

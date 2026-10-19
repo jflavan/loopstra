@@ -124,16 +124,30 @@ const RequestFile = z.object({ id: z.string().regex(ID), transport: z.string(), 
 interface Read { requests: Request[]; unreadable: Unreadable[] }
 
 /**
- * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
- * not requests the loop knows (see Unreadable). A file that is not a request at all is set aside.
+ * Given by the applier only (its passes, and its look between them): a file that is not a request is
+ * set aside (see setAside), traced when there is a trace. Every other reader (the console, chat) only
+ * passes such a file over: it may be half written, or held open for a moment on Windows.
  */
-function readDir(root: string, dir: string, trace?: Trace): Read {
+export interface Tidy { trace?: Trace }
+
+/** How long a file must have been unreadable before the applier sets it aside: one being written is younger. */
+const BAD_AFTER_MS = 30_000;
+
+/**
+ * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
+ * not requests the loop knows (see Unreadable). A file that is not a request at all is passed over,
+ * and set aside by the applier (see Tidy).
+ */
+function readDir(root: string, dir: string, tidy?: Tidy): Read {
   const read: Read = { requests: [], unreadable: [] };
   if (!existsSync(dir)) return read;
   for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
     const file = readJsonAs(join(dir, n), RequestFile);
     // Named for its own id, or claiming, cancelling and finishing it would act on another file.
-    if (!file || n !== `${file.id}.json`) { setAside(root, dir, n, trace); continue; }
+    if (!file || n !== `${file.id}.json`) {
+      if (tidy && settled(join(dir, n))) setAside(root, dir, n, tidy.trace);
+      continue;
+    }
     const r = RequestSchema.safeParse(file);
     if (r.success) { read.requests.push(r.data); continue; }
     read.unreadable.push({
@@ -163,11 +177,16 @@ function setAside(root: string, dir: string, name: string, trace?: Trace): void 
   } catch { /* see above */ }
 }
 
+/** True when the file has not been written for BAD_AFTER_MS (false when it is gone). */
+function settled(path: string): boolean {
+  try { return Date.now() - statSync(path).mtimeMs >= BAD_AFTER_MS; } catch { return false; }
+}
+
 /** Request files not yet claimed. */
-function waiting(root: string, trace?: Trace): Read { return readDir(root, requestsDir(root), trace); }
+function waiting(root: string, tidy?: Tidy): Read { return readDir(root, requestsDir(root), tidy); }
 
 /** Request files the loop claimed and has not finished (a pass that failed, or one cut short), oldest first. */
-export function claimedRequests(root: string, trace?: Trace): Read { return readDir(root, applyingDir(root), trace); }
+export function claimedRequests(root: string, tidy?: Tidy): Read { return readDir(root, applyingDir(root), tidy); }
 
 /** Requests the loop has not finished, claimed or not, oldest first: what the console shows as waiting. */
 export function pendingRequests(root: string): Request[] {
@@ -178,8 +197,8 @@ export function pendingRequests(root: string): Request[] {
 export function applyingRequests(root: string): Request[] { return claimedRequests(root).requests; }
 
 /** The ids of the request files waiting to be claimed, oldest first: the requests, and the ones someone waits on that cannot be read (see Unreadable). */
-export function waitingIds(root: string, trace?: Trace): string[] {
-  const read = waiting(root, trace);
+export function waitingIds(root: string, tidy?: Tidy): string[] {
+  const read = waiting(root, tidy);
   return [...read.requests, ...read.unreadable].map((r) => r.id).sort();
 }
 
@@ -262,8 +281,8 @@ function oldDirs(root: string): ReadonlyArray<readonly [string, string]> {
  * nothing every 2 s.
  */
 export function anythingToApply(root: string): boolean {
-  const claimed = claimedRequests(root);
-  return waitingIds(root).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
+  const claimed = claimedRequests(root, {});
+  return waitingIds(root, {}).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
 }
 
 /** Moves what chat left in the folders it used before (`.loopstra/chat/requests|results/`) into the new ones. */

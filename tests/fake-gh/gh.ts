@@ -36,6 +36,8 @@ if (statePath) {
 
 const state: State = existsSync(statePath) ? JSON.parse(await Bun.file(statePath).text()) : { prs: {}, next: 1 };
 if (process.env.LOOPSTRA_FAKE_GH_LOG) appendFileSync(process.env.LOOPSTRA_FAKE_GH_LOG, JSON.stringify(args) + "\n");
+// What git would be told about the repository, for the test that gh never gets a hook's GIT_DIR.
+if (process.env.LOOPSTRA_FAKE_GH_ENV_LOG) appendFileSync(process.env.LOOPSTRA_FAKE_GH_ENV_LOG, JSON.stringify({ GIT_DIR: process.env.GIT_DIR ?? null, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE ?? null }) + "\n");
 const save = () => Bun.write(statePath, JSON.stringify(state, null, 2));
 const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 // The body, as gh takes it: --body <text>, or --body-file - (standard input).

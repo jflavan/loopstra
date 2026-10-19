@@ -8,7 +8,11 @@ import { useEffect, useState } from "preact/hooks";
 export function useReturnFocus(): void {
   const [before] = useState(() => document.activeElement as HTMLElement | null);
   useEffect(() => () => {
-    if (before && before !== document.body && document.contains(before)) before.focus();
+    // After every cleanup of the closing dialog has run, the page's inert one included (see
+    // useInertPage): focus() on an element that is still inert does nothing.
+    queueMicrotask(() => {
+      if (before && before !== document.body && document.contains(before)) before.focus();
+    });
   }, []);
 }
 

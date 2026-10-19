@@ -123,6 +123,8 @@ describe("the command line outside a set-up repo", () => {
         [["customize", "--list"], "Usage: loopstra customize [prompt]"],
         [["apply-lessons", "one", "--dry"], "Usage: loopstra apply-lessons <slug>"],
         [["apply-lessons"], "Usage: loopstra apply-lessons <slug>"],
+        [["status", "--json"], "Usage: loopstra status"],
+        [["init", "--force"], "Usage: loopstra init"],
       ];
       for (const [args, usage] of cases) {
         const r = await run([process.execPath, CLI, ...args], t.path);

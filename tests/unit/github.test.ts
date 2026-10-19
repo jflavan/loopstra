@@ -38,6 +38,18 @@ describe("GitHub", () => {
     t.cleanup();
   });
 
+  test("gh never gets a hook's repository variables, so it works on the checkout it is given", async () => {
+    const t = tempDir();
+    try {
+      const envLog = join(t.path, "env.jsonl");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: join(t.path, "gh.json"), LOOPSTRA_FAKE_GH_ENV_LOG: envLog, GIT_DIR: join(t.path, "other", ".git"), GIT_INDEX_FILE: join(t.path, "other", "index") } });
+      expect(await gh.lookupPr("intent/x")).toEqual({ pr: null });
+      const seen = (await Bun.file(envLog).text()).trim().split("\n").map((l) => JSON.parse(l) as unknown);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const s of seen) expect(s).toEqual({ GIT_DIR: null, GIT_INDEX_FILE: null });
+    } finally { t.cleanup(); }
+  });
+
   test("without a branch rule requiring reviews, an approval from someone with a say in the repository counts", async () => {
     const t = tempDir();
     try {

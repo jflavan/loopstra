@@ -171,9 +171,9 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
     pruned.set(key, Date.now());
     pruneResults(root);
   }
-  for (const id of waitingIds(root, trace)) claimRequest(root, id);
+  for (const id of waitingIds(root, { trace })) claimRequest(root, id);
   let applied = 0;
-  const claimed = claimedRequests(root, trace);
+  const claimed = claimedRequests(root, { trace });
   // A request with a wrong field would otherwise fail the same way every pass: finished at once, under its slug when it has a real one.
   for (const u of claimed.unreadable) {
     trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, transport: u.transport, result: "refused", problem: u.problem });

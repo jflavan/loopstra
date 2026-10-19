@@ -33,7 +33,9 @@ const HELP = `loopstra <command>
 `;
 
 /** The words each command takes (see parseArgs); the usage line is said when they do not fit. */
-const ARGS: Record<"start" | "tail" | "judges" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
+const ARGS: Record<"init" | "status" | "start" | "tail" | "judges" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
+  init: { usage: "Usage: loopstra init" },
+  status: { usage: "Usage: loopstra status" },
   start: { usage: "Usage: loopstra start [--once]", flags: ["--once"] },
   tail: { usage: "Usage: loopstra tail [slug]", names: 1 },
   judges: { usage: "Usage: loopstra judges" },
@@ -102,6 +104,7 @@ async function main(): Promise<number> {
       console.log(packageVersion()); return 0;
     }
     case "init": {
+      if (!args("init")) return 1;
       const { init } = await import("./init");
       const r = await init(root);
       if (r.stopped) { for (const w of r.warnings) console.error(`warning: ${w}`); return 1; }
@@ -125,6 +128,7 @@ async function main(): Promise<number> {
       return setup(root, args);
     }
     case "status": {
+      if (!args("status")) return 1;
       if (!setUp()) return 1;
       const pending = notice();
       process.stdout.write(await renderStatus(root));

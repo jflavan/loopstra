@@ -1,4 +1,4 @@
-import { lastLine, spawnBounded } from "./shell";
+import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
@@ -126,7 +126,8 @@ export class GitHub {
   private async run(args: string[], stdin?: string): Promise<{ code: number; out: string; err: string }> {
     if (!this.exe) return { code: 127, out: "", err: "gh not found" };
     const cmd = this.exe.endsWith(".ts") ? [process.execPath, this.exe, ...args] : [this.exe, ...args];
-    const r = await spawnBounded({ cmd, cwd: this.cwd, env: { ...process.env, ...this.env }, stdin, timeoutMs: this.timeoutMs, onStop: "kill" });
+    // gh runs git to find the repository: a hook's GIT_DIR would point it at the hook's (see withoutGitLocation).
+    const r = await spawnBounded({ cmd, cwd: this.cwd, env: withoutGitLocation({ ...process.env, ...this.env }), stdin, timeoutMs: this.timeoutMs, onStop: "kill" });
     if (r.stopped) throw new StopRequested();
     if (r.timedOut) return { code: 124, out: r.out, err: `${r.err}\ngh did not finish within ${Math.round(this.timeoutMs / 1000)}s and was stopped.`.trim() };
     return { code: r.code ?? 1, out: r.out, err: r.err };

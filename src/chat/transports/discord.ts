@@ -235,8 +235,12 @@ export class DiscordTransport implements Transport {
 
   async send(thread: string, text: string): Promise<void> {
     try {
-      await chunked(text, DISCORD_MAX, (part) => this.post(thread, part));
+      await this.sendOrThrow(thread, text);
     } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
+  }
+
+  async sendOrThrow(thread: string, text: string): Promise<void> {
+    await chunked(text, DISCORD_MAX, (part) => this.post(thread, part));
   }
 
   async announce(text: string): Promise<void> {
