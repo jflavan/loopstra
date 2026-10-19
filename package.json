@@ -36,17 +36,18 @@
   },
   "dependencies": {
     "@preact/signals": "^2.11.3",
-    "marked": "^16.4.2",
-    "preact": "^10.29.8",
+    "marked": "^18.1.1",
+    "preact": "^11.0.1",
     "yaml": "^2.6.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^10.13.0",
     "fast-check": "^4.10.2",
     "knip": "^6.42.0",
-    "typescript": "^5.6.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.71.2"
   }
 }
