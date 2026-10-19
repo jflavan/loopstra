@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { ActivityItem } from "../../console/types";
-import { feedAfter, fitsFeed, type FeedRead, type FeedState } from "../feed";
+import { feedAfter, liveRows, type FeedRead, type FeedState } from "../feed";
 import { clock } from "../format";
 import { Link } from "../parts/Link";
 import { activity, changes, gaps, getJson, now } from "../store";
@@ -28,7 +28,8 @@ export function Activity() {
       page = await getJson<{ items: ActivityItem[]; next: number | null }>(`/api/events?${q}`);
     } catch { /* page stays null: the read failed, and Try again repeats it */ }
     if (mine !== request.current) return;
-    setFeed((f) => feedAfter(f, read, page, filter));
+    // The live rows shown above the history as the page comes back, which a reload after missed events merges in too.
+    setFeed((f) => feedAfter(f, read, page, filter, liveRows(activity.peek(), f.items, filter)));
     setLoading(false);
   };
   // The history is read again when the filter changes and when the live stream says this page missed events.
@@ -43,11 +44,8 @@ export function Activity() {
       void load({ before: 0, how: "reset" });
     } else void load({ before: 0, how: "merge" });
   }, [slug, technical, missed]);
-  // The live stream carries only events in plain words; the technical view loads again on Refresh.
   const { items: older, next, failed } = feed;
-  const newest = older[0]?.id ?? 0;
-  const fresh = technical ? [] : activity.value.filter((a) => a.id > newest && fitsFeed(a, { slug, technical })).reverse();
-  const items = [...fresh, ...older];
+  const items = [...liveRows(activity.value, older, { slug, technical }), ...older];
   const t = now.value;
   return (
     <section class="view">

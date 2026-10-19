@@ -16,7 +16,7 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { follow } from "../../src/ui/stream";
-import { feedAfter, mergeFeed, type FeedState } from "../../src/ui/feed";
+import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
 import { givesFocusBack } from "../../src/ui/parts/focus";
 
@@ -368,22 +368,41 @@ describe("the activity feed read again after a gap", () => {
 
   test("the newest page is merged into what is shown by id, newest first, so older pages read before are kept", () => {
     const older = [item(30), item(20), item(10)];
-    const { items, joined } = mergeFeed(older, [item(50), item(40), item(30)], all);
+    const { items, joined } = mergeFeed(older, [], [item(50), item(40), item(30)], all);
     expect(joined).toBe(true);
     expect(ids(items)).toEqual([50, 40, 30, 20, 10]);
     expect(ids(older)).toEqual([30, 20, 10]);
   });
 
   test("a page that does not reach what is shown stands alone, since what lies between could not be read", () => {
-    expect(mergeFeed([item(30), item(20)], [item(90), item(80)], all)).toEqual({ items: [item(90), item(80)], joined: false });
-    expect(mergeFeed([], [item(5)], all)).toEqual({ items: [item(5)], joined: false });
+    expect(mergeFeed([item(30), item(20)], [], [item(90), item(80)], all)).toEqual({ items: [item(90), item(80)], joined: false });
+    expect(mergeFeed([], [], [item(5)], all)).toEqual({ items: [item(5)], joined: false });
+  });
+
+  test("the live rows shown above the list count: a page that reaches them joins, and keeps them and what is below", () => {
+    // Read: 20 and 10. From the stream since: 40 and 30. The page read again after a gap: 50 and 40.
+    const { items, joined } = mergeFeed([item(20), item(10)], [item(40), item(30)], [item(50), item(40)], all);
+    expect(joined).toBe(true);
+    expect(ids(items)).toEqual([50, 40, 30, 20, 10]);
+    // A page that reaches neither stands alone; the live rows below it are left to Older.
+    expect(mergeFeed([item(20), item(10)], [item(40), item(30)], [item(90), item(80)], all)).toEqual({ items: [item(90), item(80)], joined: false });
+    // With nothing read yet there is no cursor to keep, so the page stands alone with its own.
+    expect(mergeFeed([], [item(40), item(30)], [item(50), item(40)], all)).toEqual({ items: [item(50), item(40)], joined: false });
+  });
+
+  test("the live rows shown are the stream's rows above the list that fit the filter, newest first, and none in the technical view", () => {
+    const stream = [item(5), item(10), item(30, "b"), item(40), item(50, "a", null)];
+    expect(ids(liveRows(stream, [item(20), item(10)], all))).toEqual([40, 30]);
+    expect(ids(liveRows(stream, [item(20)], { slug: "a", technical: false }))).toEqual([40]);
+    expect(ids(liveRows(stream, [], all))).toEqual([40, 30, 10, 5]);
+    expect(liveRows(stream, [item(20)], { slug: "", technical: true })).toEqual([]);
   });
 
   test("only rows that fit the filter go in: one change's, and rows in plain words unless the view is technical", () => {
     const page = [item(3, "b"), item(2, "a", null), item(1, "a")];
-    expect(ids(mergeFeed([], page, { slug: "a", technical: false }).items)).toEqual([1]);
-    expect(ids(mergeFeed([], page, { slug: "a", technical: true }).items)).toEqual([2, 1]);
-    expect(ids(mergeFeed([], page, { slug: "", technical: true }).items)).toEqual([3, 2, 1]);
+    expect(ids(mergeFeed([], [], page, { slug: "a", technical: false }).items)).toEqual([1]);
+    expect(ids(mergeFeed([], [], page, { slug: "a", technical: true }).items)).toEqual([2, 1]);
+    expect(ids(mergeFeed([], [], page, { slug: "", technical: true }).items)).toEqual([3, 2, 1]);
   });
 
   const shown: FeedState = { items: [item(30), item(20)], next: 20, failed: null };
@@ -391,28 +410,33 @@ describe("the activity feed read again after a gap", () => {
   const gap = { before: 0, how: "merge" } as const;
 
   test("an Older read that failed is offered again after a gap reload joins the list, and Try again repeats it", () => {
-    const failed = feedAfter(shown, older, null, all);
+    const failed = feedAfter(shown, older, null, all, []);
     expect(failed).toEqual({ items: [item(30), item(20)], next: 20, failed: older });
-    const merged = feedAfter(failed, gap, { items: [item(40), item(30)], next: 30 }, all);
+    const merged = feedAfter(failed, gap, { items: [item(40), item(30)], next: 30 }, all, []);
     expect(ids(merged.items)).toEqual([40, 30, 20]);
     // Neither Older nor Try again would be left without this: the failed read is still the Older one, from the same cursor.
     expect(merged.next).toBe(20);
     expect(merged.failed).toEqual(older);
-    const again = feedAfter(merged, merged.failed!, { items: [item(10)], next: null }, all);
+    const again = feedAfter(merged, merged.failed!, { items: [item(10)], next: null }, all, []);
     expect(again).toEqual({ items: [item(40), item(30), item(20), item(10)], next: null, failed: null });
   });
 
   test("a gap reload that does not join stands alone with its own cursor; one that failed is cleared when one joins", () => {
-    const failed = feedAfter(shown, older, null, all);
-    expect(feedAfter(failed, gap, { items: [item(90), item(80)], next: 80 }, all)).toEqual({ items: [item(90), item(80)], next: 80, failed: null });
-    const gapFailed = feedAfter(shown, gap, null, all);
+    const failed = feedAfter(shown, older, null, all, []);
+    expect(feedAfter(failed, gap, { items: [item(90), item(80)], next: 80 }, all, [])).toEqual({ items: [item(90), item(80)], next: 80, failed: null });
+    const gapFailed = feedAfter(shown, gap, null, all, []);
     expect(gapFailed.failed).toEqual(gap);
-    expect(feedAfter(gapFailed, gap, { items: [item(40), item(30)], next: 30 }, all)).toEqual({ items: [item(40), item(30), item(20)], next: 20, failed: null });
+    expect(feedAfter(gapFailed, gap, { items: [item(40), item(30)], next: 30 }, all, [])).toEqual({ items: [item(40), item(30), item(20)], next: 20, failed: null });
+  });
+
+  test("a gap reload that reaches only the live rows still joins, so the Older cursor and the rows below are kept", () => {
+    const merged = feedAfter(shown, gap, { items: [item(60), item(50)], next: 50 }, all, [item(50), item(40)]);
+    expect(merged).toEqual({ items: [item(60), item(50), item(40), item(30), item(20)], next: 20, failed: null });
   });
 
   test("a new page replaces the list, and an Older page adds below it", () => {
-    expect(feedAfter(shown, { before: 0, how: "reset" }, { items: [item(5)], next: 5 }, all)).toEqual({ items: [item(5)], next: 5, failed: null });
-    expect(feedAfter(shown, older, { items: [item(10)], next: null }, all)).toEqual({ items: [item(30), item(20), item(10)], next: null, failed: null });
+    expect(feedAfter(shown, { before: 0, how: "reset" }, { items: [item(5)], next: 5 }, all, [])).toEqual({ items: [item(5)], next: 5, failed: null });
+    expect(feedAfter(shown, older, { items: [item(10)], next: null }, all, [])).toEqual({ items: [item(30), item(20), item(10)], next: null, failed: null });
   });
 });
 
