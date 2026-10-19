@@ -6,7 +6,7 @@ import { writeJson } from "../fsutil";
 import type { RequestShape } from "../actions";
 import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
-import { readStateFile } from "./statefile";
+import { readStateFile, StateFileUnavailable } from "./statefile";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
 export function chatDir(root: string): string {
@@ -110,12 +110,17 @@ export class ThreadStore {
     return d;
   }
 
-  /** The thread saved at `path`, or null when there is none (or the file was damaged: it is moved aside, see readStateFile). */
+  /**
+   * The thread saved at `path`, or null when there is none (or the file was damaged: it is moved
+   * aside, see readStateFile). Throws StateFileUnavailable when the file is there but cannot be used
+   * now, so no fresh thread is saved over it.
+   */
   private read(path: string): ThreadState | null {
     const t = readStateFile(path, ThreadStateSchema, this.log);
     return t ? { ...t, pending: t.pending as Pending | null } : null;
   }
 
+  /** The thread, or a fresh one when it has none. Throws StateFileUnavailable as read does. */
   get(transport: string, thread: string): ThreadState {
     const key = threadKey(transport, thread);
     const found = this.read(join(this.dir(), fileName(key)));
@@ -142,6 +147,10 @@ export class ThreadStore {
   all(): ThreadState[] {
     const d = this.dir();
     if (!existsSync(d)) return [];
-    return readdirSync(d).filter((n) => THREAD_FILE.test(n)).map((n) => this.read(join(d, n))).filter((t): t is ThreadState => !!t);
+    // A thread that cannot be read now is left out of this pass (and said once, see readStateFile).
+    const readable = (path: string) => {
+      try { return this.read(path); } catch (e) { if (e instanceof StateFileUnavailable) return null; throw e; }
+    };
+    return readdirSync(d).filter((n) => THREAD_FILE.test(n)).map((n) => readable(join(d, n))).filter((t): t is ThreadState => !!t);
   }
 }

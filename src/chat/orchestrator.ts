@@ -66,6 +66,16 @@ function plainName(s: string): string {
   return s.replace(/[\s<>"]+/g, " ").trim() || "someone";
 }
 
+/**
+ * A value that may run over several lines (an announcement made from a change's note, a hand-off
+ * title, a proposal's quoted note), with every line after its first indented by two spaces, so none
+ * can pass for a line of the context around it ("From: ...", "Since your last turn:"). Blank lines
+ * stay blank, as in about.ts.
+ */
+function hanging(text: string): string {
+  return text.split(/\r\n?|\n/).map((l, i) => (i === 0 ? l : l.trim() ? `  ${l}` : "")).join("\n");
+}
+
 /** Characters that show as nothing (U+200B-U+200D, U+2060, U+FEFF): one inside a tag would hide it from a plain match. */
 const INVISIBLE = /[​-‍⁠﻿]/g;
 /** What could be a tag's start: "<", spaces, slashes and invisible characters, then a name that may hold invisible ones. */
@@ -126,16 +136,25 @@ export class Orchestrator {
   /**
    * Sends a message from Loopstra into a thread (not through the agent) and puts it in the thread's
    * log. Sent first: a send that fails throws before anything is recorded, so the caller can try
-   * the whole delivery again later without the log showing it twice. `since`: a line for the
-   * agent's next turn about it (see ThreadState.since), as for a request's result.
+   * the whole delivery again later without the log showing it twice. Once it is sent, a failure to
+   * record it (a thread file that cannot be saved) is traced and not thrown: the caller would post
+   * it again on every try. `since`: a line for the agent's next turn about it (see
+   * ThreadState.since), as for a request's result.
    */
   async deliver(transport: string, thread: string, text: string, send: Send, since?: string): Promise<void> {
     await send(text);
-    await this.withThread(transport, thread, async (t) => {
-      this.store.addMessage(t, { from: "loopstra", text });
-      if (since) this.store.noteSince(t, since);
-      this.store.save(t);
-    });
+    try {
+      await this.withThread(transport, thread, async (t) => {
+        this.store.addMessage(t, { from: "loopstra", text });
+        if (since) this.store.noteSince(t, since);
+        this.store.save(t);
+      });
+    } catch (e) {
+      try {
+        const trace = Trace.open(this.root, () => {});
+        try { trace.event(CHAT_SLUG, "error", { where: "chat-record", error: `posted to ${threadKey(transport, thread)} but not recorded in its thread: ${errorText(e)}` }); } finally { trace.close(); }
+      } catch { /* nowhere to record it */ }
+    }
   }
 
   /** Handles one message: a yes to a waiting proposal, or a turn of the conversation. */
@@ -264,7 +283,7 @@ export class Orchestrator {
     const log = new AnnouncementLog(this.root);
     const since = (t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0)).filter((a) => a.id <= upTo);
     const announced = since.slice(-ANNOUNCEMENTS_IN_CONTEXT);
-    const handoffs = t.handoffs.map((h) => `- "${h.title}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
+    const handoffs = t.handoffs.map((h) => `- "${hanging(h.title)}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
     const name = plainName(m.authorName);
     const history = await this.recentHistory(cfg);
     const lines = [
@@ -276,7 +295,7 @@ export class Orchestrator {
       `How the loop takes changes: ${loopRules(cfg)}`,
       `Handed off from this conversation so far:${handoffs.length ? `\n${handoffs.join("\n")}` : " nothing yet"}`,
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
-      `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
+      `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${hanging(a.text)}`).join("\n")}` : " nothing"}`,
     ];
     if (m.about) {
       // Read from the change's own files, which hold people's words (made harmless below, with the rest).
@@ -284,7 +303,7 @@ export class Orchestrator {
       if (about) lines.push(`About this change (from where the person opened chat):\n${about}`);
     }
     if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${oneLine(l, 1000)}`).join("\n")}`);
-    if (declined) lines.push(declined);
+    if (declined) lines.push(hanging(declined));
     const text = untagged(m.text);
     return `<context>\n${untagged(lines.join("\n"))}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
   }

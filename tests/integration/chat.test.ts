@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
 import { commitRecord } from "../../src/context";
 import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
 import { ChatService, type OnMessage, type Transport } from "../../src/chat/service";
+import { fetchJson } from "../../src/chat/transports/shared";
 import { Git } from "../../src/git";
 import { readIntent, writeIntent } from "../../src/intents";
 import { tick } from "../../src/scheduler";
@@ -329,6 +331,144 @@ describe("chat with the loop", () => {
       expect((await r.ghState()).prs).toEqual({});
       expect((await run(["git", "branch", "--list", "intent-proposal/*"], r.remote!)).out.trim()).toBe("");
       expect(o.store.get("terminal", "local").handoffs).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("the full review of #47", () => {
+  const STARTED = "Started a. I will say here when it needs anyone, and when it is done.";
+  /** A repository with one result waiting for the terminal's thread "local". */
+  async function withResult() {
+    const r = await chatRepo({ intents: { a: INTENT("draft") } });
+    submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+    await tick(r.root).catch(() => {});
+    return r;
+  }
+  const resultFiles = (root: string) => {
+    const dir = join(requestsDir(root), "results");
+    return existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".json")) : [];
+  };
+
+  test("a result posted whose thread cannot be saved is posted once, not on every poll", async () => {
+    const r = await withResult();
+    try {
+      const t = recorder();
+      const service = new ChatService(r.root, [t], { announce: false, pollMs: 60_000 });
+      service.orchestrator.store.save = () => { throw new Error("EACCES: permission denied"); };
+      await service.poll();
+      await service.poll();
+      await service.poll();
+      expect(t.sent).toEqual([["local", STARTED]]);
+      expect(resultFiles(r.root)).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a result posted whose file cannot be removed is not posted again", async () => {
+    const r = await withResult();
+    try {
+      const t = recorder();
+      const service = new ChatService(r.root, [t], { announce: false, pollMs: 60_000 });
+      const stuck = spyOn(fs, "rmSync").mockImplementation(() => { throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" }); });
+      try {
+        await service.poll();
+        await service.poll();
+      } finally { stuck.mockRestore(); }
+      expect(resultFiles(r.root)).toHaveLength(1);
+      await service.poll();
+      expect(t.sent).toEqual([["local", STARTED]]);
+      expect(resultFiles(r.root)).toEqual([]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a result file that is not JSON is removed only by the process whose transport it names", async () => {
+    const r = await chatRepo();
+    try {
+      const dir = join(requestsDir(r.root), "results");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "1-slack.json"), '{"id":"1","transport":"slack","thread":"C1:1.0","te');
+      writeFileSync(join(dir, "2-terminal.json"), '{"id":"2","transport":"terminal","thread":"local","te');
+      writeFileSync(join(dir, "3-unknown.json"), "{ not json");
+      const service = new ChatService(r.root, [recorder()], { announce: false, pollMs: 60_000 });
+      await service.poll();
+      expect(resultFiles(r.root).sort()).toEqual(["1-slack.json", "3-unknown.json"]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a call to a bot's API that never answers fails that post, and the next poll goes on", async () => {
+    const r = await withResult();
+    let answering = false;
+    const server = Bun.serve({ port: 0, fetch: () => (answering ? Response.json({ ok: true }) : new Promise<Response>(() => {})) });
+    try {
+      const t = recorder();
+      const posted: string[] = [];
+      const sure = async (_thread: string, text: string) => {
+        const { json } = await fetchJson(`http://127.0.0.1:${server.port}/post`, { method: "POST", body: text }, () => 1, 200);
+        if (json?.ok) posted.push(text);
+      };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: sure })], { announce: false, pollMs: 60_000 });
+      const started = Date.now();
+      await service.poll();
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(posted).toEqual([]);
+      answering = true;
+      await service.poll();
+      expect(posted).toEqual([STARTED]);
+    } finally { void server.stop(true); r.cleanup(); }
+  });
+
+  /** A thread with one hand-off whose pull request (number 1) GitHub has as `state`. */
+  async function handedOff(state: "MERGED" | "CLOSED") {
+    const r = await chatRepo({ remote: true });
+    await Bun.write(join(r.remote!, "fake-gh.json"), JSON.stringify({ next: 2, prs: { "intent-proposal/csv-export": { number: 1, state, reviewDecision: "", checks: "none", merged: state === "MERGED", comments: [] } } }));
+    const o = new Orchestrator(r.root);
+    const t = o.store.get("terminal", "local");
+    t.handoffs.push({ title: "CSV export", slugs: ["csv-export"], at: new Date().toISOString(), by: "Ana", local: false, pr: { number: 1, url: "https://example.test/pr/1", branch: "intent-proposal/csv-export", state: "OPEN" } });
+    o.store.save(t);
+    return { r, o };
+  }
+  const MERGED = 'The pull request for "CSV export" was merged, so csv-export is in the queue as a draft. Ask me to start it when you are ready.';
+
+  test("a merge notice whose post fails is tried again at the next check, and the new state saved only once it is posted", async () => {
+    const { r, o } = await handedOff("MERGED");
+    try {
+      const t = recorder();
+      let down = true;
+      t.send = async () => {};
+      const sure = async (thread: string, text: string) => { if (down) throw new Error("Slack is unreachable"); t.sent.push([thread, text]); };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: sure })], { announce: false, pollMs: 60_000 });
+      await service.checkPullRequests();
+      expect(t.sent).toEqual([]);
+      expect(o.store.get("terminal", "local").handoffs[0]!.pr!.state).toBe("OPEN");
+      down = false;
+      await service.checkPullRequests();
+      await service.checkPullRequests();
+      expect(t.sent).toEqual([["local", MERGED]]);
+      expect(o.store.get("terminal", "local").handoffs[0]!.pr!.state).toBe("MERGED");
+      expect(o.store.get("terminal", "local").messages.map((m) => m.text)).toEqual([MERGED]);
+    } finally { r.cleanup(); }
+  });
+
+  test("a merge notice that can never be posted is given up after the wait: the state is saved and it is not tried again", async () => {
+    const { r, o } = await handedOff("CLOSED");
+    try {
+      const t = recorder();
+      let tries = 0;
+      const never = async () => { tries++; throw new Error("channel_not_found"); };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: never })], { announce: false, pollMs: 60_000, resultGiveUpMs: 2_000 });
+      await service.checkPullRequests();
+      await service.checkPullRequests();
+      expect(o.store.get("terminal", "local").handoffs[0]!.pr!.state).toBe("OPEN");
+      await Bun.sleep(2_100);
+      await service.checkPullRequests();
+      expect(o.store.get("terminal", "local").handoffs[0]!.pr!.state).toBe("CLOSED");
+      await service.checkPullRequests();
+      expect(tries).toBe(3);
+      const trace = Trace.open(r.root);
+      try {
+        const errors = trace.events("_chat").filter((e) => e.type === "error" && e.payload.includes("chat-pr"));
+        expect(errors).toHaveLength(2);
+        expect(errors[1]!.payload).toContain("gave up");
+      } finally { trace.close(); }
     } finally { r.cleanup(); }
   });
 });
