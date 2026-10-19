@@ -401,13 +401,11 @@ describe("applying requests", () => {
     }
   }, 60_000);
 
-  test("a request due to be given up whose record landed is kept for the next pass, which finishes it as applied", async () => {
+  test("a request whose record landed but whose follow-up failed stays claimed before the give-up point; once it works, the next pass finishes it as applied", async () => {
     const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
     const kept = join(r.root, ".loopstra", "runs", "a", "sent-back.md");
     try {
       const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
-      claimRequest(r.root, q.id);
-      failedLongAgo(r.root, 5);
       // The record lands, then keeping the note fails: a folder stands where it goes.
       mkdirSync(join(kept, "x"), { recursive: true });
       expect(await apply(r.root)).toBe(0);
@@ -420,6 +418,49 @@ describe("applying requests", () => {
       expect(await commitCount(r.root)).toBe(commits);
       expect(readFileSync(kept, "utf8")).toBe("Split step 3.");
     } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a request whose record landed but whose follow-up never works is finished as applied at the give-up point, saying what could not be kept, and not tried again", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("plan-review", "x") }, config: PEOPLE });
+    const kept = join(r.root, ".loopstra", "runs", "a", "sent-back.md");
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "send-back", slug: "a", expect: "plan-review", note: "Split step 3." });
+      claimRequest(r.root, q.id);
+      failedLongAgo(r.root, 5);
+      // The folder where the note goes is never taken away.
+      mkdirSync(join(kept, "x"), { recursive: true });
+      expect(await apply(r.root)).toBe(1);
+      const state = requestState(r.root, q.id);
+      expect(state).toMatchObject({ state: "done", ok: true, status: "spec-approved" });
+      expect(state && "text" in state ? state.text : "").toEndWith("Its note for the next session could not be kept; an engineer can find why in the trace.");
+      expect(applyingRequests(r.root)).toEqual([]);
+      expect(await apply(r.root)).toBe(0);
+      expect((await run(["git", "show", "HEAD:intent/a/intent.md"], r.root)).out).toContain("status: spec-approved");
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
+  test("a new request whose first draft landed and whose second never can be written is finished at the give-up point, naming both", async () => {
+    const r = await chatRepo({ intents: {} });
+    const commitFiles = Git.prototype.commitFiles;
+    try {
+      const req = submitRequest(r.root, { ...by, kind: "new", title: "t", intents: [{ slug: "b", text: INTENT("draft", "b"), update: false }, { slug: "c", text: INTENT("draft", "c"), update: false }] });
+      await landedBeforeKill(r.root, req, "open intent from chat", (d) => { d.write("intent/b/intent.md", INTENT("draft", "b")); }, "b");
+      failedLongAgo(r.root, 5);
+      // Every commit of the second draft is refused.
+      Git.prototype.commitFiles = async function (this: Git, parent, paths, changes, message) {
+        if (changes.some((c) => c.rel.startsWith("intent/c/"))) throw new Error("refused");
+        return commitFiles.call(this, parent, paths, changes, message);
+      };
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, req.id)).toMatchObject({ state: "done", ok: true, text: "Added to the queue as drafts: b. Read them in intent/, then set status to accepted, or ask me to start one. Could not be written: c; an engineer can find why in the trace." });
+      expect(existsSync(join(r.root, "intent", "c", "intent.md"))).toBe(false);
+      expect(await apply(r.root)).toBe(0);
+    } finally {
+      Git.prototype.commitFiles = commitFiles;
       r.cleanup();
     }
   }, 60_000);

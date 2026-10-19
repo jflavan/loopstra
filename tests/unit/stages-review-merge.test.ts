@@ -479,7 +479,7 @@ describe("merge", () => {
     try {
       result = await runMergeStep(ctx);
     } finally { restore(); rmSync(join(repo.path, ".git", "index.lock"), { force: true }); }
-    expect(result).toEqual({ ok: true, waiting: true });
+    expect(result).toEqual({ ok: true, waiting: true, waitingFor: "a record the loop was writing to be finished" });
     expect(await status(repo.path)).toBe("merge-approved");
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
     await ctx.reload();

@@ -52,8 +52,9 @@ export function betweenPasses<T>(root: string, fn: () => Promise<T>): Promise<T>
  * One that cannot be done gets a plain result saying why. One that cannot be read (see Unreadable in
  * src/requests.ts) is finished at once, and one that kept failing (see MAX_TRIES) is given up with a
  * plain result (a checkout off main, RecordRaced and RecordUnsettled are not tries: each is a reason
- * to wait), unless its record landed (see anyLanded); nothing is put back then, since a record that
- * never landed wrote nothing. Passes on a root run one after another, never side by side, and at most
+ * to wait); nothing is put back then, since a record that never landed wrote nothing. One whose record
+ * landed and whose follow-up kept failing (a note that could not be kept, say) is finished then as
+ * applied, its result saying what could not be done (see finishLanded). Passes on a root run one after another, never side by side, and at most
  * one waits behind the running one: a call while one waits gets that pass (it has not started, so it
  * sees this caller's requests too). Gives how many were finished.
  */
@@ -196,7 +197,13 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
       req.tries = (req.tries ?? 0) + 1;
       if (!Number.isFinite(Date.parse(req.firstFailedAt ?? ""))) req.firstFailedAt = new Date().toISOString();
       const failing = Date.now() - Date.parse(req.firstFailedAt!);
-      if (req.tries < MAX_TRIES || failing < GIVE_UP_MS || (await anyLanded(root, cfg.main_branch, req))) { saveApplying(root, req); continue; }
+      if (req.tries < MAX_TRIES || failing < GIVE_UP_MS) { saveApplying(root, req); continue; }
+      // At the give-up point. A record that landed is not taken back: what kept failing came after it.
+      if (await anyLanded(root, cfg.main_branch, req)) {
+        finishRequest(root, req, await finishLanded(root, cfg, trace, req));
+        applied++;
+        continue;
+      }
       // Nothing to put back: a record is committed before anything of it is written to the checkout.
       trace.event("slug" in req ? req.slug : "_loop", "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result: "failed", tries: req.tries });
       finishRequest(root, req, { ok: false, status: null, text: "The loop could not apply this request; an engineer can find the details in the trace." });
@@ -208,9 +215,9 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
 
 /**
  * True when a record of the request landed (see landed): for a new request, for any of its drafts.
- * Such a request is not given up on: what failed came after its record, and the next pass finishes it
- * as applied. A git that cannot answer counts as not landed, so a request is still given up on when
- * git itself keeps failing; a stop request passes through.
+ * Such a request is not given up on at the give-up point but finished as applied (see finishLanded). A
+ * git that cannot answer counts as not landed, so a request is still given up on when git itself
+ * keeps failing; a stop request passes through.
  */
 async function anyLanded(root: string, main: string, req: Request): Promise<boolean> {
   const slugs = req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug];
@@ -224,6 +231,39 @@ async function anyLanded(root: string, main: string, req: Request): Promise<bool
   return false;
 }
 
+/**
+ * A request at the give-up point whose record landed: applied once more as its last try, so nothing is
+ * written again (see landed) and what goes with the record is tried once more, a failure there being
+ * said in the result instead of thrown (see followUp). Should even that throw, a plain result says the
+ * request was applied and something that goes with it kept failing.
+ */
+async function finishLanded(root: string, cfg: Config, trace: Trace, req: Request): Promise<Outcome> {
+  try {
+    return await applyOne(root, cfg, trace, req, true);
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event("slug" in req ? req.slug : "_loop", "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, result: "applied", problem: errorText(e) });
+    return { ok: true, status: null, text: "The loop applied this request, but something that goes with it kept failing; an engineer can find the details in the trace." };
+  }
+}
+
+/**
+ * Runs what goes with a request's landed record (keeping a note, storing an answer). A failure
+ * throws, so the request is tried again, except on its last try (see finishLanded): then it is
+ * traced, and `note` (a sentence for the request's result) is given back, after a space, instead.
+ */
+function followUp(trace: Trace, req: { id: string; kind: string; slug: string }, lastTry: boolean, note: string, fn: () => void): string {
+  if (!lastTry) { fn(); return ""; }
+  try {
+    fn();
+    return "";
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    trace.event(req.slug, "error", { where: "request", id: req.id, kind: req.kind, error: errorText(e), note });
+    return ` ${note}`;
+  }
+}
+
 /** True for an undo that takes back a send back (not an approve). */
 function undoesSendBack(req: Request): boolean {
   return req.kind === "undo" && SEND_BACK_TO[req.to] === req.expect;
@@ -235,13 +275,14 @@ function writeRecord(slug: string, entry: ConversationEntry, draft: RecordDraft)
   draft.write(rel, withEntry(draft.read(rel) ?? "", entry));
 }
 
-function applyOne(root: string, cfg: Config, trace: Trace, req: Request): Promise<Outcome> {
+/** Applies one request; `lastTry`: at the give-up point, with its record landed (see finishLanded). */
+function applyOne(root: string, cfg: Config, trace: Trace, req: Request, lastTry = false): Promise<Outcome> {
   switch (req.kind) {
     case "accept": return applyAccept(root, cfg.main_branch, trace, req);
-    case "new": return applyNew(root, cfg.main_branch, trace, req);
+    case "new": return applyNew(root, cfg.main_branch, trace, req, lastTry);
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
-    case "answer": return applyAnswer(root, cfg, trace, req);
-    default: return applyStatus(root, cfg, trace, req);
+    case "answer": return applyAnswer(root, cfg, trace, req, lastTry);
+    default: return applyStatus(root, cfg, trace, req, lastTry);
   }
 }
 
@@ -280,9 +321,11 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   return { ok: true, status: "accepted", text: fromConsole ? resultText({ kind: "accept", expect: "draft" }, req.slug, "accepted") : `Started ${req.slug}. I will say here when it needs anyone, and when it is done.` };
 }
 
-async function applyNew(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "new" }>): Promise<Outcome> {
+/** Adds each draft of a new request. On its last try (see finishLanded) a draft whose commit fails is named in the result, not thrown. */
+async function applyNew(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "new" }>, lastTry: boolean): Promise<Outcome> {
   const added: string[] = [];
   const skipped: string[] = [];
+  const failed: string[] = [];
   for (const i of req.intents) {
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const path = join(root, "intent", i.slug, "intent.md");
@@ -294,9 +337,16 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
       if (!i.update || status !== "draft") { skipped.push(`${i.slug} (it already exists and is ${status})`); continue; }
     }
     if (!done) {
-      await commitRecord(root, main, i.slug, `${i.update ? "update" : "open"} intent from chat`, async (draft) => {
-        draft.write(`intent/${i.slug}/intent.md`, i.text);
-      }, { request: req.id, trace });
+      try {
+        await commitRecord(root, main, i.slug, `${i.update ? "update" : "open"} intent from chat`, async (draft) => {
+          draft.write(`intent/${i.slug}/intent.md`, i.text);
+        }, { request: req.id, trace });
+      } catch (e) {
+        if (!lastTry || e instanceof StopRequested) throw e;
+        trace.event(i.slug, "error", { where: "request", id: req.id, kind: "new", error: errorText(e) });
+        failed.push(i.slug);
+        continue;
+      }
     }
     trace.event(i.slug, "chat-request", { id: req.id, kind: "new", by: req.byName, update: i.update });
     added.push(i.slug);
@@ -304,6 +354,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
   const parts: string[] = [];
   if (added.length) parts.push(`Added to the queue as drafts: ${added.join(", ")}. Read them in intent/, then set status to accepted, or ask me to start one.`);
   if (skipped.length) parts.push(`Not written, because something changed meanwhile: ${skipped.join("; ")}.`);
+  if (failed.length) parts.push(`Could not be written: ${failed.join(", ")}; an engineer can find why in the trace.`);
   return { ok: added.length > 0, status: null, text: parts.join(" ") || "Nothing was written." };
 }
 
@@ -363,7 +414,7 @@ function noteFor(req: StatusRequest): string {
  * Approve, send back, retry, close and undo: only when the status is still the one the person saw
  * (`expect`), and only when the action is allowed from it. Committed as "<what> by <who> from <where>".
  */
-async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusRequest): Promise<Outcome> {
+async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusRequest, lastTry: boolean): Promise<Outcome> {
   const found = await current(root, req.slug);
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const was = found.intent.file.frontmatter.status;
@@ -391,12 +442,16 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   }
   if (refused !== null) return movedOn(trace, req, refused);
   // Kept for the next session only once the send back landed: one that never did must not steer it.
-  if (req.kind === "send-back") writeSentBack(root, req.slug, req.note.trim());
+  let after = "";
+  if (req.kind === "send-back") {
+    const kept = req.note.trim();
+    after += followUp(trace, req, lastTry, "Its note for the next session could not be kept; an engineer can find why in the trace.", () => writeSentBack(root, req.slug, kept));
+  }
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req, "applied", { from: req.expect, to, what: doneWords(req) });
-  if (req.kind === "undo") dropSentBack(root, req.slug);
-  return { ok: true, status: to, text: resultText(req, req.slug, to) };
+  if (req.kind === "undo") after += followUp(trace, req, lastTry, "The note it was sent back with could not be dropped, so the next session may still read it; an engineer can find why in the trace.", () => dropSentBack(root, req.slug));
+  return { ok: true, status: to, text: resultText(req, req.slug, to) + after };
 }
 
 /**
@@ -450,7 +505,7 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
  * goes into conversation.md; once that landed, the answer is stored for the session that asked (see
  * answerQuestion).
  */
-async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerRequest): Promise<Outcome> {
+async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerRequest, lastTry: boolean): Promise<Outcome> {
   const found = await current(root, req.slug);
   if ("problem" in found) { traced(trace, req, "missing"); return { ok: false, status: null, text: found.problem }; }
   const fm = found.intent.file.frontmatter;
@@ -469,7 +524,8 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
     }, { request: req.id, trace });
   }
   // Stored only once the answer landed: one that never did must not resume the session.
-  answerQuestion(root, req.slug, { text, by: req.byName, via: req.via });
+  const after = followUp(trace, req, lastTry, "The answer could not be kept for the session that asked, so that session starts afresh and reads the answer in conversation.md; an engineer can find why in the trace.",
+    () => { answerQuestion(root, req.slug, { text, by: req.byName, via: req.via }); });
   traced(trace, req, "applied", { status: fm.status, what: doneWords(shape) });
-  return { ok: true, status: fm.status, text: resultText(shape, req.slug, fm.status) };
+  return { ok: true, status: fm.status, text: resultText(shape, req.slug, fm.status) + after };
 }

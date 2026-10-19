@@ -200,6 +200,17 @@ describe("settleRecord", () => {
     } finally { rmSync(lock, { force: true }); trace.close(); repo.cleanup(); }
   });
 
+  test("a record that cannot be finished is traced once while it stays the same, not on every settle", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const lock = join(repo.path, ".git", "index.lock");
+    try {
+      await killedAfterHeadMoved(repo.path);
+      writeFileSync(lock, "");
+      for (let i = 0; i < 3; i++) expect(await settleRecord(repo.path, "main", trace)).toBe(false);
+      expect(trace.events(SLUG).filter((e) => e.type === "error" && e.payload.includes("could not be finished"))).toHaveLength(1);
+    } finally { rmSync(lock, { force: true }); trace.close(); repo.cleanup(); }
+  });
+
   test("off main, the marker and the files are left alone; back on main, the record is finished", async () => {
     const { repo, trace } = await setupRepo("accepted");
     try {
@@ -324,6 +335,26 @@ describe("commitRecord beside a person's branch switch", () => {
       expect(await sha(repo.path, "main")).toBe(parent);
       expect(existsSync(marker(repo.path))).toBe(false);
     } finally { Git.prototype.moveRef = moveRef; trace.close(); repo.cleanup(); }
+  });
+
+  test("a switch while the commit is built (after the folder was read from disk): MainCheckoutMoved, and nothing lands", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    const commitFiles = Git.prototype.commitFiles;
+    try {
+      const parent = await sha(repo.path, "main");
+      Git.prototype.commitFiles = async function (this: Git, from, paths, changes, message) {
+        const made = await commitFiles.call(this, from, paths, changes, message);
+        await run(["git", "switch", "-q", "-c", "theirs"], repo.path);
+        return made;
+      };
+      await expect(commitRecord(repo.path, "main", SLUG, "a note", async (d) => {
+        d.write(`intent/${SLUG}/note.md`, "n\n");
+      }, { trace })).rejects.toBeInstanceOf(MainCheckoutMoved);
+      expect(await sha(repo.path, "main")).toBe(parent);
+      expect(await sha(repo.path, "theirs")).toBe(parent);
+      expect(existsSync(marker(repo.path))).toBe(false);
+      expect(existsSync(join(repo.path, "intent", SLUG, "note.md"))).toBe(false);
+    } finally { Git.prototype.commitFiles = commitFiles; trace.close(); repo.cleanup(); }
   });
 
   test("a switch once main moved: the record lands on main, the checkout is not written off main, and back on main a settle finishes it", async () => {

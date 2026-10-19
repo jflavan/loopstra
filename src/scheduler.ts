@@ -963,12 +963,13 @@ export async function sleepBetweenTicks(root: string, ms: number, seen: string, 
   }
 }
 
-/** What a step gave, for the console line. */
-function stepText(r: StepResult): string {
+/** What a step gave, for the console line. A step that waits says for what: GitHub unless it names something else. */
+export function stepText(r: StepResult): string {
   if (!r.ok) return r.note;
   if (r.stoppedBy) return `stopped by ${r.stoppedBy}`;
   if (r.asked) return "asked a person a question";
-  return r.waiting ? "waiting for GitHub" : r.personChanged ? "a person changed the status; it is picked up next" : "step done";
+  if (r.waiting) return `waiting for ${r.waitingFor ?? "GitHub"}`;
+  return r.personChanged ? "a person changed the status; it is picked up next" : "step done";
 }
 
 /** Prints a line of the loop's console output, after the time. */

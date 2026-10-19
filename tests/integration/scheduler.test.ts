@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { holdLoop, loopAlreadyRunning, readPause, releaseLoop, thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { othersRunning, othersRunningCommands } from "../../src/lanes";
 import { CONSOLE, requestState, submitRequest } from "../../src/requests";
-import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, tick } from "../../src/scheduler";
+import { claudeOverrideProblem, missingTools, preflight, runStepGuarded, sleepBetweenTicks, start, stepText, tick } from "../../src/scheduler";
 import { endsStepQuietly, QuestionAsked, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { init } from "../../src/init";
 import { FAKE_CLAUDE, fixture, fixtureDir, NEVER_A_PID, run, setupRepo, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
@@ -649,6 +649,13 @@ describe("scheduler resilience", () => {
     } finally { trace.close(); repo.cleanup(); }
   }, 60_000);
 
+});
+
+describe("the console line for a step", () => {
+  test("a step that waits says what for: GitHub, unless it names something else", () => {
+    expect(stepText({ ok: true, waiting: true })).toBe("waiting for GitHub");
+    expect(stepText({ ok: true, waiting: true, waitingFor: "a record the loop was writing to be finished" })).toBe("waiting for a record the loop was writing to be finished");
+  });
 });
 
 describe("holds", () => {

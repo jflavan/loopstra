@@ -82,14 +82,16 @@ export class StepContext {
 }
 
 /**
- * `waiting`: the step only looked at a pull request (the watcher's steps) and nothing changed; it
- * looks again later. `personChanged`: a person set the status while the step ran, so
+ * `waiting`: the step did nothing and looks again later; by default it only looked at a pull request
+ * (the watcher's steps) and nothing changed. `waitingFor`, with it: what else it waits for, in plain
+ * words that follow "waiting for" (a local merge waits for a record the loop was writing to be
+ * finished). `personChanged`: a person set the status while the step ran, so
  * the step ended without writing anything over it; the next tick picks up their status.
  * `stoppedBy`: a person stopped the step's session (who), so the step ended and the change kept its
  * status. `asked`: an agent asked a person a question, so the change waits for the answer.
  */
 export type StepResult =
-  | { ok: true; waiting?: boolean; personChanged?: boolean; stoppedBy?: string; asked?: boolean }
+  | { ok: true; waiting?: boolean; waitingFor?: string; personChanged?: boolean; stoppedBy?: string; asked?: boolean }
   | { ok: false; note: string };
 
 /**
@@ -132,8 +134,8 @@ async function checkoutBranch(git: Git): Promise<string | null> {
 }
 
 /**
- * Throws MainCheckoutMoved unless the checkout is still on `main`, once a record has drafted (see
- * commitRecord): a person switched branches meanwhile, so what the draft read and the folder as it is
+ * Throws MainCheckoutMoved unless the checkout is still on `main`, once a record's commit is built (see
+ * commitRecord): a person switched branches meanwhile, so what the draft read and the folder as it was
  * on disk may be their branch's. Nothing has landed then.
  */
 async function assertStillOnMain(git: Git, root: string, main: string): Promise<void> {
@@ -162,7 +164,7 @@ const markerPath = (root: string) => join(loopstraDir(root), "recording.json");
  * only on main (MainCheckoutMoved otherwise). A record a kill cut short is finished first (see
  * settleRecord); while it cannot be, nothing is committed (RecordUnsettled), since a
  * commit over a checkout still behind main would undo it. `write` writes into a draft, never the
- * checkout (it may give false: nothing to commit after all). Once it has drafted, and before each
+ * checkout (it may give false: nothing to commit after all). Once the commit is built, and before each
  * further try, the checkout must still be on main (MainCheckoutMoved otherwise, with nothing landed:
  * what the draft read and the folder on disk may be another branch's). The commit is made first, from
  * the main branch (`refs/heads/<main>`, not HEAD, so a switch after this point never moves a person's
@@ -198,7 +200,6 @@ export function commitRecord(root: string, main: string, slug: string, what: str
       if (!parent) throw new Error(`there is no branch ${main} to record on`);
       const draft = new RecordDraft(root, slug);
       if ((await write(draft)) === false) return false;
-      await assertStillOnMain(git, root, main);
       const changes = draft.changes();
       // What each drafted file held on disk when the draft read it, or now for one it never read: a
       // file that holds anything else when the checkout is written is a person's save.
@@ -207,6 +208,9 @@ export function commitRecord(root: string, main: string, slug: string, what: str
         return [c.rel, read !== undefined ? read : readIfThere(join(root, c.rel))] as const;
       }));
       const commit = await git.commitFiles(parent, paths, changes, message);
+      // Checked once the folder was read from disk: a switch before this point may have put another
+      // branch's files into the commit, which is then dropped; one after it never moves their branch.
+      await assertStillOnMain(git, root, main);
       if (!commit) return false;
       const marker: RecordMarker = { parent, commit, slug, paths: changes.map((c) => c.rel) };
       writeFileAtomic(markerPath(root), JSON.stringify(marker));
@@ -302,13 +306,15 @@ async function bringUp(git: Git, root: string, paths: string[], changes: DraftCh
  * Finishes a record a kill (or a failure after main moved, or a branch switch) left between moving
  * main and writing the checkout (see commitRecord), at the start of each tick, of each record and of
  * a local merge. Only with the checkout on `main`: off it, HEAD is a person's branch, and the marker
- * waits. Main at the marker's parent: main never moved, and the marker goes. Main at the marker's commit or past it: each file the marker names
- * that still holds what the parent had (as git compares it) is brought up to the commit; one holding
+ * waits. Main at the marker's parent: main never moved, and the marker goes. Main at the marker's
+ * commit or past it: each file the marker names that still holds what the parent had (as git
+ * compares it) is brought up to the commit; one holding
  * anything else is left (a person's edit since, or the commit's own content already written); the
  * index is brought up for the record's paths. Anything else (main reset by a person): the marker goes.
  * Under the checkout lock, so a record in progress is never taken for one a kill cut short; a stop
  * request does not stop it. Traced when there is a trace. Never throws: true when no marker is left,
- * false when one is (off main, or a failure, which is traced and tried again on the next settle).
+ * false when one is (off main, or a failure, which is traced once while it stays the same and tried
+ * again on the next settle).
  */
 export function settleRecord(root: string, main: string, trace?: Trace): Promise<boolean> {
   return onCheckout(root, () => settle(root, main, trace));
@@ -316,11 +322,13 @@ export function settleRecord(root: string, main: string, trace?: Trace): Promise
 
 async function settle(root: string, main: string, trace?: Trace): Promise<boolean> {
   let slug = "_loop";
+  let commit = "";
   try {
     const m = readJsonAs(markerPath(root), RecordMarkerSchema);
     // No marker, or one that is not one (half-written): nothing to finish.
     if (!m) { rmSync(markerPath(root), { force: true }); return true; }
     slug = m.slug;
+    commit = m.commit;
     const git = new Git(root);
     const o = { allowFail: true, cleanup: true };
     const branch = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], o);
@@ -346,7 +354,8 @@ async function settle(root: string, main: string, trace?: Trace): Promise<boolea
     rmSync(markerPath(root), { force: true });
     return true;
   } catch (e) {
-    trace?.event(slug, "error", { where: "record", error: `a record a kill cut short could not be finished; it is tried again: ${errorText(e)}` });
+    // Once while the record and the error stay the same: it is tried again at every tick, record and request pass.
+    trace?.eventOnChange(slug, "error", `"where":"record","settling":"${commit}"`, { where: "record", settling: commit, error: `a record a kill cut short could not be finished; it is tried again: ${errorText(e)}` }, "error");
     return false;
   }
 }

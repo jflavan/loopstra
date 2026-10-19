@@ -742,7 +742,7 @@ async function mergeNow(ctx: StepContext): Promise<StepResult> {
  */
 async function mergeIntoMain(ctx: StepContext): Promise<true | StepResult> {
   if (!(await settleRecord(ctx.root, ctx.cfg.main_branch, ctx.trace)) && (await ctx.git.currentBranch()) === ctx.cfg.main_branch) {
-    return { ok: true, waiting: true };
+    return { ok: true, waiting: true, waitingFor: "a record the loop was writing to be finished" };
   }
   const root = await rootReady(ctx);
   if (!root.ok) return block(ctx, DIRTY_ROOT_NOTE, { detail: root.detail });
