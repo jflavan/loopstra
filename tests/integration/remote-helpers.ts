@@ -13,7 +13,7 @@ export const SLUG = "add-numbers";
 export const BRANCH = `intent/${SLUG}`;
 export const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
-export interface FakePr { number: number; state: string; reviewDecision: string; checks: string; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] }
+export interface FakePr { number: number; state: string; reviewDecision: string; checks: string; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[]; isDraft?: boolean }
 
 /**
  * A bare "GitHub" remote and a clone of it with Loopstra set up and one intent at plan-approved.

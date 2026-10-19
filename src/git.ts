@@ -91,7 +91,12 @@ const WRITES_CHECKOUT: ReadonlySet<string> = new Set([
 /** Commands that write the remote-tracking refs: the remote lock's. */
 const WRITES_REMOTE: ReadonlySet<string> = new Set(["fetch", "push"]);
 
-/** The git command of an argument list: the first argument after any `-c name=value` pairs. */
+/**
+ * The git command of an argument list: the first argument after any `-c name=value` pairs. Only
+ * that prefix is skipped: every call here puts its command right after its `-c` settings, and no
+ * other option (`-C`, `--git-dir`) is ever passed before it. One that were would be read as the
+ * command, and the call would take no lock.
+ */
 function subcommand(args: string[]): string {
   let i = 0;
   while (args[i] === "-c") i += 2;
@@ -100,13 +105,34 @@ function subcommand(args: string[]): string {
 
 export type GitResult = { code: number; out: string; err: string };
 
+/**
+ * The environment variables with which git names a repository's location instead of looking one up
+ * from the directory it runs in. A git hook or alias exports them to what it starts (GIT_DIR,
+ * GIT_INDEX_FILE, ...), and Loopstra started from one would then run every one of its git calls,
+ * whatever the checkout given, on that hook's repository. They are dropped from every git call's
+ * environment (see gitEnv); the environment handed to project commands and sessions should drop
+ * them too (see withoutGitLocation), since those run git of their own in a worktree.
+ */
+export const GIT_LOCATION_VARS: readonly string[] = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE",
+];
+
+/** A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS). */
+export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
+  const out = { ...env };
+  for (const name of GIT_LOCATION_VARS) delete out[name];
+  return out;
+}
+
 /** Whether a repository has its own ssh command configured (then GIT_SSH_COMMAND must not override it). */
 const sshConfigured = new Map<string, boolean>();
 function hasOwnSshCommand(cwd: string): boolean {
   let known = sshConfigured.get(cwd);
   if (known === undefined) {
     try {
-      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      // The repository at cwd, not one a hook named in the environment (see GIT_LOCATION_VARS).
+      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, env: withoutGitLocation(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
       known = r.exitCode === 0 && r.stdout.toString().trim().length > 0;
     } catch { known = false; }
     sshConfigured.set(cwd, known);
@@ -119,10 +145,12 @@ function hasOwnSshCommand(cwd: string): boolean {
  * key, and it speaks English (the C locale) whatever the machine's language, since some of its
  * messages are read (conflicts, a missing session, the last line of an error). An author or committer
  * named in the environment is dropped: it would win over RUNTIME_COMMIT_CONFIG's identity, and every
- * commit this git makes is the runtime's (a replayed commit keeps the author it recorded).
+ * commit this git makes is the runtime's (a replayed commit keeps the author it recorded). So is a
+ * repository location named in it (see GIT_LOCATION_VARS): the call works on the checkout it is
+ * given, even when Loopstra was started from a git hook or alias.
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" };
+  const env: Record<string, string | undefined> = withoutGitLocation({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
   delete env.SSH_ASKPASS;
   delete env.LANGUAGE;
   for (const who of ["AUTHOR", "COMMITTER"]) { delete env[`GIT_${who}_NAME`]; delete env[`GIT_${who}_EMAIL`]; }
@@ -167,9 +195,11 @@ export class Git {
    * Runs one git command. Bounded: past the timeout it is stopped with everything it started and
    * GitTimeout is thrown. It never asks for credentials. It does not start after a stop request; a
    * stop during the call gives it a moment to finish, then kills it, and throws StopRequested.
-   * `allowFail` (or `true`) returns a non-zero exit instead of throwing. In the main checkout, a
-   * command that writes its index or files takes the checkout lock, and fetch and push take the
-   * remote lock; every other command, and every command in a linked worktree, takes none.
+   * `allowFail` (or `true`) returns a non-zero exit instead of throwing: `run(args, true)` and
+   * `run(args, { allowFail: true })` mean the same, and both spellings are in use (the shorthand
+   * where that is the only option, the object where a timeout or `cleanup` goes with it). In the
+   * main checkout, a command that writes its index or files takes the checkout lock, and fetch and
+   * push take the remote lock; every other command, and every command in a linked worktree, takes none.
    */
   async run(args: string[], opts: boolean | GitRunOptions = {}): Promise<GitResult> {
     const o: GitRunOptions = typeof opts === "boolean" ? { allowFail: opts } : opts;
@@ -282,18 +312,23 @@ export class Git {
   /**
    * True when `target` already has `branch`'s changes: the branch is part of its history, or it has
    * the branch's version of every file the branch changed since the two diverged (a squash merge).
-   * Paths under an `ignore` prefix are left out of the comparison.
+   * Paths under an `ignore` prefix are left out of the comparison. The files compared are those the
+   * branch changed since it diverged from `base`, `target` itself unless given: a caller asking
+   * whether a merged pull request's head has the branch's commits names main as the base, since
+   * the branch may have been rebased onto a main that has that merge, and then only the commits on
+   * top are the branch's own.
    */
-  async containsChanges(target: string, branch: string, ignore: string[] = []): Promise<boolean> {
+  async containsChanges(target: string, branch: string, ignore: string[] = [], base = target): Promise<boolean> {
     if (await this.isAncestor(branch, target)) return true;
     // -z: the names as they are; without it git quotes a non-ASCII name, and a quoted name matches no file.
-    const changed = await this.run(["diff", "--name-only", "-z", `${target}...${branch}`], true);
+    const changed = await this.run(["diff", "--name-only", "-z", `${base}...${branch}`], true);
     if (changed.code !== 0) return false;
     const files = changed.out.split("\0").filter((f) => f && !ignore.some((p) => f.startsWith(p)));
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
+    // Each name literal (see putBack), so one with * or [ in it is compared, not every file it matches.
     for (const chunk of chunks(files, DIFF_CHUNK)) {
-      if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk], true)).code !== 0) return false;
+      if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk.map((f) => `:(literal)${f}`)], true)).code !== 0) return false;
     }
     return true;
   }
@@ -432,21 +467,41 @@ export class Git {
   }
 }
 
-/** An index lock older than this is left over from a git process that died: the loop's own calls end within GIT_TIMEOUT_MS. */
+/** A git lock older than this is left over from a git process that died: the loop's own calls end within GIT_TIMEOUT_MS. */
 export const STALE_LOCK_MS = 10 * 60_000;
 
+/** The lock files a killed git can leave in a git directory, beside those under refs/. */
+const LOCK_FILES = ["index.lock", "HEAD.lock", "packed-refs.lock", "config.lock"];
+
+/** Every `*.lock` file under `dir`, at any depth (none when `dir` does not exist). */
+function lockFilesUnder(dir: string): string[] {
+  const found: string[] = [];
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return found; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) found.push(...lockFilesUnder(p));
+    else if (e.name.endsWith(".lock")) found.push(p);
+  }
+  return found;
+}
+
 /**
- * Removes `index.lock` files older than `maxAgeMs` from the repository and each of its worktrees,
- * and returns their paths. A killed git leaves its lock behind, and every later git write then fails;
- * the loop is the only automated git user, and a person's git command does not hold a lock that long.
+ * Removes git's lock files older than `maxAgeMs` from the repository and each of its worktrees, and
+ * returns their paths: `index.lock`, `HEAD.lock`, `packed-refs.lock`, `config.lock`, and every
+ * `*.lock` under `refs/`, in the main git directory and under each `worktrees/*`. A killed git
+ * leaves the lock of what it was writing behind (a commit holds the index's and the branch's, a
+ * push the packed refs'), and every later git write of that then fails; the loop is the only
+ * automated git user, and a person's git command does not hold a lock that long.
  */
 export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, now = Date.now()): Promise<string[]> {
   const common = await new Git(root).run(["rev-parse", "--git-common-dir"], true);
   if (common.code !== 0) return [];
   const gitDir = resolve(root, common.out.trim());
   const worktrees = join(gitDir, "worktrees");
-  const candidates = [join(gitDir, "index.lock")];
-  if (existsSync(worktrees)) for (const name of readdirSync(worktrees)) candidates.push(join(worktrees, name, "index.lock"));
+  const dirs = [gitDir];
+  if (existsSync(worktrees)) for (const name of readdirSync(worktrees)) dirs.push(join(worktrees, name));
+  const candidates = dirs.flatMap((dir) => [...LOCK_FILES.map((name) => join(dir, name)), ...lockFilesUnder(join(dir, "refs"))]);
   const removed: string[] = [];
   for (const lock of candidates) {
     try {

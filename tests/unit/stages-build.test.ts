@@ -320,6 +320,41 @@ describe("build stage", () => {
     rmSync(hook, { force: true });
     trace.close(); repo.cleanup();
   }, 60_000);
+
+  test("removing the commands' new files after the checks is tried again when git refuses once; a refusal that lasts is traced", async () => {
+    const run = Git.prototype.run;
+    /** Makes `git clean` fail `times` times (a file Windows still holds open), counting every clean. */
+    const refusing = (times: number) => {
+      let left = times;
+      let cleans = 0;
+      Git.prototype.run = async function (this: Git, args, opts) {
+        if (args[0] === "clean") {
+          cleans++;
+          if (left > 0) { left--; return { code: 1, out: "", err: "warning: failed to remove out/: Permission denied" }; }
+        }
+        return run.call(this, args, opts);
+      };
+      return () => cleans;
+    };
+    const cleanErrors = (trace: Trace) => trace.events("add-numbers").filter((e) => e.type === "error" && e.payload.includes("\"where\":\"clean\""));
+    {
+      const { repo, ctx, trace } = await planned({ test: "echo ok" });
+      const cleans = refusing(1);
+      try { await runBuildStep(ctx); } finally { Git.prototype.run = run; }
+      expect(cleans()).toBeGreaterThanOrEqual(2);
+      expect(cleanErrors(trace)).toEqual([]);
+      trace.close(); repo.cleanup();
+    }
+    {
+      const { repo, ctx, trace } = await planned({ test: "echo ok" });
+      refusing(Number.POSITIVE_INFINITY);
+      try { await runBuildStep(ctx); } finally { Git.prototype.run = run; }
+      const errors = cleanErrors(trace);
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      expect(JSON.parse(errors[0]!.payload)).toMatchObject({ where: "clean", error: expect.stringContaining("Permission denied") });
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
 });
 
 describe("the first review alongside the verifier", () => {

@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // `checksHead`: when set, `checks` are those of that head only; on any other head they still run (pending).
 // `latestReviews`: each reviewer's latest review, as gh prints them; the author is "loopstra-bot".
+// `isDraft`: a draft pull request, which GitHub refuses to merge.
 type Review = { author?: { login: string }; authorAssociation?: string; state: string };
-type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED"; latestReviews?: Review[]; checks: "pass" | "fail" | "pending" | "none"; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[] };
+type Pr = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; reviewDecision: "" | "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED"; latestReviews?: Review[]; checks: "pass" | "fail" | "pending" | "none"; checksHead?: string; merged: boolean; mergeCommit?: string; createdAt?: string; title?: string; body?: string; comments: string[]; isDraft?: boolean };
 // `old`: pull requests a newer one for the same branch replaced, still found by number.
 type State = { prs: Record<string, Pr>; next: number; old?: Pr[] };
 
@@ -67,12 +68,18 @@ if (group === "pr" && process.env.LOOPSTRA_FAKE_GH_FAIL === "1") { console.error
 if (group !== "pr") { console.error(`fake gh: unsupported ${args.join(" ")}`); process.exit(1); }
 
 if (cmd === "view") {
+  // Test knob: LOOPSTRA_FAKE_GH_VIEW_FAILS=1 behaves like a GitHub that answers every look at a pull request with an error.
+  if (process.env.LOOPSTRA_FAKE_GH_VIEW_FAILS === "1") { console.error("HTTP 502: Bad Gateway (https://api.github.com/graphql)"); process.exit(1); }
   // Like gh: a pull request by number, or by its branch.
   const ref = args[2]!;
   const pr = /^\d+$/.test(ref) ? [...Object.values(state.prs), ...(state.old ?? [])].find((p) => p.number === Number(ref)) : state.prs[ref];
   if (!pr) { console.error("no pull requests found"); process.exit(1); }
+  // Test knob: LOOPSTRA_FAKE_GH_MERGED_VIEW_FAILS_ONCE=<path>: the first look at a merged pull request fails
+  // (GitHub not answering right after the merge); the file marks that it happened, and later looks answer.
+  const once = process.env.LOOPSTRA_FAKE_GH_MERGED_VIEW_FAILS_ONCE;
+  if (once && pr.merged && !existsSync(once)) { writeFileSync(once, ""); console.error("HTTP 502: Bad Gateway (https://api.github.com/graphql)"); process.exit(1); }
   const branch = /^\d+$/.test(ref) ? Object.entries(state.prs).find(([, p]) => p === pr)?.[0] : ref;
-  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, latestReviews: pr.latestReviews ?? [], author: { login: "loopstra-bot" }, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}`, headRefOid: headOf(branch) }));
+  console.log(JSON.stringify({ number: pr.number, state: pr.state, reviewDecision: pr.reviewDecision, latestReviews: pr.latestReviews ?? [], author: { login: "loopstra-bot" }, mergedAt: pr.merged ? "2026-01-01T00:00:00Z" : null, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, createdAt: pr.createdAt ?? "2026-01-01T00:00:00Z", url: `https://example.test/pr/${pr.number}`, headRefOid: headOf(branch), isDraft: pr.isDraft === true }));
 } else if (cmd === "create") {
   const branch = flag("--head")!;
   const pr: Pr = { number: state.next++, state: "OPEN", reviewDecision: "", checks: "pending", merged: false, createdAt: new Date().toISOString(), title: flag("--title"), body: await body(), comments: [] };
@@ -108,6 +115,8 @@ if (cmd === "view") {
   if (process.env.LOOPSTRA_FAKE_GH_QUEUE === "1") process.exit(0);
   const number = Number(args[2]);
   const [branch, pr] = Object.entries(state.prs).find(([, p]) => p.number === number)!;
+  // Like GitHub: a draft cannot be merged until it is marked ready for review.
+  if (pr.isDraft) { console.error("GraphQL: Pull request Pull request is in draft state (mergePullRequest)"); process.exit(1); }
   runScript("LOOPSTRA_FAKE_GH_BEFORE_MERGE");
   // Test knob: with a bare repository as the remote, merge on it for real, the way GitHub would.
   const remote = process.env.LOOPSTRA_FAKE_GH_REMOTE;

@@ -125,6 +125,36 @@ describe("GitHub", () => {
     } finally { t.cleanup(); }
   });
 
+  test("a draft pull request is read as one, and an answer that is not a pull request is an error, not a pull request", async () => {
+    const t = tempDir();
+    try {
+      const statePath = join(t.path, "gh.json");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath } });
+      await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" });
+      expect((await gh.prForBranch("intent/x"))?.draft).toBe(false);
+      const s = JSON.parse(await Bun.file(statePath).text());
+      s.prs["intent/x"].isDraft = true;
+      await Bun.write(statePath, JSON.stringify(s));
+      expect((await gh.prForBranch("intent/x"))?.draft).toBe(true);
+      // gh printing JSON that is not a pull request (a number without a state, say) is not taken for one.
+      const fake = join(t.path, "odd-gh.ts");
+      await Bun.write(fake, 'if (Bun.argv[3] === "view") console.log(JSON.stringify({ number: 1 }));\n');
+      const odd = new GitHub(t.path, { executable: fake });
+      expect(await odd.lookupPr("intent/x")).toEqual({ error: "gh pr view printed something that is not a pull request" });
+    } finally { t.cleanup(); }
+  });
+
+  test("createPr takes the number from the pull request's link when GitHub cannot be asked for it right after", async () => {
+    const t = tempDir();
+    try {
+      const statePath = join(t.path, "gh.json");
+      const gh = new GitHub(t.path, { executable: FAKE, env: { LOOPSTRA_FAKE_GH_STATE: statePath, LOOPSTRA_FAKE_GH_VIEW_FAILS: "1" } });
+      expect(await gh.lookupPr("intent/x")).toMatchObject({ error: expect.stringContaining("502") });
+      expect(await gh.createPr({ head: "intent/x", base: "main", title: "x: title", body: "body" })).toEqual({ number: 1, url: "https://example.test/pr/1" });
+      expect(await gh.createPr({ head: "intent/y", base: "main", title: "y: title", body: "body" })).toEqual({ number: 2, url: "https://example.test/pr/2" });
+    } finally { t.cleanup(); }
+  });
+
   test("available is false when gh is missing", async () => {
     const t = tempDir();
     const gh = new GitHub(t.path, { executable: join(t.path, "missing.exe") });

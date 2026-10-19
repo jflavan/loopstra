@@ -165,7 +165,10 @@ export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
   return (await alreadyTested(ctx, wt)) ? TESTS_PASSED : TESTS_NOT_RUN;
 }
 
-/** Run-folder marker written just before merging (holds main's commit before the merge). */
+/**
+ * Run-folder marker written just before merging: main's commit before the merge, and, on a second
+ * line once it is built, the merge commit itself (see alreadyMerged in merge.ts).
+ */
 export const MERGING = "merging";
 
 /** Run-folder marker: the pull request waits for main here to get changes merged on GitHub that the sync could not bring in yet (traced once). */

@@ -128,6 +128,81 @@ test("no checks reported yet on a new pull request whose branch has workflows: w
     s.cleanup();
   }, 180_000);
 
+  test("a pull request someone merged by hand while a later review round committed fixes blocks, naming the branch, instead of recording the fixes as merged", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      // Someone merges it on GitHub.
+      const other = await elsewhere(s.remote);
+      await run(["git", "merge", "-q", "--squash", `origin/${BRANCH}`], other.path);
+      await run(["git", "commit", "-q", "-m", "merged on GitHub"], other.path);
+      await run(["git", "push", "-q", "origin", "main"], other.path);
+      const mergeCommit = (await run(["git", "rev-parse", "HEAD"], other.path)).out.trim();
+      other.cleanup();
+      await s.setPr({ state: "MERGED", merged: true, mergeCommit });
+      // Meanwhile the change goes round the review once more, with a fix committed on the branch.
+      const wt = new Git(join(s.repo, ".loopstra", "worktrees", SLUG));
+      await Bun.write(join(wt.cwd, "src", "fix.ts"), "export const fixed = true;\n");
+      await wt.commitAll("fix: after the review");
+      const i = await readIntent(s.repo, SLUG);
+      await writeIntent(i, { status: "reviewing" });
+      await new Git(s.repo).commitPaths([`intent/${SLUG}`], "loopstra: another round");
+      await tick(s.repo);
+      const after = await intentOf(s.repo);
+      expect(after.status).toBe("blocked");
+      expect(after.note).toContain("merged on GitHub before this change's latest fixes were made");
+      expect(after.note).toContain("plan-approved");
+      // No new pull request, nothing recorded as merged, and the fix is still on the branch here.
+      expect((await s.ghCalls()).filter((a) => a[0] === "pr" && a[1] === "create")).toHaveLength(1);
+      expect(await onRemoteMain(s.remote, "src/fix.ts")).toBe(false);
+      expect((await new Git(s.repo).run(["cat-file", "-e", `${BRANCH}:src/fix.ts`], true)).code).toBe(0);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a draft pull request waits, traced once, and merges once it is marked ready for review", async () => {
+    const s = await remoteSetup();
+    await withEnv(s.env, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass", isDraft: true });
+      expect((await tick(s.repo)).result).toEqual({ ok: true, waiting: true });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      expect((await s.pr()).merged).toBe(false);
+      expect((await s.ghCalls()).some((a) => a[0] === "pr" && a[1] === "merge")).toBe(false);
+      inTrace(s.repo, (t) => expect(t.events(SLUG).filter((e) => e.payload.includes("is a draft on GitHub"))).toHaveLength(1));
+      await s.setPr({ isDraft: false });
+      await tick(s.repo);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+    });
+    s.cleanup();
+  }, 180_000);
+
+  test("a merge Loopstra made whose look right after failed still gets its branch on GitHub deleted, by the look that sees the merge", async () => {
+    const s = await remoteSetup();
+    const failed = join(s.remote, "view-failed-once");
+    const onGitHub = async () => (await run(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`], s.remote)).code === 0;
+    await withEnv({ ...s.env, LOOPSTRA_FAKE_GH_MERGED_VIEW_FAILS_ONCE: failed }, async () => {
+      await tick(s.repo); // build
+      await tick(s.repo); // review, pull request
+      await s.setPr({ checks: "pass" });
+      // GitHub merges, then does not answer the look right after: that step waits, leaving the branch; the
+      // tick's next look at the pull request sees the merge, deletes the branch, and records it.
+      const t = await tick(s.repo);
+      expect(existsSync(failed)).toBe(true);
+      expect(t.steps?.map((x) => x.result)).toEqual([{ ok: true, waiting: true }, { ok: true }]);
+      expect((await s.pr()).merged).toBe(true);
+      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect(await onGitHub()).toBe(false);
+      expect(existsSync(join(s.repo, ".loopstra", "runs", SLUG, "gh-merge"))).toBe(false);
+    });
+    s.cleanup();
+  }, 180_000);
+
   test("a pull request closed without merging, whose branch a person then deleted on GitHub: a rebuild opens a new one", async () => {
     const s = await remoteSetup();
     await withEnv(s.env, async () => {
