@@ -5,6 +5,15 @@ updates:
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     cooldown: { default-days: 7 }
+  # The npm the release workflow runs (pinned by hash there). A new major is a choice: `npm stage`
+  # was checked with 11.x (docs/publishing.md), so only minor and patch updates are offered.
+  - package-ecosystem: npm
+    directory: /.github/npm
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    ignore:
+      - dependency-name: npm
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }

@@ -23,6 +23,14 @@ or `files` in `package.json`, or any `v*` tag.
 Everything is in `.github/workflows/release.yml`. It runs after the `ci` workflow passes on a push to
 `main`, or by hand (Actions, "release", Run workflow, on `main`).
 
+The workflow checks out `main` as it is, never a ref the triggering ci run names. After a ci run, it
+releases only if that is still the commit ci passed on: when `main` has moved on meanwhile, the run
+says so and releases nothing, and the ci run of the newer commit releases it, the earlier changes
+included. Its permissions are the job's own (`contents: write` for the tag and release, `id-token:
+write` for trusted publishing); the workflow grants nothing at the top level. The npm it runs is
+11.21.1, installed with `npm ci` from the lockfile in `.github/npm/`, so its hash is checked;
+Dependabot offers its minor and patch updates.
+
 1. **Plan** (`bun scripts/release.ts plan [--manual] [patch|minor]`, tested in
    `tests/unit/release.test.ts`):
    - The version comes from the latest `v*` tag. A commit since then with `!` before the colon

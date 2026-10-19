@@ -1,0 +1,8 @@
+{
+  "name": "loopstra-release-npm",
+  "private": true,
+  "description": "The npm the release workflow runs, pinned by package-lock.json and installed with npm ci.",
+  "dependencies": {
+    "npm": "11.21.1"
+  }
+}

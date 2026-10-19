@@ -197,13 +197,14 @@ describe("chat with the loop", () => {
       const t = recorder();
       t.send = async () => {};
       const never = async () => { throw new Error("channel_not_found"); };
-      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: never })], { announce: false, pollMs: 60_000, resultGiveUpMs: 200 });
+      // Wide enough that the first two polls fall inside it on a slow runner under coverage (200 ms did not).
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: never })], { announce: false, pollMs: 60_000, resultGiveUpMs: 2_000 });
       const results = join(requestsDir(r.root), "results");
       const left = () => (existsSync(results) ? readdirSync(results).filter((n) => n.endsWith(".json")).length : 0);
       await service.poll();
       await service.poll();
       expect(left()).toBe(1);
-      await Bun.sleep(250);
+      await Bun.sleep(2_100);
       await service.poll();
       expect(left()).toBe(0);
       await service.poll();
