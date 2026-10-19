@@ -49,7 +49,7 @@ function unrecordedDir(root: string, slug: string): string {
  */
 function recordDelivered(ctx: StepContext, m: InboxMessage, phase: string): Promise<void> {
   const at = new Date();
-  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(m, phase, at), { id: m.id }).catch((err: unknown) => {
+  return appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(m, phase, at), { id: m.id, trace: ctx.trace }).catch((err: unknown) => {
     if (!(err instanceof StopRequested)) traceError(ctx, { where: "conversation", error: errorText(err) });
     try {
       const marker: Unrecorded = { message: m, phase, at: at.toISOString() };
@@ -67,8 +67,8 @@ function deliveredEntry(m: InboxMessage, phase: string, at: Date): ConversationE
 
 /**
  * Records the delivered messages whose record failed (see recordDelivered); each marker goes once its
- * record landed. An entry a failed commit left on disk (or another entry's commit took along) is not
- * written twice (see recordedAs). Never throws.
+ * record landed. An entry the record already holds (its record landed, but the marker did not go) is
+ * not written twice (see recordedAs). Never throws.
  */
 async function recordUnrecorded(ctx: StepContext): Promise<void> {
   const dir = unrecordedDir(ctx.root, ctx.slug);
@@ -79,7 +79,7 @@ async function recordUnrecorded(ctx: StepContext): Promise<void> {
     if (!u) continue;
     try {
       const at = new Date(u.at);
-      await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { id: u.message.id });
+      await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, deliveredEntry(u.message, u.phase, Number.isNaN(at.getTime()) ? new Date() : at), { id: u.message.id, trace: ctx.trace });
       rmSync(path, { force: true });
     } catch (e) {
       // A stopping loop records nothing: the marker waits for the next step's sweep.
@@ -109,7 +109,7 @@ async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
   recording.add(key);
   try {
     const was = recordedAs(ctx.root, ctx.slug, m.id, { who: m.by, via: m.via, text: m.text });
-    if (!was) await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "later", who: m.by, via: m.via, text: m.text, at: new Date() }, { id: m.id });
+    if (!was) await appendConversation(ctx.root, ctx.cfg.main_branch, ctx.slug, { kind: "later", who: m.by, via: m.via, text: m.text, at: new Date() }, { id: m.id, trace: ctx.trace });
     markDone(ctx.root, ctx.slug, m, was && was !== "later" ? "delivered" : "next session");
   } catch (e) {
     // A stopping loop records nothing: the message waits for the next step's sweep.

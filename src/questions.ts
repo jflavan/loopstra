@@ -5,11 +5,8 @@ import { runDir } from "./paths";
 import { readJsonAs, writeJson } from "./fsutil";
 import { phaseKind } from "./console/steerable";
 import { commitForStep, writeForStep, type StepContext } from "./context";
-import { conversationPath, readConversation, withEntryOnce } from "./conversation";
-import { Git } from "./git";
-import { asAtHead, fileHash, matchesHead } from "./headfiles";
+import { withEntryOnce } from "./conversation";
 import { hasQuestion, STATUSES, type Intent, type Status } from "./intents";
-import { onCheckout } from "./lanes";
 import { errorText } from "./shell";
 
 /**
@@ -103,8 +100,9 @@ export function questionIn(envelope: Record<string, unknown>): Question | null {
 
 /**
  * Records a question a session asked: `question: open` and the conversation.md entry in one commit,
- * then question.json. Written only once the commit landed, so a failed commit never leaves an open
- * question the change does not say it has. A status a person set while the session ran is never
+ * then question.json. The commit is made before anything reaches the checkout, so a failed one writes
+ * nothing; question.json is written only once it landed, so it never names an open question the
+ * change does not say it has. A status a person set while the session ran is never
  * written over: PersonChangedStatus is thrown, as the step's own writes do. The change then waits (the scheduler skips it). The
  * session's row already ended asked, with the question traced as an event of its own (see tracedSession).
  */
@@ -112,45 +110,13 @@ export async function recordQuestion(ctx: StepContext, a: Omit<Asked, "at" | "an
   const stay = stayAt(ctx);
   const at = new Date();
   const count = askedAt(ctx) + 1;
-  const files = [`intent/${ctx.slug}/intent.md`, `intent/${ctx.slug}/conversation.md`];
-  /** The hash of what was written, by file, for each that held nothing but HEAD's before the write. */
-  const written = new Map<string, string>();
-  try {
-    await commitForStep(ctx, `${a.phase} asks a question`, async (draft) => {
-      const own = await Promise.all(files.map((f) => matchesHead(ctx.root, f)));
-      // Never over a status a person set while the session ran (PersonChangedStatus instead).
-      await writeForStep(ctx, { question: "open" }, draft);
-      // An earlier try whose put back failed left the entry on disk: it is not added twice.
-      await Bun.write(conversationPath(ctx.root, ctx.slug), withEntryOnce(readConversation(ctx.root, ctx.slug), { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
-      files.forEach((f, i) => {
-        const hash = own[i] ? fileHash(join(ctx.root, f)) : null;
-        if (hash) written.set(f, hash);
-      });
-    });
-  } catch (e) {
-    if (written.size) await putBack(ctx, written);
-    throw e;
-  }
+  await commitForStep(ctx, `${a.phase} asks a question`, async (draft) => {
+    // Never over a status a person set while the session ran (PersonChangedStatus instead).
+    await writeForStep(ctx, { question: "open" }, draft);
+    const rel = `intent/${ctx.slug}/conversation.md`;
+    draft.write(rel, withEntryOnce(draft.read(rel) ?? "", { kind: "question", phase: a.phase, text: a.text, why: a.why, options: a.options, at }));
+  });
   writeState(ctx.root, ctx.slug, { ...stay, count, open: { ...a, at: at.toISOString() } });
-}
-
-/**
- * Puts back, as HEAD has them, the files a question's failed write left (a failed commit puts its
- * write back itself, see commitRecord), so the next commit (a block, say) never commits an open
- * question with no question.json; only those that still hold exactly what was written. A problem is
- * traced: the files then stay as they are.
- */
-async function putBack(ctx: StepContext, written: Map<string, string>): Promise<void> {
-  try {
-    await onCheckout(ctx.root, async () => {
-      const git = new Git(ctx.root);
-      // Off main, HEAD is another branch's: what it holds is not what the write replaced.
-      if ((await git.currentBranch()) !== ctx.cfg.main_branch) return;
-      for (const [f, hash] of written) if (fileHash(join(ctx.root, f)) === hash) await asAtHead(git, ctx.root, f);
-    });
-  } catch (e) {
-    ctx.trace.event(ctx.slug, "error", { where: "question", error: `what the question wrote could not be put back: ${errorText(e)}` });
-  }
 }
 
 /** The text of each open question, by change, for the changes whose intent.md says `question: open` (see renderQueue). */
