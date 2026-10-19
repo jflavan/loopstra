@@ -54,7 +54,9 @@ describe("writeFileAtomic", () => {
       const id = statSync(path, { bigint: true }).ino;
       writeFileAtomic(path, "two", tmpDir);
       expect(readFileSync(path, "utf8")).toBe("two");
-      expect(statSync(path, { bigint: true }).ino).not.toBe(id);
+      // Renamed over, so a new file: where a rename can be refused (Windows, while something holds a file open)
+      // writeFileAtomic may fall back to a plain write, so the identity is only certain elsewhere.
+      if (process.platform !== "win32") expect(statSync(path, { bigint: true }).ino).not.toBe(id);
       expect(readdirSync(join(t.path, "intent", "x"))).toEqual(["intent.md"]);
       expect(readdirSync(tmpDir)).toEqual([]);
     } finally { t.cleanup(); }

@@ -137,7 +137,9 @@ describe("removing a line", () => {
       const id = statSync(path, { bigint: true }).ino;
       expect(await writeIntent(i, { status: "reviewing" })).toBe(true);
       // Another file was renamed over it: a reader (the console, chat, a person's editor) never sees it emptied and half written.
-      expect(statSync(path, { bigint: true }).ino).not.toBe(id);
+      // Renamed over, so a new file: where a rename can be refused (Windows, while something holds a file open)
+      // writeFileAtomic may fall back to a plain write, so the identity is only certain elsewhere.
+      if (process.platform !== "win32") expect(statSync(path, { bigint: true }).ino).not.toBe(id);
       expect(await Bun.file(path).text()).toBe("---\nstatus: reviewing\n---\n# Intent: a\n");
       expect(readdirSync(dirname(path))).toEqual(["intent.md"]);
     } finally {
