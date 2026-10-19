@@ -58,6 +58,42 @@ describe("shipped index", () => {
     expect(await closestBase(index, "templates/REVIEW.md", "l1\nX\n", async (_t, commit) => (commit === "c" ? null : texts[commit]!))).toBeNull();
   });
 
+  test("closestBase reads at most four versions at a time and tries a failed read once more", async () => {
+    // Ten versions on a local stand-in for raw.githubusercontent.com that counts reads in flight and
+    // fails the first read of one version, the way a dropped connection would.
+    const commits = Array.from({ length: 10 }, (_, i) => `c${i}`);
+    const texts: Record<string, string> = Object.fromEntries(commits.map((c, i) => [c, `l1\n${"x\n".repeat(i)}`]));
+    const index: ShippedIndex = { "templates/REVIEW.md": commits.map((c) => ({ sha: textSha(texts[c]!), commit: c })) };
+    let inFlight = 0;
+    let most = 0;
+    const reads: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: async (req) => {
+        const commit = new URL(req.url).pathname.split("/")[1]!;
+        reads.push(commit);
+        most = Math.max(most, ++inFlight);
+        await Bun.sleep(20);
+        inFlight--;
+        if (commit === "c3" && reads.filter((r) => r === "c3").length === 1) return new Response("reset", { status: 503 });
+        return new Response(texts[commit]);
+      },
+    });
+    try {
+      const fetchText = async (template: string, commit: string) => {
+        const res = await fetch(`${server.url.origin}/${commit}/${template}`);
+        return res.ok ? res.text() : null;
+      };
+      const best = await closestBase(index, "templates/REVIEW.md", `l1\n${"x\n".repeat(9)}`, fetchText);
+      expect(best?.commit).toBe("c9");
+      expect(most).toBeGreaterThan(1);
+      expect(most).toBeLessThanOrEqual(4);
+      expect(reads.filter((r) => r === "c3")).toHaveLength(2);
+      expect(reads).toHaveLength(11);
+    } finally { void server.stop(true); }
+  });
+
   test("baseOf: the shipped version a file is, today's text with no versions known, else the closest; offline throws", async () => {
     const t = tempDir();
     try {

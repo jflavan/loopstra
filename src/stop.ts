@@ -8,9 +8,13 @@
  * nowhere else.
  */
 
-/** Thrown where work would start (or was running) after a stop was requested. Never blocks an intent. */
+/**
+ * Thrown where work would start (or was running) after a stop was requested. Never blocks an intent.
+ * `sessionId`, on one that ended an agent session (see runPhase), is that session's, so its
+ * interrupted phase row still names the transcript; null for any other work.
+ */
 export class StopRequested extends Error {
-  constructor() {
+  constructor(public readonly sessionId: string | null = null) {
     super("stop requested");
     this.name = "StopRequested";
   }
@@ -19,9 +23,10 @@ export class StopRequested extends Error {
 /**
  * Thrown by work whose result stopped being wanted while it ran (see alongside in phases): its
  * session or command was killed. Not a failure; it never gets past the work that cancelled it.
+ * `sessionId` as for StopRequested.
  */
 export class Cancelled extends Error {
-  constructor() {
+  constructor(public readonly sessionId: string | null = null) {
     super("cancelled: its result was no longer needed");
     this.name = "Cancelled";
   }
@@ -30,10 +35,11 @@ export class Cancelled extends Error {
 /**
  * A person stopped this one session (Stop in the console). Not the step's failure: the phase ends
  * interrupted with who stopped it, the change keeps its status, and the hold sent with the stop keeps
- * it from starting again. Only this step ends; the loop goes on.
+ * it from starting again. Only this step ends; the loop goes on. `sessionId` as for StopRequested
+ * (null when the stop came between phases, see throwIfChangeStopped in src/phases.ts).
  */
 export class SessionStopped extends Error {
-  constructor(public readonly by: string) {
+  constructor(public readonly by: string, public readonly sessionId: string | null = null) {
     super(`stopped by ${by}`);
     this.name = "SessionStopped";
   }

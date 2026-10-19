@@ -1,6 +1,6 @@
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
 import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitLocation } from "./shell";
-import { Cancelled, SessionStopped, StopRequested } from "./stop";
+import { Cancelled, SessionStopped, StopRequested, stopRequested } from "./stop";
 import { MEANWHILE_HEADING } from "./console/steerable";
 
 export interface StreamEvent {
@@ -325,6 +325,7 @@ export function resolveClaude(override?: string): string | null {
  * After a stop request it does not start, or it kills the running session, and throws StopRequested;
  * likewise Cancelled for `signal`. A live session (`input.live`) keeps stdin open while it runs, so a
  * person can send it messages, stop it (SessionStopped) or redirect it (resumed with the new direction).
+ * Each of the three carries the session's id when it has one, so the interrupted row names its transcript.
  */
 export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   if (!input.live) return runSession(input, null);
@@ -337,31 +338,54 @@ export async function runPhase(input: RunPhaseInput): Promise<RunPhaseResult> {
   }
 }
 
-/** runPhase's work; `live` is the live session's state, or null. */
-async function runSession(input: RunPhaseInput, live: LiveSession | null): Promise<RunPhaseResult> {
-  const started = Date.now();
-  let collector = new StreamCollector();
-  // What earlier sends of the prompt cost, and what they were refused (see the resends below).
-  let earlierCostUsd = 0;
-  let earlierDenied: string[] = [];
-  // Whether the session was asked again for its missing structured output.
-  let nudged = false;
-  const finish = (): Collected => {
-    const c = collector.finish();
-    return { ...c, costUsd: c.costUsd + earlierCostUsd, denied: [...new Set([...earlierDenied, ...c.denied])] };
-  };
-  const fail = (reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult => {
-    // The work was done; only the report is missing. A nudge that times out or breaks does not make it a crash to rerun.
-    if (nudged && (reason === "timeout" || reason === "crash" || reason === "no-session")) {
-      detail = `claude finished without structured output, and asking again failed: ${detail}`;
-      reason = "invalid-envelope";
-    }
-    return { ...finish(), ok: false, reason, detail, exitCode, durationMs: Date.now() - started, stderr, matched };
-  };
+/** What spawnBounded gave for one process of the session. */
+type SpawnResult = Awaited<ReturnType<typeof spawnBounded>>;
 
-  const exe = resolveClaude(input.executable);
-  if (!exe) return fail("not-started", "could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
+/**
+ * What the earlier sends of one session cost and were refused, and what a further send may spend. A
+ * session may be sent more than once (see the resends in runSession); each send is a run of its own,
+ * with a cap of its own, and a later one may spend only what the earlier ones left of maxBudgetUsd.
+ */
+class Sends {
+  /** What the earlier sends cost. */
+  private costUsd = 0;
+  /** What they were refused, each once. */
+  private denied: string[] = [];
+  private readonly capped: boolean;
 
+  constructor(private readonly maxBudgetUsd: number | undefined) {
+    this.capped = maxBudgetUsd !== undefined && Number.isFinite(maxBudgetUsd);
+  }
+
+  /**
+   * The cap to send again with, after the earlier sends and `moreUsd` besides: [] with no cap, and null
+   * when too little is left to send again.
+   */
+  budgetArgs(moreUsd = 0): string[] | null {
+    if (!this.capped) return [];
+    const left = Math.round((this.maxBudgetUsd! - (this.costUsd + moreUsd)) * 1e6) / 1e6;
+    return left < MIN_SESSION_USD ? null : ["--max-budget-usd", String(left)];
+  }
+
+  /** What the next process may spend: what the earlier sends left of the cap (Infinity with no cap). */
+  leftUsd(): number {
+    return this.capped ? Math.max(0, this.maxBudgetUsd! - this.costUsd) : Infinity;
+  }
+
+  /** A send ended and the session goes on: what it cost and was refused counts with the earlier sends. */
+  add(costUsd: number, denied: string[]): void {
+    this.costUsd += costUsd;
+    this.denied = [...new Set([...this.denied, ...denied])];
+  }
+
+  /** The newest send's result with the earlier sends': what they all cost, and every refusal (the phase's report names each). */
+  total(c: Collected): Collected {
+    return { ...c, costUsd: c.costUsd + this.costUsd, denied: [...new Set([...this.denied, ...c.denied])] };
+  }
+}
+
+/** The command that starts a session: the CLI and its flags (each send adds its cap and --resume). */
+function claudeCommand(exe: string, input: RunPhaseInput): string[] {
   const args = [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", JSON.stringify(input.schema),
@@ -372,38 +396,50 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
   if (input.settings) args.push("--settings", input.settings);
   // Every user message the session takes is echoed, so the runner knows which result answers it.
-  if (live) args.push("--input-format", "stream-json", ...(input.live!.replay === false ? [] : ["--replay-user-messages"]));
-  const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;
-
+  if (input.live) args.push("--input-format", "stream-json", ...(input.live.replay === false ? [] : ["--replay-user-messages"]));
   // A .ts fake must be run through bun; the real CLI is a native executable.
-  const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
+  return exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
+}
+
+/** runPhase's work; `live` is the live session's state, or null. */
+async function runSession(input: RunPhaseInput, live: LiveSession | null): Promise<RunPhaseResult> {
+  const started = Date.now();
+  const exe = resolveClaude(input.executable);
+  if (!exe) {
+    return failure(new StreamCollector().finish(), { started, nudged: false }, "not-started", "could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
+  }
+  const cmd = claudeCommand(exe, input);
+  const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
   const env = withBunOnPath(withoutGitLocation({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env }));
 
   // A session that ended having answered only notifications (one started before background tasks
   // were turned off) gets the prompt again on the same session, within the same deadline. A session
-  // that finished without structured output is asked for it once, the same way.
+  // that finished without structured output is asked for it once, the same way. `sends` keeps what
+  // the earlier sends cost and were refused.
+  const sends = new Sends(input.maxBudgetUsd);
+  let collector = new StreamCollector();
   let resume = input.resume;
   let stdin = input.prompt;
-  // Each send is a run of its own, with a cap of its own: a later one may spend only what the earlier
-  // ones left of maxBudgetUsd (null: too little is left to send again).
-  const capped = input.maxBudgetUsd !== undefined && Number.isFinite(input.maxBudgetUsd);
-  const budgetArgs = (spentUsd: number): string[] | null => {
-    if (!capped) return [];
-    const left = Math.round((input.maxBudgetUsd! - spentUsd) * 1e6) / 1e6;
-    return left < MIN_SESSION_USD ? null : ["--max-budget-usd", String(left)];
-  };
-  let r: Awaited<ReturnType<typeof spawnBounded>>;
+  // Whether the session was asked again for its missing structured output.
+  let nudged = false;
+  // The session's id as far as it is known (the running process's, else the one it resumes), for
+  // what a stop throws: the phase row keeps it, so the transcript can still be found.
+  const sessionNow = () => collector.finish().sessionId ?? resume ?? null;
+  let r: SpawnResult;
   for (let resends = 0; ; resends++) {
-    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy, sessionNow());
+    // spawnBounded checks these too, but what it throws cannot name the session a resend resumes.
+    if (stopRequested()) throw new StopRequested(sessionNow());
+    if (input.signal?.aborted) throw new Cancelled(sessionNow());
     const resumeArgs = resume ? ["--resume", resume] : [];
     // A live process is killed by its own signal too (a stop or a redirect), as well as by the caller's.
     const kill = live?.next();
     const signal = kill ? (input.signal ? AbortSignal.any([input.signal, kill]) : kill) : input.signal;
     const processStarted = Date.now();
     // What this process may spend: what the earlier ones left of the cap.
-    const leftAtStart = capped ? Math.max(0, input.maxBudgetUsd! - earlierCostUsd) : Infinity;
+    const leftAtStart = sends.leftUsd();
     // The wait for an echo after a result (see ECHO_WAIT_MS). Once it ran out, stdin is closed and reading goes on to the end.
     let echoTimer: ReturnType<typeof setTimeout> | undefined;
     let echoGaveUp = false;
@@ -412,7 +448,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       echoTimer = setTimeout(() => { echoGaveUp = true; live?.done(); }, echoWaitMs);
     };
     r = await spawnBounded({
-      cmd: [...cmd, ...(budgetArgs(earlierCostUsd) ?? []), ...resumeArgs], cwd: input.cwd, env,
+      cmd: [...cmd, ...(sends.budgetArgs() ?? []), ...resumeArgs], cwd: input.cwd, env,
       stdin: live ? { open: userLine(stdin) } : stdin,
       onStdin: live ? (w) => { live.writer = w; } : undefined,
       timeoutMs: Math.max(1, started + input.timeoutMs - Date.now()), onStop: "kill", signal, graceMs: input.exitGraceMs ?? EXIT_GRACE_MS,
@@ -446,31 +482,29 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     });
     clearTimeout(echoTimer);
     live?.done();
-    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy);
+    if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy, sessionNow());
     if (live && live.redirectTo !== null && !r.stopped && !input.signal?.aborted && r.started) {
       // What the killed process spent counts toward the cap, as a resend's does: its newest result's
       // running total, or about its minutes when it gave none (never more than it could spend).
       const reported = collector.events.filter((e) => e.type === "result").at(-1)?.total_cost_usd;
-      earlierCostUsd += typeof reported === "number" ? reported : Math.min(leftAtStart, ((Date.now() - processStarted) / 60_000) * USD_PER_MINUTE);
-      earlierDenied = [...new Set([...earlierDenied, ...collector.finish().denied])];
+      sends.add(typeof reported === "number" ? reported : Math.min(leftAtStart, ((Date.now() - processStarted) / 60_000) * USD_PER_MINUTE), collector.finish().denied);
       resume = live.sessionId ?? resume;
       stdin = live.redirectTo;
       live.redirectTo = null;
       collector = new StreamCollector();
       // Too little is left to resume it: the session ends quietly, as if its sender had stopped it. The change
       // keeps its status, and conversation.md has the redirect for the next session.
-      if (budgetArgs(earlierCostUsd) === null) throw new SessionStopped(live.redirectBy ?? "a person");
+      if (sends.budgetArgs() === null) throw new SessionStopped(live.redirectBy ?? "a person", sessionNow());
       resends--; // a redirect is not a notification resend
       continue;
     }
     if (r.stopped || r.cancelled || !r.started || r.timedOut) break;
     const c = collector.finish();
     if (!nudged && c.subtype === "success" && !c.isError && c.structuredOutput === undefined && c.sessionId) {
-      if (budgetArgs(earlierCostUsd + c.costUsd) === null) break; // nothing left to ask with
+      if (sends.budgetArgs(c.costUsd) === null) break; // nothing left to ask with
       nudged = true;
-      earlierCostUsd += c.costUsd;
       // Kept with what a redirect before it was refused: the phase's report names every refusal.
-      earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
+      sends.add(c.costUsd, c.denied);
       resume = c.sessionId;
       stdin = ENVELOPE_NUDGE;
       collector = new StreamCollector();
@@ -478,37 +512,69 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       continue;
     }
     if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || resends >= NOTIFICATION_RESENDS) break;
-    // A result's total_cost_usd is the run's running total, so the last one is what the run cost.
+    // A result's total_cost_usd is the run's running total, so the last one is what the run cost. (A run
+    // with no result of its own reported no refusals: c.denied is empty.)
     const cost = c.events.filter(answersNotification).at(-1)?.total_cost_usd;
-    earlierCostUsd += typeof cost === "number" ? cost : 0;
-    if (budgetArgs(earlierCostUsd) === null) break; // nothing left to send it again with
-    earlierDenied = [...new Set([...earlierDenied, ...c.denied])];
+    sends.add(typeof cost === "number" ? cost : 0, c.denied);
+    if (sends.budgetArgs() === null) break; // nothing left to send it again with
     resume = c.sessionId;
     collector = new StreamCollector();
   }
-  if (r.stopped) throw new StopRequested();
-  if (r.cancelled) throw new Cancelled();
-  if (!r.started) return fail("not-started", `could not start claude: ${r.err}`);
-  const { code: exitCode, err: stderr, timedOut } = r;
+  return classify(sends.total(collector.finish()), r, { started, timeoutMs: input.timeoutMs, resume, nudged });
+}
 
-  const collected = finish();
-  if (timedOut) return fail("timeout", `claude timed out after ${Math.round(input.timeoutMs / 1000)}s`, exitCode, stderr);
+/** What classify needs besides the session's result and its last process's. */
+interface ClassifyContext {
+  /** When runPhase started (Date.now()): durationMs counts from it. */
+  started: number;
+  /** The session's deadline, for what a timeout says. */
+  timeoutMs: number;
+  /** The session the last send resumed, if any: only then can stderr mean it was not found. */
+  resume: string | undefined;
+  /** Whether the session was asked again for its missing structured output (see ENVELOPE_NUDGE). */
+  nudged: boolean;
+}
+
+/** A failed phase result: what was collected, why it failed, and what the process left. */
+function failure(collected: Collected, ctx: Pick<ClassifyContext, "started" | "nudged">, reason: FailureReason, detail: string, exitCode: number | null = null, stderr = "", matched: string | null = null): RunPhaseResult {
+  // The work was done; only the report is missing. A nudge that times out or breaks does not make it a crash to rerun.
+  if (ctx.nudged && (reason === "timeout" || reason === "crash" || reason === "no-session")) {
+    detail = `claude finished without structured output, and asking again failed: ${detail}`;
+    reason = "invalid-envelope";
+  }
+  return { ...collected, ok: false, reason, detail, exitCode, durationMs: Date.now() - ctx.started, stderr, matched };
+}
+
+/**
+ * What a session's end means as a phase result, from what it collected (every send's, see
+ * Sends.total) and its last process. A process killed from outside throws StopRequested or
+ * Cancelled, with the session's id (else the one it resumed). It reads nothing else, so each reason
+ * can be tested without a process.
+ */
+export function classify(collected: Collected, r: SpawnResult, ctx: ClassifyContext): RunPhaseResult {
+  if (r.stopped) throw new StopRequested(collected.sessionId ?? ctx.resume ?? null);
+  if (r.cancelled) throw new Cancelled(collected.sessionId ?? ctx.resume ?? null);
+  if (!r.started) return failure(collected, ctx, "not-started", `could not start claude: ${r.err}`);
+  const { code: exitCode, err: stderr } = r;
+  const fail = (reason: FailureReason, detail: string, matched: string | null = null) => failure(collected, ctx, reason, detail, exitCode, stderr, matched);
+
+  if (r.timedOut) return fail("timeout", `claude timed out after ${Math.round(ctx.timeoutMs / 1000)}s`);
   const lastErr = lastLine(stderr);
   // Before any subtype check: the CLI reports a missing session with an error result as well.
-  if (resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found", exitCode, stderr);
-  if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`, exitCode, stderr);
+  if (ctx.resume && /no conversation found|session.*not found/i.test(stderr)) return fail("no-session", lastErr || "the session to resume was not found");
+  if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`);
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
     const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr))
       ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus ?? ""}` : null);
-    if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, exitCode, stderr, outage);
+    if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, outage);
   }
   if (collected.subtype === "missing_result" && collected.events.some(answersNotification)) {
-    return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
+    return fail("crash", `claude answered only background task notifications and never the prompt${lastErr ? `: ${lastErr}` : ""}`);
   }
-  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode ?? "without an exit code"} without a result${lastErr ? `: ${lastErr}` : ""}`, exitCode, stderr);
-  if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`, exitCode, stderr);
-  if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`, exitCode, stderr);
-  if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output", exitCode, stderr);
-  return { ...collected, ok: true, reason: null, detail: "", exitCode, durationMs: Date.now() - started, stderr, matched: null };
+  if (collected.subtype === "missing_result") return fail("crash", `claude exited ${exitCode ?? "without an exit code"} without a result${lastErr ? `: ${lastErr}` : ""}`);
+  if (/structured_output/i.test(collected.subtype)) return fail("invalid-envelope", `claude ended with ${collected.subtype}`);
+  if (collected.subtype !== "success" || collected.isError) return fail("crash", `claude ended with ${collected.subtype}`);
+  if (collected.structuredOutput === undefined) return fail("invalid-envelope", "claude finished without structured output");
+  return { ...collected, ok: true, reason: null, detail: "", exitCode, durationMs: Date.now() - ctx.started, stderr, matched: null };
 }

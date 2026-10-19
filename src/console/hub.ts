@@ -29,12 +29,19 @@ export interface HubOptions {
   pingMs?: number;
   /** Reads the intent folder (what the hub keeps until a file there changes); tests count its calls. */
   scan?: (root: string) => Promise<Scan>;
+  /** Fingerprints the intent folder (see intentsKey); tests count its calls. */
+  fingerprint?: (root: string) => string;
 }
 
 /** The most events read at once, and the most a page coming back is sent. */
 const CATCH_UP = 500;
 /** The most reads of new events one look makes, so a flood of them cannot hold a look forever. */
 const EVENT_READS = 10;
+/**
+ * While the watch on intent/ works, how often its folders are fingerprinted all the same, in case the
+ * watch missed a change (an event dropped, the folder replaced). Where it cannot watch, every look does.
+ */
+const FINGERPRINT_MS = 5_000;
 
 /** When a file was last written and how big it is; "-" when it is missing. */
 function stamp(path: string): string {
@@ -59,6 +66,12 @@ export class Hub {
   private signature = "";
   /** The intent folder as last read, with the fingerprint of the files it was read from. */
   private scanned: { key: string; scan: Scan } | null = null;
+  /** Whether the watch on intent/ works: its events then say when to fingerprint the folder again. */
+  private intentsWatched = false;
+  /** The watch reported a change under intent/ since the fingerprint was last taken (true until it is first taken). */
+  private intentsChanged = true;
+  /** The intent folder's fingerprint as last taken, and when. */
+  private intentsPrint = { key: "", at: 0 };
   private lastEventId = 0;
   private lastBuild = 0;
   private running: Promise<void> | null = null;
@@ -145,13 +158,25 @@ export class Hub {
       setInterval(() => void this.look(), this.opts.intervalMs ?? 500),
       setInterval(() => this.broadcast(PING), this.opts.pingMs ?? 15_000),
     ];
-    // Watching only makes a change show sooner; the timer finds it anyway where watching does not work.
-    for (const [dir, recursive] of [[intentRoot(this.root), true], [join(this.root, ".loopstra"), false]] as const) {
-      try {
-        const w = watch(dir, { recursive }, () => this.lookSoon());
-        w.on("error", () => { /* polling still runs */ });
-        this.watchers.push(w);
-      } catch { /* the folder is missing, or this system cannot watch it */ }
+    // Watching makes a change show sooner; the timer finds it anyway where watching does not work. The
+    // watch on intent/ also spares each look fingerprinting every change folder (see intentsKeyNow).
+    this.intentsWatched = this.watchTo(intentRoot(this.root), true, () => { this.intentsChanged = true; }, () => { this.intentsWatched = false; });
+    this.watchTo(join(this.root, ".loopstra"), false);
+  }
+
+  /**
+   * Watches `dir`: each change there calls `changed` and brings the next look forward; `failed` is
+   * called when the watch breaks. False when it cannot be watched (the folder is missing, or this
+   * system cannot watch it); polling still runs.
+   */
+  private watchTo(dir: string, recursive: boolean, changed: () => void = () => {}, failed: () => void = () => {}): boolean {
+    try {
+      const w = watch(dir, { recursive }, () => { changed(); this.lookSoon(); });
+      w.on("error", failed);
+      this.watchers.push(w);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -168,6 +193,9 @@ export class Hub {
     this.sent.clear();
     this.signature = "";
     this.scanned = null;
+    this.intentsWatched = false;
+    this.intentsChanged = true;
+    this.intentsPrint = { key: "", at: 0 };
     this.noted.clear();
     // A look still running uses the trace; it is closed once that look ends. The promise never
     // fails: every later connect waits on it.
@@ -200,7 +228,7 @@ export class Hub {
     // and would clear the mark before it is set.
     this.running = (async () => {
       try {
-        const key = this.intentsKey();
+        const key = this.intentsKeyNow(force);
         const signature = this.signatureOf(trace, key);
         if (!force && this.model && signature === this.signature) return;
         this.signature = signature;
@@ -244,22 +272,18 @@ export class Hub {
   }
 
   /**
-   * A fingerprint of everything reading the intent folder looks at (see scanRepo): what is in intent/,
-   * which files each change folder holds (the documents present) and when its intent.md was written.
+   * The intent folder's fingerprint (see intentsKey). Taking it reads every change folder, on the
+   * server's event loop, so while the watch on intent/ works it is taken again only once the watch
+   * reported a change there, for a forced look, or every FINGERPRINT_MS in case the watch missed one.
+   * Where intent/ is not watched, every look takes it.
    */
-  private intentsKey(): string {
-    const dir = intentRoot(this.root);
-    const parts: string[] = [];
-    let entries: Dirent[] = [];
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { /* no intent folder yet */ }
-    for (const e of entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
-      if (e.isFile()) { parts.push(e.name); continue; }
-      let files = "";
-      try { files = readdirSync(join(dir, e.name)).sort().join(","); } catch { /* not a folder */ }
-      // The plan too: the files it names decide which changes wait for each other.
-      parts.push(`${e.name}[${files}]${stamp(join(dir, e.name, "intent.md"))}${stamp(join(dir, e.name, "plan.md"))}`);
-    }
-    return parts.join("|");
+  private intentsKeyNow(force: boolean): string {
+    const now = Date.now();
+    if (this.intentsWatched && !this.intentsChanged && !force && now - this.intentsPrint.at < FINGERPRINT_MS) return this.intentsPrint.key;
+    // Cleared before reading: a change reported while it is read is read again by the next look.
+    this.intentsChanged = false;
+    this.intentsPrint = { key: (this.opts.fingerprint ?? intentsKey)(this.root), at: now };
+    return this.intentsPrint.key;
   }
 
   /** The intent folder, read again only when `key` is not the one it was last read at. Undefined when it cannot be read: the model then reads it itself and says why. */
@@ -309,6 +333,25 @@ export class Hub {
     this.noted.add(what);
     try { this.trace?.event("_loop", "error", { where: "console", what }); } catch { /* the console never stops over its own trace */ }
   }
+}
+
+/**
+ * A fingerprint of everything reading the intent folder looks at (see scanRepo): what is in intent/,
+ * which files each change folder holds (the documents present) and when its intent.md was written.
+ */
+export function intentsKey(root: string): string {
+  const dir = intentRoot(root);
+  const parts: string[] = [];
+  let entries: Dirent[] = [];
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { /* no intent folder yet */ }
+  for (const e of entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
+    if (e.isFile()) { parts.push(e.name); continue; }
+    let files = "";
+    try { files = readdirSync(join(dir, e.name)).sort().join(","); } catch { /* not a folder */ }
+    // The plan too: the files it names decide which changes wait for each other.
+    parts.push(`${e.name}[${files}]${stamp(join(dir, e.name, "intent.md"))}${stamp(join(dir, e.name, "plan.md"))}`);
+  }
+  return parts.join("|");
 }
 
 /** The waiting and claimed requests by name: a request made or finished changes the console. */

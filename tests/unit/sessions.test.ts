@@ -5,7 +5,7 @@ import { runChatAgent } from "../../src/chat/agents";
 import type { SessionControl } from "../../src/claude";
 import { configPath, loadConfig } from "../../src/config";
 import { tracedSession } from "../../src/sessions";
-import { SessionStopped } from "../../src/stop";
+import { Cancelled, requestStop, resetStop, SessionStopped, StopRequested } from "../../src/stop";
 import { andList } from "../../src/text";
 import { Trace } from "../../src/trace";
 import { until } from "../console-helpers";
@@ -70,6 +70,45 @@ describe("a session a person stopped", () => {
       expect(row.cost_usd).toBeGreaterThan(0);
     } finally { trace.close(); t.cleanup(); }
   }, 90_000);
+});
+
+describe("a session ended mid-way", () => {
+  // Each way a running session is ended from outside: a person's Stop, the loop's stop request, and
+  // a cancel of work no longer wanted. The fake printed its first events, with its session id, first.
+  const endings: Array<{ name: string; end: (ctl: SessionControl, abort: AbortController) => void; thrown: new (...a: never[]) => Error }> = [
+    { name: "a person's stop", end: (ctl) => { ctl.stop("John"); }, thrown: SessionStopped },
+    { name: "a stop request", end: () => { requestStop(); }, thrown: StopRequested },
+    { name: "a cancel", end: (_ctl, abort) => { abort.abort(); }, thrown: Cancelled },
+  ];
+  for (const ending of endings) {
+    test(`${ending.name} keeps the session's id on its interrupted row, so its transcript can be found`, async () => {
+      const t = tempDir();
+      const trace = Trace.open(t.path);
+      try {
+        const seq = trace.phaseStart("add-numbers", "build", "agent");
+        let ctl: SessionControl | null = null;
+        let running = false;
+        let sessionId: string | undefined;
+        const abort = new AbortController();
+        const run = tracedSession({
+          trace, slug: "add-numbers", seq, dir: join(t.path, "phase"), capUsd: 1,
+          read: (output) => ({ ok: true, value: output }),
+          onEvent: (e) => { sessionId ??= e.session_id; if (e.type === "system") running = true; },
+          run: {
+            cwd: t.path, prompt: "FIXTURE:hang", schema: {}, model: "haiku", permissionMode: "default", allowedTools: [], timeoutMs: 60_000,
+            maxBudgetUsd: 1, executable: FAKE_CLAUDE, signal: abort.signal, live: { attach: (c) => { ctl = c; return () => {}; } },
+          },
+        });
+        await until(() => running);
+        ending.end(ctl!, abort);
+        const e = await run.then(() => null, (err: unknown) => err);
+        expect(e).toBeInstanceOf(ending.thrown);
+        expect(sessionId).toBeString();
+        expect((e as { sessionId?: unknown }).sessionId).toBe(sessionId!);
+        expect(trace.phases("add-numbers")[0]).toMatchObject({ status: "interrupted", session_id: sessionId! });
+      } finally { resetStop(); trace.close(); t.cleanup(); }
+    }, 90_000);
+  }
 });
 
 describe("a session that asked a question", () => {

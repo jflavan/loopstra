@@ -121,15 +121,44 @@ function differingLines(a: string, b: string): number {
   return extra + [...count.values()].reduce((s, n) => s + n, 0);
 }
 
+/** How many versions of a template are read at once: a long history is not a burst of requests. */
+const FETCH_CONCURRENCY = 4;
+
+/** How long a read that failed waits before its one retry, so a dropped connection is not the end. */
+const RETRY_WAIT_MS = 500;
+
+/** A version's text, read a second time after a short wait when the first read gives nothing. */
+async function fetchWithRetry(fetchText: FetchText, template: string, commit: string): Promise<string | null> {
+  const first = await fetchText(template, commit);
+  if (first !== null && first !== undefined) return first;
+  await Bun.sleep(RETRY_WAIT_MS);
+  return (await fetchText(template, commit)) ?? null;
+}
+
+/** Every version's text, in the entries' order, read FETCH_CONCURRENCY at a time. */
+async function fetchAll(entries: Array<{ commit: string }>, template: string, fetchText: FetchText): Promise<Array<string | null>> {
+  const texts: Array<string | null> = new Array<string | null>(entries.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < entries.length) {
+      const i = next++;
+      texts[i] = await fetchWithRetry(fetchText, template, entries[i]!.commit);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(FETCH_CONCURRENCY, entries.length) }, worker));
+  return texts;
+}
+
 /**
  * The shipped version closest to `text` (fewest differing lines), with its text. Ties go to the newer
- * version. Null when there is none, or when any version cannot be fetched: the closest one may be
- * the one that could not be read, so a choice among the rest could be the wrong base.
+ * version. The versions are read a few at a time, and a read that fails is tried once more. Null when
+ * there is none, or when any version still cannot be fetched: the closest one may be the one that
+ * could not be read, so a choice among the rest could be the wrong base.
  */
 export async function closestBase(index: ShippedIndex, template: string, text: string, fetchText: FetchText = fetchShipped): Promise<{ sha: string; commit: string; text: string } | null> {
   const entries = index[template] ?? [];
-  const fetched = await Promise.all(entries.map((e) => fetchText(template, e.commit)));
-  if (fetched.some((t) => t === null || t === undefined)) return null;
+  const fetched = await fetchAll(entries, template, fetchText);
+  if (fetched.some((t) => t === null)) return null;
   let best: { sha: string; commit: string; text: string; d: number } | null = null;
   for (const [i, e] of entries.entries()) {
     const t = fetched[i]!;
