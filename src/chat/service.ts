@@ -41,6 +41,12 @@ export interface Transport {
 
 /** How often pull requests opened from chat are checked on GitHub. */
 const PR_CHECK_MS = 60_000;
+/**
+ * How long a loop result is tried again after its first failed post before it is given up: a thread
+ * the bot can no longer post in (deleted, archived, the bot removed) never clears, and each try would
+ * repeat the parts of a long result that did post.
+ */
+const RESULT_GIVE_UP_MS = 60 * 60_000;
 
 /**
  * The results the loop left for the given transports (the files in `.loopstra/requests/results/`,
@@ -71,12 +77,15 @@ export class ChatService {
   private stopped = false;
   private polling: Promise<void> | null = null;
 
-  constructor(private readonly root: string, private readonly transports: Transport[], private readonly opts: { pollMs?: number; announce?: boolean } = {}) {
+  constructor(private readonly root: string, private readonly transports: Transport[], private readonly opts: { pollMs?: number; announce?: boolean; resultGiveUpMs?: number } = {}) {
     this.orchestrator = new Orchestrator(root);
     this.log = new AnnouncementLog(root);
   }
 
   private transport(name: string): Transport | undefined { return this.transports.find((t) => t.name === name); }
+
+  /** When each loop result that could not be posted first failed, by its file: traced once, and given up after RESULT_GIVE_UP_MS. */
+  private readonly failingResults = new Map<string, number>();
 
   async start(): Promise<void> {
     for (const t of this.transports) {
@@ -137,7 +146,8 @@ export class ChatService {
         }
       }
       // A result is removed once it was passed on, not before: one whose delivery fails is tried
-      // again next poll (deliver sends before it records, so nothing of the failed try is kept).
+      // again next poll (deliver sends before it records, so nothing of the failed try is kept),
+      // for up to RESULT_GIVE_UP_MS. Its failure is traced once, and its giving up once.
       for (const { path, result: r } of waitingResults(this.root, new Set(this.transports.map((t) => t.name)))) {
         const t = this.transport(r.transport);
         if (!t) continue;
@@ -145,7 +155,18 @@ export class ChatService {
         try {
           await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => (t.sendOrThrow ? t.sendOrThrow(r.thread, text) : t.send(r.thread, text)), `The loop answered: ${r.text}`);
           rmSync(path, { force: true });
-        } catch (e) { this.traceError("chat-result", e); }
+          this.failingResults.delete(path);
+        } catch (e) {
+          const first = this.failingResults.get(path);
+          if (first === undefined) {
+            this.failingResults.set(path, Date.now());
+            this.traceError("chat-result", e);
+          } else if (Date.now() - first >= (this.opts.resultGiveUpMs ?? RESULT_GIVE_UP_MS)) {
+            rmSync(path, { force: true });
+            this.failingResults.delete(path);
+            this.traceError("chat-result", new Error(`gave up posting what the loop did with a request to ${t.via} after an hour of tries: ${errorText(e)}`));
+          }
+        }
       }
       if (Date.now() - this.lastPrCheck >= PR_CHECK_MS) {
         this.lastPrCheck = Date.now();
