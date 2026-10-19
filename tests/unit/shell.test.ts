@@ -230,7 +230,7 @@ describe("a project command's environment", () => {
     process.env.GIT_INDEX_FILE = join(t.path, "elsewhere", "index");
     try {
       const script = "console.log(JSON.stringify([process.env.GIT_DIR ?? null, process.env.GIT_INDEX_FILE ?? null, typeof process.env.PATH]))";
-      const r = await runCommand(`bun -e "${script.replace(/"/g, '\\"')}"`, t.path);
+      const r = await runCommand(`bun -e "${script.replace(/[\\"]/g, "\\$&")}"`, t.path);
       expect(r.code).toBe(0);
       expect(JSON.parse(r.output.trim())).toEqual([null, null, "string"]);
       const env: Record<string, string | undefined> = { GIT_DIR: "x", GIT_WORK_TREE: "y", HOME: "h" };

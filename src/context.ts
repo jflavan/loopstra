@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runDir } from "./paths";
 import type { Config } from "./config";
@@ -183,14 +183,29 @@ async function nothingLanded(git: Git, head: string, message: string): Promise<b
   return sha === head || parents !== head || subject !== message;
 }
 
+const codeOf = (e: unknown) => (e as { code?: string } | null)?.code;
+
+/** What a file holds, or null when it is not there. */
+function readIfThere(abs: string): Buffer | null {
+  try { return readFileSync(abs); } catch (e) { if (codeOf(e) === "ENOENT") return null; throw e; }
+}
+
 /** The files under these paths (each a file or a folder, relative to `root`), with what each holds, by path relative to `root`. */
 function filesUnder(root: string, paths: string[]): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
   const visit = (rel: string) => {
     const abs = join(root, rel);
-    if (!existsSync(abs)) return;
-    if (statSync(abs).isDirectory()) for (const name of readdirSync(abs)) visit(`${rel}/${name}`);
-    else out.set(rel, readFileSync(abs));
+    // Listed as a folder first, then read as a file: no look at what it is before the read.
+    let names: string[];
+    try {
+      names = readdirSync(abs);
+    } catch (e) {
+      if (codeOf(e) === "ENOENT") return;
+      const text = readIfThere(abs);
+      if (text) out.set(rel, text);
+      return;
+    }
+    for (const name of names) visit(`${rel}/${name}`);
   };
   for (const p of paths) visit(p);
   return out;
@@ -207,13 +222,16 @@ async function putBackRecord(git: Git, root: string, paths: string[], before: Ma
   for (const [rel, text] of written) {
     const abs = join(root, rel);
     const was = before.get(rel);
-    if (was?.equals(text) || !existsSync(abs) || !readFileSync(abs).equals(text)) continue;
+    if (was?.equals(text) || !readIfThere(abs)?.equals(text)) continue;
     if (was) writeFileSync(abs, was);
     else rmSync(abs, { force: true });
   }
   for (const [rel, was] of before) {
+    if (written.has(rel)) continue;
     const abs = join(root, rel);
-    if (!written.has(rel) && !existsSync(abs)) { mkdirSync(dirname(abs), { recursive: true }); writeFileSync(abs, was); }
+    mkdirSync(dirname(abs), { recursive: true });
+    // "wx": made only when it is not there, so a file that is there is never written over.
+    try { writeFileSync(abs, was, { flag: "wx" }); } catch (e) { if (codeOf(e) !== "EEXIST") throw e; }
   }
   try {
     await git.run(["reset", "-q", "--", ...paths], { allowFail: true, cleanup: true });

@@ -1,4 +1,4 @@
-import { closeSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config";
@@ -384,18 +384,20 @@ function loopHoldPath(root: string): string {
  */
 export function readLoopHold(root: string): LoopHold | null {
   const path = loopHoldPath(root);
-  let since: string;
-  try {
-    since = statSync(path).mtime.toISOString();
-  } catch (e) {
-    if ((e as { code?: string })?.code === "ENOENT") return null;
-    since = new Date().toISOString();
-  }
+  let since = new Date().toISOString();
   let h: Partial<Record<keyof LoopHold, unknown>> = {};
+  let fd: number | undefined;
   try {
-    const read = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    fd = openSync(path, "r");
+    since = fstatSync(fd).mtime.toISOString();
+    const read = JSON.parse(readFileSync(fd, "utf8")) as unknown;
     if (read && typeof read === "object") h = read;
-  } catch { /* unreadable: it still pauses */ }
+  } catch (e) {
+    if (fd === undefined && (e as { code?: string })?.code === "ENOENT") return null;
+    /* unreadable: it still pauses */
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
   return { by: typeof h.by === "string" ? h.by : "someone", at: typeof h.at === "string" ? h.at : since };
 }
 

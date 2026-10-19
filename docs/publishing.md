@@ -36,7 +36,7 @@ Everything is in `.github/workflows/release.yml`. It runs after the `ci` workflo
    publishing (GitHub's OIDC token; no npm token is stored anywhere). The version is uploaded with
    provenance but is **not installable** until a maintainer approves it (see below). If the version
    is already published, this step is skipped.
-4. **Tag:** `v<version>` on the released commit, pushed to GitHub.
+4. **Tag:** `v<version>` on the released commit, made on GitHub through its API (the checkout keeps no git token).
 5. **GitHub Release:** `v<version>`, its notes the commit subjects since the previous tag.
    `loopstra upgrade` puts these notes in the upgrade commit's body.
 

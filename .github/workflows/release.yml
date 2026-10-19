@@ -6,7 +6,11 @@ name: release
 # publisher on npm may stage but not publish. A manual run of this workflow on main releases even
 # without such a change; `bump` forces a patch or minor release.
 on:
-  workflow_run:
+  # Safe here, though zizmor flags every workflow_run: only a ci run on a push to main (the branch
+  # filter, and the job's `if` on event and conclusion) gets this far, never one on a fork's pull
+  # request, and the job checks out that main commit. A reusable workflow called from ci would
+  # change the workflow npm's trusted publisher names (release.yml).
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [ci]
     types: [completed]
     branches: [main]
@@ -39,6 +43,7 @@ jobs:
         with:
           fetch-depth: 0 # every commit and tag: the version, the skip check and shipped.json need them
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false # the tag is made through the API, so git needs no token
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
@@ -46,8 +51,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      # Trusted publishing needs npm 11.5.1 or later, and `npm stage` 11.15 or later.
-      - run: npm install -g npm@^11.21.0
+      # Trusted publishing needs npm 11.5.1 or later, and `npm stage` 11.15 or later; the workflow uses
+      # 11.21. No Node release bundles that yet, so npm itself is installed, at one exact version.
+      - run: npm install -g npm@11.21.1 # zizmor: ignore[adhoc-packages]
       - run: bun install --frozen-lockfile
       - id: plan
         env:
@@ -56,9 +62,13 @@ jobs:
         # Unquoted: an empty one (a workflow_run, or no bump chosen) passes no argument.
         run: bun scripts/release.ts plan $MANUAL $BUMP >> "$GITHUB_OUTPUT"
       - if: steps.plan.outputs.ship != 'true'
-        run: echo "Nothing to release since v${{ steps.plan.outputs.previous }}."
+        env:
+          PREVIOUS: ${{ steps.plan.outputs.previous }}
+        run: echo "Nothing to release since v$PREVIOUS."
       - if: steps.plan.outputs.ship == 'true'
-        run: npm version "${{ steps.plan.outputs.version }}" --no-git-tag-version
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version
       - if: steps.plan.outputs.ship == 'true'
         run: bun scripts/shipped.ts shipped.json
       # Each of the last three steps tolerates having been done already, so a run that failed half way
@@ -85,15 +95,17 @@ jobs:
           fi
       - if: steps.plan.outputs.ship == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.plan.outputs.version }}
+        # The checkout fetched every tag, so one not here is not on GitHub either.
         run: |
           if tagged=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
             if [ "$tagged" != "$(git rev-parse HEAD)" ]; then echo "v$VERSION already tags another commit." >&2; exit 1; fi
             echo "v$VERSION is already tagged."
           else
-            git tag "v$VERSION"
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$(git rev-parse HEAD)" >/dev/null
+            git tag "v$VERSION" # here too: the release notes are the log up to it
           fi
-          git push origin "refs/tags/v$VERSION"
       - if: steps.plan.outputs.ship == 'true'
         env:
           GH_TOKEN: ${{ github.token }}

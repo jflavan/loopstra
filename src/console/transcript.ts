@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { relativePath, toolTarget } from "../tools";
 import { MEANWHILE_HEADING, MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
 import type { TranscriptItem } from "./types";
@@ -149,31 +149,26 @@ export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
  * The folder a session's init event names, read from the start of its raw file line by line up to
  * that event (hook events may come before it), so a long init line is still read whole.
  */
-function initCwd(path: string): string | undefined {
-  const fd = openSync(path, "r");
-  try {
-    let buf = Buffer.alloc(64 * 1024);
-    let filled = 0;
-    let start = 0;
-    for (;;) {
-      if (filled === buf.length) {
-        if (buf.length >= INIT_MAX) return undefined;
-        const bigger = Buffer.alloc(Math.min(buf.length * 2, INIT_MAX));
-        buf.copy(bigger, 0, 0, filled);
-        buf = bigger;
-      }
-      const n = readSync(fd, buf, filled, buf.length - filled, filled);
-      if (n === 0) return undefined;
-      const got = buf.subarray(0, filled + n);
-      for (let nl = got.indexOf(10, filled); nl >= 0; nl = got.indexOf(10, nl + 1)) {
-        const e = rawEvent(got.subarray(start, nl).toString("utf8"));
-        start = nl + 1;
-        if (e?.type === "system" && e.subtype === "init") return typeof e.cwd === "string" ? e.cwd : undefined;
-      }
-      filled += n;
+function initCwd(fd: number): string | undefined {
+  let buf = Buffer.alloc(64 * 1024);
+  let filled = 0;
+  let start = 0;
+  for (;;) {
+    if (filled === buf.length) {
+      if (buf.length >= INIT_MAX) return undefined;
+      const bigger = Buffer.alloc(Math.min(buf.length * 2, INIT_MAX));
+      buf.copy(bigger, 0, 0, filled);
+      buf = bigger;
     }
-  } finally {
-    closeSync(fd);
+    const n = readSync(fd, buf, filled, buf.length - filled, filled);
+    if (n === 0) return undefined;
+    const got = buf.subarray(0, filled + n);
+    for (let nl = got.indexOf(10, filled); nl >= 0; nl = got.indexOf(10, nl + 1)) {
+      const e = rawEvent(got.subarray(start, nl).toString("utf8"));
+      start = nl + 1;
+      if (e?.type === "system" && e.subtype === "init") return typeof e.cwd === "string" ? e.cwd : undefined;
+    }
+    filled += n;
   }
 }
 
@@ -196,16 +191,18 @@ export class TranscriptReader {
    * file is known to be complete, so its end also ends a last line written without a newline.
    */
   read(maxBytes = READ_MAX, opts: { final?: boolean } = {}): Array<{ item: TranscriptItem; offset: number }> {
-    if (!existsSync(this.path)) return [];
-    const size = statSync(this.path).size;
-    if (size <= this.offset) return [];
-    if (!this.cwdRead) {
-      this.cwd = initCwd(this.path);
-      this.cwdRead = true;
-    }
-    const fd = openSync(this.path, "r");
+    // One open file for the size and every read, so they all see the same file.
+    let fd: number;
+    try { fd = openSync(this.path, "r"); } catch (e) { if ((e as { code?: string })?.code === "ENOENT") return []; throw e; }
     let buf: Buffer;
+    let size: number;
     try {
+      size = fstatSync(fd).size;
+      if (size <= this.offset) return [];
+      if (!this.cwdRead) {
+        this.cwd = initCwd(fd);
+        this.cwdRead = true;
+      }
       const want = Buffer.alloc(Math.min(size - this.offset, maxBytes));
       buf = want.subarray(0, readSync(fd, want, 0, want.length, this.offset));
     } finally {

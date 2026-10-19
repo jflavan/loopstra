@@ -1,4 +1,4 @@
-import { appendFileSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { attention, type AttentionItem } from "../attention";
@@ -31,12 +31,21 @@ export class AnnouncementLog {
   /** Every announcement. Read again only when the file changed since the last read in this process. */
   all(): Announcement[] {
     const path = this.path();
+    // One open file for the look and the read, so the cache never pairs one file's size with another's lines.
+    let fd: number;
+    try { fd = openSync(path, "r"); } catch { return []; }
     let st: { size: number; mtimeMs: number };
-    try { st = statSync(path); } catch { return []; }
-    const hit = cache.get(path);
-    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.items;
+    let text: string;
+    try {
+      st = fstatSync(fd);
+      const hit = cache.get(path);
+      if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.items;
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
     const items: Announcement[] = [];
-    for (const line of readFileSync(path, "utf8").split("\n")) {
+    for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try { items.push(JSON.parse(line) as Announcement); } catch { /* a half-written last line */ }
     }
