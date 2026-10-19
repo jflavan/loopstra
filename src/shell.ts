@@ -34,14 +34,15 @@ const GIT_LOCATION_VARS: readonly string[] = [
  * GIT_LOCATION_VARS. How pathspecs are read (`git --literal-pathspecs` exports GIT_LITERAL_PATHSPECS,
  * and with it a `:(literal)name` pathspec names a file called that and matches nothing, so a
  * comparison finds no difference); the dates of the commit the hook is part of (every commit made
- * would carry them); and the `-c` settings of the command that ran the hook (GIT_CONFIG_PARAMETERS,
- * and GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, see GIT_CONFIG_PAIR).
+ * would carry them); and the `-c` and `--config-env` settings of the command that ran the hook,
+ * which git passes on in GIT_CONFIG_PARAMETERS. GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_n and
+ * GIT_CONFIG_VALUE_n stay: git never exports them, so they are set on purpose (a container's
+ * safe.directory, a CI job's url.<base>.insteadOf or http.extraHeader), and git needs them there.
  */
 const GIT_HOOK_VARS: readonly string[] = [
   "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
-  "GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+  "GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE", "GIT_CONFIG_PARAMETERS",
 ];
-const GIT_CONFIG_PAIR = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 
 /**
  * A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS) and the other
@@ -50,7 +51,6 @@ const GIT_CONFIG_PAIR = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
   const out = { ...env };
   for (const name of [...GIT_LOCATION_VARS, ...GIT_HOOK_VARS]) delete out[name];
-  for (const name of Object.keys(out)) if (GIT_CONFIG_PAIR.test(name)) delete out[name];
   return out;
 }
 

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DIFF_CHARS, DIFF_CHUNK, Git, GitError, GitTimeout, pathChunks, removeStaleLocks, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
@@ -291,9 +292,10 @@ describe("Git", () => {
     } finally { restore(); repo.cleanup(); }
   });
 
-  test("a hook's commit dates and -c settings do not reach git", async () => {
+  test("a hook's commit dates and -c settings do not reach git; configuration set on purpose in the environment does", async () => {
     const repo = await tempGitRepo();
-    // What a hook run by `git -c name=value commit` exports, beside the dates of the commit it is part of.
+    // What a hook run by `git -c name=value commit` exports, beside the dates of the commit it is part
+    // of; and what a container or CI job sets on purpose (GIT_CONFIG_COUNT and its pairs, which git never exports).
     const restore = setEnv({
       GIT_AUTHOR_DATE: "2001-02-03T04:05:06Z", GIT_COMMITTER_DATE: "2001-02-03T04:05:06Z",
       GIT_CONFIG_PARAMETERS: "'loopstra.fromhook'='yes'", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "loopstra.counted", GIT_CONFIG_VALUE_0: "yes",
@@ -301,7 +303,7 @@ describe("Git", () => {
     try {
       const git = new Git(repo.path);
       expect((await git.run(["config", "--get", "loopstra.fromhook"], true)).code).toBe(1);
-      expect((await git.run(["config", "--get", "loopstra.counted"], true)).code).toBe(1);
+      expect((await git.run(["config", "--get", "loopstra.counted"], true)).out.trim()).toBe("yes");
       await Bun.write(join(repo.path, "a.md"), "a");
       expect(await git.commitAll("a")).toBe(true);
       expect((await git.run(["log", "-1", "--format=%ad|%cd", "--date=format:%Y"])).out.trim()).not.toContain("2001");
@@ -772,6 +774,21 @@ describe("worktree administration", () => {
       resetStop();
       expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)?.length).toBe(1);
     } finally { repo.cleanup(); }
+  });
+
+  test("a stop is what a removal throws even when the folder cannot be deleted, and git's record is still unlocked", async () => {
+    const repo = await tempGitRepo();
+    // A folder Windows will not let go of (EBUSY): the file system's fallback is refused.
+    const refused = spyOn(fs, "rmSync").mockImplementation(() => { throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }); });
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "verify", "x");
+      await git.run(["worktree", "add", "--detach", dir, "main"]);
+      await git.run(["worktree", "lock", "--reason", "initializing", dir]);
+      requestStop();
+      await expect(removeWorktree(git, dir)).rejects.toBeInstanceOf(StopRequested);
+      expect(existsSync(join(repo.path, ".git", "worktrees", "x", "locked"))).toBe(false);
+    } finally { refused.mockRestore(); repo.cleanup(); }
   });
 
   test.if(process.platform === "win32")("a teardown Windows refuses never hides the work's result (Windows)", async () => {
