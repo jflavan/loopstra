@@ -40,7 +40,7 @@ export function fromPage(req: Request, url: URL): boolean {
 }
 
 /** True when a content type's MIME essence (before any parameters) is JSON. */
-export function isJson(ct: string | null): boolean {
+function isJson(ct: string | null): boolean {
   return ((ct ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
 }
 

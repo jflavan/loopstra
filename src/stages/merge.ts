@@ -26,7 +26,7 @@ const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status 
 const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
 const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
-export const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";
+const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
@@ -34,12 +34,12 @@ export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set t
  * from it, "no checks reported" still means "not registered yet", when the branch has GitHub Actions
  * workflows. After that, a pull request with no checks merges.
  */
-export const CHECKS_GRACE_MS = 5 * 60_000;
+const CHECKS_GRACE_MS = 5 * 60_000;
 /**
  * Run-folder marker: when Loopstra last pushed the branch for its pull request, or took commits a
  * person pushed to it (an ISO time).
  */
-export const PR_PUSHED = "pr-pushed";
+const PR_PUSHED = "pr-pushed";
 
 /** Run-folder marker: cleanup left the branch because main does not have its changes (traced once). */
 const BRANCH_KEPT = "branch-kept";

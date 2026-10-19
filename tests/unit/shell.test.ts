@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { errorText, runCommand, spawnBounded, withBunOnPath, within, type StdinWriter } from "../../src/shell";
+import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitLocation, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
@@ -219,5 +219,25 @@ describe("errorText", () => {
     expect(errorText("plain")).toBe("plain");
     expect(errorText(null)).not.toContain("[object");
     expect(errorText({ code: "ENOENT" })).not.toBe("[object Object]");
+  });
+});
+
+describe("a project command's environment", () => {
+  test("a hook's repository variables (GIT_DIR, GIT_INDEX_FILE) do not reach the command", async () => {
+    const t = tempDir();
+    const had = { GIT_DIR: process.env.GIT_DIR, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE };
+    process.env.GIT_DIR = join(t.path, "elsewhere", ".git");
+    process.env.GIT_INDEX_FILE = join(t.path, "elsewhere", "index");
+    try {
+      const script = "console.log(JSON.stringify([process.env.GIT_DIR ?? null, process.env.GIT_INDEX_FILE ?? null, typeof process.env.PATH]))";
+      const r = await runCommand(`bun -e "${script.replace(/"/g, '\\"')}"`, t.path);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.output.trim())).toEqual([null, null, "string"]);
+      const env: Record<string, string | undefined> = { GIT_DIR: "x", GIT_WORK_TREE: "y", HOME: "h" };
+      expect(withoutGitLocation(env)).toEqual({ HOME: "h" });
+    } finally {
+      for (const [k, v] of Object.entries(had)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      t.cleanup();
+    }
   });
 });

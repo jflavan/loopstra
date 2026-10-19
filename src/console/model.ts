@@ -126,7 +126,7 @@ function pendingView(r: Request): PendingRequest[] {
 }
 
 /** What phases cost; a running one's budget hold is not spending. */
-export function endedCost(phases: PhaseRow[]): number {
+function endedCost(phases: PhaseRow[]): number {
   return phases.reduce((n, p) => n + (p.status === "running" ? 0 : p.cost_usd ?? 0), 0);
 }
 

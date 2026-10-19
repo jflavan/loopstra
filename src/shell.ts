@@ -2,7 +2,7 @@ import { delimiter, dirname } from "node:path";
 import { Cancelled, onStop, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 
 /** The longest delay a timer can hold (2^31-1 ms, about 24.8 days); setTimeout fires a longer one after 1 ms. */
-export const MAX_TIMER_MS = 2 ** 31 - 1;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** `ms` as a timer can hold it: a longer wait (a huge configured timeout) is the longest a timer can, not 1 ms. */
 export function timerMs(ms: number): number {
@@ -14,6 +14,26 @@ export async function within<T, F>(p: Promise<T>, ms: number, fallback: F): Prom
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<F>((resolve) => { timer = setTimeout(() => resolve(fallback), timerMs(ms)); });
   try { return await Promise.race([p, late]); } finally { clearTimeout(timer); }
+}
+
+/**
+ * The environment variables with which git names a repository's location instead of looking one up
+ * from the directory it runs in. A git hook or alias exports them to what it starts (GIT_DIR,
+ * GIT_INDEX_FILE, ...), and Loopstra started from one would then run every one of its git calls,
+ * whatever the checkout given, on that hook's repository. They are dropped from every git call's
+ * environment (see gitEnv in src/git.ts), from every project command's (runCommand) and from every
+ * session's (src/claude.ts), since those run git of their own in a worktree.
+ */
+export const GIT_LOCATION_VARS: readonly string[] = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE",
+];
+
+/** A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS). */
+export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
+  const out = { ...env };
+  for (const name of GIT_LOCATION_VARS) delete out[name];
+  return out;
 }
 
 /** An error's message, or the thrown value as text: a plain object as JSON, never "[object Object]". */
@@ -145,7 +165,7 @@ export interface StdinWriter {
   end(): void;
 }
 
-export interface SpawnOptions {
+interface SpawnOptions {
   cmd: string[];
   cwd: string;
   /** The child's whole environment. Defaults to this process's. */
@@ -174,7 +194,7 @@ export interface SpawnOptions {
   signal?: AbortSignal;
 }
 
-export interface SpawnResult {
+interface SpawnResult {
   /** The exit code; null when the process could not be made to exit. 127 when it could not start. */
   code: number | null;
   out: string;
@@ -314,7 +334,7 @@ export interface CommandResult {
   timedOut: boolean;
 }
 
-export interface RunCommandOptions {
+interface RunCommandOptions {
   env?: Record<string, string>;
   /** Kill the command (and anything it started) after this long. Callers pass `claude.timeout_minutes`. */
   timeoutMs?: number;
@@ -324,7 +344,7 @@ export interface RunCommandOptions {
 
 /** Used only when a caller passes no timeout; matches the config default of 30 minutes. */
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
-export const COMMAND_TIMEOUT_NOTE = "A project command did not finish in time.";
+const COMMAND_TIMEOUT_NOTE = "A project command did not finish in time.";
 
 /** The timeout callers pass: the per-phase limit from config. */
 export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): number {
@@ -340,7 +360,7 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath({ ...process.env, ...opts.env }), timeoutMs, onStop: "kill", signal: opts.signal });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitLocation({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
   if (r.stopped) throw new StopRequested();
   if (r.cancelled) throw new Cancelled();
   if (!r.started) throw new Error(r.err);

@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
-import { lastLine, spawnBounded } from "./shell";
+import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
 import { endsStepQuietly, notTheStepsFault, StopRequested } from "./stop";
 
 /** How long one git call may take before it is stopped (a Git constructor option overrides it). */
-export const GIT_TIMEOUT_MS = 5 * 60_000;
+const GIT_TIMEOUT_MS = 5 * 60_000;
 
 /** After a stop request, a running git call gets this long to finish on its own before it is killed (a Git constructor option overrides it). */
 const STOP_GRACE_MS = 2_000;
@@ -103,27 +103,7 @@ function subcommand(args: string[]): string {
   return args[i] ?? "";
 }
 
-export type GitResult = { code: number; out: string; err: string };
-
-/**
- * The environment variables with which git names a repository's location instead of looking one up
- * from the directory it runs in. A git hook or alias exports them to what it starts (GIT_DIR,
- * GIT_INDEX_FILE, ...), and Loopstra started from one would then run every one of its git calls,
- * whatever the checkout given, on that hook's repository. They are dropped from every git call's
- * environment (see gitEnv); the environment handed to project commands and sessions should drop
- * them too (see withoutGitLocation), since those run git of their own in a worktree.
- */
-export const GIT_LOCATION_VARS: readonly string[] = [
-  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE",
-];
-
-/** A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS). */
-export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
-  const out = { ...env };
-  for (const name of GIT_LOCATION_VARS) delete out[name];
-  return out;
-}
+type GitResult = { code: number; out: string; err: string };
 
 /** Whether a repository has its own ssh command configured (then GIT_SSH_COMMAND must not override it). */
 const sshConfigured = new Map<string, boolean>();

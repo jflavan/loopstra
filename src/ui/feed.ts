@@ -1,7 +1,7 @@
 import type { ActivityItem } from "../console/types";
 
 /** Which rows the Activity screen shows: one change's (or everything's), and only rows in plain words unless `technical`. */
-export interface FeedFilter { slug: string; technical: boolean }
+interface FeedFilter { slug: string; technical: boolean }
 
 /** Whether a row fits the filter: the live stream's rows and a page read again both go in by this rule. */
 export const fitsFeed = (a: ActivityItem, f: FeedFilter): boolean => (!f.slug || a.slug === f.slug) && (f.technical || a.text !== null);

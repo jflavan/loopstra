@@ -137,7 +137,7 @@ async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
 }
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
-export const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
+const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
 
 /** What fix is told about a failed project command: which one, and the end of its output. */
 function failureOutput(f: CommandResult): string {
@@ -220,7 +220,7 @@ async function removeNewFiles(ctx: StepContext, wt: Git): Promise<void> {
  * `speed.parallel_checks` all at once. Returns the first failure in that order, or null when all
  * pass. The phase is recorded as failed when a command fails.
  */
-export async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
+async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
   const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
   let failed = null as CommandResult | null;
   const r = await codePhase(ctx, phaseName, async (seq) => {

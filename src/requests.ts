@@ -20,7 +20,7 @@ import { touchWake } from "./wake";
 export const CONSOLE = "console";
 
 /** The longest answer a request may carry. */
-export const MAX_ANSWER = 4000;
+const MAX_ANSWER = 4000;
 
 /**
  * What every request carries. `via`: where the person was, in words ("the dashboard", "Slack"), for
@@ -56,7 +56,7 @@ const status = z.enum(STATUSES);
  * `expect` is the status the person saw. A retry's is blocked in every request the console or chat
  * writes; a file can say any status, which the applier refuses in words rather than as unreadable.
  */
-export const RequestSchema = z.discriminatedUnion("kind", [
+const RequestSchema = z.discriminatedUnion("kind", [
   base.extend({ kind: z.literal("accept"), slug }),
   base.extend({ kind: z.literal("new"), title: z.string(), intents: z.array(z.object({ slug: z.string(), text: z.string(), update: z.boolean() })) }),
   base.extend({ kind: z.literal("approve"), slug, expect: status }),
@@ -116,7 +116,7 @@ export function submitRequest(root: string, req: Submission): Request {
  * pass finishes it with a plain result (see src/apply.ts), as it would any request, rather than try
  * it, or leave the page that asked waiting. `slug`: the change it names, when that is a change name.
  */
-export interface Unreadable { id: string; kind: string; slug: string | null; transport: string; thread: string; problem: string }
+interface Unreadable { id: string; kind: string; slug: string | null; transport: string; thread: string; problem: string }
 
 /** What makes a request file someone's (see Unreadable). Anything less is not a request (see setAside). */
 const RequestFile = z.object({ id: z.string().regex(ID), transport: z.string(), thread: z.string() }).loose();

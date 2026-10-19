@@ -4,7 +4,7 @@ import type { OnMessage } from "../service";
 import { andList } from "../../text";
 
 /** Who may chat with a bot (empty: anyone in its channel), and who may also start drafts. */
-export interface Access { allow: string[]; acceptors: string[] }
+interface Access { allow: string[]; acceptors: string[] }
 
 /**
  * A bot's `allow` and `acceptors`, read from the config for each message, so a change counts from the
@@ -62,13 +62,13 @@ export async function chunked(text: string, max: number, post: (part: string) =>
 }
 
 /** "a, b and c" for the people who may start drafts, or who to ask when there are none. */
-export function mentionList(people: string[], setting: string): string {
+function mentionList(people: string[], setting: string): string {
   if (!people.length) return `nobody here yet (an engineer can add people to ${setting})`;
   return andList(people);
 }
 
 /** A JSON object as a response body gave it. */
-export type JsonObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 
 function isObject(v: unknown): v is JsonObject {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -103,7 +103,7 @@ export async function fetchJson(url: string, init: RequestInit, retryAfter: (res
 }
 
 /** How long a websocket gets to open before it is given up on (and tried again, see Reconnector). */
-export const OPEN_TIMEOUT_MS = 20_000;
+const OPEN_TIMEOUT_MS = 20_000;
 
 /**
  * A websocket to `url`, once it is open. A handshake that fails, is closed, or takes longer than

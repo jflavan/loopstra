@@ -33,7 +33,7 @@ export interface Heartbeat {
   pauseReason?: string | null;
 }
 
-export type LoopState = "running" | "paused" | "stopped" | "not-responding";
+type LoopState = "running" | "paused" | "stopped" | "not-responding";
 
 export interface LoopStatus {
   state: LoopState;
@@ -51,7 +51,7 @@ function workingOf(hb: Heartbeat): Array<{ slug: string }> {
 
 
 /** How often a live loop refreshes `lastBeatAt`. */
-export const BEAT_MS = 5_000;
+const BEAT_MS = 5_000;
 
 export function heartbeatPath(root: string): string {
   return join(root, ".loopstra", "heartbeat.json");
@@ -298,7 +298,7 @@ export function dropLoopLock(root: string): void {
  * The loop's pause after the assistant was unavailable, `.loopstra/paused.json`. It is on disk, not
  * in the process, so a restart keeps backing off. `failures` counts unavailable sessions in a row.
  */
-export interface Pause {
+interface Pause {
   until: string;
   /** Plain words for the owner, with the time of the next try. */
   reason: string;
@@ -316,7 +316,7 @@ export interface Pause {
 }
 
 /** What made the loop pause: the change, its phase, the line that matched, and the model it asked. */
-export interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
+interface PauseCause { slug: string; phase: string; line: string; model?: string | null }
 
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
@@ -419,7 +419,7 @@ export function loopHoldText(h: LoopHold): string {
 }
 
 /** "14:32", local time. */
-export function clockText(d: Date): string {
+function clockText(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
@@ -447,7 +447,7 @@ export function clearPause(root: string, slug?: string, now: Date = new Date(), 
 }
 
 /** The tick waits for the loop's daily budget: why, and until when the loop line says so. */
-export interface DayPause { until: string; reason: string }
+interface DayPause { until: string; reason: string }
 
 export interface LoopBeat {
   tickStarted(): void;

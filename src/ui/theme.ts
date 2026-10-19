@@ -1,6 +1,6 @@
 import { signal } from "@preact/signals";
 
-export type Theme = "system" | "light" | "dark";
+type Theme = "system" | "light" | "dark";
 const KEY = "loopstra-theme";
 
 function read(): Theme {

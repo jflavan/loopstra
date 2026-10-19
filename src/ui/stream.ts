@@ -7,7 +7,7 @@
 /** How long a stream may be silent (pings included) before the page says it is reconnecting and opens a new one. */
 export const STALE_MS = 20_000;
 
-export interface Handlers {
+interface Handlers {
   /** One message's data, as the server sent it (JSON), and the id its frame came with (0 when none): a session stream's resume offset. */
   message(data: string, id: number): void;
   /** The stream said something, so it is alive. */

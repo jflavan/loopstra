@@ -1,7 +1,7 @@
 import { costSoFar } from "./format";
 
 /** What is known of one session: from its stream, from the trace once it is over, and the clock. */
-export interface SessionKnown {
+interface SessionKnown {
   /** When it started (ISO). */
   started: string;
   /** When it ended (ISO), as its stream said; null while it runs, or when the stream never said. */
@@ -20,7 +20,7 @@ export interface SessionKnown {
 }
 
 /** The facts a session's card, tile and page show: how long, what it cost (an estimate while it runs), and how it stands. */
-export interface SessionFacts {
+interface SessionFacts {
   elapsedMs: number;
   /** Null when there is nothing to say: no rate while it runs, nothing recorded once over. */
   cost: number | null;

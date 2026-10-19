@@ -4,7 +4,7 @@ import { ConfigError, configPath, validateConfig, type Config } from "../config"
 import { writeFileAtomic } from "../fsutil";
 
 /** Where a value is in the config, like ["claude", "max_budget_usd"]. */
-export type Path = readonly (string | number)[];
+type Path = readonly (string | number)[];
 
 /** Comment texts joined into one, skipping the empty ones; undefined when there are none. */
 function joined(...comments: (string | null | undefined)[]): string | undefined {

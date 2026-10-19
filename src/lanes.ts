@@ -31,7 +31,7 @@ const ORDER = { merge: 0, sync: 1, checkout: 2, remote: 3 } as const;
 type Kind = keyof typeof ORDER;
 
 /** A first-come, first-served lock, re-entrant within one async context. */
-export interface Lock {
+interface Lock {
   readonly name: string;
   /** Runs `fn` once every earlier caller is done (at once when this context holds the lock already). `who` is recorded as the holder. */
   run<T>(fn: () => Promise<T>, who?: string): Promise<T>;

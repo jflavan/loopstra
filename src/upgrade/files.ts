@@ -22,7 +22,7 @@ export interface FileResult {
 }
 
 /** Gets the shipped text whose textSha is `sha`, or null. */
-export type BaseFor = (sha: string) => Promise<string | null>;
+type BaseFor = (sha: string) => Promise<string | null>;
 
 /** How long one merge may take before it is stopped. */
 const MERGE_TIMEOUT_MS = 60_000;

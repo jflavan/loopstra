@@ -5,7 +5,7 @@ import { z } from "zod";
 import { errorText } from "./shell";
 
 /** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
-export interface ConfigProblem {
+interface ConfigProblem {
   path: string[];
   text: string;
   /** A key the schema does not know, at `path`: only removing it fixes it. */

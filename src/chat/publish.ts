@@ -19,7 +19,7 @@ export type HandoffOutcome =
   /** `pushed`: a branch that went up although its pull request could not be opened. */
   | { kind: "failed"; problem: string; pushed?: string; budget?: "today" | "held" };
 
-export interface HandoffInput {
+interface HandoffInput {
   root: string; cfg: Config; trace: Trace; handoff: Handoff;
   /** Who agreed it, by name and by platform id, and where. */
   author: string; authorId: string; transport: string; thread: string; via: string;
@@ -37,7 +37,7 @@ async function freeBranch(git: Git, remote: string, slug: string): Promise<strin
   throw new Error(`every intent-proposal/${slug} branch name is taken`);
 }
 
-export function prBody(h: Handoff, intents: WrittenIntent[], summary: string, author: string, via: string): string {
+function prBody(h: Handoff, intents: WrittenIntent[], summary: string, author: string, via: string): string {
   return [
     summary.trim(),
     "",

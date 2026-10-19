@@ -14,7 +14,7 @@ function sizeOf(path: string): number {
 }
 
 /** What a follower is told: one message, with an item's resume offset; false once whoever reads it is gone (it then stops). */
-export type Emit = (msg: SessionMessage, offset?: number) => boolean;
+type Emit = (msg: SessionMessage, offset?: number) => boolean;
 
 /**
  * Streams one phase's transcript to a page (see followSession), each item with its offset as the

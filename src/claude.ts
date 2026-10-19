@@ -1,5 +1,5 @@
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
-import { lastLine, spawnBounded, withBunOnPath, type StdinWriter } from "./shell";
+import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitLocation } from "./shell";
 import { Cancelled, SessionStopped, StopRequested } from "./stop";
 import { MEANWHILE_HEADING } from "./console/steerable";
 
@@ -10,7 +10,7 @@ export interface StreamEvent {
   [key: string]: unknown;
 }
 
-export interface Collected {
+interface Collected {
   sessionId: string | null;
   subtype: string;
   structuredOutput: unknown;
@@ -39,7 +39,7 @@ function deniedText(d: { tool_name?: string; tool_input?: Record<string, unknown
  * A result event that answers a background task's notification, not the prompt. A resumed session
  * with a task still pending delivers the notification first and answers it with a turn of its own.
  */
-export function answersNotification(e: StreamEvent): boolean {
+function answersNotification(e: StreamEvent): boolean {
   return e.type === "result" && (e as { origin?: { kind?: unknown } }).origin?.kind === "task-notification";
 }
 
@@ -199,7 +199,7 @@ export interface SessionControl {
 }
 
 /** A user message as one stream-json input line. */
-export function userLine(text: string): string {
+function userLine(text: string): string {
   return `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
 }
 
@@ -309,7 +309,7 @@ const NOTIFICATION_RESENDS = 2;
  * Sent once, on the same session, when a session finishes without structured output (for example
  * it wrote its report as text). Cheaper than a new session, which would redo the whole phase.
  */
-export const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the StructuredOutput tool (a tool call, not text) with the result you reached; do not redo the work.";
+const ENVELOPE_NUDGE = "You finished without returning your result. Return it now by calling the StructuredOutput tool (a tool call, not text) with the result you reached; do not redo the work.";
 
 export function resolveClaude(override?: string): string | null {
   if (override) return override;
@@ -379,7 +379,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   const cmd = exe.endsWith(".ts") ? [process.execPath, exe, ...args] : [exe, ...args];
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
-  const env = withBunOnPath({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env });
+  const env = withBunOnPath(withoutGitLocation({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env }));
 
   // A session that ended having answered only notifications (one started before background tasks
   // were turned off) gets the prompt again on the same session, within the same deadline. A session

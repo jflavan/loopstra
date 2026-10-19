@@ -2,7 +2,7 @@ import { frame, PING, type Hub, type Send } from "./hub";
 import { followSession } from "./session";
 import { agentKey, type AgentMessage } from "./types";
 
-export interface AgentsOptions {
+interface AgentsOptions {
   /** How often it reads the running sessions, and each follower reads its file (ms). */
   intervalMs?: number;
   /** How often it pings while nothing else is sent, so the page can tell a quiet stream from a dead one (ms). */

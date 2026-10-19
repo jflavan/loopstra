@@ -110,7 +110,7 @@ export function testedMarker(ctx: StepContext, sha: string): string {
 }
 
 /** The commit the current test commands last passed on, or null. */
-export function lastTested(ctx: StepContext): string | null {
+function lastTested(ctx: StepContext): string | null {
   const marker = readMarker(ctx, TESTED);
   const sha = marker?.split("\n")[0];
   return sha && marker === testedMarker(ctx, sha) ? sha : null;
@@ -154,8 +154,8 @@ export async function codeDiffers(git: Git, a: string, b: string): Promise<boole
   return (await git.run(["diff", "--quiet", "--no-ext-diff", "--no-textconv", a, b, "--", ".", ...NOT_CODE], true)).code !== 0;
 }
 
-export const TESTS_PASSED = "The test command passed after the latest change.";
-export const TESTS_NOT_RUN = "The tests have not run on the latest change yet; the runtime runs them before merging.";
+const TESTS_PASSED = "The test command passed after the latest change.";
+const TESTS_NOT_RUN = "The tests have not run on the latest change yet; the runtime runs them before merging.";
 
 /**
  * `{{test_result}}` for a judge: what the runtime's own test run says about the code it is judging.

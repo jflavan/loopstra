@@ -13,7 +13,7 @@ export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
 }
 
-export interface IntentSummary {
+interface IntentSummary {
   slug: string; status: string; priority: string; updated: string;
   costUsd: number; lastPhase: string | null; lastPhaseStatus: string | null; lastActivity: string | null;
 }
@@ -188,7 +188,7 @@ function damaged(e: unknown): boolean {
 }
 
 /** Whose phases a budget counts: one slug's, or every slug's but one (the loop's day leaves chat out). */
-export type BudgetPool = { slug: string } | { except: string };
+type BudgetPool = { slug: string } | { except: string };
 
 export class Trace {
   private constructor(private readonly root: string, private readonly db: Database) {}

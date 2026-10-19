@@ -34,7 +34,7 @@ export interface SetupOptions {
  * ("stages.build.model" under "stages.*.model"), or holds one (`gates: none` holds "gates.spec", and
  * writing that makes `gates` a map). A problem with the whole file (an empty path) is never covered.
  */
-export function coveredBy(path: readonly string[], covers: readonly string[]): boolean {
+function coveredBy(path: readonly string[], covers: readonly string[]): boolean {
   if (!path.length) return false;
   return covers.some((cover) => {
     const parts = cover.split(".");

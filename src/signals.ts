@@ -9,7 +9,7 @@ import { StopRequested } from "./stop";
 import { andList } from "./text";
 import type { Trace } from "./trace";
 
-export type HealthResult = "pass" | "fail" | "error";
+type HealthResult = "pass" | "fail" | "error";
 
 const SIGNAL = "main_health";
 

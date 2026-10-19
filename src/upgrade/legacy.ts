@@ -7,7 +7,7 @@ import { isPromptOverride, managedFiles, textSha, type Stamp } from "../stamp";
 /** The hook file init used to write into a repository. */
 export const OLD_HOOK_FILE = ".claude/hooks/loopstra-protect-tests.ts";
 /** The text that marks the old hook's entry in .claude/settings.json. */
-export const OLD_HOOK_MARK = "loopstra-protect-tests";
+const OLD_HOOK_MARK = "loopstra-protect-tests";
 
 const SETTINGS = ".claude/settings.json";
 

@@ -106,7 +106,7 @@ const ENTRY_KINDS = ["message", "redirect", "question", "answer", "later", "sent
 const RecordedSchema = z.record(z.string(), z.enum(ENTRY_KINDS));
 
 /** An inbox message as its record is looked for: who sent it, from where, and its words. */
-export interface Recorded { who: string; via: string; text: string }
+interface Recorded { who: string; via: string; text: string }
 
 /**
  * True when the record holds the inbox message's entry: one by the same person from the same place

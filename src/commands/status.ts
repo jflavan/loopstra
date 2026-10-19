@@ -65,7 +65,7 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
 }
 
 /** Splits text into lines of at most `width` characters at spaces; a longer word is cut. */
-export function wrap(text: string, width: number): string[] {
+function wrap(text: string, width: number): string[] {
   const out: string[] = [];
   let lineText = "";
   for (const word of text.split(/\s+/).filter(Boolean)) {

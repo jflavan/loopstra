@@ -36,7 +36,7 @@ const AskedSchema = z.object({
 export type Asked = z.infer<typeof AskedSchema>;
 
 /** A question with its answer: what the asking session is resumed with. */
-export type Answered = Asked & { answer: z.infer<typeof AnswerSchema> };
+type Answered = Asked & { answer: z.infer<typeof AnswerSchema> };
 
 /**
  * question.json's shape. `status` and `since`: the change's stay at a status the question and the count
@@ -46,7 +46,7 @@ export type Answered = Asked & { answer: z.infer<typeof AnswerSchema> };
  * status, which only rewrites the note (a spec written again), does not start a stay.
  */
 const QuestionStateSchema = z.object({ status: z.enum(STATUSES), since: z.number().optional(), count: z.number(), open: AskedSchema.nullable() });
-export type QuestionState = z.infer<typeof QuestionStateSchema>;
+type QuestionState = z.infer<typeof QuestionStateSchema>;
 
 /** A question as an envelope carries it. */
 export interface Question { text: string; why: string; options: string[] }
@@ -75,7 +75,7 @@ export function readQuestion(root: string, slug: string): QuestionState | null {
  * The change's present stay at its status: the status, and the id of the trace's newest status change
  * to another status (0: none). One to the same status only rewrote the note, so it does not count.
  */
-export function stayAt(ctx: StepContext): { status: Status; since: number } {
+function stayAt(ctx: StepContext): { status: Status; since: number } {
   return { status: ctx.intent.file.frontmatter.status, since: ctx.trace.lastStatusMove(ctx.slug) };
 }
 

@@ -14,14 +14,14 @@ export function chatDir(root: string): string {
 }
 
 /** A proposal waiting for a person's yes. */
-export type Pending =
+type Pending =
   | { kind: "handoff"; handoff: Handoff; by: string; at: string }
   | { kind: "accept"; slug: string; by: string; at: string }
   /** An action on a change, as it will be submitted; `ask` is the question the person was asked. */
   | { kind: "action"; request: RequestBody & RequestShape; ask: string; by: string; at: string };
 
 /** One hand-off made from a thread, and what became of it. */
-export interface HandoffRecord {
+interface HandoffRecord {
   title: string;
   slugs: string[];
   at: string;
@@ -32,7 +32,7 @@ export interface HandoffRecord {
   local: boolean;
 }
 
-export interface ChatMessage {
+interface ChatMessage {
   id: number;
   from: "person" | "loopstra";
   author?: string;

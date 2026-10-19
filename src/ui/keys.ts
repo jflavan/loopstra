@@ -56,7 +56,7 @@ export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: b
 }
 
 /** What a key press does: one of the page's actions, the screen's own handler for that key, or nothing. */
-export type Decision = { kind: "action"; action: string } | { kind: "screen" } | { kind: "nothing" };
+type Decision = { kind: "action"; action: string } | { kind: "screen" } | { kind: "nothing" };
 
 const NOTHING: Decision = { kind: "nothing" };
 
@@ -75,7 +75,7 @@ export function decide(name: string | null, press: (name: string) => string | nu
 }
 
 /** Something that can take the keyboard's focus: a button, or a box with tabIndex -1. */
-export interface Focusable { focus(): void; disabled?: boolean }
+interface Focusable { focus(): void; disabled?: boolean }
 
 /**
  * Gives the focus to `first` when it is there and can take it (not disabled), else to `fallback`: after

@@ -80,7 +80,7 @@ export const Envelopes = {
 export type PhaseName = keyof typeof Envelopes;
 export type Envelope<N extends PhaseName> = z.infer<(typeof Envelopes)[N]>;
 
-export interface JsonSchemaObject {
+interface JsonSchemaObject {
   type: "object";
   properties: Record<string, unknown>;
   required: string[];

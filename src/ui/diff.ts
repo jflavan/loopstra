@@ -1,4 +1,4 @@
-export type DiffRow = { kind: "file" | "hunk" | "add" | "del" | "ctx" | "meta"; text: string };
+type DiffRow = { kind: "file" | "hunk" | "add" | "del" | "ctx" | "meta"; text: string };
 
 /**
  * Unified diff text as rows: git's (`diff --git`, its header, hunks) or an edit's from a transcript

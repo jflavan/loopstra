@@ -2,7 +2,7 @@ import { lastLine, spawnBounded } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
-export const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
+const GH_ENV = "LOOPSTRA_GH_EXECUTABLE";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 
 /** Whether GitHub answered the pull request watcher's last look: `fail` with gh's error, or `pass`. */
@@ -43,7 +43,7 @@ export function recordGitHub(trace: Trace, error: string | null): void {
  */
 export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null; draft: boolean }
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
-export type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
+type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
 /**
  * Check states that fail or are still running. A failed state wins over gh's `bucket`, which puts

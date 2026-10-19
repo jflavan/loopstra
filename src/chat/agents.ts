@@ -11,11 +11,11 @@ import type { Trace } from "../trace";
 
 export { CHAT_SLUG, MIN_SESSION_USD, startOfToday };
 
-export type ChatPhase = "orchestrator" | "write-intent";
+type ChatPhase = "orchestrator" | "write-intent";
 
 /** Every variable a chat prompt template may use. A variable with no value renders as `(none)`. */
 export const CHAT_PROMPT_VARS = ["main_branch", "brief", "existing", "template", "updates", "problems"] as const;
-export type ChatPromptVars = Partial<Record<(typeof CHAT_PROMPT_VARS)[number], string>>;
+type ChatPromptVars = Partial<Record<(typeof CHAT_PROMPT_VARS)[number], string>>;
 
 /** The prompt template for a chat phase: the repository's override, else the one shipped with Loopstra. */
 export async function chatTemplate(root: string, name: ChatPhase): Promise<string> {
@@ -38,7 +38,7 @@ export function renderChatPrompt(template: string, vars: ChatPromptVars): string
  * present, around the Read rules below; the runtime puts recent history in the context instead. Claude
  * Code allows read-only git by itself, so CHAT_DENIED also denies it.
  */
-export const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
+const CHAT_TOOLS = ["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"];
 /** Files that hold secrets wherever they are: denied by their relative glob and by the absolute one (`//` is the file system's root). */
 const SECRET_FILES = [".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", ".git/**"];
 /** Places in the home folder that hold secrets or sign-ins (shell rc files and the profile export them; ~/.claude.json holds Claude Code's own). */
@@ -78,13 +78,13 @@ export function secretEnvNames(cfg: Config, env: Record<string, string | undefin
   return [...new Set([...named, ...looksSecret])];
 }
 
-export type ChatAgentResult<T> =
+type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
   | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number;
       /** Why no session started: the day's budget is spent ("today"), or what is left is held by sessions still running ("held"). */
       budgetUsedUp?: "today" | "held" };
 
-export interface ChatAgentInput<T> {
+interface ChatAgentInput<T> {
   root: string;
   cfg: Config;
   trace: Trace;

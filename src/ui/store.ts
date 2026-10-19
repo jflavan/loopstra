@@ -27,7 +27,7 @@ export function applyMessage(s: State, msg: StreamMessage): State {
   }
 }
 
-export const state = signal<State>({ meta: null, sections: {}, activity: [], gaps: 0 });
+const state = signal<State>({ meta: null, sections: {}, activity: [], gaps: 0 });
 export const meta = computed(() => state.value.meta);
 export const loop = computed(() => state.value.sections.loop ?? null);
 export const inbox = computed(() => state.value.sections.inbox ?? null);
@@ -39,7 +39,7 @@ export const requests = computed(() => state.value.sections.requests ?? null);
 export const activity = computed(() => state.value.activity);
 export const gaps = computed(() => state.value.gaps);
 
-export type Connection = "connecting" | "live" | "stale";
+type Connection = "connecting" | "live" | "stale";
 export const connection = signal<Connection>("connecting");
 /** The time, refreshed every second, for clocks and ages. */
 export const now = signal(Date.now());

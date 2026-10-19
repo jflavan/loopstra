@@ -292,7 +292,7 @@ function saysWhatToSet(note: string): boolean {
  * the approved status the change is resumed from. Null when the note already says what to set, or
  * there is no approved status to go back to.
  */
-export function retryTarget(ctx: StepContext, note: string, retryFrom?: Status): Status | null {
+function retryTarget(ctx: StepContext, note: string, retryFrom?: Status): Status | null {
   if (saysWhatToSet(note)) return null;
   const from = ctx.intent.file.frontmatter.status;
   return retryFrom ?? (APPROVED.has(from) ? from : ctx.intent.file.frontmatter.resume_from) ?? null;

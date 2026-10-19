@@ -56,14 +56,14 @@ export function effectivePriority(fm: { priority?: Priority }): Priority {
   return fm.priority ?? "normal";
 }
 
-export interface IntentFile {
+interface IntentFile {
   frontmatter: Frontmatter;
   title: string;
   body: string;
   sections: Record<string, string>;
 }
 
-export const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
+const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
 
 /** The frontmatter block: `---` alone on the first line, the lines, and `---` starting a line (the file may end there). */
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
@@ -155,7 +155,7 @@ export async function readIntent(root: string, slug: string): Promise<Intent> {
 }
 
 /** An intent folder whose intent.md could not be read, or a Markdown file loose in intent/. `problem` is plain; `detail` is for the trace. */
-export interface Unreadable { slug: string; problem: string; detail: string }
+interface Unreadable { slug: string; problem: string; detail: string }
 
 export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 
@@ -545,7 +545,7 @@ export function hasQuestion(intent: Intent): boolean {
  * "Has a question: <text>." for a change whose question waits, or "". `text`: the question, from
  * question.json; without it the note sends a person to conversation.md.
  */
-export function questionNote(intent: Intent, text?: string): string {
+function questionNote(intent: Intent, text?: string): string {
   if (!hasQuestion(intent)) return "";
   const q = text?.replace(/\s+/g, " ").trim();
   return q ? `Has a question: ${/[.!?]$/.test(q) ? q : `${q}.`}` : "Has a question. Read conversation.md.";

@@ -10,7 +10,7 @@ const SLACK_MAX = 3500;
  * again. Slack sends frames of its own now and then (a disconnect notice before it refreshes the
  * link), so a healthy quiet connection is opened again at most this often, which costs nothing.
  */
-export const SLACK_QUIET_MS = 10 * 60_000;
+const SLACK_QUIET_MS = 10 * 60_000;
 
 /**
  * Text as Slack shows it, without pinging anyone: replies carry the agent's words, which a person in
@@ -26,7 +26,7 @@ export function noBroadcast(text: string, keep: readonly string[] = []): string 
 const TOKEN_REFUSED = new Set(["invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"]);
 
 /** A Web API method Slack answered with ok: false, and its error code. */
-export class SlackApiError extends Error {
+class SlackApiError extends Error {
   constructor(method: string, readonly code: string) { super(`Slack ${method} failed: ${code}`); }
 }
 

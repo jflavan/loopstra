@@ -11,10 +11,10 @@ import { dismiss, toast } from "./store";
  * What the page posts to /api/requests. A `priority` of null takes the priority line out (an undo to no
  * stated priority). `text`: an answer's words; `question`: when the question it answers was asked.
  */
-export interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string; text?: string; question?: string }
+interface ActionBody { kind: string; slug: string; expect?: string; to?: string; note?: string; priority?: string | null; reason?: string; text?: string; question?: string }
 
 /** What the change was before an action, so an undo can put it back. `priority`: the priority line as written, or null when there was none. */
-export interface Before { note: string; priority: string | null }
+interface Before { note: string; priority: string | null }
 
 /** A change's Before as the page shows it: its stated priority, not the one it reads as (normal when none is stated). */
 export function beforeOf(c: ChangeSummary): Before {
@@ -63,7 +63,7 @@ export function nextPoll(asked: number): number | null {
 }
 
 /** The loop's answer to a request. \`status\`: the change's status after it (null when there is no change). */
-export interface Done { state: "done"; ok: boolean; text: string; status: string | null }
+interface Done { state: "done"; ok: boolean; text: string; status: string | null }
 
 /** Posts JSON to the console; gives the reply, or the plain words of why it failed. */
 async function post(url: string, body: unknown): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
@@ -78,7 +78,7 @@ async function post(url: string, body: unknown): Promise<{ ok: true; data: Recor
 }
 
 /** Takes a request back while the loop has not claimed it; true when it was (nothing changed). */
-export async function cancel(id: string): Promise<boolean> {
+async function cancel(id: string): Promise<boolean> {
   try {
     return (await fetch(`/api/requests/${encodeURIComponent(id)}`, { method: "DELETE" })).ok;
   } catch {
@@ -90,7 +90,7 @@ export async function cancel(id: string): Promise<boolean> {
  * Asks for a request's result until it is done (see nextPoll); gives back a stopper. A request the
  * console no longer knows (cancelled, or its result read already) ends quietly.
  */
-export function follow(id: string, onDone: (d: Done) => void): () => void {
+function follow(id: string, onDone: (d: Done) => void): () => void {
   let asked = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;

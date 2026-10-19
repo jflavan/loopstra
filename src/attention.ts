@@ -22,7 +22,7 @@ export interface AttentionItem {
   key?: string;
 }
 
-export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
+const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
   paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings",
   blocked: "Blocked", held: "Held", question: "Has a question", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
@@ -31,7 +31,7 @@ export const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
  * What the tests on main say, in plain words: the newest check, and whether main is red. `state` is
  * the same words without the time.
  */
-export function healthView(trace: Trace, now: Date): { result: string; ts: string; text: string; state: "pass" | "new" | "red" | "error" } | null {
+function healthView(trace: Trace, now: Date): { result: string; ts: string; text: string; state: "pass" | "new" | "red" | "error" } | null {
   const newest = trace.lastSignal("main_health");
   if (!newest) return null;
   const red = trace.lastSignal("main_health", { excludeErrors: true })?.result === "fail";

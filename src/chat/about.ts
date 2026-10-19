@@ -41,7 +41,7 @@ function quoted(label: string, text: string): string {
 }
 
 /** A transcript item as one line of text for the orchestrator. */
-export function itemLine(item: TranscriptItem): string {
+function itemLine(item: TranscriptItem): string {
   switch (item.kind) {
     case "text": return `text: ${one(item.text)}`;
     case "tool": return `tool ${item.tool}: ${one(item.target)}`;
