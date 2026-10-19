@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { ActivityItem } from "../../console/types";
-import { fitsFeed, mergeFeed } from "../feed";
+import { feedAfter, fitsFeed, type FeedRead, type FeedState } from "../feed";
 import { clock } from "../format";
 import { Link } from "../parts/Link";
 import { activity, changes, gaps, getJson, now } from "../store";
@@ -11,42 +11,25 @@ const OWN: Record<string, string> = { _chat: "chat", _loop: "the loop", _signals
 export function Activity() {
   const [slug, setSlug] = useState("");
   const [technical, setTechnical] = useState(false);
-  const [older, setOlder] = useState<ActivityItem[]>([]);
-  const [next, setNext] = useState<number | null>(0);
+  const [feed, setFeed] = useState<FeedState>({ items: [], next: 0, failed: null });
   const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
   // Only the newest request may fill the list, so a slow answer for an earlier filter does not replace it.
   const request = useRef(0);
-  /**
-   * Reads a page of history. `how`: "reset" shows the page alone (a new filter, Refresh), "more" adds it
-   * below (Older), "merge" merges the newest page into what is shown (the stream said this page missed events).
-   */
-  const load = async (before: number, how: "reset" | "more" | "merge") => {
+  /** Reads a page of history, and shows it as feedAfter says (`read.how`: a new list, Older, or a reload after missed events). */
+  const load = async (read: FeedRead) => {
     const mine = ++request.current;
     setLoading(true);
+    const filter = { slug, technical };
+    let page: { items: ActivityItem[]; next: number | null } | null = null;
     try {
-      const q = new URLSearchParams({ before: String(before) });
+      const q = new URLSearchParams({ before: String(read.before) });
       if (slug) q.set("slug", slug);
       if (technical) q.set("technical", "1");
-      const page = await getJson<{ items: ActivityItem[]; next: number | null }>(`/api/events?${q}`);
-      if (mine !== request.current) return;
-      if (how === "merge") {
-        const merged = mergeFeed(older, page.items, { slug, technical });
-        setOlder(merged.items);
-        // Joined, the Older cursor still points below what is shown; not joined, the page stands alone with its own.
-        if (!merged.joined) setNext(page.next);
-      } else {
-        setOlder((o) => (how === "reset" ? page.items : [...o, ...page.items]));
-        setNext(page.next);
-      }
-      setFailed(false);
-    } catch {
-      if (mine !== request.current) return;
-      setNext(null);
-      setFailed(true);
-    } finally {
-      if (mine === request.current) setLoading(false);
-    }
+      page = await getJson<{ items: ActivityItem[]; next: number | null }>(`/api/events?${q}`);
+    } catch { /* page stays null: the read failed, and Try again repeats it */ }
+    if (mine !== request.current) return;
+    setFeed((f) => feedAfter(f, read, page, filter));
+    setLoading(false);
   };
   // The history is read again when the filter changes and when the live stream says this page missed events.
   const missed = gaps.value;
@@ -56,12 +39,12 @@ export function Activity() {
     const filter = `${slug}|${technical}`;
     if (filter !== shownFilter.current) {
       shownFilter.current = filter;
-      setOlder([]);
-      setNext(0);
-      void load(0, "reset");
-    } else void load(0, "merge");
+      setFeed({ items: [], next: 0, failed: null });
+      void load({ before: 0, how: "reset" });
+    } else void load({ before: 0, how: "merge" });
   }, [slug, technical, missed]);
   // The live stream carries only events in plain words; the technical view loads again on Refresh.
+  const { items: older, next, failed } = feed;
   const newest = older[0]?.id ?? 0;
   const fresh = technical ? [] : activity.value.filter((a) => a.id > newest && fitsFeed(a, { slug, technical })).reverse();
   const items = [...fresh, ...older];
@@ -77,9 +60,9 @@ export function Activity() {
           <option value="_loop">The loop</option>
         </select>
         <label><input type="checkbox" checked={technical} onChange={(e) => setTechnical(e.currentTarget.checked)} /> Technical</label>
-        {technical && <button class="btn" onClick={() => void load(0, "reset")}>Refresh</button>}
+        {technical && <button class="btn" onClick={() => void load({ before: 0, how: "reset" })}>Refresh</button>}
       </div>
-      {failed && <p class="muted">The history could not be read. <button class="link" type="button" onClick={() => void load(0, "reset")}>Try again</button></p>}
+      {failed && <p class="muted">The history could not be read. <button class="link" type="button" onClick={() => void load(failed)}>Try again</button></p>}
       {/* A page can come back empty with older ones still to read (a long run of events only an engineer would care about). */}
       {!items.length && !loading && !failed && next === null && <p class="muted">Nothing has happened yet.</p>}
       {items.length > 0 && (
@@ -96,7 +79,7 @@ export function Activity() {
           ))}
         </ul>
       )}
-      {next !== null && <p><button class="btn" disabled={loading} onClick={() => void load(next, "more")}>{loading ? "Loading…" : "Older"}</button></p>}
+      {next !== null && !failed && <p><button class="btn" disabled={loading} onClick={() => void load({ before: next, how: "more" })}>{loading ? "Loading…" : "Older"}</button></p>}
     </section>
   );
 }

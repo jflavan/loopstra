@@ -16,7 +16,7 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { follow } from "../../src/ui/stream";
-import { mergeFeed } from "../../src/ui/feed";
+import { feedAfter, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
 import { givesFocusBack } from "../../src/ui/parts/focus";
 
@@ -350,6 +350,35 @@ describe("the activity feed read again after a gap", () => {
     expect(ids(mergeFeed([], page, { slug: "a", technical: false }).items)).toEqual([1]);
     expect(ids(mergeFeed([], page, { slug: "a", technical: true }).items)).toEqual([2, 1]);
     expect(ids(mergeFeed([], page, { slug: "", technical: true }).items)).toEqual([3, 2, 1]);
+  });
+
+  const shown: FeedState = { items: [item(30), item(20)], next: 20, failed: null };
+  const older = { before: 20, how: "more" } as const;
+  const gap = { before: 0, how: "merge" } as const;
+
+  test("an Older read that failed is offered again after a gap reload joins the list, and Try again repeats it", () => {
+    const failed = feedAfter(shown, older, null, all);
+    expect(failed).toEqual({ items: [item(30), item(20)], next: 20, failed: older });
+    const merged = feedAfter(failed, gap, { items: [item(40), item(30)], next: 30 }, all);
+    expect(ids(merged.items)).toEqual([40, 30, 20]);
+    // Neither Older nor Try again would be left without this: the failed read is still the Older one, from the same cursor.
+    expect(merged.next).toBe(20);
+    expect(merged.failed).toEqual(older);
+    const again = feedAfter(merged, merged.failed!, { items: [item(10)], next: null }, all);
+    expect(again).toEqual({ items: [item(40), item(30), item(20), item(10)], next: null, failed: null });
+  });
+
+  test("a gap reload that does not join stands alone with its own cursor; one that failed is cleared when one joins", () => {
+    const failed = feedAfter(shown, older, null, all);
+    expect(feedAfter(failed, gap, { items: [item(90), item(80)], next: 80 }, all)).toEqual({ items: [item(90), item(80)], next: 80, failed: null });
+    const gapFailed = feedAfter(shown, gap, null, all);
+    expect(gapFailed.failed).toEqual(gap);
+    expect(feedAfter(gapFailed, gap, { items: [item(40), item(30)], next: 30 }, all)).toEqual({ items: [item(40), item(30), item(20)], next: 20, failed: null });
+  });
+
+  test("a new page replaces the list, and an Older page adds below it", () => {
+    expect(feedAfter(shown, { before: 0, how: "reset" }, { items: [item(5)], next: 5 }, all)).toEqual({ items: [item(5)], next: 5, failed: null });
+    expect(feedAfter(shown, older, { items: [item(10)], next: null }, all)).toEqual({ items: [item(30), item(20), item(10)], next: null, failed: null });
   });
 });
 
