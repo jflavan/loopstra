@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@preact/signals": "^2.11.3",
-    "marked": "^16.4.2",
+    "marked": "^18.1.1",
     "preact": "^10.29.8",
     "yaml": "^2.6.0",
     "zod": "^4.0.0"
