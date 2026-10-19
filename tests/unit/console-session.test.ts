@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { followSession, streamSession } from "../../src/console/session";
-import { TranscriptReader } from "../../src/console/transcript";
+import { resumePoint, TranscriptReader } from "../../src/console/transcript";
 import type { SessionMessage } from "../../src/console/types";
 import { Trace } from "../../src/trace";
 import { parseFrames, until } from "../console-helpers";
@@ -57,14 +57,23 @@ describe("a session's stream", () => {
         { type: "phase", name: "build", status: "success", started: expect.any(String), ended: expect.any(String) },
         { type: "end" },
       ]);
-      const ids = messages(p.frames).filter((m) => m.msg.type === "item").map((m) => Number(m.id));
-      expect(ids).toEqual([...ids].sort((a, b) => a - b));
+      // Every item has an id of its own, and their resume points only go forward.
+      const ids = messages(p.frames).filter((m) => m.msg.type === "item").map((m) => m.id!);
+      expect(new Set(ids).size).toBe(4);
+      const points = ids.map(resumePoint);
+      expect(points).toEqual([...points].sort((a, b) => a - b));
 
       // From the offset after the tool's result: only what came after it.
       const later = page();
-      stops.push(streamSession(t.path, "one", seq, ids[2]!, later.send, later.close, 20)!);
+      stops.push(streamSession(t.path, "one", seq, points[2]!, later.send, later.close, 20)!);
       await until(() => later.closed);
       expect(kinds(later.frames)).toEqual(["result"]);
+
+      // From the first row's id, inside a line: that line is sent again, from its start.
+      const again = page();
+      stops.push(streamSession(t.path, "one", seq, resumePoint(ids[0]), again.send, again.close, 20)!);
+      await until(() => again.closed);
+      expect(kinds(again.frames)).toEqual(["text", "tool", "tool-result", "result"]);
     } finally {
       for (const stop of stops) stop();
       trace.close();
@@ -245,7 +254,7 @@ describe("a session's stream", () => {
     }
   });
 
-  test("a follower gets the same messages as typed values, with each item's offset", async () => {
+  test("a follower gets the same messages as typed values, with each item's frame id", async () => {
     const t = tempDir();
     const trace = Trace.open(t.path);
     let stop: (() => void) | null = null;
@@ -253,13 +262,13 @@ describe("a session's stream", () => {
       const seq = trace.phaseStart("one", "build", "agent");
       writeFileSync(raw(t.path, "one", seq, "build"), lines([...START, ...REST]));
       trace.phaseEnd("one", seq, { status: "success", costUsd: 0.1 });
-      const got: Array<{ msg: SessionMessage; offset?: number }> = [];
+      const got: Array<{ msg: SessionMessage; id?: string }> = [];
       let closed = false;
-      stop = followSession(t.path, "one", seq, 0, (msg, offset) => { got.push({ msg, offset }); return true; }, () => { closed = true; }, 20);
+      stop = followSession(t.path, "one", seq, 0, (msg, id) => { got.push({ msg, id }); return true; }, () => { closed = true; }, 20);
       await until(() => closed);
       expect(got.map((g) => g.msg.type)).toEqual(["phase", "item", "item", "item", "item", "phase", "end"]);
-      expect(got.filter((g) => g.msg.type === "item").every((g) => typeof g.offset === "number")).toBe(true);
-      expect(got[0]!.offset).toBeUndefined();
+      expect(got.filter((g) => g.msg.type === "item").every((g) => typeof g.id === "string")).toBe(true);
+      expect(got[0]!.id).toBeUndefined();
     } finally {
       stop?.();
       trace.close();

@@ -8,8 +8,11 @@
 export const STALE_MS = 20_000;
 
 interface Handlers {
-  /** One message's data, as the server sent it (JSON), and the id its frame came with (0 when none): a session stream's resume offset. */
-  message(data: string, id: number): void;
+  /**
+   * One message's data, as the server sent it (JSON), and the id its frame came with, as sent (""
+   * when none): on a session stream it names the row (see SessionMessage).
+   */
+  message(data: string, id: string): void;
   /** The stream said something, so it is alive. */
   live?(): void;
   /**
@@ -26,7 +29,8 @@ interface Handlers {
  * there). When it gives up, or the stream has been silent for STALE_MS (a connection can die without
  * an error, as when a laptop slept), this closes it and opens a new one, waiting 1, 2, 4, then 8
  * seconds. A new EventSource sends no Last-Event-ID, so `urlFor` gets the newest id the page has
- * seen (0 when none) to name in the address instead.
+ * seen (0 when none) to name in the address instead: its number before any dot, which is where a
+ * session stream resumes ("150.1" names a row inside the line that starts at 150).
  */
 export function follow(urlFor: (newest: number) => string, h: Handlers): () => void {
   let last = Date.now();
@@ -69,9 +73,10 @@ export function follow(urlFor: (newest: number) => string, h: Handlers): () => v
     s.onmessage = (ev) => {
       if (s !== source) return;
       alive();
-      const id = Number(ev.lastEventId);
-      if (Number.isFinite(id) && id > newest) newest = id;
-      h.message(ev.data as string, Number.isFinite(id) ? id : 0);
+      const id = ev.lastEventId;
+      const at = Number.parseInt(id, 10);
+      if (at > newest) newest = at;
+      h.message(ev.data as string, id);
     };
     s.addEventListener("ping", alive);
     s.onerror = () => {

@@ -12,6 +12,7 @@ import { Hub, type Send } from "./hub";
 import { decode, json, NO_STORE, plain } from "./routes";
 import { streamSession } from "./session";
 import { steerRoutes } from "./steer";
+import { resumePoint } from "./transcript";
 import { ANY_SLUG } from "./types";
 import { writes } from "./writes";
 
@@ -97,8 +98,9 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
     const seq = Number(session[2]);
     if (!slug || !ANY_SLUG.test(slug)) return null;
     if (!(await withTrace(root, (t) => t.phase(slug, seq) !== null))) return null;
-    const from = Number(req.headers.get("last-event-id") ?? url.searchParams.get("from") ?? 0);
-    return sse(server, req, (send, close) => streamSession(root, slug, seq, Number.isFinite(from) && from > 0 ? from : 0, send, close) ?? (close(), () => {}));
+    // A frame id names a row ("123.4" is a row inside the line that starts at byte 123); the stream goes on from its line.
+    const from = resumePoint(req.headers.get("last-event-id") ?? url.searchParams.get("from"));
+    return sse(server, req, (send, close) => streamSession(root, slug, seq, from, send, close) ?? (close(), () => {}));
   }
   if (path === "/api/events") {
     server.timeout(req, JSON_IDLE_SECONDS);

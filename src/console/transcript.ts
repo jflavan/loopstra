@@ -172,6 +172,20 @@ function initCwd(fd: number): string | undefined {
   }
 }
 
+/** One transcript item with its frame id (see TranscriptReader.read). */
+interface ReadItem { item: TranscriptItem; id: string }
+
+/**
+ * The byte offset a session stream resumes from, given the frame id a page names (Last-Event-ID or
+ * `from`): the number before the dot, so "123.4" (a row inside the line that starts at 123) resumes
+ * at 123 and the line is sent again. Anything that is not such an id, or not above 0, is 0, the start.
+ */
+export function resumePoint(id: string | null | undefined): number {
+  const m = /^(\d+)(?:\.\d+)?$/.exec(id ?? "");
+  const at = m ? Number(m[1]) : 0;
+  return Number.isSafeInteger(at) && at > 0 ? at : 0;
+}
+
 /** Reads a phase's raw.jsonl as transcript items from a byte offset, one finished line at a time. */
 export class TranscriptReader {
   private cwd: string | undefined;
@@ -185,12 +199,14 @@ export class TranscriptReader {
   }
 
   /**
-   * The items of the finished lines after the offset. Each has its line's start as its offset,
-   * except the line's last item, which has the line's end: a page that reconnects after an earlier
-   * item of a line gets that line again, rather than losing the items after it. With `final` the
-   * file is known to be complete, so its end also ends a last line written without a newline.
+   * The items of the finished lines after the offset, each with a frame id of its own: the line's
+   * last item has the line's end ("200"), any other the line's start and its index in the line
+   * ("100.1"). A page that reconnects after an earlier item resumes at the line's start (see
+   * resumePoint), so it gets that line again rather than losing the items after it, and passes over
+   * the rows it has drawn by their ids. With `final` the file is known to be complete, so its
+   * end also ends a last line written without a newline.
    */
-  read(maxBytes = READ_MAX, opts: { final?: boolean } = {}): Array<{ item: TranscriptItem; offset: number }> {
+  read(maxBytes = READ_MAX, opts: { final?: boolean } = {}): ReadItem[] {
     // One open file for the size and every read, so they all see the same file.
     let fd: number;
     try { fd = openSync(this.path, "r"); } catch (e) { if ((e as { code?: string })?.code === "ENOENT") return []; throw e; }
@@ -208,7 +224,7 @@ export class TranscriptReader {
     } finally {
       closeSync(fd);
     }
-    const out: Array<{ item: TranscriptItem; offset: number }> = [];
+    const out: ReadItem[] = [];
     let start = 0;
     /** Takes the line from `start` to `end`; the next one begins at `next`. */
     const line = (end: number, next: number) => {
@@ -220,7 +236,7 @@ export class TranscriptReader {
       // An event in a shape nothing here expected is passed over, so the lines after it still come.
       let items: TranscriptItem[];
       try { items = toItems(e, this.cwd); } catch { return; }
-      items.forEach((item, k) => out.push({ item, offset: k === items.length - 1 ? this.offset + next : lineStart }));
+      items.forEach((item, k) => out.push({ item, id: k === items.length - 1 ? String(this.offset + next) : `${lineStart}.${k}` }));
     };
     for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10, start)) line(nl, nl + 1);
     if (opts.final && start < buf.length && this.offset + buf.length >= size) line(buf.length, buf.length);

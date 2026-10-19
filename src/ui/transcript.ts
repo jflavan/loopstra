@@ -6,13 +6,13 @@ export interface Shown {
   results: Record<string, { ok: boolean; output: string }>;
   todos: Array<{ text: string; state: string }> | null;
   /**
-   * The line the session stream is in the middle of (see addFrames): the offset its rows come with,
-   * and the rows without an id drawn from it so far, as JSON.
+   * Where the session stream is (see addFrames): the end of the last line drawn whole, and the frame
+   * ids of the rows drawn since, from the line it is in the middle of.
    */
-  line: { at: number; drawn: string[] };
+  line: { end: number; drawn: string[] };
 }
 
-export const EMPTY: Shown = { items: [], results: {}, todos: null, line: { at: 0, drawn: [] } };
+export const EMPTY: Shown = { items: [], results: {}, todos: null, line: { end: 0, drawn: [] } };
 
 /** `s` with `more` added; `s` itself is left as it was. */
 export function addItems(s: Shown, more: TranscriptItem[]): Shown {
@@ -34,35 +34,35 @@ export function addItems(s: Shown, more: TranscriptItem[]): Shown {
   return { ...s, items, results, todos };
 }
 
-/** One row as a session's stream sends it, with the frame's id: the offset the stream continues from (see SessionMessage). */
-export interface Frame { item: TranscriptItem; offset: number }
+/** One row as a session's stream sends it, with its frame's id (see SessionMessage). */
+export interface Frame { item: TranscriptItem; id: string }
 
 /**
- * `s` with the session stream's `frames` added; `s` itself is left as it was. A row without an id
- * (text, a message, the result) is drawn once per line: a stream opened again continues from the
- * start of the line it was in, so it sends that line's rows again, and the ones drawn from it
- * already are passed over. The rows of one line come with the line's start as their offset, except
- * the last, which comes with the line's end (see TranscriptReader.read): a row above the line's
- * offset ends it, and the next line starts where it ended.
+ * `s` with the session stream's `frames` added; `s` itself is left as it was. Every row's frame id
+ * is its own: a line's last row has the line's end ("200"), any other the line's start and its index
+ * in the line ("100.1"), see TranscriptReader.read. A stream opened again continues from the start of
+ * the line it was in, so it sends that line's rows again; the ones drawn already are known by their
+ * ids and passed over. A last row completes its line, and the ids drawn before it are let go. A row
+ * of a line drawn whole (an older line sent again) is passed over too.
  */
 export function addFrames(s: Shown, frames: Frame[]): Shown {
-  let { at } = s.line;
-  let drawn = s.line.drawn;
+  let { end, drawn } = s.line;
   const fresh: TranscriptItem[] = [];
-  for (const { item, offset } of frames) {
-    if (offset > at) {
-      at = offset;
-      drawn = [];
-    } else if (!("id" in item)) {
-      // Below the line: an older line sent again, every row of which is drawn.
-      if (offset < at) continue;
-      const key = JSON.stringify(item);
-      if (drawn.includes(key)) continue;
-      drawn = [...drawn, key];
+  for (const { item, id } of frames) {
+    const at = Number.parseInt(id, 10);
+    const last = !id.includes(".");
+    // A row without a usable id cannot be placed, so it is drawn as it comes.
+    if (Number.isFinite(at)) {
+      if (last ? at <= end : at < end) continue;
+      if (drawn.includes(id)) continue;
+      if (last) {
+        end = at;
+        drawn = [];
+      } else drawn = [...drawn, id];
     }
     fresh.push(item);
   }
-  return { ...addItems(s, fresh), line: { at, drawn } };
+  return { ...addItems(s, fresh), line: { end, drawn } };
 }
 
 /** The cost the newest result row names, or null when there is none (a chat turn has no change page to read it from). */

@@ -220,6 +220,19 @@ describe("the console's server", () => {
     });
   });
 
+  test("a session's stream resumes at the start of the line a frame id names, from the header or the address", async () => {
+    await withConsole(async (base) => {
+      const url = `${base}/api/sessions/one/1/stream`;
+      const all = await sseFrames(url, 5);
+      const firstEnd = all[1]!.id!;
+      // A row inside the second line has an id like "<its start>.<k>": the stream goes on from that start.
+      const types = (frames: Awaited<ReturnType<typeof sseFrames>>) => frames.map((f) => { const m = f.data as SessionMessage; return m.type === "item" ? m.item.kind : m.type; });
+      expect(types(await sseFrames(url, 4, { "last-event-id": `${firstEnd}.3` }))).toEqual(["phase", "result", "phase", "end"]);
+      expect(types(await sseFrames(`${url}?from=${firstEnd}.3`, 4))).toEqual(["phase", "result", "phase", "end"]);
+      expect(types(await sseFrames(`${url}?from=${firstEnd}`, 4))).toEqual(["phase", "result", "phase", "end"]);
+    });
+  });
+
   test("a change's own documents and run files are served read-only as plain text, and nothing else is", async () => {
     await withConsole(async (base) => {
       const doc = await fetch(`${base}/docs/one/intent.md`);

@@ -246,37 +246,51 @@ describe("a transcript on the page", () => {
     expect(again.items.map((i) => ("id" in i ? i.id : i.kind))).toEqual(["t1", "e1", "text", "text", "t2"]);
   });
 
-  // The server gives a line's rows the line's start as their offset, except the last, which gets the line's end (see TranscriptReader.read).
-  const text = (t: string, offset: number): Frame => ({ item: { kind: "text", text: t }, offset });
-  const tool = (id: string, offset: number): Frame => ({ item: { kind: "tool", id, tool: "Bash", target: "x", input: {} }, offset });
+  // The server gives every row a frame id of its own: a row that is not its line's last gets the
+  // line's start and its index in the line ("100.1"), the last gets the line's end ("200"); see TranscriptReader.read.
+  const text = (t: string, id: string): Frame => ({ item: { kind: "text", text: t }, id });
+  const tool = (t: string, id: string): Frame => ({ item: { kind: "tool", id: t, tool: "Bash", target: "x", input: {} }, id });
   const texts = (s: ReturnType<typeof addFrames>) => s.items.map((i) => ("id" in i ? i.id : i.kind === "text" ? i.text : i.kind));
 
   test("a line re-sent after a reconnect draws once: the stream continues from the line it was in and sends that line again", () => {
     // Line 1 is bytes 0 to 100 (two rows), line 2 is 100 to 200 (three rows). The page saw line 1 and the first two rows of line 2.
-    let s = addFrames(EMPTY, [text("a", 0), tool("t1", 100), text("b", 100), tool("t2", 100)]);
-    expect(texts(s)).toEqual(["a", "t1", "b", "t2"]);
-    // The stream came back from offset 100 (the newest id the page saw) and sent line 2 from its start.
-    s = addFrames(s, [text("b", 100), tool("t2", 100), text("c", 200)]);
-    expect(texts(s)).toEqual(["a", "t1", "b", "t2", "c"]);
-    // The next line's rows carry the offset where line 2 ended, and are new.
-    s = addFrames(s, [text("d", 200), text("e", 300)]);
-    expect(texts(s)).toEqual(["a", "t1", "b", "t2", "c", "d", "e"]);
-    expect(s.line).toEqual({ at: 300, drawn: [] });
+    let s = addFrames(EMPTY, [text("a", "0.0"), tool("t1", "100"), text("b", "100.0"), text("b2", "100.1")]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "b2"]);
+    // The stream came back from byte 100 (the newest id the page saw, "100.1") and sent line 2 from its start.
+    s = addFrames(s, [text("b", "100.0"), text("b2", "100.1"), text("c", "200")]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "b2", "c"]);
+    // The next line's rows start where line 2 ended, and are new.
+    s = addFrames(s, [text("d", "200.0"), text("e", "300")]);
+    expect(texts(s)).toEqual(["a", "t1", "b", "b2", "c", "d", "e"]);
+    expect(s.line).toEqual({ end: 300, drawn: [] });
   });
 
-  test("the same words in two lines are two rows; a line's rows arriving in two batches are all drawn", () => {
-    // Two one-row lines, each saying the same thing.
-    let s = addFrames(EMPTY, [text("ok", 100)]);
-    s = addFrames(s, [text("ok", 200)]);
-    expect(texts(s)).toEqual(["ok", "ok"]);
-    // The third line's rows come in two batches: the second batch continues the line, it does not re-send it.
-    s = addFrames(s, [text("x", 200)]);
-    s = addFrames(s, [text("y", 200), text("z", 300)]);
-    expect(texts(s)).toEqual(["ok", "ok", "x", "y", "z"]);
-    // A row below the line is an older line sent again (a server that resumes earlier): its id-less rows are passed over.
-    expect(texts(addFrames(s, [text("old", 50), tool("t9", 50)]))).toEqual(["ok", "ok", "x", "y", "z", "t9"]);
+  test("a reconnect in a line that follows a line with no rows draws nothing twice", () => {
+    // Line 1 is bytes 0 to 100 (one row), line 2 is 100 to 150 and has no rows, line 3 is 150 to 300 (two rows).
+    let s = addFrames(EMPTY, [text("a", "100"), text("b", "150.0")]);
+    expect(texts(s)).toEqual(["a", "b"]);
+    // The stream came back from byte 150, the start of line 3, and sent it again.
+    s = addFrames(s, [text("b", "150.0"), text("c", "300")]);
+    expect(texts(s)).toEqual(["a", "b", "c"]);
+  });
+
+  test("identical rows are all drawn: two in one line, and the same words in two lines", () => {
+    let s = addFrames(EMPTY, [text("ok", "0.0"), text("ok", "0.1"), text("ok", "100")]);
+    expect(texts(s)).toEqual(["ok", "ok", "ok"]);
+    s = addFrames(s, [text("ok", "200")]);
+    expect(texts(s)).toEqual(["ok", "ok", "ok", "ok"]);
+  });
+
+  test("a line's rows arriving in two batches are all drawn; a line drawn whole and sent again is passed over", () => {
+    let s = addFrames(EMPTY, [text("ok", "100")]);
+    // The second line's rows come in two batches: the second batch continues the line, it does not re-send it.
+    s = addFrames(s, [text("x", "100.0")]);
+    s = addFrames(s, [text("y", "100.1"), text("z", "200")]);
+    expect(texts(s)).toEqual(["ok", "x", "y", "z"]);
+    // Rows of a line drawn whole (a server that resumes earlier) are passed over, calls and edits included.
+    expect(texts(addFrames(s, [text("old", "50.0"), tool("t9", "100"), text("x", "100.0"), text("z", "200")]))).toEqual(["ok", "x", "y", "z"]);
     // The old state is left alone.
-    expect(texts(s)).toEqual(["ok", "ok", "x", "y", "z"]);
+    expect(texts(s)).toEqual(["ok", "x", "y", "z"]);
   });
 });
 
@@ -470,6 +484,23 @@ describe("the page's live stream", () => {
       jest.advanceTimersByTime(60_000);
       expect(FakeSource.opened).toHaveLength(2);
       expect(FakeSource.opened[1]!.closed).toBe(true);
+    });
+  });
+
+  test("a frame's id reaches the handler as it came; a new stream resumes at the number before its dot", () => {
+    faked(() => {
+      const ids: string[] = [];
+      const stop = follow((from) => (from > 0 ? `/s?from=${from}` : "/s"), { message(_data, id) { ids.push(id); } });
+      const first = FakeSource.opened[0]!;
+      first.onmessage!({ data: "{}", lastEventId: "100" });
+      first.onmessage!({ data: "{}", lastEventId: "150.1" });
+      first.onmessage!({ data: "{}", lastEventId: "" });
+      expect(ids).toEqual(["100", "150.1", ""]);
+      first.readyState = FakeSource.CLOSED;
+      first.onerror!();
+      jest.advanceTimersByTime(1000);
+      expect(FakeSource.opened[1]!.url).toBe("/s?from=150");
+      stop();
     });
   });
 

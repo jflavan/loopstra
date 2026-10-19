@@ -13,12 +13,12 @@ function sizeOf(path: string): number {
   try { return statSync(path).size; } catch { return -1; }
 }
 
-/** What a follower is told: one message, with an item's resume offset; false once whoever reads it is gone (it then stops). */
-type Emit = (msg: SessionMessage, offset?: number) => boolean;
+/** What a follower is told: one message, with an item's frame id; false once whoever reads it is gone (it then stops). */
+type Emit = (msg: SessionMessage, id?: string) => boolean;
 
 /**
- * Streams one phase's transcript to a page (see followSession), each item with its offset as the
- * frame's id, so a page that reconnects continues there. While nothing else is sent it pings every
+ * Streams one phase's transcript to a page (see followSession), each item with its frame id (see
+ * TranscriptReader.read), so a page that reconnects continues from it and knows which rows it has. While nothing else is sent it pings every
  * `pingMs`: a session on a long command writes nothing for minutes, and without pings the page
  * could not tell that quiet from a connection that died.
  */
@@ -31,7 +31,7 @@ export function streamSession(root: string, slug: string, seq: number, from: num
     if (!ok) { closed = true; clearInterval(ping); }
     return ok;
   };
-  const stop = followSession(root, slug, seq, from, (msg, offset) => write(frame(msg, offset)), () => { closed = true; clearInterval(ping); close(); }, intervalMs);
+  const stop = followSession(root, slug, seq, from, (msg, id) => write(frame(msg, id)), () => { closed = true; clearInterval(ping); close(); }, intervalMs);
   if (!stop) return null;
   const end = () => { clearInterval(ping); stop(); };
   // The stream may have ended already (an unreadable file, a page gone): then there is nobody to ping.
@@ -40,7 +40,7 @@ export function streamSession(root: string, slug: string, seq: number, from: num
 }
 
 /**
- * Follows one phase's transcript from byte `from`: first the phase, then each item with its offset
+ * Follows one phase's transcript from byte `from`: first the phase, then each item with its frame id
  * (see TranscriptReader.read). Checks the file every `intervalMs` (watching a growing file is
  * unreliable on Windows). Once the phase has ended and its file is read to the end, emits the phase
  * again and `end`, then closes. If anything goes wrong it closes too, and never throws. Gives the
@@ -73,8 +73,8 @@ export function followSession(root: string, slug: string, seq: number, from: num
   };
   /** Sends items; false once the page is gone (the stream is then stopped). */
   const sent = (items: ReturnType<TranscriptReader["read"]>): boolean => {
-    for (const { item, offset } of items) {
-      if (!emit({ type: "item", item }, offset)) {
+    for (const { item, id } of items) {
+      if (!emit({ type: "item", item }, id)) {
         stop();
         return false;
       }

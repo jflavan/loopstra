@@ -126,9 +126,9 @@ export type TranscriptItem =
   | { kind: "message"; text: string; redirect: boolean };
 
 /**
- * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame is a resume point (a byte
- * offset in the file, see TranscriptReader.read), not a unique key: the items of one line share the
- * line's start, so the page must not dedupe or key items by it.
+ * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame names that row: a line's
+ * last row has the line's end ("200"), any other the line's start and its index in the line
+ * ("100.1"), see TranscriptReader.read. Its number before the dot is where a stream resumes.
  */
 export type SessionMessage =
   | { type: "phase"; name: string; status: string; started: string; ended: string | null }
