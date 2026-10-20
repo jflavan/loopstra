@@ -549,9 +549,12 @@ describe("the shared transport pieces (hardening review)", () => {
     } finally { void server.stop(true); }
   });
 
-  test("noBroadcast shows broadcasts and other people's mentions as text, and keeps the acceptors' mentions", () => {
-    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and &lt;@U2|bob>");
-    expect(noBroadcast("ping <@U1>")).toBe("ping &lt;@U1>");
+  test("noBroadcast shows broadcasts as text and other people's mentions as their names, and keeps the acceptors' mentions", () => {
+    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and @U2");
+    expect(noBroadcast("ping <@U1>")).toBe("ping @U1");
+    // A name is the person's own choice: it is shown as text, never read by Slack as a mention.
+    const names = new Map([["U0999ABC", "Bo"], ["U7", "<!channel>"]]);
+    expect(noBroadcast("ask <@U0999ABC>, <@U7> or <@U8>", [], (id) => names.get(id))).toBe("ask @Bo, @&lt;!channel> or @U8");
     expect(noBroadcast("a <#C1|general> link and x < y")).toBe("a <#C1|general> link and x < y");
   });
 });
@@ -649,8 +652,10 @@ describe("Slack (hardening review)", () => {
     const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: ["U1"] }, { root: r.root, env, log: () => {} });
     try {
       await slack.start(async () => {});
-      await slack.send("C1:1.0", "<!channel> ask <@U1> or <@U2>");
-      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1> or &lt;@U2>");
+      // U2 has written in the channel, so its name is known; U3 has not.
+      await slack.onEvent({ type: "message", user: "U2", channel: "C1", text: "hi", ts: "1.0" });
+      await slack.send("C1:1.0", "<!channel> ask <@U1>, <@U2> or <@U3>");
+      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1>, @Someone or @U3");
     } finally {
       await slack.stop();
       void stub.server.stop(true);

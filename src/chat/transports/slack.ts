@@ -18,12 +18,14 @@ type PingableSocket = WebSocket & { ping(): void };
 
 /**
  * Text as Slack shows it, without pinging anyone: replies carry the agent's words, which a person in
- * the channel can steer. `<!channel>`, `<!here>`, `<!everyone>` and `<!subteam^...>` are shown as text,
- * and so is a mention of anyone but the people in `keep` (the acceptors: the agent is meant to point
- * at them). Discord needs none of this: its replies are sent with mentions turned off.
+ * the channel can steer. `<!channel>`, `<!here>`, `<!everyone>` and `<!subteam^...>` are shown as text.
+ * A mention of anyone but the people in `keep` (the acceptors: the agent is meant to point at them)
+ * becomes plain `@name`, with the name `nameOf` knows for the id, else the id: readable, and no
+ * ping. A name is the person's own choice, so it is shown as text too. Discord needs none of this:
+ * its replies are sent with mentions turned off.
  */
-export function noBroadcast(text: string, keep: readonly string[] = []): string {
-  return text.replace(/<!/g, "&lt;!").replace(/<@([A-Z0-9]+)(\|[^>]*)?>/g, (m, id: string) => (keep.includes(id) ? m : `&lt;${m.slice(1)}`));
+export function noBroadcast(text: string, keep: readonly string[] = [], nameOf: (id: string) => string | undefined = () => undefined): string {
+  return text.replace(/<!/g, "&lt;!").replace(/<@([A-Z0-9]+)(\|[^>]*)?>/g, (m, id: string) => (keep.includes(id) ? m : `@${(nameOf(id) ?? id).replace(/</g, "&lt;")}`));
 }
 
 /** Errors from apps.connections.open that mean the app-level token is no good until a person replaces it. */
@@ -223,9 +225,12 @@ export class SlackTransport implements Transport {
     return name;
   }
 
-  /** The people a reply may mention: the acceptors as the config has them now. */
-  private async keepMentions(): Promise<string[]> {
-    return (await this.access.read())?.acceptors ?? [];
+  /**
+   * Text to post, pinging nobody but the acceptors as the config has them now; anyone else is named
+   * as this bot knows them, from the people who wrote to it (see noBroadcast).
+   */
+  private async postable(text: string): Promise<string> {
+    return noBroadcast(text, (await this.access.read())?.acceptors ?? [], (id) => this.names.get(id));
   }
 
   async send(thread: string, text: string): Promise<void> {
@@ -236,15 +241,13 @@ export class SlackTransport implements Transport {
 
   async sendOrThrow(thread: string, text: string): Promise<void> {
     const [channel, ts] = thread.split(":");
-    const keep = await this.keepMentions();
-    await chunked(noBroadcast(text, keep), SLACK_MAX, (part) => this.call("chat.postMessage", { channel, thread_ts: ts, text: part }).then(() => {}));
+    await chunked(await this.postable(text), SLACK_MAX, (part) => this.call("chat.postMessage", { channel, thread_ts: ts, text: part }).then(() => {}));
   }
 
   async announce(text: string): Promise<void> {
     if (!this.cfg.announce_to) return;
     // Long like any reply (a note can be), and a failure is thrown so the service tries it again.
-    const keep = await this.keepMentions();
-    await chunked(noBroadcast(text, keep), SLACK_MAX, (part) => this.call("chat.postMessage", { channel: this.cfg.announce_to, text: part }).then(() => {}));
+    await chunked(await this.postable(text), SLACK_MAX, (part) => this.call("chat.postMessage", { channel: this.cfg.announce_to, text: part }).then(() => {}));
   }
 
   async stop(): Promise<void> {
