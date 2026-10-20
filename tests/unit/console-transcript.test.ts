@@ -3,7 +3,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MEANWHILE_HEADING } from "../../src/console/steerable";
 import { OUTPUT_MAX, resumePoint, toItems, TranscriptReader } from "../../src/console/transcript";
-import type { TranscriptItem } from "../../src/console/types";
+import { frameId, parseFrameId, type TranscriptItem } from "../../src/console/types";
 import { messageText, redirectText } from "../../src/steering";
 import { tempDir } from "../helpers";
 
@@ -122,7 +122,16 @@ describe("session transcripts", () => {
     expect(resumePoint("123.4")).toBe(123);
     expect(resumePoint("123.0")).toBe(123);
     expect(resumePoint("456")).toBe(456);
-    for (const bad of [null, undefined, "", "0", "-5", "abc", "12.x", "1e3", " 7"]) expect({ bad, at: resumePoint(bad) }).toEqual({ bad, at: 0 });
+    for (const bad of [null, undefined, "", "0", "-5", "abc", "12.x", "12x", "1e3", " 7"]) expect({ bad, at: resumePoint(bad) }).toEqual({ bad, at: 0 });
+  });
+
+  test("a frame id is built and read in one place: a line's end alone, or its start and the row's index", () => {
+    expect(frameId(200)).toBe("200");
+    expect(frameId(100, 1)).toBe("100.1");
+    expect(parseFrameId("200")).toEqual({ at: 200, last: true });
+    expect(parseFrameId("100.1")).toEqual({ at: 100, last: false });
+    expect(parseFrameId("0.0")).toEqual({ at: 0, last: false });
+    for (const bad of ["", "12x", "12.x", "12.", ".1", "-5", "1e3", " 7", "1.2.3", "99999999999999999999"]) expect({ bad, parsed: parseFrameId(bad) }).toEqual({ bad, parsed: null });
   });
 
   test("a line that is not an event, or has odd fields, is skipped and the lines after it still come", () => {

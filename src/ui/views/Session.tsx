@@ -7,7 +7,7 @@ import { Transcript } from "../parts/Transcript";
 import { steerOffer } from "../requests";
 import { sessionFacts } from "../session-facts";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
-import { follow } from "../stream";
+import { follow, streamGone } from "../stream";
 import { addFrames, EMPTY, lastCost, type Frame, type Shown } from "../transcript";
 
 type Phase = Extract<SessionMessage, { type: "phase" }>;
@@ -25,6 +25,8 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
   useEffect(() => {
     let buffer: Frame[] = [];
     let gotPhase = false;
+    let gone = false;
+    let checking = false;
     const flushNow = () => {
       if (!buffer.length) return;
       const batch = buffer;
@@ -35,7 +37,22 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
     const flush = setInterval(flushNow, 100);
     // A stream opened again continues from the line of the newest row (see follow); each row's frame
     // id goes with it, so the rows of a line sent again are drawn once (see addFrames).
-    const stop = follow((from) => `/api/sessions/${encodeURIComponent(slug)}/${seq}/stream${from > 0 ? `?from=${from}` : ""}`, {
+    const url = (from: number) => `/api/sessions/${encodeURIComponent(slug)}/${seq}/stream${from > 0 ? `?from=${from}` : ""}`;
+    /**
+     * Asks the stream's address whether the step is there (a HEAD opens no stream): the browser closes
+     * a stream on any error answer, so a closed stream alone does not say the step is missing.
+     */
+    const check = () => {
+      if (checking) return;
+      checking = true;
+      void fetch(url(0), { method: "HEAD" }).then((r) => r.status, () => null).then((status) => {
+        checking = false;
+        if (gone || gotPhase || !streamGone(status)) return;
+        setMissing(true);
+        stop();
+      });
+    };
+    const stop = follow(url, {
       message(data, id) {
         let m: SessionMessage;
         try { m = JSON.parse(data) as SessionMessage; } catch { return; }
@@ -55,16 +72,15 @@ export function Session({ slug, seq }: { slug: string; seq: number }) {
       },
       live() { setDown(false); },
       down(why) {
-        // Closed before it said what the step is: there is no such step. (Closed later, it is opened again.)
-        if (why === "closed" && !gotPhase) {
-          setMissing(true);
-          return "stop";
-        }
+        // Closed before it said what the step is: there may be no such step, or the server had a
+        // trouble (a 500 while the database was busy). The check says which; until it does, the
+        // stream is opened again as after any other close.
+        if (why === "closed" && !gotPhase) check();
         setDown(true);
-        return undefined;
       },
     });
     return () => {
+      gone = true;
       clearInterval(flush);
       stop();
     };

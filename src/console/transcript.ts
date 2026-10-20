@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { relativePath, toolTarget } from "../tools";
 import { MEANWHILE_HEADING, MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
-import type { TranscriptItem } from "./types";
+import { frameId, parseFrameId, type TranscriptItem } from "./types";
 
 /** The longest tool output one item carries. */
 export const OUTPUT_MAX = 256 * 1024;
@@ -178,12 +178,10 @@ interface ReadItem { item: TranscriptItem; id: string }
 /**
  * The byte offset a session stream resumes from, given the frame id a page names (Last-Event-ID or
  * `from`): the number before the dot, so "123.4" (a row inside the line that starts at 123) resumes
- * at 123 and the line is sent again. Anything that is not such an id, or not above 0, is 0, the start.
+ * at 123 and the line is sent again. Anything that is not such an id (see parseFrameId) is 0, the start.
  */
 export function resumePoint(id: string | null | undefined): number {
-  const m = /^(\d+)(?:\.\d+)?$/.exec(id ?? "");
-  const at = m ? Number(m[1]) : 0;
-  return Number.isSafeInteger(at) && at > 0 ? at : 0;
+  return parseFrameId(id ?? "")?.at ?? 0;
 }
 
 /** Reads a phase's raw.jsonl as transcript items from a byte offset, one finished line at a time. */
@@ -236,7 +234,7 @@ export class TranscriptReader {
       // An event in a shape nothing here expected is passed over, so the lines after it still come.
       let items: TranscriptItem[];
       try { items = toItems(e, this.cwd); } catch { return; }
-      items.forEach((item, k) => out.push({ item, id: k === items.length - 1 ? String(this.offset + next) : `${lineStart}.${k}` }));
+      items.forEach((item, k) => out.push({ item, id: k === items.length - 1 ? frameId(this.offset + next) : frameId(lineStart, k) }));
     };
     for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10, start)) line(nl, nl + 1);
     if (opts.final && start < buf.length && this.offset + buf.length >= size) line(buf.length, buf.length);

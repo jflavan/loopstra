@@ -216,6 +216,8 @@ describe("the console's server", () => {
       const frames = await sseFrames(`${base}/api/sessions/one/1/stream`, 5);
       expect(frames.map((f) => (f.data as SessionMessage).type)).toEqual(["phase", "item", "item", "phase", "end"]);
       expect((await fetch(`${base}/api/sessions/one/9/stream`)).status).toBe(404);
+      // The page asks with a HEAD when its stream closed before it said what the step is: only this 404 says the step is missing.
+      expect((await fetch(`${base}/api/sessions/one/9/stream`, { method: "HEAD" })).status).toBe(404);
       expect((await fetch(`${base}/api/sessions/..%2Fx/1/stream`)).status).toBe(404);
     });
   });

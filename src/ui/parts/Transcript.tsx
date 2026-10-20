@@ -12,7 +12,7 @@ const SHOWN = 1500;
 /** Output lines shown before "Show all". */
 const OUTPUT_LINES = 200;
 
-type Result = Shown["results"][string] | undefined;
+type Result = ReturnType<Shown["results"]["get"]>;
 
 /** A session's transcript. It follows the newest row until the person scrolls up, then offers to jump back. `compact`: a tile's, of a fixed height, with edits closed and shown as counts. */
 // Memoised: the session screen redraws for other reasons (its facts, its status) and the rows need not be rebuilt for them.
@@ -44,7 +44,7 @@ export const Transcript = memo(function Transcript({ shown, live, done, compact 
     <div class={`transcript-wrap${compact ? " compact" : ""}`}>
       <div class="transcript" ref={box} onScroll={onScroll} onClick={onClick}>
         {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
-        {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results[item.id] : undefined} compact={compact} />)}
+        {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results.get(item.id) : undefined} compact={compact} />)}
         {!shown.items.length && done && <p class="muted">This step left no transcript.</p>}
         {live && <div class="t-live"><span class="pulse" aria-hidden="true" /> Working…</div>}
       </div>

@@ -770,3 +770,12 @@ A record (a status, an artifact, a conversation entry, a person's edits, chat's 
   - An answer request was capped at 4,000 characters while chat passes a person's answer on whole (its dashboard takes 20,000), so a long answer from chat was refused as unreadable. The request's cap is now 20,000; the console's own form still allows 4,000.
   - A file in `requests/` that could not be set aside (held open, say) made every look between passes start a whole pass, every 2 s. A failed set-aside is remembered by the file's modification time, and the file is tried again after a minute, or as soon as it changes.
   - The event for a request that could not be read no longer said who asked. It names `by`, `byId` and `via` again when the file has them.
+
+## Cleanup after the full review (2026-10-19)
+
+- **The console and the page.**
+  - A reload of the Activity screen after a gap joined the history when it reached any live row, but the live rows can lie on both sides of the events the stream missed, so the rows between the page and the earlier live rows were never shown and Older could not reach them. Now only reaching the history read joins; otherwise the page stands alone and Older goes on from below it.
+  - An input method's Escape closed a form (and threw away what was typed), the palette or the drawer, and its arrows moved the palette's highlight, since those checks missed keyCode 229 or ignored composing altogether. One `composing` check now guards them all, with `escapePressed` and `listKey` built on it.
+  - A session stream the browser closed before it said what the step is showed "No such step" for good, though the browser closes a stream on any error answer, a 500 while the database was busy included. The page now asks the stream's address with a HEAD and gives up only on a 404; any other trouble opens the stream again with its backoff.
+  - A session row's frame id was built in one place and read in three, which disagreed on ids like "12x". `frameId` and `parseFrameId` in console/types.ts now build and read it for the server and the page alike; an id that is not one resumes from the start on the server and moves nothing on the page.
+  - Small ones: a transcript's results are a Map, so a call whose id is "constructor" has no result until one comes; `keyName` passes over a keydown with no key (Chrome's autofill); a question's repeated option and a gate check recorded twice get keys of their own; the Agents stream forgets when a session went missing once that session's follower ends by itself.

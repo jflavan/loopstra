@@ -1,4 +1,4 @@
-import { decide, keyMatcher, keyName, typingIn, type Binding } from "./keys";
+import { composing, decide, keyMatcher, keyName, typingIn, type Binding } from "./keys";
 import { navigate } from "./nav";
 import { drawer, helpOpen, paletteOpen } from "./store";
 
@@ -22,7 +22,7 @@ export function installKeys(): void {
   const press = keyMatcher(SHORTCUTS);
   window.addEventListener("keydown", (e) => {
     // Keys that pick a character in an input method (Japanese, Chinese, ...) are not shortcuts.
-    if (e.isComposing) return;
+    if (composing(e)) return;
     const name = keyName(e);
     const what = decide(name, (n) => press(n, Date.now()), { typing: typingIn(e.target), overlay: paletteOpen.value || helpOpen.value, screenKey: !!name && screenKeys.has(name) });
     if (what.kind === "nothing") return;

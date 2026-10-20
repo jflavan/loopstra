@@ -3,8 +3,9 @@ import type { JudgesView } from "../commands/judges";
 import type { LoopStatus } from "../heartbeat";
 
 /*
- * What the console's server sends and its page reads. Only types and plain constants live here: the
- * page imports this file, so it must never pull in server code (type-only imports are erased).
+ * What the console's server sends and its page reads. Only types, plain constants and small pure
+ * functions live here: the page imports this file, so it must never pull in server code (type-only
+ * imports are erased).
  */
 
 /** A board column: where a change is, or is heading next. */
@@ -126,14 +127,34 @@ export type TranscriptItem =
   | { kind: "message"; text: string; redirect: boolean };
 
 /**
- * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame names that row: a line's
- * last row has the line's end ("200"), any other the line's start and its index in the line
- * ("100.1"), see TranscriptReader.read. Its number before the dot is where a stream resumes.
+ * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame names that row (see
+ * frameId); its number before the dot is where a stream resumes.
  */
 export type SessionMessage =
   | { type: "phase"; name: string; status: string; started: string; ended: string | null }
   | { type: "item"; item: TranscriptItem }
   | { type: "end" };
+
+/**
+ * A session row's frame id: a line's last row has the line's end alone ("200"), any other the line's
+ * start and its index in the line ("100.1"), see TranscriptReader.read. Built only here and read
+ * only by parseFrameId, so the server and the page agree on every id.
+ */
+export function frameId(at: number, k?: number): string {
+  return k === undefined ? String(at) : `${at}.${k}`;
+}
+
+/**
+ * A frame id read back (see frameId): its number before any dot (`at`), and whether it names a
+ * line's last row (`last`, no dot). Null for anything else ("12x", "1e3", " 7", a number too big to
+ * be exact), which neither the server nor the page takes for a place in the transcript.
+ */
+export function parseFrameId(id: string): { at: number; last: boolean } | null {
+  const m = /^(\d+)(\.\d+)?$/.exec(id);
+  if (!m) return null;
+  const at = Number(m[1]);
+  return Number.isSafeInteger(at) ? { at, last: m[2] === undefined } : null;
+}
 
 /** A running session's key on the Agents screen. */
 export const agentKey = (slug: string, seq: number): string => `${slug}:${seq}`;
