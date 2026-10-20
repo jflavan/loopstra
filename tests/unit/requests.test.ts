@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { Trace } from "../../src/trace";
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults, waitingIds } from "../../src/requests";
+import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, waitingResults, waitingIds } from "../../src/requests";
 import { wakeStamp } from "../../src/wake";
 import { tempDir } from "../helpers";
 
@@ -50,7 +50,7 @@ describe("request files", () => {
       for (const r of [a, c]) { claimRequest(t.path, r.id); finishRequest(t.path, applyingRequests(t.path).find((x) => x.id === r.id)!, { ok: true, text: "done", status: "plan-approved" }); }
       expect(applyingRequests(t.path)).toEqual([]);
       // Chat never takes the console's results.
-      expect(takeResults(t.path, new Set(["slack", CONSOLE])).map((r) => r.id)).toEqual([c.id]);
+      expect(waitingResults(t.path, new Set(["slack", CONSOLE])).map((w) => w.result.id)).toEqual([c.id]);
       expect(requestState(t.path, a.id)).toMatchObject({ state: "done", ok: true, text: "done", status: "plan-approved" });
       expect(requestState(t.path, a.id)).toBeNull();
     } finally {
@@ -65,7 +65,7 @@ describe("request files", () => {
       claimRequest(t.path, c.id);
       finishRequest(t.path, applyingRequests(t.path)[0]!, { ok: true, text: "done", status: "accepted" });
       expect(requestState(t.path, c.id)).toBeNull();
-      expect(takeResults(t.path, new Set(["slack"])).map((r) => r.id)).toEqual([c.id]);
+      expect(waitingResults(t.path, new Set(["slack"])).map((w) => w.result.id)).toEqual([c.id]);
     } finally {
       t.cleanup();
     }
@@ -254,14 +254,15 @@ describe("request files", () => {
       drainOld(t.path);
       expect(existsSync(join(old, "requests"))).toBe(false);
       expect(pendingRequests(t.path).map((r) => [r.id, r.via])).toEqual([["000000000000001-1-0000", "chat"]]);
-      expect(takeResults(t.path, new Set(["terminal"])).map((r) => r.id)).toEqual(["000000000000002-1-0000"]);
+      expect(waitingResults(t.path, new Set(["terminal"])).map((w) => w.result.id)).toEqual(["000000000000002-1-0000"]);
       const stale = join(requestsDir(t.path), "results", "000000000000003-1-0000.json");
       mkdirSync(join(requestsDir(t.path), "results"), { recursive: true });
       writeFileSync(stale, "{}");
       const twoDays = (Date.now() - 2 * 86_400_000) / 1000;
       utimesSync(stale, twoDays, twoDays);
       pruneResults(t.path);
-      expect(readdirSync(join(requestsDir(t.path), "results"))).toEqual([]);
+      // The stale one only: the drained result is left until chat passes it on.
+      expect(readdirSync(join(requestsDir(t.path), "results"))).toEqual(["000000000000002-1-0000.json"]);
     } finally {
       t.cleanup();
     }
@@ -283,6 +284,23 @@ describe("request files", () => {
       expect(anythingToApply(t.path)).toBe(false);
       mkdirSync(join(t.path, ".loopstra", "chat", "requests"), { recursive: true });
       expect(anythingToApply(t.path)).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("cleanup after the full review", () => {
+  test("the console's results are read with the same schema as chat's: a file that is not a result is no answer", () => {
+    const t = tempDir();
+    try {
+      const dir = join(requestsDir(t.path), "results");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "000000000000001-1-0000.json"), JSON.stringify({ transport: CONSOLE }));
+      writeFileSync(join(dir, "000000000000002-1-0000.json"), JSON.stringify({ id: "000000000000002-1-0000", kind: "close", slug: "a", transport: CONSOLE, thread: "", text: "Closed.", ok: true, status: "no-such-status", at: "x" }));
+      expect(requestState(t.path, "000000000000001-1-0000")).toBeNull();
+      // A status this loop does not know reads as none, not as a result that is not one.
+      expect(requestState(t.path, "000000000000002-1-0000")).toMatchObject({ state: "done", ok: true, text: "Closed.", status: null });
     } finally {
       t.cleanup();
     }

@@ -87,6 +87,8 @@ describe("the dashboard panel", () => {
       expect((await post({ thread, text: "hi" }, { "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: "http://evil.test", "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain" })).status).toBe(415);
+      // The content type's MIME essence must be JSON, as for every other write of the console.
+      expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain; note=application/json" })).status).toBe(415);
       expect((await post({ thread: "../x", text: "hi" })).status).toBe(400);
       expect((await post({ thread, text: "hi" })).status).toBe(202);
       // While it answers, a second message is refused rather than queued behind it.
@@ -102,6 +104,12 @@ describe("the dashboard panel", () => {
       expect((await fetch(`${base}/api/chat?thread=bad`)).status).toBe(400);
       // A page on another host name that resolves here (DNS rebinding) gets nothing.
       expect((await fetch(`${base}/api/chat?thread=${thread}`, { headers: { host: "evil.test" } })).status).toBe(403);
+      // The console answers on [::1] too, and so does its chat (review of the merged #47 fixes).
+      const v6 = `[::1]:${server.port}`;
+      expect((await fetch(`${base}/api/chat?thread=${thread}&after=0`, { headers: { host: v6 } })).status).toBe(200);
+      const v6post = await fetch(`${base}/api/chat`, { method: "POST", headers: { host: v6, origin: `http://${v6}`, "content-type": "application/json; charset=utf-8" }, body: JSON.stringify({ thread: "tab-ipv6abcd", text: "" }) });
+      // Past the host, the origin and the content type: only the empty message is refused.
+      expect({ status: v6post.status, body: await v6post.json() }).toEqual({ status: 400, body: { error: "message" } });
       // Everything else stays read-only, and the page is told it has chat.
       expect((await fetch(`${base}/api/spend`, { method: "POST" })).status).toBe(405);
       const [first] = await sseFrames(`${base}/api/stream`, 1);
@@ -541,9 +549,12 @@ describe("the shared transport pieces (hardening review)", () => {
     } finally { void server.stop(true); }
   });
 
-  test("noBroadcast shows broadcasts and other people's mentions as text, and keeps the acceptors' mentions", () => {
-    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and &lt;@U2|bob>");
-    expect(noBroadcast("ping <@U1>")).toBe("ping &lt;@U1>");
+  test("noBroadcast shows broadcasts as text and other people's mentions as their names, and keeps the acceptors' mentions", () => {
+    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and @U2");
+    expect(noBroadcast("ping <@U1>")).toBe("ping @U1");
+    // A name is the person's own choice: it is shown as text, never read by Slack as a mention.
+    const names = new Map([["U0999ABC", "Bo"], ["U7", "<!channel>"]]);
+    expect(noBroadcast("ask <@U0999ABC>, <@U7> or <@U8>", [], (id) => names.get(id))).toBe("ask @Bo, @&lt;!channel> or @U8");
     expect(noBroadcast("a <#C1|general> link and x < y")).toBe("a <#C1|general> link and x < y");
   });
 });
@@ -641,8 +652,10 @@ describe("Slack (hardening review)", () => {
     const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: ["U1"] }, { root: r.root, env, log: () => {} });
     try {
       await slack.start(async () => {});
-      await slack.send("C1:1.0", "<!channel> ask <@U1> or <@U2>");
-      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1> or &lt;@U2>");
+      // U2 has written in the channel, so its name is known; U3 has not.
+      await slack.onEvent({ type: "message", user: "U2", channel: "C1", text: "hi", ts: "1.0" });
+      await slack.send("C1:1.0", "<!channel> ask <@U1>, <@U2> or <@U3>");
+      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1>, @Someone or @U3");
     } finally {
       await slack.stop();
       void stub.server.stop(true);
@@ -746,11 +759,11 @@ describe("the full review of #47", () => {
       const answers = [
         await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh`), new URL(`${base}/api/chat?thread=tab-abcdefgh`)),
         await dash.handle(new Request(`${base}/api/chat?thread=bad`), new URL(`${base}/api/chat?thread=bad`)),
-        await dash.handle(new Request("http://evil.test/api/chat"), new URL("http://evil.test/api/chat")),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "[]" }), new URL(`${base}/api/chat`)),
         await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`)),
         await dash.handle(new Request(`${base}/api/chat`, { method: "PUT" }), new URL(`${base}/api/chat`)),
       ];
-      expect(answers.map((a) => a.status)).toEqual([200, 400, 403, 503, 405]);
+      expect(answers.map((a) => a.status)).toEqual([200, 400, 400, 503, 405]);
       expect(answers.map((a) => a.headers.get("cache-control"))).toEqual(Array(5).fill("no-store"));
     } finally { r.cleanup(); }
   });

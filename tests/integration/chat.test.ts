@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { Orchestrator } from "../../src/chat/orchestrator";
 import { commitRecord } from "../../src/context";
-import { pendingRequests, requestsDir, submitRequest, takeResults } from "../../src/requests";
+import { pendingRequests, requestsDir, submitRequest, waitingResults } from "../../src/requests";
 import { ChatService, type OnMessage, type Transport } from "../../src/chat/service";
 import { fetchJson } from "../../src/chat/transports/shared";
 import { Git } from "../../src/git";
@@ -92,7 +92,7 @@ describe("chat with the loop", () => {
       const log = (await new Git(r.root).run(["log", "--format=%s"])).out;
       expect(log).toContain("loopstra(csv-export): accepted by Ana from the terminal [skip ci]");
       expect((await readIntent(r.root, "other")).file.frontmatter.status).toBe("closed");
-      const results = takeResults(r.root, new Set(["terminal"]));
+      const results = waitingResults(r.root, new Set(["terminal"])).map((w) => w.result);
       expect(results.map((x) => x.text)).toEqual([
         "Started csv-export. I will say here when it needs anyone, and when it is done.",
         "I did not start other: it is closed now, not a draft, so someone already changed it.",
@@ -120,7 +120,7 @@ describe("chat with the loop", () => {
       rmSync(join(requestsDir(r.root), `${accept.id}.json`));
       rmSync(join(requestsDir(r.root), `${added.id}.json`));
       await tick(r.root).catch(() => {});
-      expect(takeResults(r.root, new Set(["terminal"])).map((x) => x.text)).toEqual([
+      expect(waitingResults(r.root, new Set(["terminal"])).map((w) => w.result.text)).toEqual([
         "Started a. I will say here when it needs anyone, and when it is done.",
         "Added to the queue as drafts: c. Read them in intent/, then set status to accepted, or ask me to start one.",
       ]);
@@ -187,7 +187,7 @@ describe("chat with the loop", () => {
       const thread = service.orchestrator.store.get("terminal", "local");
       expect(thread.messages.map((m) => m.text)).toEqual([started]);
       expect(thread.since).toEqual([`The loop answered: ${started}`]);
-      expect(takeResults(r.root, new Set(["terminal"]))).toEqual([]);
+      expect(waitingResults(r.root, new Set(["terminal"])).map((w) => w.result)).toEqual([]);
     } finally { r.cleanup(); }
   });
 
@@ -235,7 +235,7 @@ describe("chat with the loop", () => {
       down = false;
       await service.poll();
       expect(t.sent).toEqual([["local", "Started a. I will say here when it needs anyone, and when it is done."]]);
-      expect(takeResults(r.root, new Set(["terminal"]))).toEqual([]);
+      expect(waitingResults(r.root, new Set(["terminal"])).map((w) => w.result)).toEqual([]);
     } finally { r.cleanup(); }
   });
 
@@ -244,8 +244,8 @@ describe("chat with the loop", () => {
     try {
       submitRequest(r.root, { kind: "accept", slug: "a", by: "u", byName: "U", via: "Slack", transport: "slack", thread: "C1:1.0" });
       await tick(r.root).catch(() => {});
-      expect(takeResults(r.root, new Set(["terminal", "dashboard"]))).toEqual([]);
-      expect(takeResults(r.root, new Set(["slack"])).map((x) => x.thread)).toEqual(["C1:1.0"]);
+      expect(waitingResults(r.root, new Set(["terminal", "dashboard"])).map((w) => w.result)).toEqual([]);
+      expect(waitingResults(r.root, new Set(["slack"])).map((w) => w.result.thread)).toEqual(["C1:1.0"]);
     } finally { r.cleanup(); }
   });
 
