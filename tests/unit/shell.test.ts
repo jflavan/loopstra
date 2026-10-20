@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitLocation, type StdinWriter } from "../../src/shell";
+import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitHookEnv, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { tempDir } from "../helpers";
 
@@ -234,7 +234,7 @@ describe("a project command's environment", () => {
       expect(r.code).toBe(0);
       expect(JSON.parse(r.output.trim())).toEqual([null, null, "string"]);
       const env: Record<string, string | undefined> = { GIT_DIR: "x", GIT_WORK_TREE: "y", HOME: "h" };
-      expect(withoutGitLocation(env)).toEqual({ HOME: "h" });
+      expect(withoutGitHookEnv(env)).toEqual({ HOME: "h" });
       // The other variables a hook or alias exports that change what a git call does: how pathspecs
       // are read, the dates of the commit it is part of, and its -c settings. An author's name stays
       // (gitEnv drops it for the runtime's own calls), and so does configuration set on purpose
@@ -245,7 +245,7 @@ describe("a project command's environment", () => {
         GIT_CONFIG_KEY_0: "a.b", GIT_CONFIG_VALUE_0: "c", GIT_CONFIG_KEY_1: "d.e", GIT_CONFIG_VALUE_1: "f",
         GIT_AUTHOR_NAME: "Person", GIT_CONFIG_GLOBAL: "/home/p/.gitconfig", HOME: "h",
       };
-      expect(withoutGitLocation(hook)).toEqual({
+      expect(withoutGitHookEnv(hook)).toEqual({
         GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "a.b", GIT_CONFIG_VALUE_0: "c", GIT_CONFIG_KEY_1: "d.e", GIT_CONFIG_VALUE_1: "f",
         GIT_AUTHOR_NAME: "Person", GIT_CONFIG_GLOBAL: "/home/p/.gitconfig", HOME: "h",
       });

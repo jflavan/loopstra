@@ -48,7 +48,7 @@ const GIT_HOOK_VARS: readonly string[] = [
  * A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS) and the other
  * variables a hook or alias exports that change what git does (see GIT_HOOK_VARS).
  */
-export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
+export function withoutGitHookEnv<T extends Record<string, string | undefined>>(env: T): T {
   const out = { ...env };
   for (const name of [...GIT_LOCATION_VARS, ...GIT_HOOK_VARS]) delete out[name];
   return out;
@@ -378,7 +378,7 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitLocation({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitHookEnv({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
   if (r.stopped) throw new StopRequested();
   if (r.cancelled) throw new Cancelled();
   if (!r.started) throw new Error(r.err);

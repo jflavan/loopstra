@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
-import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
+import { lastLine, spawnBounded, withoutGitHookEnv } from "./shell";
 import { endsStepQuietly, notTheStepsFault, StopRequested } from "./stop";
 
 /** How long one git call may take before it is stopped (a Git constructor option overrides it). */
@@ -117,7 +117,7 @@ function hasOwnSshCommand(cwd: string): boolean {
   if (known === undefined) {
     try {
       // The repository at cwd, not one a hook named in the environment (see GIT_LOCATION_VARS).
-      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, env: withoutGitLocation(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, env: withoutGitHookEnv(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
       known = r.exitCode === 0 && r.stdout.toString().trim().length > 0;
     } catch { known = false; }
     sshConfigured.set(cwd, known);
@@ -137,7 +137,7 @@ function hasOwnSshCommand(cwd: string): boolean {
  * literal, and a commit gets its own time.
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = withoutGitLocation({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
+  const env: Record<string, string | undefined> = withoutGitHookEnv({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
   delete env.SSH_ASKPASS;
   delete env.LANGUAGE;
   for (const who of ["AUTHOR", "COMMITTER"]) { delete env[`GIT_${who}_NAME`]; delete env[`GIT_${who}_EMAIL`]; }
