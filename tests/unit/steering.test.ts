@@ -261,8 +261,11 @@ describe("steering a running session", () => {
       await Bun.sleep(2500);
       expect(tries).toBe(1);
       // Past each wait (one minute, then two, then four) one more try; then it is left for the next step's sweep.
+      // Each wait counts from when its try began, so a slow try (Windows) cannot push the next one back.
       for (const [minutes, expected] of [[1.1, 2], [3.2, 3], [7.3, 4], [60, 4], [120, 4]] as const) {
+        const before = tries;
         setSystemTime(new Date(start + minutes * 60_000));
+        if (expected > before) await until(() => tries === expected, 5000);
         await Bun.sleep(1500);
         expect(tries).toBe(expected);
       }

@@ -135,7 +135,7 @@ const sameError = (error: string) => error.replace(/\b[0-9a-f]{7,64}\b/g, "<comm
 /**
  * Keeps an ended session's message for the next session (see keepForNext), from a session's look.
  * A record that keeps failing (the checkout off main, a held lock, git failing) is not tried on every
- * look: after a failure the looks wait PICK_UP_WAIT_MS, twice as long after each one, and after
+ * look: after a failure the looks wait PICK_UP_WAIT_MS from when that try began, twice as long after each one, and after
  * PICK_UP_TRIES failures they leave the message for the next step's sweep. The error is traced once
  * while it stays the same for the message (commit ids aside). Null when it is not tried now.
  */
@@ -144,11 +144,13 @@ function pickUp(ctx: StepContext, m: InboxMessage): Promise<void> | null {
   const was = pickUpFailed.get(key);
   if (was && (was.tries >= PICK_UP_TRIES || Date.now() < was.next)) return null;
   let failed = false;
+  // The wait counts from the try's start, so a slow failure (git on a busy machine) does not push the next try back.
+  const began = Date.now();
   return keepForNext(ctx, m, (error) => {
     failed = true;
     const tries = (was?.tries ?? 0) + 1;
     const traced = sameError(error);
-    pickUpFailed.set(key, { tries, next: Date.now() + PICK_UP_WAIT_MS * 2 ** (tries - 1), traced });
+    pickUpFailed.set(key, { tries, next: began + PICK_UP_WAIT_MS * 2 ** (tries - 1), traced });
     if (traced === was?.traced) return;
     try {
       ctx.trace.event(ctx.slug, "error", { where: "conversation", id: m.id, error, note: `a message for a session that ended could not be kept for the next one; tried again less often, and after ${PICK_UP_TRIES} tries left for the next step` });
