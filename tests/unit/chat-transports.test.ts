@@ -87,6 +87,8 @@ describe("the dashboard panel", () => {
       expect((await post({ thread, text: "hi" }, { "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: "http://evil.test", "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain" })).status).toBe(415);
+      // The content type's MIME essence must be JSON, as for every other write of the console.
+      expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain; note=application/json" })).status).toBe(415);
       expect((await post({ thread: "../x", text: "hi" })).status).toBe(400);
       expect((await post({ thread, text: "hi" })).status).toBe(202);
       // While it answers, a second message is refused rather than queued behind it.
@@ -102,6 +104,12 @@ describe("the dashboard panel", () => {
       expect((await fetch(`${base}/api/chat?thread=bad`)).status).toBe(400);
       // A page on another host name that resolves here (DNS rebinding) gets nothing.
       expect((await fetch(`${base}/api/chat?thread=${thread}`, { headers: { host: "evil.test" } })).status).toBe(403);
+      // The console answers on [::1] too, and so does its chat (review of the merged #47 fixes).
+      const v6 = `[::1]:${server.port}`;
+      expect((await fetch(`${base}/api/chat?thread=${thread}&after=0`, { headers: { host: v6 } })).status).toBe(200);
+      const v6post = await fetch(`${base}/api/chat`, { method: "POST", headers: { host: v6, origin: `http://${v6}`, "content-type": "application/json; charset=utf-8" }, body: JSON.stringify({ thread: "tab-ipv6abcd", text: "" }) });
+      // Past the host, the origin and the content type: only the empty message is refused.
+      expect({ status: v6post.status, body: await v6post.json() }).toEqual({ status: 400, body: { error: "message" } });
       // Everything else stays read-only, and the page is told it has chat.
       expect((await fetch(`${base}/api/spend`, { method: "POST" })).status).toBe(405);
       const [first] = await sseFrames(`${base}/api/stream`, 1);
@@ -746,11 +754,11 @@ describe("the full review of #47", () => {
       const answers = [
         await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh`), new URL(`${base}/api/chat?thread=tab-abcdefgh`)),
         await dash.handle(new Request(`${base}/api/chat?thread=bad`), new URL(`${base}/api/chat?thread=bad`)),
-        await dash.handle(new Request("http://evil.test/api/chat"), new URL("http://evil.test/api/chat")),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "[]" }), new URL(`${base}/api/chat`)),
         await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`)),
         await dash.handle(new Request(`${base}/api/chat`, { method: "PUT" }), new URL(`${base}/api/chat`)),
       ];
-      expect(answers.map((a) => a.status)).toEqual([200, 400, 403, 503, 405]);
+      expect(answers.map((a) => a.status)).toEqual([200, 400, 400, 503, 405]);
       expect(answers.map((a) => a.headers.get("cache-control"))).toEqual(Array(5).fill("no-store"));
     } finally { r.cleanup(); }
   });
