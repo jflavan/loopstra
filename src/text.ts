@@ -7,3 +7,9 @@ export function andList(items: readonly string[]): string {
 export function oneLine(s: string, max: number): string {
   return s.replace(/\s+/g, " ").trim().slice(0, max);
 }
+
+/** A text's lines, each with its line ending ("\r\n" or "\n"; none on a last line without one). [""] for "". */
+export const linesOf = (text: string): string[] => text.split(/(?<=\n)/);
+
+/** A line's text without its line ending. */
+export const lineText = (line: string): string => line.replace(/\r?\n$/, "");

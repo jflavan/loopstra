@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { lineText, linesOf } from "../text";
 
 /**
  * Copies the bullets under "## Proposed CLAUDE.md additions" in a change's lessons.md (written for
@@ -41,11 +42,11 @@ export async function applyLessons(root: string, slug: string): Promise<{ added:
   return { added };
 }
 
-/** A text's lines, each with the ending it has ("\r\n", "\n", or "" for a last line without one). */
+/** A text's lines, each with the ending it has ("\r\n", "\n", or "" for a last line without one); none for "". */
 function withEndings(text: string): { text: string; end: string }[] {
-  return (text.match(/[^\n]*\n|[^\n]+$/g) ?? []).map((l) => {
-    const end = l.endsWith("\r\n") ? "\r\n" : l.endsWith("\n") ? "\n" : "";
-    return { text: l.slice(0, l.length - end.length), end };
+  return linesOf(text).filter((l) => l !== "").map((l) => {
+    const own = lineText(l);
+    return { text: own, end: l.slice(own.length) };
   });
 }
 

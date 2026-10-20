@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Config } from "./config";
 import type { RecordDraft } from "./record-draft";
 import { errorText } from "./shell";
-import { andList } from "./text";
+import { andList, lineText, linesOf } from "./text";
 
 export const STATUSES = [
   "draft", "accepted",
@@ -65,12 +65,6 @@ interface IntentFile {
 
 const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
 
-/** A text's lines, each with its line ending. */
-const linesOf = (text: string) => text.split(/(?<=\n)/);
-
-/** A line's text without its line ending. */
-const content = (p: string) => p.replace(/\r?\n$/, "");
-
 /**
  * The frontmatter block, the one rule parseIntentFile and patchFrontmatter both read it by: `---`
  * alone on the first line, the lines, and the first later line that is `---` with nothing but spaces
@@ -81,7 +75,7 @@ const content = (p: string) => p.replace(/\r?\n$/, "");
  */
 function closingFence(parts: readonly string[]): number {
   if (!/^---\r?\n$/.test(parts[0] ?? "")) return -1;
-  return parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---");
+  return parts.findIndex((p, i) => i > 0 && lineText(p).trimEnd() === "---");
 }
 
 /**
@@ -277,16 +271,16 @@ function commentStart(rest: string): number {
  * value; inside a block scalar it is text, and goes with the value. Blank lines at the end are not the value's.
  */
 function valueEnd(head: string[], at: number): number {
-  const own = content(head[at]!);
+  const own = lineText(head[at]!);
   const block = /^\s*[|>]/.test(own.slice(own.indexOf(":") + 1));
   let end = at + 1;
   while (end < head.length) {
-    const line = content(head[end]!);
+    const line = lineText(head[end]!);
     if (!/^(\s+\S|\s*$)/.test(line)) break;
     if (!block && /^\s*#/.test(line)) break;
     end++;
   }
-  while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+  while (end > at + 1 && !lineText(head[end - 1]!).trim()) end--;
   return end;
 }
 
@@ -321,16 +315,16 @@ export function patchFrontmatter(raw: string, patch: Record<string, string>, rem
     const head = parts.slice(0, close);
     const tail = parts.slice(close);
     for (const key of remove) {
-      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(lineText(p)));
       if (at < 0) continue;
       // The key's line and any lines its value went on over (a block or folded scalar).
       head.splice(at, valueEnd(head, at) - at);
     }
     for (const [key, value] of entries) {
-      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(lineText(p)));
       const line = `${key}: ${scalar(value)}`;
       if (at < 0) { head.push(line + eol); continue; }
-      const own = content(head[at]!);
+      const own = lineText(head[at]!);
       const ending = head[at]!.slice(own.length) || eol;
       const rest = own.slice(own.indexOf(":") + 1);
       const c = commentStart(rest);
