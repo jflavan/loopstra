@@ -770,3 +770,15 @@ A record (a status, an artifact, a conversation entry, a person's edits, chat's 
   - An answer request was capped at 4,000 characters while chat passes a person's answer on whole (its dashboard takes 20,000), so a long answer from chat was refused as unreadable. The request's cap is now 20,000; the console's own form still allows 4,000.
   - A file in `requests/` that could not be set aside (held open, say) made every look between passes start a whole pass, every 2 s. A failed set-aside is remembered by the file's modification time, and the file is tried again after a minute, or as soon as it changes.
   - The event for a request that could not be read no longer said who asked. It names `by`, `byId` and `via` again when the file has them.
+
+## Cleanup after the full review (2026-10-19)
+
+- **The loop's core.**
+  - Every Trace.open entered a migration transaction, which takes SQLite's write lock, even on an up-to-date database, so every console request, chat turn and session stream could wait up to 5 s behind the loop's writes. migrate now enters a step only when the version it read is behind; the step still reads the version again inside its transaction.
+  - alreadyMerged ran a second `git diff` to learn whether the branch changed anything outside intent/, the diff containsChanges had just run. containsChanges now takes that rule as an option (`ignoreOnlyWithOthers`), and its other options (`ignore`, `base`) go in the same object.
+  - Literal pathspecs were built in three places, apart from the length pathChunks charges for them. `literalPathspecs` in src/git.ts builds them all, beside the one definition of their cost.
+  - The check of what `gh pr view` prints was hand-written beside separate types. One zod schema now gives both; data in another shape is still an error to wait on, with the same two messages.
+  - `withoutGitLocation` also drops the hook variables (pathspec modes, commit dates, `-c` settings), so it is `withoutGitHookEnv` now.
+  - apply-lessons split lines with endings by its own regex, beside the same helpers in src/intents.ts. `linesOf` and `lineText` live in src/text.ts and both use them.
+  - The applier's memory of when a request file was first unreadable was filled by every reader (the console, chat) and never forgot a file that was gone; its comment said it did. Only the applier's looks record now, and each forgets the files of its folder no longer there, for the failed set-asides too.
+  - A request a loop from before #75 wrote (and maybe committed) before it was hard-killed, then upgraded, read as "moved on; nothing changed" (or "held already", or "no question waiting", with the answer never stored), since its commit has no `Loopstra-Request` trailer. A claimed request keeps the `writtenHash` such a loop saved, and when the change's intent.md, in the checkout or at main, still hashes to it, the request is finished as applied (`doneBefore` in src/apply.ts).
