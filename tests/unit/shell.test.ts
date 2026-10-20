@@ -4,6 +4,8 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitHookEnv, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
+import { pidAlive } from "../../src/heartbeat";
+import { until } from "../console-helpers";
 import { tempDir } from "../helpers";
 
 describe("runCommand", () => {
@@ -56,13 +58,21 @@ describe("runCommand", () => {
     t.cleanup();
   });
 
-  test("a cancelled command is killed at once and throws Cancelled; once cancelled, none starts", async () => {
+  test("a cancelled command is killed at once and throws Cancelled, with nothing it started left running; once cancelled, none starts", async () => {
     const t = tempDir();
     const cancel = new AbortController();
     const started = Date.now();
+    const pidFile = join(t.path, "pid.txt");
+    // The command runs a child of its own, which writes its pid and waits.
+    const child = `bun -e "require('fs').writeFileSync('pid.txt', String(process.pid)); await Bun.sleep(5000)"`;
     setTimeout(() => cancel.abort(), 200);
-    expect(await runCommand(`bun -e "await Bun.sleep(5000)"`, t.path, { signal: cancel.signal }).catch((e: unknown) => e)).toBeInstanceOf(Cancelled);
+    const pending = runCommand(child, t.path, { signal: cancel.signal }).catch((e: unknown) => e);
+    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8") !== "");
+    expect(await pending).toBeInstanceOf(Cancelled);
     expect(Date.now() - started).toBeLessThan(4_500);
+    // Cancelled is thrown only once the whole tree is gone, so the folder can be removed at once
+    // (on Windows a child still running holds it).
+    expect(pidAlive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
     expect(await runCommand("echo never > ran.txt", t.path, { signal: cancel.signal }).catch((e: unknown) => e)).toBeInstanceOf(Cancelled);
     expect(existsSync(join(t.path, "ran.txt"))).toBe(false);
     t.cleanup();

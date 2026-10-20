@@ -249,15 +249,20 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   }
   track(proc);
 
+  // A kill begun by a stop or a cancel is waited for before returning: the direct child can exit
+  // before its own children (taskkill on Windows ends the tree in no set order), and a child still
+  // running would hold the working folder the caller may remove next.
+  let killing: Promise<void> | undefined;
+  const kill = () => { killing ??= killTree(proc); };
   let stopped = false;
   let grace: ReturnType<typeof setTimeout> | undefined;
   const unsubscribe = o.onStop === "ignore" ? () => {} : onStop(() => {
     stopped = true;
-    if (o.onStop === "kill") void killTree(proc);
-    else grace = setTimeout(() => { void killTree(proc); }, graceMs);
+    if (o.onStop === "kill") kill();
+    else grace = setTimeout(kill, graceMs);
   });
   let cancelled = false;
-  const cancel = () => { cancelled = true; void killTree(proc); };
+  const cancel = () => { cancelled = true; kill(); };
   o.signal?.addEventListener("abort", cancel, { once: true });
 
   let closeStdin = () => {};
@@ -336,6 +341,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   clearTimeout(grace);
   unsubscribe();
   o.signal?.removeEventListener("abort", cancel);
+  if (killing) await killing;
   // Output pipes may be held by a leftover grandchild; take what arrived.
   if (!stopped && !cancelled) await within(Promise.all([outDone, errDone]), timedOut || o.onLine ? 250 : 2_000, undefined);
   if (handlerError !== undefined) throw handlerError instanceof Error ? handlerError : new Error(errorText(handlerError));
