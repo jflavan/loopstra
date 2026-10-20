@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import type { Trace } from "../../src/trace";
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, takeResults, waitingIds } from "../../src/requests";
+import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, waitingResults, waitingIds } from "../../src/requests";
 import { wakeStamp } from "../../src/wake";
 import { tempDir } from "../helpers";
 
@@ -49,7 +50,7 @@ describe("request files", () => {
       for (const r of [a, c]) { claimRequest(t.path, r.id); finishRequest(t.path, applyingRequests(t.path).find((x) => x.id === r.id)!, { ok: true, text: "done", status: "plan-approved" }); }
       expect(applyingRequests(t.path)).toEqual([]);
       // Chat never takes the console's results.
-      expect(takeResults(t.path, new Set(["slack", CONSOLE])).map((r) => r.id)).toEqual([c.id]);
+      expect(waitingResults(t.path, new Set(["slack", CONSOLE])).map((w) => w.result.id)).toEqual([c.id]);
       expect(requestState(t.path, a.id)).toMatchObject({ state: "done", ok: true, text: "done", status: "plan-approved" });
       expect(requestState(t.path, a.id)).toBeNull();
     } finally {
@@ -64,7 +65,7 @@ describe("request files", () => {
       claimRequest(t.path, c.id);
       finishRequest(t.path, applyingRequests(t.path)[0]!, { ok: true, text: "done", status: "accepted" });
       expect(requestState(t.path, c.id)).toBeNull();
-      expect(takeResults(t.path, new Set(["slack"])).map((r) => r.id)).toEqual([c.id]);
+      expect(waitingResults(t.path, new Set(["slack"])).map((w) => w.result.id)).toEqual([c.id]);
     } finally {
       t.cleanup();
     }
@@ -76,6 +77,19 @@ describe("request files", () => {
       expect(cancelRequest(t.path, "../hold")).toBe(false);
       expect(requestState(t.path, "..\\x")).toBeNull();
       expect(claimRequest(t.path, "a/b")).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("an answer as long as chat may send (up to 20,000 characters) is a request; a longer one is not", () => {
+    const t = tempDir();
+    try {
+      const long = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(5000) });
+      const longest = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_000) });
+      const over = submitRequest(t.path, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_001) });
+      expect(pendingRequests(t.path).map((r) => r.id)).toEqual([long.id, longest.id]);
+      expect(waitingIds(t.path)).toContain(over.id);
     } finally {
       t.cleanup();
     }
@@ -107,9 +121,17 @@ describe("request files", () => {
       for (const n of ["copy.json", "000000000000001-1-0001.json", "000000000000001-1-0004.json"]) utimesSync(join(requestsDir(t.path), n), old, old);
       expect(anythingToApply(t.path)).toBe(false);
       expect(readdirSync(requestsDir(t.path)).filter((n) => n.endsWith(".json")).length).toBe(3);
-      // Still unreadable once the wait has passed (none here): the applier's look sets them aside; the console's reads never do.
+      // Still unreadable once the wait has passed (none here): the applier's look starts a pass for them, and the
+      // pass, which has the trace, sets them aside and traces each once; the console's reads never do.
       expect(pendingRequests(t.path)).toEqual([]);
       expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(existsSync(join(requestsDir(t.path), "bad"))).toBe(false);
+      const traced: unknown[] = [];
+      const trace = { event: (...args: unknown[]) => { traced.push(args); } } as unknown as Trace;
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(claimedRequests(t.path, { trace, badAfterMs: 0 }).requests).toEqual([]);
+      expect(traced).toHaveLength(4);
       expect(anythingToApply(t.path, 0)).toBe(false);
       expect(pendingRequests(t.path)).toEqual([]);
       expect(waitingIds(t.path)).toEqual([]);
@@ -128,6 +150,71 @@ describe("request files", () => {
       expect(claimedRequests(t.path)).toMatchObject({ requests: [], unreadable: [{ id: "000000000000001-1-0003", kind: "explode", slug: "a", transport: CONSOLE, thread: "" }] });
       expect(claimedRequests(t.path).unreadable[0]!.problem).toContain("kind");
     } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a file that cannot be set aside does not start a pass on every look: it waits a minute, or until it changes", () => {
+    const t = tempDir();
+    const clock = spyOn(Date, "now");
+    try {
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      // A file where requests/bad/ would go: every move into it fails, as for a file Windows holds open.
+      writeFileSync(join(requestsDir(t.path), "bad"), "");
+      const copy = join(requestsDir(t.path), "copy.json");
+      writeFileSync(copy, "{ not json");
+      const traced: unknown[] = [];
+      const trace = { event: (...args: unknown[]) => { traced.push(args); } } as unknown as Trace;
+      const start = Date.now();
+      clock.mockImplementation(() => start);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(existsSync(copy)).toBe(true);
+      expect(traced).toEqual([]);
+      // The failed move is remembered: the next looks start no pass for it.
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      clock.mockImplementation(() => start + 30_000);
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      // A minute on, it is tried again.
+      clock.mockImplementation(() => start + 61_000);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+      expect(waitingIds(t.path, { trace, badAfterMs: 0 })).toEqual([]);
+      expect(anythingToApply(t.path, 0)).toBe(false);
+      // So is a file that changed since.
+      const later = new Date(start + 5 * 60_000);
+      utimesSync(copy, later, later);
+      expect(anythingToApply(t.path, 0)).toBe(true);
+    } finally {
+      clock.mockRestore();
+      t.cleanup();
+    }
+  });
+
+  test("only the applier's looks start a bad file's wait, and a file that is gone is forgotten", () => {
+    const t = tempDir();
+    const clock = spyOn(Date, "now");
+    try {
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      const copy = join(requestsDir(t.path), "copy.json");
+      const start = Date.now();
+      clock.mockImplementation(() => start);
+      // The console's reads pass the file over without starting its wait.
+      writeFileSync(copy, "{ not json");
+      expect(pendingRequests(t.path)).toEqual([]);
+      clock.mockImplementation(() => start + 40_000);
+      expect(anythingToApply(t.path)).toBe(false);
+      // The applier's first look started it: the wait is up 30 s on.
+      clock.mockImplementation(() => start + 71_000);
+      expect(anythingToApply(t.path)).toBe(true);
+      // Gone at the next look, then a new bad file of that name: its wait starts afresh.
+      rmSync(copy);
+      clock.mockImplementation(() => start + 72_000);
+      expect(anythingToApply(t.path)).toBe(false);
+      writeFileSync(copy, "{ not json");
+      clock.mockImplementation(() => start + 73_000);
+      expect(anythingToApply(t.path)).toBe(false);
+    } finally {
+      clock.mockRestore();
       t.cleanup();
     }
   });
@@ -167,14 +254,15 @@ describe("request files", () => {
       drainOld(t.path);
       expect(existsSync(join(old, "requests"))).toBe(false);
       expect(pendingRequests(t.path).map((r) => [r.id, r.via])).toEqual([["000000000000001-1-0000", "chat"]]);
-      expect(takeResults(t.path, new Set(["terminal"])).map((r) => r.id)).toEqual(["000000000000002-1-0000"]);
+      expect(waitingResults(t.path, new Set(["terminal"])).map((w) => w.result.id)).toEqual(["000000000000002-1-0000"]);
       const stale = join(requestsDir(t.path), "results", "000000000000003-1-0000.json");
       mkdirSync(join(requestsDir(t.path), "results"), { recursive: true });
       writeFileSync(stale, "{}");
       const twoDays = (Date.now() - 2 * 86_400_000) / 1000;
       utimesSync(stale, twoDays, twoDays);
       pruneResults(t.path);
-      expect(readdirSync(join(requestsDir(t.path), "results"))).toEqual([]);
+      // The stale one only: the drained result is left until chat passes it on.
+      expect(readdirSync(join(requestsDir(t.path), "results"))).toEqual(["000000000000002-1-0000.json"]);
     } finally {
       t.cleanup();
     }
@@ -196,6 +284,23 @@ describe("request files", () => {
       expect(anythingToApply(t.path)).toBe(false);
       mkdirSync(join(t.path, ".loopstra", "chat", "requests"), { recursive: true });
       expect(anythingToApply(t.path)).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("cleanup after the full review", () => {
+  test("the console's results are read with the same schema as chat's: a file that is not a result is no answer", () => {
+    const t = tempDir();
+    try {
+      const dir = join(requestsDir(t.path), "results");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "000000000000001-1-0000.json"), JSON.stringify({ transport: CONSOLE }));
+      writeFileSync(join(dir, "000000000000002-1-0000.json"), JSON.stringify({ id: "000000000000002-1-0000", kind: "close", slug: "a", transport: CONSOLE, thread: "", text: "Closed.", ok: true, status: "no-such-status", at: "x" }));
+      expect(requestState(t.path, "000000000000001-1-0000")).toBeNull();
+      // A status this loop does not know reads as none, not as a result that is not one.
+      expect(requestState(t.path, "000000000000002-1-0000")).toMatchObject({ state: "done", ok: true, text: "Closed.", status: null });
     } finally {
       t.cleanup();
     }

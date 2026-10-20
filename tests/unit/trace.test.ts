@@ -273,6 +273,54 @@ describe("the schema version", () => {
     } finally { db.close(); }
   });
 
+  test("a migration another process ran after the version was first read is not run again", () => {
+    const db = new Database(":memory:");
+    try {
+      db.run("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, phase_seq INTEGER, type TEXT NOT NULL, ts TEXT NOT NULL, payload TEXT NOT NULL)");
+      const steps = ["ALTER TABLE events ADD COLUMN extra TEXT"];
+      // Another process (a second loop, the console) migrates between this one's first read of the version and its own step.
+      let firstRead = true;
+      const racing = new Proxy(db, {
+        get(target, name) {
+          if (name === "query") {
+            return (sql: string) => {
+              if (firstRead && sql.includes("user_version")) {
+                firstRead = false;
+                const seen = target.query(sql).get();
+                migrate(target, steps);
+                return { get: () => seen };
+              }
+              return target.query(sql);
+            };
+          }
+          const value = Reflect.get(target, name, target) as unknown;
+          return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      expect(() => migrate(racing, steps)).not.toThrow();
+      expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+    } finally { db.close(); }
+  });
+
+  test("an up-to-date database opens without the write lock, so a reader does not queue behind the loop's writes", () => {
+    const t = tempDir();
+    try {
+      Trace.open(t.path).close();
+      // Another connection (the loop, mid-write) holds the write lock; opening for a read must not wait for it.
+      const writer = new Database(join(t.path, ".loopstra", "trace.db"));
+      try {
+        writer.run("BEGIN IMMEDIATE");
+        const started = Date.now();
+        const trace = Trace.open(t.path);
+        try {
+          expect(Date.now() - started).toBeLessThan(1000);
+          expect(trace.events("a")).toEqual([]);
+        } finally { trace.close(); }
+        writer.run("COMMIT");
+      } finally { writer.close(); }
+    } finally { t.cleanup(); }
+  }, 15_000);
+
   test("an older database is brought up without losing its rows", () => {
     const t = tempDir();
     try {

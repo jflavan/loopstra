@@ -8,7 +8,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
-import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Request, type Submission } from "../../src/requests";
+import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { until } from "../console-helpers";
@@ -162,6 +162,55 @@ describe("applying requests", () => {
       r.cleanup();
     }
   });
+
+  /**
+   * Claims the request and leaves what a loop from before records carried the request's id left when
+   * it was hard-killed after writing the request (and, with `commit`, committing it): the write, and
+   * on the claimed request the sha256 of the intent.md it wrote (`writtenHash`).
+   */
+  async function writtenByOlderLoop(root: string, req: Request, slug: string, write: (text: string) => string, commit: boolean): Promise<void> {
+    claimRequest(root, req.id);
+    const path = join(root, "intent", slug, "intent.md");
+    writeFileSync(path, write(readFileSync(path, "utf8")));
+    if (commit) {
+      await run(["git", "add", "-A", `intent/${slug}`], root);
+      await run(["git", "commit", "-q", "-m", `loopstra(${slug}): written by an older loop`], root);
+    }
+    const hash = new Bun.CryptoHasher("sha256").update(readFileSync(path)).digest("hex");
+    const file = join(requestsDir(root), "applying", `${req.id}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), written: [slug], writtenHash: { [slug]: hash } }));
+  }
+
+  test("a request an older loop wrote, committed or not, before it was killed and upgraded is finished as applied, not refused as done already", async () => {
+    const r = await chatRepo({ intents: { x: INTENT("plan-review", "x"), a: INTENT("building", "y"), b: ASKING }, config: PEOPLE });
+    try {
+      asked(r.root);
+      const approve = submitRequest(r.root, { ...by, kind: "approve", slug: "x", expect: "plan-review" });
+      await writtenByOlderLoop(r.root, approve, "x", (t) => t.replace("status: plan-review", "status: plan-approved\nresume_from: plan-approved"), true);
+      const hold = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "legal" });
+      await writtenByOlderLoop(r.root, hold, "a", (t) => t.replace("status: building", "status: building\nhold: legal (John, the dashboard)"), false);
+      mkdirSync(join(r.root, ".loopstra", "runs", "b"), { recursive: true });
+      writeFileSync(join(r.root, ".loopstra", "runs", "b", "question.json"), readFileSync(join(r.root, ".loopstra", "runs", "a", "question.json")));
+      const answer = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out." });
+      await writtenByOlderLoop(r.root, answer, "b", (t) => t.replace("\nquestion: open", ""), true);
+      const commits = await commitCount(r.root);
+      expect(await apply(r.root)).toBe(3);
+      expect(requestState(r.root, approve.id)).toMatchObject({ ok: true, status: "plan-approved", text: "Plan approved: x is now plan approved, waiting to build." });
+      expect(requestState(r.root, hold.id)).toMatchObject({ ok: true, status: "building" });
+      expect(requestState(r.root, answer.id)).toMatchObject({ ok: true, text: "b has its answer; the loop goes on with it." });
+      expect(readQuestion(r.root, "b")!.open!.answer).toMatchObject({ text: "Leave them out." });
+      expect(await commitCount(r.root)).toBe(commits);
+      // A hash that no longer matches (the change moved on since) is no evidence: the request is refused as before.
+      const late = submitRequest(r.root, { ...by, kind: "approve", slug: "x", expect: "plan-review" });
+      claimRequest(r.root, late.id);
+      const file = join(requestsDir(r.root), "applying", `${late.id}.json`);
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), writtenHash: { x: "0".repeat(64) } }));
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, late.id)).toMatchObject({ ok: false, text: "x moved on to plan-approved; nothing changed." });
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
 
   test("a change that moved on is left alone, and the result says so", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
@@ -743,7 +792,7 @@ describe("applying requests", () => {
       const none = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "Leave them out." });
       const closed = submitRequest(r.root, { ...by, kind: "answer", slug: "c", text: "Leave them out." });
       const blank = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "  " });
-      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(4001) });
+      const long = submitRequest(r.root, { ...by, kind: "answer", slug: "a", text: "x".repeat(20_001) });
       await apply(r.root);
       expect(requestState(r.root, none.id)).toMatchObject({ ok: false, text: "a has no question waiting; nothing changed." });
       expect(requestState(r.root, closed.id)).toMatchObject({ ok: false, text: "c is closed; nothing changed." });
@@ -751,7 +800,10 @@ describe("applying requests", () => {
       expect(existsSync(join(r.root, "intent", "a", "conversation.md"))).toBe(false);
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("c", "request")!.payload)).toMatchObject({ kind: "answer", result: "refused" });
+      // The refusal says who asked, from where, as every other request's event does.
+      const refused = trace.lastEvent("a", "request", long.id)?.payload ?? "";
       trace.close();
+      expect(JSON.parse(refused)).toMatchObject({ id: long.id, result: "refused", by: by.byName, byId: by.by, via: by.via });
     } finally {
       r.cleanup();
     }
@@ -892,7 +944,7 @@ describe("applying requests", () => {
       expect(requestState(r.root, missing.id)).toMatchObject({ ok: false, text: "There is no change called nope in the main code." });
       // Read the way chat reads it: the console never takes it.
       expect(requestState(r.root, chat.id)).toBeNull();
-      expect(takeResults(r.root, new Set(["slack"])).find((x) => x.id === chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
+      expect(waitingResults(r.root, new Set(["slack"])).map((w) => w.result).find((x) => x.id === chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("c", "chat-request")!.payload)).toMatchObject({ via: "Slack", result: "accepted" });
       trace.close();

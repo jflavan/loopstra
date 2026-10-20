@@ -4,12 +4,17 @@
  * they come back from the same troubles the same way.
  */
 
+import { parseFrameId } from "../console/types";
+
 /** How long a stream may be silent (pings included) before the page says it is reconnecting and opens a new one. */
 export const STALE_MS = 20_000;
 
 interface Handlers {
-  /** One message's data, as the server sent it (JSON), and the id its frame came with (0 when none): a session stream's resume offset. */
-  message(data: string, id: number): void;
+  /**
+   * One message's data, as the server sent it (JSON), and the id its frame came with, as sent (""
+   * when none): on a session stream it names the row (see SessionMessage).
+   */
+  message(data: string, id: string): void;
   /** The stream said something, so it is alive. */
   live?(): void;
   /**
@@ -21,12 +26,24 @@ interface Handlers {
 }
 
 /**
+ * Whether a stream the browser closed is gone for good, given the status a plain request to its
+ * address got (null when none came): only a 404 says there is nothing to stream. The browser closes
+ * an EventSource on any error answer, so a 500 (the database was busy) or a 403 looks the same from
+ * the stream; those, and no answer at all, are troubles the stream comes back from.
+ */
+export function streamGone(status: number | null): boolean {
+  return status === 404;
+}
+
+/**
  * Opens the stream at `urlFor(0)`; gives back the function that closes it for good. The browser's
  * EventSource reconnects by itself (sending the newest id it saw, so the server continues from
  * there). When it gives up, or the stream has been silent for STALE_MS (a connection can die without
  * an error, as when a laptop slept), this closes it and opens a new one, waiting 1, 2, 4, then 8
  * seconds. A new EventSource sends no Last-Event-ID, so `urlFor` gets the newest id the page has
- * seen (0 when none) to name in the address instead.
+ * seen (0 when none) to name in the address instead: its number before any dot, which is where a
+ * session stream resumes ("150.1" names a row inside the line that starts at 150). An id that is not
+ * one (see parseFrameId) moves nothing, as the server would not resume from it either.
  */
 export function follow(urlFor: (newest: number) => string, h: Handlers): () => void {
   let last = Date.now();
@@ -69,9 +86,10 @@ export function follow(urlFor: (newest: number) => string, h: Handlers): () => v
     s.onmessage = (ev) => {
       if (s !== source) return;
       alive();
-      const id = Number(ev.lastEventId);
-      if (Number.isFinite(id) && id > newest) newest = id;
-      h.message(ev.data as string, Number.isFinite(id) ? id : 0);
+      const id = ev.lastEventId;
+      const at = parseFrameId(id)?.at ?? 0;
+      if (at > newest) newest = at;
+      h.message(ev.data as string, id);
     };
     s.addEventListener("ping", alive);
     s.onerror = () => {

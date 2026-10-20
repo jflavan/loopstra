@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { chunks, DIFF_CHUNK, Git, GitError, GitTimeout, removeStaleLocks, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
+import { DIFF_CHARS, DIFF_CHUNK, Git, GitError, GitTimeout, pathChunks, removeStaleLocks, removeWorktree, withDetachedWorktree, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, RUNTIME_NAME } from "../../src/git";
 import { checkoutKey, onCheckout, onRemoteKey } from "../../src/lanes";
 import { moveMain } from "../../src/remote";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
@@ -271,6 +272,46 @@ describe("Git", () => {
     repo.cleanup(); other.cleanup();
   });
 
+  test("a changed file is still seen, and put back, when GIT_LITERAL_PATHSPECS is inherited from a hook or alias", async () => {
+    const repo = await tempGitRepo();
+    // What git exports to an alias or hook of a `git --literal-pathspecs` run. With it, ":(literal)app.ts"
+    // names a file of that name, which matches nothing, so every comparison passed.
+    const restore = setEnv({ GIT_LITERAL_PATHSPECS: "1" });
+    try {
+      const git = new Git(repo.path);
+      await git.createBranch("intent/x", "main");
+      const wt = join(repo.path, ".loopstra", "worktrees", "x");
+      await git.worktreeAdd(wt, "intent/x");
+      await Bun.write(join(wt, "app.ts"), "export const a = 1;\n");
+      await new Git(wt).commitAll("app");
+      expect(await git.containsChanges("main", "intent/x")).toBe(false);
+      await Bun.write(join(repo.path, "README.md"), "a person's edit\n");
+      await git.putBack(["README.md"]);
+      expect(await git.changedTrackedFiles()).toEqual([]);
+      await git.worktreeRemove(wt);
+    } finally { restore(); repo.cleanup(); }
+  });
+
+  test("a hook's commit dates and -c settings do not reach git; configuration set on purpose in the environment does", async () => {
+    const repo = await tempGitRepo();
+    // What a hook run by `git -c name=value commit` exports, beside the dates of the commit it is part
+    // of; and what a container or CI job sets on purpose (GIT_CONFIG_COUNT and its pairs, which git never exports).
+    const restore = setEnv({
+      GIT_AUTHOR_DATE: "2001-02-03T04:05:06Z", GIT_COMMITTER_DATE: "2001-02-03T04:05:06Z",
+      GIT_CONFIG_PARAMETERS: "'loopstra.fromhook'='yes'", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "loopstra.counted", GIT_CONFIG_VALUE_0: "yes",
+    });
+    try {
+      const git = new Git(repo.path);
+      expect((await git.run(["config", "--get", "loopstra.fromhook"], true)).code).toBe(1);
+      expect((await git.run(["config", "--get", "loopstra.counted"], true)).out.trim()).toBe("yes");
+      await Bun.write(join(repo.path, "a.md"), "a");
+      expect(await git.commitAll("a")).toBe(true);
+      expect((await git.run(["log", "-1", "--format=%ad|%cd", "--date=format:%Y"])).out.trim()).not.toContain("2001");
+      // The runtime's identity still holds.
+      expect((await git.run(["log", "-1", "--format=%an|%cn"])).out.trim()).toBe(`${RUNTIME_NAME}|${RUNTIME_NAME}`);
+    } finally { restore(); repo.cleanup(); }
+  });
+
   test("rebaseOnto aborts a rebase an interrupted step left in progress, then rebases onto the base it is given", async () => {
     const repo = await tempGitRepo();
     try {
@@ -444,9 +485,19 @@ describe("Git across systems", () => {
     } finally { restore(); repo.cleanup(); }
   });
 
-  test("chunks splits a list into slices of at most the given size", () => {
-    expect(chunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
-    expect(chunks([], 2)).toEqual([]);
+  test("pathChunks splits paths into slices of at most so many paths and so many characters, each counted as a literal pathspec", () => {
+    expect(pathChunks(["a", "b", "c", "d", "e"], 2)).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    expect(pathChunks([], 2)).toEqual([]);
+    // ":(literal)" and a space make each one-letter path 12 characters: two fit in 30, three do not.
+    expect(pathChunks(["a", "b", "c", "d", "e"], 10, 30)).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    // A path longer than the limit on its own still goes, alone.
+    expect(pathChunks(["a", "x".repeat(40), "b"], 10, 30)).toEqual([["a"], ["x".repeat(40)], ["b"]]);
+    // DIFF_CHUNK paths of 150 characters, prefixed, pass the default limit: they no longer go on one line.
+    const long = Array.from({ length: DIFF_CHUNK }, (_, i) => `${"d/".repeat(70)}${String(i).padStart(6, "0")}.txt`);
+    const sliced = pathChunks(long);
+    expect(sliced.length).toBeGreaterThan(1);
+    for (const slice of sliced) expect(slice.reduce((n, p) => n + p.length + ":(literal) ".length, 0)).toBeLessThanOrEqual(DIFF_CHARS);
+    expect(sliced.flat()).toEqual(long);
   });
 
   test("containsChanges compares hundreds of long paths without one huge command line", async () => {
@@ -481,6 +532,28 @@ describe("Git across systems", () => {
       for (const f of [...names, "[id].txt", "i.txt"]) await Bun.write(join(repo.path, f), "rewritten\n");
       await git.putBack([...names, "[id].txt"]);
       expect(await git.changedTrackedFiles()).toEqual(["i.txt"]);
+    } finally { repo.cleanup(); }
+  });
+
+  test("containsChanges ignores the given prefixes, and with ignoreOnlyWithOthers compares them when nothing else changed", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await run(["git", "checkout", "-q", "-b", "feature"], repo.path);
+      await Bun.write(join(repo.path, "intent", "x", "intent.md"), "the branch's record\n");
+      await git.commitAll("intent only");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"] })).toBe(true);
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"], ignoreOnlyWithOthers: true })).toBe(false);
+      // With a file outside the prefix that main has, the prefix is left out again.
+      await run(["git", "checkout", "-q", "feature"], repo.path);
+      await Bun.write(join(repo.path, "app.ts"), "export const a = 1;\n");
+      await git.commitAll("app");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      await run(["git", "checkout", "feature", "--", "app.ts"], repo.path);
+      await git.commitAll("app on main");
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"], ignoreOnlyWithOthers: true })).toBe(true);
+      expect(await git.containsChanges("main", "feature")).toBe(false);
     } finally { repo.cleanup(); }
   });
 
@@ -697,6 +770,47 @@ describe("worktree administration", () => {
     } finally {
       repo.cleanup();
     }
+  });
+
+  test("a stop during a throwaway checkout's work still removes the checkout and git's record of it; the stop goes on", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "verify", "x");
+      const failed: unknown[] = [];
+      // Ctrl-C during the done-check: the work ends with the stop, and the removal meets it too.
+      const work = withDetachedWorktree(git, dir, "main", async (cwd) => {
+        await Bun.write(join(cwd, "node_modules", "dep", "index.js"), "installed\n");
+        requestStop();
+        throw new StopRequested();
+      }, (e) => failed.push(e));
+      await expect(work).rejects.toBeInstanceOf(StopRequested);
+      expect(existsSync(dir)).toBe(false);
+      expect(failed.map((e) => e instanceof StopRequested)).toEqual([true]);
+      // Called on its own after a stop: the folder goes, then the stop is passed on.
+      resetStop();
+      await git.run(["worktree", "add", "--detach", dir, "main"]);
+      requestStop();
+      await expect(removeWorktree(git, dir)).rejects.toBeInstanceOf(StopRequested);
+      expect(existsSync(dir)).toBe(false);
+      resetStop();
+      expect((await git.run(["worktree", "list", "--porcelain"])).out.match(/^worktree /gm)?.length).toBe(1);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a stop is what a removal throws even when the folder cannot be deleted, and git's record is still unlocked", async () => {
+    const repo = await tempGitRepo();
+    // A folder Windows will not let go of (EBUSY): the file system's fallback is refused.
+    const refused = spyOn(fs, "rmSync").mockImplementation(() => { throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }); });
+    try {
+      const git = new Git(repo.path);
+      const dir = join(repo.path, ".loopstra", "verify", "x");
+      await git.run(["worktree", "add", "--detach", dir, "main"]);
+      await git.run(["worktree", "lock", "--reason", "initializing", dir]);
+      requestStop();
+      await expect(removeWorktree(git, dir)).rejects.toBeInstanceOf(StopRequested);
+      expect(existsSync(join(repo.path, ".git", "worktrees", "x", "locked"))).toBe(false);
+    } finally { refused.mockRestore(); repo.cleanup(); }
   });
 
   test.if(process.platform === "win32")("a teardown Windows refuses never hides the work's result (Windows)", async () => {

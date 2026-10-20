@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { notificationsOn, setNotifications } from "../alerts";
-import { keyLabel, onMac } from "../keys";
+import { keyLabel, listKey, onMac } from "../keys";
 import { navigate } from "../nav";
 import { clampAt, filterCommands, type Command } from "../palette";
 import { setLoopHeld } from "../requests";
-import { changes, loop, openDrawer, paletteOpen, running, toast } from "../store";
+import { changes, drawer, loop, openDrawer, paletteOpen, running, toast } from "../store";
 import { cycleTheme } from "../theme";
-import { useInertPage, useReturnFocus } from "./focus";
+import { handFocusOver, useInertPage, useReturnFocus } from "./focus";
 
-/** Everything the palette can do: go to a screen, watch an agent, open a change, and a few settings. */
-function commands(): Command[] {
+/**
+ * Everything the palette can do: go to a screen, watch an agent, open a change, and a few settings.
+ * `before` is what had the focus before the palette opened.
+ */
+function commands(before: HTMLElement | null): Command[] {
   const list: Command[] = [
     { id: "live", title: "Go to Live", hint: "g l", run: () => navigate("/") },
     { id: "inbox", title: "Go to Inbox", hint: "g i", run: () => navigate("/inbox") },
@@ -17,7 +20,7 @@ function commands(): Command[] {
     { id: "activity", title: "Go to Activity", hint: "g a", run: () => navigate("/activity") },
     { id: "agents", title: "Go to Agents", hint: "g w", run: () => navigate("/agents") },
     { id: "spend", title: "Go to Spend", hint: "g s", run: () => navigate("/spend") },
-    { id: "ask", title: "Ask the orchestrator", hint: keyLabel("mod+j", onMac), run: () => openDrawer() },
+    { id: "ask", title: "Ask the orchestrator", hint: keyLabel("mod+j", onMac), run: () => askOrchestrator(before) },
     { id: "theme", title: "Change the theme", run: cycleTheme },
     loop.value?.held
       ? { id: "resume", title: "Resume the loop", run: () => void setLoopHeld(false) }
@@ -40,6 +43,16 @@ function commands(): Command[] {
   return list;
 }
 
+/**
+ * Opens the drawer from the palette. The palette is going as the drawer is drawn, so the drawer is
+ * handed what had the focus before the palette, to give it back to when it closes. A drawer already
+ * open is not drawn again and keeps its own.
+ */
+function askOrchestrator(before: HTMLElement | null): void {
+  if (!drawer.value.open) handFocusOver(before);
+  openDrawer();
+}
+
 export function Palette() {
   return paletteOpen.value ? <PaletteBox /> : null;
 }
@@ -48,10 +61,10 @@ function PaletteBox() {
   const [query, setQuery] = useState("");
   const [at, setAt] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  useReturnFocus();
+  const before = useReturnFocus();
   useInertPage();
   useEffect(() => { input.current?.focus(); }, []);
-  const items = filterCommands(commands(), query);
+  const items = filterCommands(commands(before), query);
   // The list can shrink under the highlighted row (typing, or an agent finishing), so it is clamped on every draw.
   const cur = clampAt(at, items.length);
   useEffect(() => { document.getElementById(`palette-option-${cur}`)?.scrollIntoView({ block: "nearest" }); }, [cur, query]);
@@ -77,9 +90,12 @@ function PaletteBox() {
           aria-activedescendant={items.length ? `palette-option-${cur}` : undefined}
           onInput={(e) => { setQuery(e.currentTarget.value); setAt(0); }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") { e.preventDefault(); setAt(clampAt(cur + 1, items.length)); }
-            else if (e.key === "ArrowUp") { e.preventDefault(); setAt(clampAt(cur - 1, items.length)); }
-            else if (e.key === "Enter") { e.preventDefault(); run(items[cur]); }
+            // Nothing while an input method is picking a character: the arrows move among its candidates then.
+            const what = listKey(e);
+            if (!what) return;
+            e.preventDefault();
+            if (what === "pick") run(items[cur]);
+            else setAt(clampAt(cur + (what === "next" ? 1 : -1), items.length));
           }}
         />
         <ul role="listbox" id="palette-list" aria-label="Results" hidden={!items.length}>

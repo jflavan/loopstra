@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
-import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
+import { lastLine, spawnBounded, withoutGitHookEnv } from "./shell";
 import { endsStepQuietly, notTheStepsFault, StopRequested } from "./stop";
 
 /** How long one git call may take before it is stopped (a Git constructor option overrides it). */
@@ -117,7 +117,7 @@ function hasOwnSshCommand(cwd: string): boolean {
   if (known === undefined) {
     try {
       // The repository at cwd, not one a hook named in the environment (see GIT_LOCATION_VARS).
-      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, env: withoutGitLocation(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      const r = Bun.spawnSync({ cmd: ["git", "config", "--get", "core.sshCommand"], cwd, env: withoutGitHookEnv(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
       known = r.exitCode === 0 && r.stdout.toString().trim().length > 0;
     } catch { known = false; }
     sshConfigured.set(cwd, known);
@@ -132,10 +132,12 @@ function hasOwnSshCommand(cwd: string): boolean {
  * named in the environment is dropped: it would win over RUNTIME_COMMIT_CONFIG's identity, and every
  * commit this git makes is the runtime's (a replayed commit keeps the author it recorded). So is a
  * repository location named in it (see GIT_LOCATION_VARS): the call works on the checkout it is
- * given, even when Loopstra was started from a git hook or alias.
+ * given, even when Loopstra was started from a git hook or alias. So are the hook's pathspec rules,
+ * commit dates and `-c` settings (see GIT_HOOK_VARS in src/shell.ts): a `:(literal)` pathspec stays
+ * literal, and a commit gets its own time.
  */
 function gitEnv(cwd: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = withoutGitLocation({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
+  const env: Record<string, string | undefined> = withoutGitHookEnv({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", LC_ALL: "C", LANG: "C" });
   delete env.SSH_ASKPASS;
   delete env.LANGUAGE;
   for (const who of ["AUTHOR", "COMMITTER"]) { delete env[`GIT_${who}_NAME`]; delete env[`GIT_${who}_EMAIL`]; }
@@ -143,13 +145,45 @@ function gitEnv(cwd: string): Record<string, string | undefined> {
   return env;
 }
 
-/** At most this many paths go on one git command line (Windows limits a command line to 32K characters). */
+/** At most this many paths go on one git command line. */
 export const DIFF_CHUNK = 200;
 
-/** `items` in consecutive slices of at most `size`. */
-export function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+/**
+ * At most this many characters of paths go on one git command line, each counted as the literal
+ * pathspec it is passed as: Windows limits a whole command line to 32K characters, and the rest of
+ * the command (git's path, two commits, options) needs room beside them.
+ */
+export const DIFF_CHARS = 24_000;
+
+/** The prefix that makes a pathspec literal. */
+const LITERAL = ":(literal)";
+
+/** What a path takes on a command line as a literal pathspec, beside its own characters: the prefix and a space. */
+const PATHSPEC_EXTRA = LITERAL.length + 1;
+
+/**
+ * The paths as literal pathspecs: each names only itself, never every file a * or [ in it would
+ * match. pathChunks counts each path at this length (PATHSPEC_EXTRA).
+ */
+export function literalPathspecs(paths: string[]): string[] {
+  return paths.map((p) => LITERAL + p);
+}
+
+/**
+ * `paths` in consecutive slices of at most `size` paths and `chars` characters (see DIFF_CHARS), for
+ * one git command line each. A path longer than `chars` on its own still gets a slice, alone.
+ */
+export function pathChunks(paths: string[], size = DIFF_CHUNK, chars = DIFF_CHARS): string[][] {
+  const out: string[][] = [];
+  let slice: string[] = [];
+  let used = 0;
+  for (const p of paths) {
+    const cost = p.length + PATHSPEC_EXTRA;
+    if (slice.length && (slice.length >= size || used + cost > chars)) { out.push(slice); slice = []; used = 0; }
+    slice.push(p);
+    used += cost;
+  }
+  if (slice.length) out.push(slice);
   return out;
 }
 
@@ -298,23 +332,28 @@ export class Git {
   /**
    * True when `target` already has `branch`'s changes: the branch is part of its history, or it has
    * the branch's version of every file the branch changed since the two diverged (a squash merge).
-   * Paths under an `ignore` prefix are left out of the comparison. The files compared are those the
-   * branch changed since it diverged from `base`, `target` itself unless given: a caller asking
-   * whether a merged pull request's head has the branch's commits names main as the base, since
-   * the branch may have been rebased onto a main that has that merge, and then only the commits on
-   * top are the branch's own.
+   * Paths under an `ignore` prefix are left out of the comparison; with `ignoreOnlyWithOthers`, only
+   * when the branch changed a file outside them too (a branch that changed nothing else has every
+   * file compared, since with nothing left the test would always pass). The files compared are
+   * those the branch changed since it diverged from `base`, `target` itself unless given: a caller
+   * asking whether a merged pull request's head has the branch's commits names main as the base,
+   * since the branch may have been rebased onto a main that has that merge, and then only the
+   * commits on top are the branch's own.
    */
-  async containsChanges(target: string, branch: string, ignore: string[] = [], base = target): Promise<boolean> {
+  async containsChanges(target: string, branch: string, opts: { ignore?: string[]; base?: string; ignoreOnlyWithOthers?: boolean } = {}): Promise<boolean> {
+    const { ignore = [], base = target, ignoreOnlyWithOthers = false } = opts;
     if (await this.isAncestor(branch, target)) return true;
     // -z: the names as they are; without it git quotes a non-ASCII name, and a quoted name matches no file.
     const changed = await this.run(["diff", "--name-only", "-z", `${base}...${branch}`], true);
     if (changed.code !== 0) return false;
-    const files = changed.out.split("\0").filter((f) => f && !ignore.some((p) => f.startsWith(p)));
+    const all = changed.out.split("\0").filter(Boolean);
+    const outside = all.filter((f) => !ignore.some((p) => f.startsWith(p)));
+    const files = ignoreOnlyWithOthers && !outside.length ? all : outside;
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
-    // Each name literal (see putBack), so one with * or [ in it is compared, not every file it matches.
-    for (const chunk of chunks(files, DIFF_CHUNK)) {
-      if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk.map((f) => `:(literal)${f}`)], true)).code !== 0) return false;
+    // Each name literal, so one with * or [ in it is compared, not every file it matches.
+    for (const chunk of pathChunks(files)) {
+      if ((await this.run(["diff", "--quiet", target, branch, "--", ...literalPathspecs(chunk)], true)).code !== 0) return false;
     }
     return true;
   }
@@ -341,7 +380,7 @@ export class Git {
   /** Puts tracked files back as HEAD has them, staged and unstaged edits alike. */
   async putBack(files: string[]): Promise<void> {
     // In chunks, as in containsChanges; each name literal, so one with * or [ in it names only itself.
-    for (const chunk of chunks(files, DIFF_CHUNK)) await this.run(["checkout", "HEAD", "--", ...chunk.map((f) => `:(literal)${f}`)]);
+    for (const chunk of pathChunks(files)) await this.run(["checkout", "HEAD", "--", ...literalPathspecs(chunk)]);
   }
 
   /**
@@ -560,23 +599,33 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
 
 /**
  * Removes a worktree directory however it can: git first, then the file system, then git's record
- * of it, unlocked first in case a `worktree add` killed part way left it locked.
+ * of it, unlocked first in case a `worktree add` killed part way left it locked. A stop request met
+ * on the way does not leave the folder (a throwaway checkout with its installed dependencies, say):
+ * its removal and git's unlock and prune are still tried, each on its own, and then the stop is
+ * thrown, never a failure of theirs (a folder Windows holds, say): the stop is what the caller sees.
  */
 export async function removeWorktree(git: Git, dir: string, opts: { cleanup?: boolean } = {}): Promise<void> {
-  const cleanup = opts.cleanup === true;
+  let stop: StopRequested | null = null;
   if (existsSync(dir)) {
     try {
-      await git.worktreeRemove(dir, { cleanup });
+      await git.worktreeRemove(dir, { cleanup: opts.cleanup === true });
     } catch (e) {
-      // A stop request is not a failed removal: the folder goes, and the stop is seen by what comes next.
-      if (e instanceof StopRequested && !cleanup) throw e;
-      rmSync(dir, { recursive: true, force: true });
+      if (!(e instanceof StopRequested)) rmSync(dir, { recursive: true, force: true });
+      else {
+        stop = e;
+        try { rmSync(dir, { recursive: true, force: true }); } catch { /* the stop wins; the next add at this path removes what is left */ }
+      }
     }
   }
-  await worktreeAdmin(git, async () => {
+  // After a stop, the unlock and prune still run (as cleanup calls do), so no record of the folder is left.
+  const cleanup = opts.cleanup === true || stop !== null;
+  const admin = worktreeAdmin(git, async () => {
     await git.run(["worktree", "unlock", dir], { allowFail: true, cleanup });
     await git.run(["worktree", "prune"], { allowFail: true, cleanup });
   });
+  if (!stop) return admin;
+  await admin.catch(() => { /* best effort: the stop wins */ });
+  throw stop;
 }
 
 /** Makes `dir` a detached worktree of `ref` (never the owner's checkout); a leftover directory there is removed first. */

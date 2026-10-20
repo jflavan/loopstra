@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { askedWords, askText, offers, retryOptions, type RequestShape } from "../actions";
-import { limitOf } from "../budget";
+import { limitOf, startOfToday } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
 import { Git } from "../git";
@@ -19,6 +19,7 @@ import { submitRequest, type RequestBody } from "../requests";
 import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
 import { oneLine } from "../text";
+import { StateFileUnavailable } from "./statefile";
 import { ThreadStore, threadKey, type ThreadState } from "./threads";
 
 /** A message from a person, as a transport delivers it. */
@@ -45,6 +46,21 @@ export interface IncomingMessage {
 /** Sends one message back into the thread. */
 export type Send = (text: string) => Promise<void>;
 
+/**
+ * Records a failure of chat's own work (`where`: which part) as an error of `_chat` in the trace,
+ * once while it lasts: the same error at the same part again today is passed over (see
+ * Trace.eventOnChange), so a bot that cannot reach Slack, or a file that cannot be read now, is one
+ * line, not one per poll. Never throws: there may be nowhere to record it.
+ */
+export function traceChatError(root: string, where: string, e: unknown): void {
+  try {
+    const trace = Trace.open(root, () => {});
+    try {
+      trace.eventOnChange(CHAT_SLUG, "error", `"where":${JSON.stringify(where)}`, { where, error: errorText(e) }, "error", startOfToday());
+    } finally { trace.close(); }
+  } catch { /* nowhere to record it */ }
+}
+
 /** A plain yes, and nothing else: anything more goes back into the conversation. */
 const YES = /^\s*(y|yes|yep|yeah|yup|sure|ok|okay|go|go ahead|do it|please do|yes please|confirm(ed)?|start it)\s*[.!]*\s*$/i;
 export function isYes(text: string): boolean {
@@ -64,6 +80,16 @@ const PENDING_TTL_MS = 24 * 60 * 60_000;
  */
 function plainName(s: string): string {
   return s.replace(/[\s<>"]+/g, " ").trim() || "someone";
+}
+
+/**
+ * A value that may run over several lines (an announcement made from a change's note, a hand-off
+ * title, a proposal's quoted note), with every line after its first indented by two spaces, so none
+ * can pass for a line of the context around it ("From: ...", "Since your last turn:"). Blank lines
+ * stay blank, as in about.ts.
+ */
+function hanging(text: string): string {
+  return text.split(/\r\n?|\n/).map((l, i) => (i === 0 ? l : l.trim() ? `  ${l}` : "")).join("\n");
 }
 
 /** Characters that show as nothing (U+200B-U+200D, U+2060, U+FEFF): one inside a tag would hide it from a plain match. */
@@ -126,20 +152,41 @@ export class Orchestrator {
   /**
    * Sends a message from Loopstra into a thread (not through the agent) and puts it in the thread's
    * log. Sent first: a send that fails throws before anything is recorded, so the caller can try
-   * the whole delivery again later without the log showing it twice. `since`: a line for the
-   * agent's next turn about it (see ThreadState.since), as for a request's result.
+   * the whole delivery again later without the log showing it twice. Once it is sent, a failure to
+   * record it (a thread file that cannot be saved) is traced and not thrown: the caller would post
+   * it again on every try. `since`: a line for the agent's next turn about it (see
+   * ThreadState.since), as for a request's result.
    */
   async deliver(transport: string, thread: string, text: string, send: Send, since?: string): Promise<void> {
     await send(text);
-    await this.withThread(transport, thread, async (t) => {
-      this.store.addMessage(t, { from: "loopstra", text });
-      if (since) this.store.noteSince(t, since);
-      this.store.save(t);
-    });
+    try {
+      await this.withThread(transport, thread, async (t) => {
+        this.store.addMessage(t, { from: "loopstra", text });
+        if (since) this.store.noteSince(t, since);
+        this.store.save(t);
+      });
+    } catch (e) {
+      traceChatError(this.root, "chat-record", new Error(`posted to ${threadKey(transport, thread)} but not recorded in its thread: ${errorText(e)}`));
+    }
   }
 
-  /** Handles one message: a yes to a waiting proposal, or a turn of the conversation. */
+  /**
+   * Handles one message: a yes to a waiting proposal, or a turn of the conversation. When the
+   * thread's file is there but cannot be used now (see readStateFile), the person is told so and
+   * nothing else is done: the file is kept, and no fresh thread is saved over it.
+   */
   handle(m: IncomingMessage, send: Send): Promise<void> {
+    const done = this.turnOn(m, send).catch(async (e: unknown) => {
+      if (!(e instanceof StateFileUnavailable)) throw e;
+      try { await send("This conversation's file cannot be read right now; try again in a moment."); } catch { /* the transport says why itself */ }
+    });
+    // Seen here, as withThread's own promise is: a caller that does not wait for it (a stop request
+    // ending the turn) leaves no unhandled rejection, and one that waits still gets the error.
+    done.catch(() => {});
+    return done;
+  }
+
+  private turnOn(m: IncomingMessage, send: Send): Promise<void> {
     return this.withThread(m.transport, m.thread, async (t) => {
       this.store.addMessage(t, { from: "person", author: m.authorName, text: m.text });
       this.store.save(t);
@@ -264,7 +311,7 @@ export class Orchestrator {
     const log = new AnnouncementLog(this.root);
     const since = (t.sessionId ? log.since(t.lastAnnouncementSeen) : log.since(0)).filter((a) => a.id <= upTo);
     const announced = since.slice(-ANNOUNCEMENTS_IN_CONTEXT);
-    const handoffs = t.handoffs.map((h) => `- "${h.title}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
+    const handoffs = t.handoffs.map((h) => `- "${hanging(h.title)}" (${h.slugs.join(", ")}): ${h.pr ? `pull request ${h.pr.url}, ${h.pr.state.toLowerCase()}` : "added to the queue without a pull request"}`);
     const name = plainName(m.authorName);
     const history = await this.recentHistory(cfg);
     const lines = [
@@ -276,7 +323,7 @@ export class Orchestrator {
       `How the loop takes changes: ${loopRules(cfg)}`,
       `Handed off from this conversation so far:${handoffs.length ? `\n${handoffs.join("\n")}` : " nothing yet"}`,
       `Recent changes on ${cfg.main_branch} (newest first):${history.length ? `\n${history.join("\n")}` : " none found"}`,
-      `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${a.text}`).join("\n")}` : " nothing"}`,
+      `Announced by Loopstra since the last message:${announced.length ? `\n${announced.map((a) => `- ${hanging(a.text)}`).join("\n")}` : " nothing"}`,
     ];
     if (m.about) {
       // Read from the change's own files, which hold people's words (made harmless below, with the rest).
@@ -284,7 +331,7 @@ export class Orchestrator {
       if (about) lines.push(`About this change (from where the person opened chat):\n${about}`);
     }
     if (t.since.length) lines.push(`Since your last turn:\n${t.since.map((l) => `- ${oneLine(l, 1000)}`).join("\n")}`);
-    if (declined) lines.push(declined);
+    if (declined) lines.push(hanging(declined));
     const text = untagged(m.text);
     return `<context>\n${untagged(lines.join("\n"))}\n</context>\n<message from=${JSON.stringify(name)}>\n${text}\n</message>`;
   }

@@ -241,19 +241,39 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
 
 /**
  * True when a pull request merged on GitHub did not take changes the branch here has outside
- * intent/: fixes a later review round committed after someone merged it by hand. Compared with the
- * pull request's head as GitHub named it, or its merge commit, whichever is known here; false when
- * neither is (nothing to compare with). The branch's own changes are those since it diverged from
- * main, not from that commit: the merge checks may have rebased it onto a main that already has the
- * merge, and then only the commits on top are its own.
+ * intent/: fixes a later review round committed after someone merged it by hand. The merge took
+ * them when its merge commit has them, or the pull request's head as GitHub named it does, of those
+ * known here; false when neither is (nothing to compare with). The merge commit counts on its own:
+ * a branch the merge checks only brought up to date (rebased onto a newer main) while a person
+ * merged the old head differs from that head in the files main changed meanwhile, but not from what
+ * the merge made of them. It is fetched with main when it is not here yet (it was made on GitHub);
+ * a fetch that fails or hangs past its time leaves the head to compare with (a stop is passed on).
+ * The head counts on its own too: a branch not brought up to date lacks what main changed, which
+ * the merge commit has. The branch's own changes are those since it diverged from main, not from
+ * either commit: the merge checks may have rebased it onto a main that already has the merge, and
+ * then only the commits on top are its own.
  */
-async function fixesNotMerged(ctx: StepContext, pr: PrInfo): Promise<boolean> {
-  let target: string | null = null;
-  for (const candidate of [pr.head, pr.mergeCommit]) {
-    if (candidate && (await ctx.git.commitOf(candidate)) !== null) { target = candidate; break; }
+export async function fixesNotMerged(ctx: StepContext, pr: PrInfo): Promise<boolean> {
+  if (!(await ctx.git.branchExists(ctx.branch))) return false;
+  const main = ctx.cfg.main_branch;
+  const remote = pr.mergeCommit && (await ctx.git.commitOf(pr.mergeCommit)) === null ? await ctx.git.remoteName() : null;
+  if (remote) {
+    try {
+      await ctx.git.fetch(["--quiet", remote, `+refs/heads/${main}:refs/remotes/${remote}/${main}`], true);
+    } catch (e) {
+      // A GitTimeout or another failure is not this look's: an already merged pull request must not read as one that could not be opened.
+      if (notTheStepsFault(e) || endsStepQuietly(e)) throw e;
+    }
   }
-  if (target === null || !(await ctx.git.branchExists(ctx.branch))) return false;
-  return !(await ctx.git.containsChanges(target, ctx.branch, ["intent/"], ctx.cfg.main_branch));
+  const known: string[] = [];
+  for (const candidate of [pr.mergeCommit, pr.head]) {
+    if (candidate && (await ctx.git.commitOf(candidate)) !== null) known.push(candidate);
+  }
+  if (!known.length) return false;
+  for (const target of known) {
+    if (await ctx.git.containsChanges(target, ctx.branch, { ignore: ["intent/"], base: main })) return false;
+  }
+  return true;
 }
 
 /**
@@ -587,8 +607,8 @@ async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
   if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
   await syncMain(ctx.root, ctx.cfg, ctx.trace);
   const hasIt = pr.mergeCommit
-    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
-    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] })))
+    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] }));
   if (!hasIt) {
     if (onceMarker(ctx, MAIN_BEHIND)) {
       const waiting = `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`;
@@ -797,9 +817,10 @@ async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; 
  * True when a merge was started (the marker exists) and its result is already on main: the branch
  * is gone, or main has the merge commit the marker names, or (a marker written before that commit
  * was known, or by an older Loopstra) main moved past the commit it was on before the merge and has
- * the branch's version of every file the branch changed outside intent/. Records land on main
- * between a landed merge and the resumed step (a status, another change's), and they must not make
- * the merge run again. A marker whose merge never landed is removed.
+ * the branch's version of every file the branch changed outside intent/ (every file, intent/ too,
+ * when it changed nothing else: with nothing to compare, that test would always pass). Records land
+ * on main between a landed merge and the resumed step (a status, another change's), and they must
+ * not make the merge run again. A marker whose merge never landed is removed.
  */
 async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   const marker = readMarker(ctx, MERGING)?.trim();
@@ -809,7 +830,7 @@ async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   const [base = "", merge] = marker.split(/\r?\n/);
   if (merge && (await ctx.git.isAncestor(merge, main))) return true;
   const moved = (await ctx.git.commitOf(main)) !== base;
-  if (moved && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) return true;
+  if (moved && (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"], ignoreOnlyWithOthers: true }))) return true;
   clearMarker(ctx, MERGING);
   return false;
 }
@@ -838,7 +859,7 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
  */
 export async function cleanupChange(ctx: StepContext): Promise<boolean> {
   const main = ctx.cfg.main_branch;
-  if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) {
+  if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] }))) {
     if (onceMarker(ctx, BRANCH_KEPT)) {
       ctx.trace.event(ctx.slug, "command", { command: "clean up after merge", kept: ctx.branch, reason: `${main} does not have this branch's changes, so the branch and its worktree were left in place` });
     }

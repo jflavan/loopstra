@@ -46,13 +46,22 @@ function isJson(ct: string | null): boolean {
 
 /**
  * True when a read that has a side effect may go ahead: the browser says the request comes from the
- * console's own page (or from nowhere, as the address bar), or says nothing (every current browser
- * sends `sec-fetch-site`; a tool like curl does not). An `<img src>` or a link on another site is
- * refused even though it carries no Origin.
+ * console's own page (or from nowhere, as the address bar). An `<img src>` or a link on another site
+ * is refused even though it carries no Origin. A request that says nothing of its site (an older
+ * browser, or a client on this machine) must show it comes from the page some other way: an Origin
+ * that is the console's own, as a write does, or a Referer on the console (the page's fetch of a
+ * result asks for one, see src/ui/requests.ts).
  */
-export function ownSite(req: Request): boolean {
+export function ownSite(req: Request, url: URL): boolean {
   const site = req.headers.get("sec-fetch-site");
-  return site === null || site === "same-origin" || site === "none";
+  if (site !== null) return site === "same-origin" || site === "none";
+  return fromPage(req, url) || refererOrigin(req.headers.get("referer")) === url.origin;
+}
+
+/** The origin a Referer names, or null when there is none or it is not an address. */
+function refererOrigin(referer: string | null): string | null {
+  if (!referer) return null;
+  try { return new URL(referer).origin; } catch { return null; }
 }
 
 /**

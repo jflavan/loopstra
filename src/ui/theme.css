@@ -470,7 +470,12 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .toasts { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); display: grid; gap: 8px; z-index: 40; }
 /* Its two live regions (news, and what went wrong) stack like one list; an empty one takes no room. */
 .toasts > div { display: grid; gap: 8px; }
-.toasts > div:empty { display: none; }
+/*
+ * An empty region is not display: none, which would take it out of the accessibility tree, so its
+ * first toast would often not be read out. Placed absolutely it is out of the grid (no cell, no gap),
+ * and at one clipped pixel it is not seen.
+ */
+.toasts > div:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* A toast is the page's opposite, so it reads over anything; it rises from the bottom edge. */
 .toast { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in srgb, var(--fg) 92%, transparent); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); color: var(--bg); font-weight: 500; box-shadow: var(--shadow-lg); animation: rise var(--spring-time) var(--spring); }
 .toast .btn { background: transparent; color: inherit; border-color: color-mix(in srgb, currentColor 45%, transparent); box-shadow: none; padding: 2px 10px; }

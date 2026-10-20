@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { lineText, linesOf } from "../text";
 
 /**
  * Copies the bullets under "## Proposed CLAUDE.md additions" in a change's lessons.md (written for
@@ -15,23 +16,38 @@ export async function applyLessons(root: string, slug: string): Promise<{ added:
   const bullets = proposedAdditions(await Bun.file(lessonsPath).text());
   const claudePath = join(root, "CLAUDE.md");
   const existing = existsSync(claudePath) ? await Bun.file(claudePath).text() : "# Project\n";
-  const eol = existing.includes("\r\n") ? "\r\n" : "\n";
+  // The added lines take the ending most lines have, so one stray CRLF does not convert the file;
+  // every line already there keeps its own.
+  const eol = (existing.match(/\r\n/g)?.length ?? 0) * 2 > (existing.match(/\n/g)?.length ?? 0) ? "\r\n" : "\n";
   const there = new Set(existing.split(/\r?\n/).flatMap((l) => { const m = BULLET.exec(l); return m ? [m[1]!.trim()] : []; }));
   const added = bullets.filter((b, n) => !there.has(b.slice(2)) && bullets.indexOf(b) === n);
   if (!added.length) return { added };
-  const lines = existing.trimEnd().split(/\r?\n/);
-  const heading = lines.findIndex((l) => /^##\s+Lessons\s*$/.test(l));
+  const lines = withEndings(existing);
+  // Blank lines at the end are dropped, and a last line with no ending gets one.
+  while (lines.length && !lines[lines.length - 1]!.text.trim()) lines.pop();
+  const last = lines[lines.length - 1];
+  if (last && !last.end) last.end = eol;
+  const fresh = added.map((text) => ({ text, end: eol }));
+  const heading = lines.findIndex((l) => /^##\s+Lessons\s*$/.test(l.text));
   if (heading < 0) {
-    lines.push("", "## Lessons", ...added);
+    lines.push({ text: "", end: eol }, { text: "## Lessons", end: eol }, ...fresh);
   } else {
     // At the end of the Lessons section, before any blank lines that lead into the next heading.
-    let end = lines.findIndex((l, n) => n > heading && /^#{1,2}\s/.test(l));
+    let end = lines.findIndex((l, n) => n > heading && /^#{1,2}\s/.test(l.text));
     if (end < 0) end = lines.length;
-    while (end - 1 > heading && !lines[end - 1]!.trim()) end--;
-    lines.splice(end, 0, ...added);
+    while (end - 1 > heading && !lines[end - 1]!.text.trim()) end--;
+    lines.splice(end, 0, ...fresh);
   }
-  await Bun.write(claudePath, lines.join(eol) + eol);
+  await Bun.write(claudePath, lines.map((l) => l.text + l.end).join(""));
   return { added };
+}
+
+/** A text's lines, each with the ending it has ("\r\n", "\n", or "" for a last line without one); none for "". */
+function withEndings(text: string): { text: string; end: string }[] {
+  return linesOf(text).filter((l) => l !== "").map((l) => {
+    const own = lineText(l);
+    return { text: own, end: l.slice(own.length) };
+  });
 }
 
 /** A bullet line, with its text. */

@@ -216,7 +216,22 @@ describe("the console's server", () => {
       const frames = await sseFrames(`${base}/api/sessions/one/1/stream`, 5);
       expect(frames.map((f) => (f.data as SessionMessage).type)).toEqual(["phase", "item", "item", "phase", "end"]);
       expect((await fetch(`${base}/api/sessions/one/9/stream`)).status).toBe(404);
+      // The page asks with a HEAD when its stream closed before it said what the step is: only this 404 says the step is missing.
+      expect((await fetch(`${base}/api/sessions/one/9/stream`, { method: "HEAD" })).status).toBe(404);
       expect((await fetch(`${base}/api/sessions/..%2Fx/1/stream`)).status).toBe(404);
+    });
+  });
+
+  test("a session's stream resumes at the start of the line a frame id names, from the header or the address", async () => {
+    await withConsole(async (base) => {
+      const url = `${base}/api/sessions/one/1/stream`;
+      const all = await sseFrames(url, 5);
+      const firstEnd = all[1]!.id!;
+      // A row inside the second line has an id like "<its start>.<k>": the stream goes on from that start.
+      const types = (frames: Awaited<ReturnType<typeof sseFrames>>) => frames.map((f) => { const m = f.data as SessionMessage; return m.type === "item" ? m.item.kind : m.type; });
+      expect(types(await sseFrames(url, 4, { "last-event-id": `${firstEnd}.3` }))).toEqual(["phase", "result", "phase", "end"]);
+      expect(types(await sseFrames(`${url}?from=${firstEnd}.3`, 4))).toEqual(["phase", "result", "phase", "end"]);
+      expect(types(await sseFrames(`${url}?from=${firstEnd}`, 4))).toEqual(["phase", "result", "phase", "end"]);
     });
   });
 
@@ -275,6 +290,9 @@ describe("writes", () => {
   const post = (base: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: base, ...headers }, body: JSON.stringify(body) });
 
+  /** How the page itself reads a result: a current browser says the request is from the same origin. */
+  const PAGE = { headers: { "sec-fetch-site": "same-origin" } };
+
   test("an action is submitted, followed and read once", async () => {
     await withRepoConsole(async (base, root) => {
       const r = await post(base, "/api/requests", { kind: "approve", slug: "a", expect: "plan-review" });
@@ -282,13 +300,13 @@ describe("writes", () => {
       const { id, loop } = await r.json() as { id: string; loop: string };
       expect(loop).toBe("stopped");
       expect(pendingRequests(root).map((q) => [q.id, q.kind, q.via, q.transport])).toEqual([[id, "approve", "the dashboard", "console"]]);
-      expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toEqual({ state: "pending" });
+      expect(await (await fetch(`${base}/api/requests/${id}`, PAGE)).json()).toEqual({ state: "pending" });
       // The loop applies it.
       await applyAll(root);
       // Only GET reads a result: a HEAD would take it with no body to carry it.
       expect((await fetch(`${base}/api/requests/${id}`, { method: "HEAD" })).status).toBe(405);
-      expect(await (await fetch(`${base}/api/requests/${id}`)).json()).toMatchObject({ state: "done", ok: true, status: "plan-approved" });
-      expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
+      expect(await (await fetch(`${base}/api/requests/${id}`, PAGE)).json()).toMatchObject({ state: "done", ok: true, status: "plan-approved" });
+      expect((await fetch(`${base}/api/requests/${id}`, PAGE)).status).toBe(404);
     });
   }, 30_000);
 
@@ -300,14 +318,22 @@ describe("writes", () => {
       // The address bar (no site) reads it; a pending result stays.
       const pending = await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": "none" } });
       expect({ status: pending.status, cache: pending.headers.get("cache-control") }).toEqual({ status: 200, cache: "no-store" });
+      expect(await (await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": "same-origin" } })).json()).toEqual({ state: "pending" });
       await applyAll(root);
       // An <img src> or a link on another site: the browser says where it comes from, and it is refused, so the result is still there for the page.
       for (const site of ["cross-site", "same-site"]) {
         const r = await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": site } });
         expect({ site, status: r.status }).toEqual({ site, status: 403 });
       }
-      expect(await (await fetch(`${base}/api/requests/${id}`, { headers: { "sec-fetch-site": "same-origin" } })).json()).toMatchObject({ state: "done", ok: true });
-      expect((await fetch(`${base}/api/requests/${id}`)).status).toBe(404);
+      // A request that says nothing of its site (an older browser's <img src>, or a client on this
+      // machine) is refused unless its Origin or Referer is the console's own, and the result stays.
+      for (const headers of [{}, { origin: "http://elsewhere.test" }, { referer: "http://elsewhere.test/c/a" }, { referer: "not a url" }] as Record<string, string>[]) {
+        const r = await fetch(`${base}/api/requests/${id}`, { headers });
+        expect({ headers, status: r.status }).toEqual({ headers, status: 403 });
+      }
+      // The page's own fetch in an older browser sends the page's Referer; the console's Origin passes too (the result is gone by then).
+      expect((await fetch(`${base}/api/requests/${id}`, { headers: { referer: `${base}/inbox` } })).status).toBe(200);
+      expect((await fetch(`${base}/api/requests/${id}`, { headers: { origin: base } })).status).toBe(404);
       // The method is checked before the Origin: a GET of the collection is not a write that lacks one.
       expect((await fetch(`${base}/api/requests`)).status).toBe(405);
       expect((await fetch(`${base}/api/requests/${id}`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "{}" })).status).toBe(405);

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
 import { loadConfig, type Config } from "./config";
@@ -7,6 +8,7 @@ import { withEntry, type ConversationEntry } from "./conversation";
 import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
+import { Git } from "./git";
 import { errorText } from "./shell";
 import { recordNotYet, StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion } from "./questions";
@@ -179,7 +181,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
   const claimed = claimedRequests(root, { trace });
   // A request with a wrong field would otherwise fail the same way every pass: finished at once, under its slug when it has a real one.
   for (const u of claimed.unreadable) {
-    trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, transport: u.transport, result: "refused", problem: u.problem });
+    trace.event(u.slug ?? "_loop", "request", { id: u.id, kind: u.kind, by: u.byName, byId: u.by, via: u.via, transport: u.transport, result: "refused", problem: u.problem });
     finishRequest(root, u, { ok: false, status: null, text: "That request could not be read, so nothing changed." });
     applied++;
   }
@@ -214,7 +216,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
 }
 
 /**
- * True when a record of the request landed (see landed): for a new request, for any of its drafts.
+ * True when a record of the request landed (see doneBefore): for a new request, for any of its drafts.
  * Such a request is not given up on at the give-up point but finished as applied (see finishLanded). A
  * git that cannot answer counts as not landed, so a request is still given up on when git itself
  * keeps failing; a stop request passes through.
@@ -223,7 +225,7 @@ async function anyLanded(root: string, main: string, req: Request): Promise<bool
   const slugs = req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug];
   for (const slug of slugs.filter((x) => SLUG.test(x))) {
     try {
-      if (await landed(root, main, req.id, slug, req.at)) return true;
+      if (await doneBefore(root, main, req, slug)) return true;
     } catch (e) {
       if (e instanceof StopRequested) throw e;
     }
@@ -291,6 +293,25 @@ function byWhom(req: Request): string {
   return `${oneLine(req.byName, 80)} from ${oneLine(req.via, 40)}`;
 }
 
+/**
+ * True when the request's record for this slug landed (see landed), or when a loop from before
+ * records carried the request's id wrote it: such a loop, killed after writing the request's
+ * intent.md (and maybe committing it) and then upgraded, left no trailer to find, only the sha256 of
+ * what it wrote on the claimed request (`writtenHash`). The file still holding just that, in the
+ * checkout or at main, is that write, so the request is finished as applied, not refused as done
+ * already. A hash the file no longer matches (the change moved on since) counts for nothing.
+ */
+async function doneBefore(root: string, main: string, req: Request, slug: string): Promise<boolean> {
+  if (await landed(root, main, req.id, slug, req.at)) return true;
+  const want = req.writtenHash?.[slug];
+  if (!want) return false;
+  const rel = `intent/${slug}/intent.md`;
+  const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
+  if (existsSync(join(root, rel)) && sha(readFileSync(join(root, rel))) === want) return true;
+  const atMain = await new Git(root).run(["show", `${main}:${rel}`], true);
+  return atMain.code === 0 && sha(atMain.out) === want;
+}
+
 async function applyAccept(root: string, main: string, trace: Trace, req: Extract<Request, { kind: "accept" }>): Promise<Outcome> {
   const path = join(root, "intent", req.slug, "intent.md");
   // The console words results like its other actions; chat speaks as itself.
@@ -301,7 +322,7 @@ async function applyAccept(root: string, main: string, trace: Trace, req: Extrac
   }
   let refused = null as Status | null;
   // Its record landed in a pass the loop was killed in: finished as started, not written again.
-  if (!(await landed(root, main, req.id, req.slug, req.at))) {
+  if (!(await doneBefore(root, main, req, req.slug))) {
     await commitRecord(root, main, req.slug, `accepted by ${byWhom(req)}`, async (draft) => {
       const intent = await readIntent(root, req.slug);
       const was = intent.file.frontmatter.status;
@@ -330,7 +351,7 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
     if (!SLUG.test(i.slug)) { skipped.push(`${i.slug} (not a valid change name)`); continue; }
     const path = join(root, "intent", i.slug, "intent.md");
     // Its record landed in a pass the loop was killed in: the file there is this request's, added already.
-    const done = await landed(root, main, req.id, i.slug, req.at);
+    const done = await doneBefore(root, main, req, i.slug);
     if (!done && existsSync(path)) {
       let status = "unreadable";
       try { status = parseIntentFile(await Bun.file(path).text()).frontmatter.status; } catch { /* keep unreadable */ }
@@ -421,7 +442,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   const to = targetOf(req);
   // Its record landed in a pass the loop was killed in: finished as applied, neither taken for a change
   // that moved on (its own record moved it) nor written again.
-  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
+  const done = await doneBefore(root, cfg.main_branch, req, req.slug);
   if (!done && was !== req.expect) return movedOn(trace, req, was);
   const problem = done ? null : notAllowed(req, found.intent.file.frontmatter, cfg, trace);
   if (problem || !to) { traced(trace, req, "refused", { status: was }); return { ok: false, status: was, text: problem ?? `${req.slug} cannot do that now.` }; }
@@ -483,7 +504,7 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as done already.
-  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
+  const done = await doneBefore(root, cfg.main_branch, req, req.slug);
   if (!done && req.kind === "hold" && fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is held already; nothing changed.` }; }
   if (!done && req.kind === "release" && !fm.hold.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is not held; nothing changed.` }; }
   // A priority of null takes the line out: the change had no stated priority.
@@ -511,7 +532,7 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
   const fm = found.intent.file.frontmatter;
   if (!isOpen(fm.status)) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} is ${fm.status}; nothing changed.` }; }
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as answered already.
-  const done = await landed(root, cfg.main_branch, req.id, req.slug, req.at);
+  const done = await doneBefore(root, cfg.main_branch, req, req.slug);
   if (!done && !fm.question.trim()) { traced(trace, req, "refused", { status: fm.status }); return { ok: false, status: fm.status, text: `${req.slug} has no question waiting; nothing changed.` }; }
   // An answer to the question the person saw, not to one asked since (a request naming none, from before, goes to whichever waits).
   if (!done && !sameQuestion(req.question, readQuestion(root, req.slug)?.open?.at)) { traced(trace, req, "refused", { status: fm.status, why: "question changed" }); return { ok: false, status: fm.status, text: questionChangedText(req.slug) }; }

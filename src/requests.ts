@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ID, newId } from "./ids";
 import { PRIORITIES, SLUG, STATUSES, type Status } from "./intents";
-import { readJson, readJsonAs, writeJson } from "./fsutil";
+import { readJsonAs, writeJson } from "./fsutil";
 import { chatDir } from "./chat/threads";
 import type { Trace } from "./trace";
 import { touchWake } from "./wake";
@@ -19,16 +19,22 @@ import { touchWake } from "./wake";
 /** The console's transport name: its results are read by id by the page that asked, never by chat. */
 export const CONSOLE = "console";
 
-/** The longest answer a request may carry. */
-const MAX_ANSWER = 4000;
+/**
+ * The longest answer a request may carry: what chat's dashboard takes in one message, since chat
+ * passes a person's answer on whole. The console's own form allows less (see src/console/writes.ts).
+ */
+const MAX_ANSWER = 20_000;
 
 /**
  * What every request carries. `via`: where the person was, in words ("the dashboard", "Slack"), for
  * the commit and the trace; requests chat left before it existed came from chat.
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
  * applyRequests, which gives up after a few, and not before some minutes). A key the schema does not
- * name is dropped as the file is read: a claimed request an older loop saved with `written`,
- * `writtenHash` or `recordHash` (what it kept to put back an uncommitted write) still reads.
+ * name is dropped as the file is read: a claimed request an older loop saved with `written` or
+ * `recordHash` (what it kept to put back an uncommitted write) still reads.
+ * `writtenHash`: only on a request a loop from before records carried the request's id claimed, by
+ * slug, the sha256 (hex) of the intent.md it wrote for it; kept, since it is the only sign that loop
+ * wrote the request before it was killed (see doneBefore in src/apply.ts).
  */
 const base = z.object({
   id: z.string().regex(ID),
@@ -40,6 +46,7 @@ const base = z.object({
   at: z.string(),
   tries: z.number().optional(),
   firstFailedAt: z.string().optional(),
+  writtenHash: z.record(z.string(), z.string()).optional(),
 });
 const slug = z.string().regex(SLUG);
 const status = z.enum(STATUSES);
@@ -80,10 +87,28 @@ type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type RequestBody = OmitEach<Request, keyof z.infer<typeof base>>;
 
 /** What submitRequest takes: everything but the id and the time, and what the loop notes while applying. */
-export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt">;
+export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt" | "writtenHash">;
 
-/** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
-export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
+/**
+ * What the loop did with a request, as its result file says (see finishRequest), for whoever asked:
+ * the console's page by id (see requestState), chat by transport (see waitingResults). `status` is
+ * the change's status after it (null when there is no change, or it names a status this loop does not
+ * know). A result chat left before requests had one folder (see drainOld) carries only the id, where
+ * it goes, the text and the time: it reads with no kind, no change, and `ok` unsaid.
+ */
+const ResultSchema = z.object({
+  id: z.string(),
+  kind: z.string().default(""),
+  slug: z.string().nullable().default(null),
+  transport: z.string(),
+  thread: z.string(),
+  text: z.string(),
+  ok: z.boolean().optional(),
+  status: status.nullable().catch(null),
+  at: z.string().default(""),
+});
+
+export type RequestResult = z.infer<typeof ResultSchema>;
 
 /** The part of a result the applier works out. */
 export interface Outcome { text: string; ok: boolean; status: Status | null }
@@ -108,17 +133,20 @@ export function submitRequest(root: string, req: Submission): Request {
  * to) whose body is not a request the loop knows: a wrong field, a kind it has no action for. The
  * pass finishes it with a plain result (see src/apply.ts), as it would any request, rather than try
  * it, or leave the page that asked waiting. `slug`: the change it names, when that is a change name.
+ * `by`, `byName` and `via`: who asked and from where, when the file says so in words.
  */
-interface Unreadable { id: string; kind: string; slug: string | null; transport: string; thread: string; problem: string }
+interface Unreadable { id: string; kind: string; slug: string | null; transport: string; thread: string; problem: string; by?: string; byName?: string; via?: string }
 
 /** What makes a request file someone's (see Unreadable). Anything less is not a request (see setAside). */
 const RequestFile = z.object({ id: z.string().regex(ID), transport: z.string(), thread: z.string() }).loose();
 
-interface Read { requests: Request[]; unreadable: Unreadable[] }
+/** `due`: a file that is not a request has waited long enough to be set aside, by a pass (see Tidy). */
+interface Read { requests: Request[]; unreadable: Unreadable[]; due: boolean }
 
 /**
- * Given by the applier only (its passes, and its look between them): a file that is not a request is
- * set aside (see setAside), traced when there is a trace. Every other reader (the console, chat) only
+ * Given by the applier only. Its passes give the trace: a file that is not a request is set aside
+ * there (see setAside), and traced once. Its look between passes gives none: such a file only makes
+ * it start a pass (`due`), so the move is always traced. Every other reader (the console, chat) only
  * passes such a file over: it may be half written, or held open for a moment on Windows.
  */
 export interface Tidy { trace?: Trace; badAfterMs?: number }
@@ -129,8 +157,44 @@ export interface Tidy { trace?: Trace; badAfterMs?: number }
  */
 const BAD_AFTER_MS = 30_000;
 
-/** When this process first found each request file unreadable, by its path; forgotten once it reads, or is gone. */
+/**
+ * When the applier first found each request file unreadable, by its path. Only its looks (those
+ * given a Tidy) record one; an entry is forgotten once the file reads, or at the next such look of
+ * its folder once the file is gone (see forgetGone).
+ */
 const unreadableSince = new Map<string, number>();
+
+/**
+ * How long a file that could not be set aside (see setAside) is left before it is tried again,
+ * unless it changes: each try is a whole pass (the config, the trace, the old folders), and the
+ * applier looks every 2 s.
+ */
+const SET_ASIDE_RETRY_MS = 60_000;
+
+/** The last failed set-aside of each file, by its path: when it was, and the file's modification time then. Forgotten once the file is gone (see forgetGone). */
+const setAsideFailed = new Map<string, { at: number; mtimeMs: number }>();
+
+/** The file's modification time, or null when it cannot be read (gone meanwhile). */
+function mtimeOf(path: string): number | null {
+  try { return statSync(path).mtimeMs; } catch { return null; }
+}
+
+/** True while a set-aside of the file at `path` failed less than SET_ASIDE_RETRY_MS ago and the file has not changed since. */
+function setAsideWaits(path: string): boolean {
+  const failed = setAsideFailed.get(path);
+  if (!failed) return false;
+  if (Date.now() - failed.at < SET_ASIDE_RETRY_MS && mtimeOf(path) === failed.mtimeMs) return true;
+  setAsideFailed.delete(path);
+  return false;
+}
+
+/** Forgets what unreadableSince and setAsideFailed hold for files of `dir` no longer among `names` (gone, or set aside). */
+function forgetGone(dir: string, names: readonly string[]): void {
+  const here = new Set(names.map((n) => join(dir, n)));
+  for (const map of [unreadableSince, setAsideFailed]) {
+    for (const path of map.keys()) if (dirname(path) === dir && !here.has(path)) map.delete(path);
+  }
+}
 
 /**
  * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
@@ -138,22 +202,29 @@ const unreadableSince = new Map<string, number>();
  * and set aside by the applier (see Tidy).
  */
 function readDir(root: string, dir: string, tidy?: Tidy): Read {
-  const read: Read = { requests: [], unreadable: [] };
-  if (!existsSync(dir)) return read;
-  for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
+  const read: Read = { requests: [], unreadable: [], due: false };
+  const names = existsSync(dir) ? readdirSync(dir).filter((x) => x.endsWith(".json")).sort() : [];
+  if (tidy) forgetGone(dir, names);
+  for (const n of names) {
     const file = readJsonAs(join(dir, n), RequestFile);
     // Named for its own id, or claiming, cancelling and finishing it would act on another file.
     if (!file || n !== `${file.id}.json`) {
+      if (!tidy) continue;
       const path = join(dir, n);
       const since = unreadableSince.get(path) ?? Date.now();
       unreadableSince.set(path, since);
-      if (tidy && Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS)) {
-        setAside(root, dir, n, tidy.trace);
-        unreadableSince.delete(path);
+      if (Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS) && !setAsideWaits(path)) {
+        if (!tidy.trace) read.due = true;
+        else {
+          const mtimeMs = mtimeOf(path);
+          if (setAside(root, dir, n, tidy.trace)) unreadableSince.delete(path);
+          else if (mtimeMs !== null) setAsideFailed.set(path, { at: Date.now(), mtimeMs });
+        }
       }
       continue;
     }
     unreadableSince.delete(join(dir, n));
+    setAsideFailed.delete(join(dir, n));
     const r = RequestSchema.safeParse(file);
     if (r.success) { read.requests.push(r.data); continue; }
     read.unreadable.push({
@@ -163,6 +234,9 @@ function readDir(root: string, dir: string, tidy?: Tidy): Read {
       transport: file.transport,
       thread: file.thread,
       problem: r.error.issues.map((i) => `${i.path.join(".") || "top"}: ${i.message}`).join("; "),
+      ...(typeof file.by === "string" ? { by: file.by } : {}),
+      ...(typeof file.byName === "string" ? { byName: file.byName } : {}),
+      ...(typeof file.via === "string" ? { via: file.via } : {}),
     });
   }
   return read;
@@ -171,16 +245,21 @@ function readDir(root: string, dir: string, tidy?: Tidy): Read {
 /**
  * Moves a file in a requests folder that is not a request (not JSON, no id of its own, not named
  * for it) to `requests/bad/<name>`, once. Left where it is, every pass would read it again every
- * 2 s, and the console would say its request is pending for ever. Traced when the reader has a
- * trace (a pass); the applier's look between passes has none, and only moves it. A file that cannot
- * be moved (held open) is left for the next look.
+ * 2 s, and the console would say its request is pending for ever. Traced. A file that cannot be
+ * moved (held open) is left, and tried again after SET_ASIDE_RETRY_MS or once it changes (see
+ * setAsideWaits); true once it is moved.
  */
-function setAside(root: string, dir: string, name: string, trace?: Trace): void {
+function setAside(root: string, dir: string, name: string, trace: Trace): boolean {
   try {
     mkdirSync(badDir(root), { recursive: true });
     renameSync(join(dir, name), join(badDir(root), name));
-    trace?.event("_loop", "error", { where: "request", file: name, error: `${name} is not a request; it was moved to .loopstra/requests/bad/` });
-  } catch { /* see above */ }
+  } catch {
+    return false;
+  }
+  try {
+    trace.event("_loop", "error", { where: "request", file: name, error: `${name} is not a request; it was moved to .loopstra/requests/bad/` });
+  } catch { /* the trace closed meanwhile */ }
+  return true;
 }
 
 /** Request files not yet claimed. */
@@ -241,31 +320,52 @@ export function cancelRequest(root: string, id: string): boolean {
 /**
  * Where a request is, for the console page that asked: still waiting or being applied, done (its
  * result, which this removes, so it is read once), or null (unknown, cancelled, its result already
- * read, or a result for another transport, which is left for chat to take: see takeResults).
+ * read or not a result, or a result for another transport, which is left for chat: see
+ * waitingResults).
  */
 export function requestState(root: string, id: string): ({ state: "pending" } | ({ state: "done" } & RequestResult)) | null {
   if (!ID.test(id)) return null;
   if (existsSync(join(requestsDir(root), `${id}.json`)) || existsSync(join(applyingDir(root), `${id}.json`))) return { state: "pending" };
   const path = join(resultsDir(root), `${id}.json`);
-  const r = readJson<RequestResult>(path);
+  const r = readJsonAs(path, ResultSchema);
   if (!r || r.transport !== CONSOLE) return null;
   rmSync(path, { force: true });
   return { state: "done", ...r };
 }
 
 /**
- * Results the loop left for the given transports, oldest first; each is removed as it is taken, so
- * it is passed on once. Results for transports another process serves (and the console's) are left.
+ * The transport a result file's text names, read without parsing it, for a file that is not JSON or
+ * not a result's shape; null when it names none.
  */
-export function takeResults(root: string, transports: ReadonlySet<string>): RequestResult[] {
+function ownerOf(text: string): string | null {
+  return /"transport"\s*:\s*"([^"\\]*)"/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * The results the loop left for the given transports (the files in `results/`, oldest first), each
+ * with its file, so chat removes it only once it was passed on (see ChatService.passOnResults). One
+ * that is not a result can never be passed on: it is removed here when it names one of these
+ * transports, and left when it names another or none (it may be another process's, and pruneResults
+ * removes what nobody takes in a day). Results for transports another process serves (and the
+ * console's) are left. A file that cannot be read now is passed over until the next look.
+ */
+export function waitingResults(root: string, transports: ReadonlySet<string>): Array<{ path: string; result: RequestResult }> {
   const dir = resultsDir(root);
   if (!existsSync(dir)) return [];
-  const out: RequestResult[] = [];
+  const ours = (transport: string | null) => transport !== null && transport !== CONSOLE && transports.has(transport);
+  const out: Array<{ path: string; result: RequestResult }> = [];
   for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
-    const r = readJson<RequestResult>(join(dir, n));
-    if (r && (r.transport === CONSOLE || !transports.has(r.transport))) continue;
-    rmSync(join(dir, n), { force: true });
-    if (r) out.push(r);
+    const path = join(dir, n);
+    let text: string;
+    try { text = readFileSync(path, "utf8"); } catch { continue; }
+    let raw: unknown = null;
+    try { raw = JSON.parse(text); } catch { /* not JSON: whose it is is read from the text below */ }
+    const parsed = ResultSchema.safeParse(raw);
+    if (parsed.success) {
+      if (ours(parsed.data.transport)) out.push({ path, result: parsed.data });
+      continue;
+    }
+    if (ours(ownerOf(text))) { try { rmSync(path, { force: true }); } catch { /* tried again next look */ } }
   }
   return out;
 }
@@ -277,14 +377,15 @@ function oldDirs(root: string): ReadonlyArray<readonly [string, string]> {
 
 /**
  * True when an applier pass has something to do: a request file waiting or claimed (one that can be
- * read, or that someone waits on: a file that is not a request is set aside here, so it never keeps
- * the applier busy), or a folder chat used before still there to drain. An idle applier does next to
- * nothing every 2 s.
+ * read, or that someone waits on), a file that is not a request to set aside (the pass does it, and
+ * traces it, so it never keeps the applier busy), or a folder chat used before still there to drain.
+ * An idle applier does next to nothing every 2 s.
  */
 export function anythingToApply(root: string, badAfterMs?: number): boolean {
   const tidy: Tidy = badAfterMs === undefined ? {} : { badAfterMs };
   const claimed = claimedRequests(root, tidy);
-  return waitingIds(root, tidy).length > 0 || claimed.requests.length > 0 || claimed.unreadable.length > 0 || oldDirs(root).some(([from]) => existsSync(from));
+  const waits = waiting(root, tidy);
+  return waits.requests.length > 0 || waits.unreadable.length > 0 || waits.due || claimed.requests.length > 0 || claimed.unreadable.length > 0 || claimed.due || oldDirs(root).some(([from]) => existsSync(from));
 }
 
 /** Moves what chat left in the folders it used before (`.loopstra/chat/requests|results/`) into the new ones. */

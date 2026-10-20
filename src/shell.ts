@@ -29,10 +29,28 @@ const GIT_LOCATION_VARS: readonly string[] = [
   "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE",
 ];
 
-/** A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS). */
-export function withoutGitLocation<T extends Record<string, string | undefined>>(env: T): T {
+/**
+ * The other variables a git hook or alias exports that change what a git call does, dropped with
+ * GIT_LOCATION_VARS. How pathspecs are read (`git --literal-pathspecs` exports GIT_LITERAL_PATHSPECS,
+ * and with it a `:(literal)name` pathspec names a file called that and matches nothing, so a
+ * comparison finds no difference); the dates of the commit the hook is part of (every commit made
+ * would carry them); and the `-c` and `--config-env` settings of the command that ran the hook,
+ * which git passes on in GIT_CONFIG_PARAMETERS. GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_n and
+ * GIT_CONFIG_VALUE_n stay: git never exports them, so they are set on purpose (a container's
+ * safe.directory, a CI job's url.<base>.insteadOf or http.extraHeader), and git needs them there.
+ */
+const GIT_HOOK_VARS: readonly string[] = [
+  "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+  "GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE", "GIT_CONFIG_PARAMETERS",
+];
+
+/**
+ * A copy of `env` without git's repository-location variables (see GIT_LOCATION_VARS) and the other
+ * variables a hook or alias exports that change what git does (see GIT_HOOK_VARS).
+ */
+export function withoutGitHookEnv<T extends Record<string, string | undefined>>(env: T): T {
   const out = { ...env };
-  for (const name of GIT_LOCATION_VARS) delete out[name];
+  for (const name of [...GIT_LOCATION_VARS, ...GIT_HOOK_VARS]) delete out[name];
   return out;
 }
 
@@ -360,7 +378,7 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitLocation({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitHookEnv({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
   if (r.stopped) throw new StopRequested();
   if (r.cancelled) throw new Cancelled();
   if (!r.started) throw new Error(r.err);

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "./git";
 import { isDev, PACKAGE_ROOT } from "./package";
-import { withoutGitLocation } from "./shell";
+import { withoutGitHookEnv } from "./shell";
 import { textSha, type ManagedFile } from "./stamp";
 
 /** Every text each template has had: its textSha and the first commit that had it, oldest first. Keyed by `templates/...` path. */
@@ -22,7 +22,7 @@ async function blobTexts(repo: string, blobs: string[]): Promise<Map<string, str
   const texts = new Map<string, string>();
   if (!blobs.length) return texts;
   // Bun.spawn, not spawnBounded: the batch output is parsed by byte counts, and spawnBounded gives text.
-  const proc = Bun.spawn({ cmd: ["git", "cat-file", "--batch"], cwd: repo, env: withoutGitLocation(process.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn({ cmd: ["git", "cat-file", "--batch"], cwd: repo, env: withoutGitHookEnv(process.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; proc.kill(); }, BLOBS_TIMEOUT_MS);
   void proc.stdin.write(`${blobs.join("\n")}\n`);

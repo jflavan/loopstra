@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config";
-import { chunks, DIFF_CHUNK, Git, GitError, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
+import { Git, GitError, literalPathspecs, pathChunks, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
 import { onCheckout, oneSync } from "./lanes";
 import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
@@ -241,7 +241,7 @@ async function putBack(git: Git, from: string, to: string): Promise<boolean> {
   const restore: string[] = [];
   const remove: string[] = [];
   const unstage: string[] = [];
-  for (const chunk of chunks(paths, DIFF_CHUNK)) {
+  for (const chunk of pathChunks(paths)) {
     const [was, would, here, staged] = [await blobs(git, from, chunk), await blobs(git, to, chunk), await fileBlobs(git, chunk), await indexBlobs(git, chunk)];
     for (const p of chunk) {
       const [w, t, h, s] = [was.get(p) ?? null, would.get(p) ?? null, here.get(p) ?? null, staged.get(p) ?? null];
@@ -249,18 +249,14 @@ async function putBack(git: Git, from: string, to: string): Promise<boolean> {
       if (s === t && s !== w) unstage.push(p);
     }
   }
-  // Each name literal (see Git.putBack): one with * or [ in it names only itself, never a sibling a
+  // Each name literal (see literalPathspecs): one with * or [ in it names only itself, never a sibling a
   // person may be editing.
-  for (const chunk of chunks(restore, DIFF_CHUNK)) await git.run(["checkout", from, "--", ...literal(chunk)], { cleanup: true });
+  for (const chunk of pathChunks(restore)) await git.run(["checkout", from, "--", ...literalPathspecs(chunk)], { cleanup: true });
   for (const p of remove) rmSync(join(git.cwd, p), { force: true });
-  for (const chunk of chunks(unstage, DIFF_CHUNK)) await git.run(["reset", "-q", from, "--", ...literal(chunk)], { cleanup: true });
+  for (const chunk of pathChunks(unstage)) await git.run(["reset", "-q", from, "--", ...literalPathspecs(chunk)], { cleanup: true });
   return true;
 }
 
-/** The paths as literal pathspecs: each names only itself, whatever * or [ it has in it. */
-function literal(paths: string[]): string[] {
-  return paths.map((p) => `:(literal)${p}`);
-}
 
 /** Path → blob, from `git ls-tree -z` or `git ls-files -s -z` output (the blob is the field before the tab's). */
 function blobMap(out: string, field: number): Map<string, string> {
@@ -274,12 +270,12 @@ function blobMap(out: string, field: number): Map<string, string> {
 
 /** The blob of each of `paths` in `commit` (paths it does not have are left out). */
 async function blobs(git: Git, commit: string, paths: string[]): Promise<Map<string, string>> {
-  return blobMap((await git.run(["ls-tree", "-r", "-z", commit, "--", ...literal(paths)])).out, 2);
+  return blobMap((await git.run(["ls-tree", "-r", "-z", commit, "--", ...literalPathspecs(paths)])).out, 2);
 }
 
 /** The blob the index holds for each of `paths` (paths it does not have are left out). */
 async function indexBlobs(git: Git, paths: string[]): Promise<Map<string, string>> {
-  return blobMap((await git.run(["ls-files", "-s", "-z", "--", ...literal(paths)])).out, 1);
+  return blobMap((await git.run(["ls-files", "-s", "-z", "--", ...literalPathspecs(paths)])).out, 1);
 }
 
 /** Stands for a file that cannot be read (another program holds it open, on Windows): it is neither commit's blob, so putBack leaves the file alone. */

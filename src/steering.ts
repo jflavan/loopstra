@@ -14,6 +14,10 @@ import { StopRequested, stopRequested } from "./stop";
 const LOOK_MS = 1000;
 /** How many times the end of deliverInbox looks for messages written while its records landed. */
 const END_LOOKS = 5;
+/** How long a look waits before trying an ended session's message again after its record failed; doubled after each failure. */
+const PICK_UP_WAIT_MS = 60_000;
+/** How many times the looks try an ended session's message before leaving it for the next step's sweep. */
+const PICK_UP_TRIES = 4;
 
 /** A message as the session reads it. Starts with MESSAGE_LEAD, which the console's transcript looks for. */
 export function messageText(m: InboxMessage): string {
@@ -101,9 +105,9 @@ const recording = new Set<string>();
  * commitRecord refuses) stays in the inbox, for the next sweep. While its record is in flight, a second
  * look leaves it alone. One with an entry already (its move to delivered/ failed after its record, in
  * this process or before a restart; see recordedAs) is only moved, as what its entry says: delivered
- * to its session, or kept for the next one. Never throws: a problem is traced.
+ * to its session, or kept for the next one. Never throws: a problem is given to `failed`, which traces it.
  */
-async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
+async function keepForNext(ctx: StepContext, m: InboxMessage, failed: (error: string) => void = (error) => traceError(ctx, { where: "conversation", error })): Promise<void> {
   const key = keyOf(ctx, m);
   if (recording.has(key)) return;
   recording.add(key);
@@ -113,10 +117,45 @@ async function keepForNext(ctx: StepContext, m: InboxMessage): Promise<void> {
     markDone(ctx.root, ctx.slug, m, was && was !== "later" ? "delivered" : "next session");
   } catch (e) {
     // A stopping loop records nothing: the message waits for the next step's sweep.
-    if (!(e instanceof StopRequested)) traceError(ctx, { where: "conversation", error: errorText(e) });
+    if (!(e instanceof StopRequested)) failed(errorText(e));
   } finally {
     recording.delete(key);
   }
+}
+
+/**
+ * Ended sessions' messages whose record failed (see pickUp), by keyOf: the failed tries, when the
+ * next may start (ms), and the error last traced (see sameError).
+ */
+const pickUpFailed = new Map<string, { tries: number; next: number; traced: string }>();
+
+/** An error's words without the commit ids in them, which differ on every try of the same failure. */
+const sameError = (error: string) => error.replace(/\b[0-9a-f]{7,64}\b/g, "<commit>");
+
+/**
+ * Keeps an ended session's message for the next session (see keepForNext), from a session's look.
+ * A record that keeps failing (the checkout off main, a held lock, git failing) is not tried on every
+ * look: after a failure the looks wait PICK_UP_WAIT_MS from when that try began, twice as long after each one, and after
+ * PICK_UP_TRIES failures they leave the message for the next step's sweep. The error is traced once
+ * while it stays the same for the message (commit ids aside). Null when it is not tried now.
+ */
+function pickUp(ctx: StepContext, m: InboxMessage): Promise<void> | null {
+  const key = keyOf(ctx, m);
+  const was = pickUpFailed.get(key);
+  if (was && (was.tries >= PICK_UP_TRIES || Date.now() < was.next)) return null;
+  let failed = false;
+  // The wait counts from the try's start, so a slow failure (git on a busy machine) does not push the next try back.
+  const began = Date.now();
+  return keepForNext(ctx, m, (error) => {
+    failed = true;
+    const tries = (was?.tries ?? 0) + 1;
+    const traced = sameError(error);
+    pickUpFailed.set(key, { tries, next: began + PICK_UP_WAIT_MS * 2 ** (tries - 1), traced });
+    if (traced === was?.traced) return;
+    try {
+      ctx.trace.event(ctx.slug, "error", { where: "conversation", id: m.id, error, note: `a message for a session that ended could not be kept for the next one; tried again less often, and after ${PICK_UP_TRIES} tries left for the next step` });
+    } catch { /* the trace closed meanwhile */ }
+  }).then(() => { if (!failed) pickUpFailed.delete(key); });
 }
 
 /** True while the message's file is still in the inbox (its move to delivered/ failed, or nobody moved it). */
@@ -144,11 +183,16 @@ const watched = new Set<string>();
 const watchKey = (ctx: StepContext, seq: number) => `${resolve(ctx.root)}|${ctx.slug}|${seq}`;
 
 /**
- * True when the message is for a session of this change that ended before the one at `seq` (nothing
- * watches it any more): a person sent it to the session they saw running, just as it ended.
+ * True when the message is for another session of this change that ended (nothing watches it any
+ * more): a person sent it to the session they saw running, just as it ended. That session ran before
+ * the one at `seq`, or alongside it (the trace's row for it has ended). One whose row still says
+ * running is not (a session alongside, about to be watched), and neither is a later one with no row
+ * yet (a session to come).
  */
 function forEndedSession(ctx: StepContext, m: InboxMessage, seq: number): boolean {
-  return m.seq < seq && !watched.has(watchKey(ctx, m.seq));
+  if (m.seq === seq || watched.has(watchKey(ctx, m.seq))) return false;
+  const row = ctx.trace.phase(ctx.slug, m.seq);
+  return row ? row.status !== "running" : m.seq < seq;
 }
 
 /**
@@ -162,7 +206,8 @@ function forEndedSession(ctx: StepContext, m: InboxMessage, seq: number): boolea
  *
  * A message for a session of the change that ended (see forEndedSession) is kept for the next session
  * by whichever look finds it, and a stop for one is dropped: held until the next step's sweep, it would
- * wait hours at a human gate. One for a session yet to come waits for it.
+ * wait hours at a human gate. A record of it that fails is tried again less and less often (see
+ * pickUp). One for a session yet to come waits for it.
  *
  * A message is written to the session once only: when its move to delivered/ fails (a file held open on
  * Windows), the error is traced once and the next look tries the move again. It is traced and recorded
@@ -195,15 +240,20 @@ export function deliverInbox(ctx: StepContext, seq: number, name: string, ctl: S
     ctx.trace.event(ctx.slug, "steer", { kind: m.kind, by: m.by, via: m.via, seq, text: m.text });
     pending.push(recordDelivered(ctx, m, name));
   };
-  /** A message for a session that ended: kept for the next session, as the sweep would; a stop for it came too late. */
+  /**
+   * A message for a session that ended: kept for the next session, as the sweep would, unless its
+   * record failed lately (see pickUp); a stop for it came too late.
+   */
   const forNext = (m: InboxMessage) => {
-    if (m.kind === "stop") markDone(ctx.root, ctx.slug, m, "dropped");
-    else pending.push(keepForNext(ctx, m));
+    if (m.kind === "stop") { markDone(ctx.root, ctx.slug, m, "dropped"); return; }
+    const record = pickUp(ctx, m);
+    if (record) pending.push(record);
   };
   const look = () => {
     for (const m of waitingIn(ctx.root, ctx.slug)) {
       if (m.seq !== seq) {
-        if (forEndedSession(ctx, m, seq)) forNext(m);
+        // A stopping loop records nothing: what is left waits for the next step's sweep.
+        if (!stopRequested() && forEndedSession(ctx, m, seq)) forNext(m);
         continue;
       }
       // Given to the session once only: a loop killed before the move delivers it again, at worst twice.
@@ -291,7 +341,11 @@ export async function sweepInbox(ctx: StepContext): Promise<void> {
   try {
     for (const m of waitingIn(ctx.root, ctx.slug)) {
       if (m.kind === "stop") markDone(ctx.root, ctx.slug, m, "dropped");
-      else await keepForNext(ctx, m);
+      else {
+        await keepForNext(ctx, m);
+        // A new step: the sessions' looks may try again what the earlier ones gave up on.
+        pickUpFailed.delete(keyOf(ctx, m));
+      }
     }
   } catch (e) {
     traceError(ctx, { where: "inbox", error: errorText(e) });

@@ -101,9 +101,12 @@ export function pidAlive(pid: number): boolean {
 /**
  * Running, paused, stopped, or not responding. A heartbeat older than three polls (never less than
  * three beats) whose process is gone is a loop that did not shut down cleanly (killed, crashed);
- * with the process still there it is not responding (hung, or the machine slept). A stopped loop
- * with a pause still running says when the next start will try. `pause` defaults to the one the
- * heartbeat carries; `hold` is a person's pause (see LoopHold); `alive` is for tests.
+ * with the process still there it is not responding (hung, or the machine slept). The process is
+ * looked for only when the heartbeat is this machine's (or an older one without its machine):
+ * another machine's process id means nothing here, so its stale heartbeat is a loop that ended,
+ * even when a process here has the same id. A stopped loop with a pause still running says when the
+ * next start will try. `pause` defaults to the one the heartbeat carries; `hold` is a person's pause
+ * (see LoopHold); `alive` is for tests, and replaces the machine check too.
  */
 export function heartbeatState(
   hb: Heartbeat | null, pollSeconds: number, now: Date = new Date(),
@@ -120,7 +123,8 @@ export function heartbeatState(
   const staleMs = Math.max(3 * pollSeconds * 1000, 3 * BEAT_MS);
   const beat = Date.parse(hb.lastBeatAt ?? hb.lastTickAt ?? hb.startedAt);
   if (t - beat > staleMs) {
-    if (!(opts.alive ?? pidAlive)(hb.pid)) return stopped(`Stopped — it did not shut down cleanly (${lastCheck})`);
+    const alive = opts.alive ?? ((pid: number) => fromHere(hb) && pidAlive(pid));
+    if (!alive(hb.pid)) return stopped(`Stopped — it did not shut down cleanly (${lastCheck})`);
     return { state: "not-responding", text: `Not responding (${lastCheck})`, working: workingOf(hb) };
   }
   if (hb.stopping) return { state: "running", text: `Stopping — ${lastCheck}`, working: workingOf(hb) };
@@ -171,8 +175,12 @@ export function thisHost(): string {
 export function runningLoopPid(root: string, pollSeconds: number): number | null {
   const hb = readHeartbeat(root);
   if (!hb || (hb.host === thisHost() && !pidAlive(hb.pid))) return null;
-  const here = hb.host === undefined || hb.host === thisHost();
-  return heartbeatState(hb, pollSeconds, new Date(), { alive: here ? pidAlive : () => false }).state === "stopped" ? null : hb.pid;
+  return heartbeatState(hb, pollSeconds).state === "stopped" ? null : hb.pid;
+}
+
+/** True when the heartbeat was written on this machine, or is an older one without its machine (taken as this one's). */
+function fromHere(hb: Heartbeat): boolean {
+  return hb.host === undefined || hb.host === thisHost();
 }
 
 /**

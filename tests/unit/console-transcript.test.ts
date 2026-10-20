@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MEANWHILE_HEADING } from "../../src/console/steerable";
-import { OUTPUT_MAX, toItems, TranscriptReader } from "../../src/console/transcript";
-import type { TranscriptItem } from "../../src/console/types";
+import { OUTPUT_MAX, resumePoint, toItems, TranscriptReader } from "../../src/console/transcript";
+import { frameId, parseFrameId, type TranscriptItem } from "../../src/console/types";
 import { messageText, redirectText } from "../../src/steering";
 import { tempDir } from "../helpers";
 
@@ -93,13 +93,14 @@ describe("session transcripts", () => {
       writeFileSync(path, jsonl(RAW.slice(0, 4)));
       const first = reader.read();
       expect(first.map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
-      // Of two items from one line, the first has the line's start and the last its end: a page
-      // that reconnects after the first gets the line again rather than losing the second.
-      expect(first.map((r) => r.offset)).toEqual([
-        Buffer.byteLength(jsonl(RAW.slice(0, 2))), Buffer.byteLength(jsonl(RAW.slice(0, 3))), Buffer.byteLength(jsonl(RAW.slice(0, 4))),
-      ]);
-      expect(new TranscriptReader(path, first[0]!.offset).read().map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
-      expect(new TranscriptReader(path, first[1]!.offset).read().map((r) => r.item)).toEqual(EXPECTED.slice(2, 3));
+      // Every item has an id of its own. Of two items from one line, the first has the line's start
+      // and its index in the line, the last the line's end: a page that reconnects after the first
+      // resumes at the line's start and gets the line again, rather than losing the second.
+      const [start, end] = [Buffer.byteLength(jsonl(RAW.slice(0, 2))), Buffer.byteLength(jsonl(RAW.slice(0, 3)))];
+      expect(first.map((r) => r.id)).toEqual([`${start}.0`, String(end), String(Buffer.byteLength(jsonl(RAW.slice(0, 4))))]);
+      expect(resumePoint(first[0]!.id)).toBe(start);
+      expect(new TranscriptReader(path, resumePoint(first[0]!.id)).read().map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
+      expect(new TranscriptReader(path, resumePoint(first[1]!.id)).read().map((r) => r.item)).toEqual(EXPECTED.slice(2, 3));
       expect(reader.atEnd()).toBe(true);
 
       const line = JSON.stringify(RAW[4]);
@@ -110,11 +111,27 @@ describe("session transcripts", () => {
       expect(reader.read().map((r) => r.item)).toEqual([EXPECTED[3]!]);
 
       // A reader started part way still shortens paths: it reads the init line first.
-      const later = new TranscriptReader(path, first[2]!.offset);
+      const later = new TranscriptReader(path, resumePoint(first[2]!.id));
       expect(later.read().map((r) => r.item)).toEqual([EXPECTED[3]!]);
     } finally {
       t.cleanup();
     }
+  });
+
+  test("a frame id's resume point is its line's start for a row inside a line, and its number otherwise", () => {
+    expect(resumePoint("123.4")).toBe(123);
+    expect(resumePoint("123.0")).toBe(123);
+    expect(resumePoint("456")).toBe(456);
+    for (const bad of [null, undefined, "", "0", "-5", "abc", "12.x", "12x", "1e3", " 7"]) expect({ bad, at: resumePoint(bad) }).toEqual({ bad, at: 0 });
+  });
+
+  test("a frame id is built and read in one place: a line's end alone, or its start and the row's index", () => {
+    expect(frameId(200)).toBe("200");
+    expect(frameId(100, 1)).toBe("100.1");
+    expect(parseFrameId("200")).toEqual({ at: 200, last: true });
+    expect(parseFrameId("100.1")).toEqual({ at: 100, last: false });
+    expect(parseFrameId("0.0")).toEqual({ at: 0, last: false });
+    for (const bad of ["", "12x", "12.x", "12.", ".1", "-5", "1e3", " 7", "1.2.3", "99999999999999999999"]) expect({ bad, parsed: parseFrameId(bad) }).toEqual({ bad, parsed: null });
   });
 
   test("a line that is not an event, or has odd fields, is skipped and the lines after it still come", () => {
@@ -184,7 +201,7 @@ describe("session transcripts", () => {
       const reader = new TranscriptReader(path);
       expect(reader.read()).toEqual([]);
       expect(reader.atEnd()).toBe(false);
-      expect(reader.read(undefined, { final: true })).toEqual([{ item: EXPECTED[8]!, offset: Bun.file(path).size }]);
+      expect(reader.read(undefined, { final: true })).toEqual([{ item: EXPECTED[8]!, id: String(Bun.file(path).size) }]);
       expect(reader.atEnd()).toBe(true);
 
       writeFileSync(path, `${jsonl(RAW.slice(0, 4))}{"type":"assist`);

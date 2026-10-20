@@ -1,5 +1,5 @@
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
-import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitLocation } from "./shell";
+import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitHookEnv } from "./shell";
 import { Cancelled, SessionStopped, StopRequested, stopRequested } from "./stop";
 import { MEANWHILE_HEADING } from "./console/steerable";
 
@@ -412,7 +412,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
-  const env = withBunOnPath(withoutGitLocation({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env }));
+  const env = withBunOnPath(withoutGitHookEnv({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !input.dropEnv?.includes(k))), CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", ...input.env }));
 
   // A session that ended having answered only notifications (one started before background tasks
   // were turned off) gets the prompt again on the same session, within the same deadline. A session

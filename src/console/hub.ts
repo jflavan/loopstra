@@ -13,7 +13,7 @@ import { SECTION_NAMES, type SectionName, type StreamMessage } from "./types";
 export type Send = (text: string) => boolean;
 
 /** An SSE frame carrying `msg` as JSON, with an id when given. */
-export function frame(msg: unknown, id?: number): string {
+export function frame(msg: unknown, id?: number | string): string {
   return `${id === undefined ? "" : `id: ${id}\n`}data: ${JSON.stringify(msg)}\n\n`;
 }
 

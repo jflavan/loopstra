@@ -3,9 +3,9 @@ import { z } from "zod";
 import type { DiscordTransportConfig } from "../../config";
 import type { OnMessage, Transport } from "../service";
 import { writeJson } from "../../fsutil";
-import { readStateFile } from "../statefile";
+import { readStateFile, StateFileUnavailable } from "../statefile";
 import { chatDir } from "../threads";
-import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, Reconnector } from "./shared";
+import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, prefixOf, Reconnector } from "./shared";
 
 /** The Discord REST API; tests point it at a stub server (which also hands out the gateway address). */
 export const DISCORD_API_ENV = "LOOPSTRA_DISCORD_API";
@@ -68,12 +68,22 @@ export class DiscordTransport implements Transport {
 
   private log(line: string): void { (this.opts.log ?? ((l) => console.error(l)))(line); }
 
-  /** Threads this bot started, kept across restarts so a conversation carries on. A damaged file is moved aside and starts over. */
+  /**
+   * Threads this bot started, kept across restarts so a conversation carries on. A damaged file is
+   * moved aside and starts over. Null when the file is there but cannot be used now (see
+   * readStateFile): it is kept, and nothing is written over it.
+   */
   private threadsPath(): string { return join(chatDir(this.opts.root), "discord-threads.json"); }
-  private knownThreads(): string[] { return readStateFile(this.threadsPath(), KnownThreads, (l) => this.log(l)) ?? []; }
+  private knownThreads(): string[] | null {
+    try { return readStateFile(this.threadsPath(), KnownThreads, (l) => this.log(l)) ?? []; } catch (e) {
+      if (e instanceof StateFileUnavailable) return null;
+      throw e;
+    }
+  }
   private remember(thread: string): void {
-    const all = [...this.knownThreads().filter((t) => t !== thread), thread].slice(-1000);
-    writeJson(this.threadsPath(), all);
+    const known = this.knownThreads();
+    if (!known) return;
+    writeJson(this.threadsPath(), [...known.filter((t) => t !== thread), thread].slice(-1000));
   }
 
   /** One REST call, waiting out a rate limit once or twice. Throws on any other failure. */
@@ -200,7 +210,7 @@ export class DiscordTransport implements Transport {
   async onDiscordMessage(m: DiscordMessage): Promise<void> {
     if (!this.onMessage || !m?.author || m.author.bot || m.author.id === this.botUser) return;
     // The config is read only for a message to this bot: the server's other channels are not.
-    const isOurs = m.channel_id === this.cfg.channel || this.knownThreads().includes(m.channel_id);
+    const isOurs = m.channel_id === this.cfg.channel || (this.knownThreads() ?? []).includes(m.channel_id);
     if (!isOurs) return;
     const access = await this.access.read();
     if (!access || (access.allow.length && !access.allow.includes(m.author.id))) return;
@@ -213,7 +223,8 @@ export class DiscordTransport implements Transport {
     }
     let thread: string;
     if (m.channel_id === this.cfg.channel) {
-      const name = text.slice(0, 80);
+      // Cut between characters, never inside one (an emoji is two UTF-16 units).
+      const name = prefixOf(text, 80);
       try {
         const t = await this.call("POST", `/channels/${m.channel_id}/messages/${m.id}/threads`, { name, auto_archive_duration: 1440 });
         thread = String(t.id);

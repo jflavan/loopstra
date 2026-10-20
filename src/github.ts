@@ -1,4 +1,5 @@
-import { lastLine, spawnBounded, withoutGitLocation } from "./shell";
+import { z } from "zod";
+import { lastLine, spawnBounded, withoutGitHookEnv } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
 
@@ -61,24 +62,32 @@ export function checksFromRows(rows: { state?: string; bucket?: string }[]): Che
   return "pass";
 }
 
-type PrJson = {
-  reviewDecision?: string | null;
-  latestReviews?: { author?: { login?: string } | null; authorAssociation?: string; state?: string }[] | null;
-  author?: { login?: string } | null;
+const ghUser = z.looseObject({ login: z.string().nullish() }).nullish();
+
+/** The fields of a pull request gh pr view --json prints that approved reads (see lookupPr). */
+const REVIEW_FIELDS = {
+  reviewDecision: z.string().nullish(),
+  latestReviews: z.array(z.looseObject({ author: ghUser, authorAssociation: z.string().nullish(), state: z.string().nullish() })).nullish(),
+  author: ghUser,
 };
 
-/** What gh pr view --json prints, as far as it is read here (see lookupPr). */
-type PrViewJson = PrJson & { number: number; state: PrInfo["state"]; mergedAt: string | null; mergeCommit?: { oid?: string } | null; url: string; createdAt: string; headRefOid?: string; isDraft?: boolean };
-
-const PR_STATES = new Set<string>(["OPEN", "MERGED", "CLOSED"]);
-
-/** True when `j` has the shape of a pull request as gh prints it: the fields read without a fallback are there, of the right type. */
-function isPrView(j: unknown): j is PrViewJson {
-  if (typeof j !== "object" || j === null) return false;
-  const o = j as Record<string, unknown>;
-  return typeof o.number === "number" && typeof o.state === "string" && PR_STATES.has(o.state) && typeof o.url === "string"
-    && typeof o.createdAt === "string" && (o.mergedAt === null || typeof o.mergedAt === "string");
-}
+/**
+ * What gh pr view --json prints, as far as it is read here (see lookupPr): the fields read without a
+ * fallback must be there and of their type, the review fields left out, null, or of their type. The
+ * fields read with a fallback take it when they are anything else.
+ */
+const PrView = z.looseObject({
+  number: z.number(),
+  state: z.enum(["OPEN", "MERGED", "CLOSED"]),
+  url: z.string(),
+  createdAt: z.string(),
+  mergedAt: z.string().nullable(),
+  mergeCommit: z.looseObject({ oid: z.string().optional() }).nullish().catch(null),
+  headRefOid: z.string().optional().catch(undefined),
+  isDraft: z.boolean().optional().catch(undefined),
+  ...REVIEW_FIELDS,
+});
+type PrJson = z.infer<typeof PrView>;
 
 /** The rows gh pr checks --json prints, each read for its state and bucket where they are strings; null when it printed no list. */
 function checkRows(rows: unknown): { state?: string; bucket?: string }[] | null {
@@ -126,8 +135,8 @@ export class GitHub {
   private async run(args: string[], stdin?: string): Promise<{ code: number; out: string; err: string }> {
     if (!this.exe) return { code: 127, out: "", err: "gh not found" };
     const cmd = this.exe.endsWith(".ts") ? [process.execPath, this.exe, ...args] : [this.exe, ...args];
-    // gh runs git to find the repository: a hook's GIT_DIR would point it at the hook's (see withoutGitLocation).
-    const r = await spawnBounded({ cmd, cwd: this.cwd, env: withoutGitLocation({ ...process.env, ...this.env }), stdin, timeoutMs: this.timeoutMs, onStop: "kill" });
+    // gh runs git to find the repository: a hook's GIT_DIR would point it at the hook's (see withoutGitHookEnv).
+    const r = await spawnBounded({ cmd, cwd: this.cwd, env: withoutGitHookEnv({ ...process.env, ...this.env }), stdin, timeoutMs: this.timeoutMs, onStop: "kill" });
     if (r.stopped) throw new StopRequested();
     if (r.timedOut) return { code: 124, out: r.out, err: `${r.err}\ngh did not finish within ${Math.round(this.timeoutMs / 1000)}s and was stopped.`.trim() };
     return { code: r.code ?? 1, out: r.out, err: r.err };
@@ -154,8 +163,14 @@ export class GitHub {
     }
     let j: unknown;
     try { j = JSON.parse(r.out); } catch { return { error: "gh pr view printed something that is not JSON" }; }
-    if (!isPrView(j)) return { error: "gh pr view printed something that is not a pull request" };
-    return { pr: { number: j.number, state: j.state, approved: approved(j), merged: !!j.mergedAt, mergeCommit: j.mergeCommit?.oid || null, url: j.url, createdAt: j.createdAt, head: j.headRefOid || null, draft: j.isDraft === true } };
+    const parsed = PrView.safeParse(j);
+    if (!parsed.success) {
+      // Reviews that cannot be read are waited on, like checks that cannot be read: approved would throw on them.
+      const reviewsOnly = parsed.error.issues.every((i) => typeof i.path[0] === "string" && i.path[0] in REVIEW_FIELDS);
+      return { error: reviewsOnly ? "gh pr view printed reviews in a shape Loopstra does not read" : "gh pr view printed something that is not a pull request" };
+    }
+    const p = parsed.data;
+    return { pr: { number: p.number, state: p.state, approved: approved(p), merged: !!p.mergedAt, mergeCommit: p.mergeCommit?.oid || null, url: p.url, createdAt: p.createdAt, head: p.headRefOid || null, draft: p.isDraft === true } };
   }
 
   async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {

@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { ChatService } from "../../src/chat/service";
 import { writeJson } from "../../src/fsutil";
-import { chatDir } from "../../src/chat/threads";
+import { chatDir, ThreadStore } from "../../src/chat/threads";
 import { configPath } from "../../src/config";
 import { DashboardTransport } from "../../src/chat/transports/dashboard";
 import { DISCORD_INTENTS, DiscordTransport } from "../../src/chat/transports/discord";
-import { chunkText, fetchJson, openSocket, retryAfterSeconds } from "../../src/chat/transports/shared";
+import { chunkText, fetchJson, openSocket, prefixOf, retryAfterSeconds } from "../../src/chat/transports/shared";
 import { noBroadcast, SlackTransport } from "../../src/chat/transports/slack";
 import { TerminalTransport } from "../../src/chat/transports/terminal";
 import { Hub } from "../../src/console/hub";
@@ -87,6 +87,8 @@ describe("the dashboard panel", () => {
       expect((await post({ thread, text: "hi" }, { "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: "http://evil.test", "content-type": "application/json" })).status).toBe(403);
       expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain" })).status).toBe(415);
+      // The content type's MIME essence must be JSON, as for every other write of the console.
+      expect((await post({ thread, text: "hi" }, { origin: base, "content-type": "text/plain; note=application/json" })).status).toBe(415);
       expect((await post({ thread: "../x", text: "hi" })).status).toBe(400);
       expect((await post({ thread, text: "hi" })).status).toBe(202);
       // While it answers, a second message is refused rather than queued behind it.
@@ -102,6 +104,12 @@ describe("the dashboard panel", () => {
       expect((await fetch(`${base}/api/chat?thread=bad`)).status).toBe(400);
       // A page on another host name that resolves here (DNS rebinding) gets nothing.
       expect((await fetch(`${base}/api/chat?thread=${thread}`, { headers: { host: "evil.test" } })).status).toBe(403);
+      // The console answers on [::1] too, and so does its chat (review of the merged #47 fixes).
+      const v6 = `[::1]:${server.port}`;
+      expect((await fetch(`${base}/api/chat?thread=${thread}&after=0`, { headers: { host: v6 } })).status).toBe(200);
+      const v6post = await fetch(`${base}/api/chat`, { method: "POST", headers: { host: v6, origin: `http://${v6}`, "content-type": "application/json; charset=utf-8" }, body: JSON.stringify({ thread: "tab-ipv6abcd", text: "" }) });
+      // Past the host, the origin and the content type: only the empty message is refused.
+      expect({ status: v6post.status, body: await v6post.json() }).toEqual({ status: 400, body: { error: "message" } });
       // Everything else stays read-only, and the page is told it has chat.
       expect((await fetch(`${base}/api/spend`, { method: "POST" })).status).toBe(405);
       const [first] = await sseFrames(`${base}/api/stream`, 1);
@@ -541,9 +549,12 @@ describe("the shared transport pieces (hardening review)", () => {
     } finally { void server.stop(true); }
   });
 
-  test("noBroadcast shows broadcasts and other people's mentions as text, and keeps the acceptors' mentions", () => {
-    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and &lt;@U2|bob>");
-    expect(noBroadcast("ping <@U1>")).toBe("ping &lt;@U1>");
+  test("noBroadcast shows broadcasts as text and other people's mentions as their names, and keeps the acceptors' mentions", () => {
+    expect(noBroadcast("<!channel> <!here> <!subteam^S1> hi <@U1> and <@U2|bob>", ["U1"])).toBe("&lt;!channel> &lt;!here> &lt;!subteam^S1> hi <@U1> and @U2");
+    expect(noBroadcast("ping <@U1>")).toBe("ping @U1");
+    // A name is the person's own choice: it is shown as text, never read by Slack as a mention.
+    const names = new Map([["U0999ABC", "Bo"], ["U7", "<!channel>"]]);
+    expect(noBroadcast("ask <@U0999ABC>, <@U7> or <@U8>", [], (id) => names.get(id))).toBe("ask @Bo, @&lt;!channel> or @U8");
     expect(noBroadcast("a <#C1|general> link and x < y")).toBe("a <#C1|general> link and x < y");
   });
 });
@@ -641,8 +652,10 @@ describe("Slack (hardening review)", () => {
     const slack = new SlackTransport({ token_env: "APP", bot_token_env: "BOT", channel: "C1", allow: [], acceptors: ["U1"] }, { root: r.root, env, log: () => {} });
     try {
       await slack.start(async () => {});
-      await slack.send("C1:1.0", "<!channel> ask <@U1> or <@U2>");
-      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1> or &lt;@U2>");
+      // U2 has written in the channel, so its name is known; U3 has not.
+      await slack.onEvent({ type: "message", user: "U2", channel: "C1", text: "hi", ts: "1.0" });
+      await slack.send("C1:1.0", "<!channel> ask <@U1>, <@U2> or <@U3>");
+      expect(stub.calls.at(-1)!.body.text).toBe("&lt;!channel> ask <@U1>, @Someone or @U3");
     } finally {
       await slack.stop();
       void stub.server.stop(true);
@@ -715,5 +728,69 @@ describe("Discord (hardening review)", () => {
       expect(got).toBeNull();
       expect(logged).toHaveLength(2);
     } finally { r.cleanup(); }
+  });
+});
+
+describe("the full review of #47", () => {
+  test("fetchJson gives up on a server that takes the call and never answers, with a plain error", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    try {
+      const started = Date.now();
+      await expect(fetchJson(`http://127.0.0.1:${server.port}/api/chat.postMessage`, { method: "POST" }, () => 1, 200)).rejects.toThrow(`no answer from 127.0.0.1:${server.port} within`);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally { void server.stop(true); }
+  });
+
+  test("a message is never cut between the two halves of a character", () => {
+    const emoji = "\u{1F600}";
+    const parts = chunkText(`${"a".repeat(9)}${emoji}b`, 10);
+    expect(parts).toEqual(["a".repeat(9), `${emoji}b`]);
+    expect(chunkText(emoji.repeat(6), 5)).toEqual([emoji.repeat(2), emoji.repeat(2), emoji.repeat(2)]);
+    expect(prefixOf(`${"a".repeat(79)}${emoji}`, 80)).toBe("a".repeat(79));
+    expect(prefixOf(`${"a".repeat(78)}${emoji}`, 80)).toBe(`${"a".repeat(78)}${emoji}`);
+    expect(prefixOf("short", 80)).toBe("short");
+  });
+
+  test("every answer of /api/chat says not to keep it", async () => {
+    const r = await chatRepo();
+    const dash = new DashboardTransport(r.root, "ana");
+    try {
+      const base = "http://127.0.0.1:4000";
+      const answers = [
+        await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh`), new URL(`${base}/api/chat?thread=tab-abcdefgh`)),
+        await dash.handle(new Request(`${base}/api/chat?thread=bad`), new URL(`${base}/api/chat?thread=bad`)),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "[]" }), new URL(`${base}/api/chat`)),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`)),
+        await dash.handle(new Request(`${base}/api/chat`, { method: "PUT" }), new URL(`${base}/api/chat`)),
+      ];
+      expect(answers.map((a) => a.status)).toEqual([200, 400, 400, 503, 405]);
+      expect(answers.map((a) => a.headers.get("cache-control"))).toEqual(Array(5).fill("no-store"));
+    } finally { r.cleanup(); }
+  });
+});
+
+describe("a thread file that cannot be read (review of the merged #47 fixes)", () => {
+  test("the dashboard answers 503, not to be kept, to a read and to a post, and posts nothing on", async () => {
+    const r = await chatRepo();
+    const dash = new DashboardTransport(r.root, "ana");
+    const handled: string[] = [];
+    await dash.start(async (m) => { handled.push(m.text); });
+    try {
+      const store = new ThreadStore(r.root, () => {});
+      store.save(store.get("dashboard", "tab-abcdefgh"));
+      const dir = join(chatDir(r.root), "threads");
+      const file = join(dir, readdirSync(dir)[0]!);
+      rmSync(file);
+      mkdirSync(file);
+      const base = "http://127.0.0.1:4000";
+      const get = await dash.handle(new Request(`${base}/api/chat?thread=tab-abcdefgh&after=0`), new URL(`${base}/api/chat?thread=tab-abcdefgh&after=0`));
+      const post = await dash.handle(new Request(`${base}/api/chat`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ thread: "tab-abcdefgh", text: "hi" }) }), new URL(`${base}/api/chat`));
+      for (const res of [get, post]) {
+        expect(res.status).toBe(503);
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        expect(await res.json()).toEqual({ error: "This conversation's file cannot be read right now." });
+      }
+      expect(handled).toEqual([]);
+    } finally { await dash.stop(); r.cleanup(); }
   });
 });

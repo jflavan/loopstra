@@ -155,7 +155,8 @@ export async function announce(root: string, log = new AnnouncementLog(root)): P
       const now = i.file.frontmatter.status;
       statuses[i.slug] = now;
       if (inMain(i.file.frontmatter)) merged.push(i.slug);
-      const before = prev?.statuses[i.slug];
+      // Its own key only: a change named "constructor" would otherwise read Object's prototype and look like news.
+      const before = prev && Object.hasOwn(prev.statuses, i.slug) ? prev.statuses[i.slug] : undefined;
       // Nothing to compare on the first poll: what was already merged is not news.
       if (!prev || before === undefined || before === now) continue;
       const title = i.file.title || i.slug;

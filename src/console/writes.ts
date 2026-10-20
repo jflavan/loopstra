@@ -31,10 +31,10 @@ export async function writes(root: string, hub: Hub, req: Request, url: URL): Pr
   if (path !== "/api/requests" && path !== "/api/loop" && !one) return null;
   if (one) {
     // Only GET reads a result, which reading removes: a HEAD would take it with no body to carry it,
-    // and so would another site's <img src> (ids are predictable), which carries no Origin but
-    // which the browser names (see ownSite).
+    // and so would another site's <img src> (ids are predictable), which carries no Origin: ownSite
+    // tells the page's own read from it.
     if (req.method === "GET") {
-      if (!ownSite(req)) return plain("Forbidden", 403);
+      if (!ownSite(req, url)) return plain("Forbidden", 403);
       const s = requestState(root, decode(one[1]!));
       return s ? json(s.state === "pending" ? { state: "pending" } : { state: "done", ok: s.ok, text: s.text, status: s.status }) : json({ error: "unknown request" }, 404);
     }

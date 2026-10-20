@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Config } from "./config";
 import type { RecordDraft } from "./record-draft";
 import { errorText } from "./shell";
-import { andList } from "./text";
+import { andList, lineText, linesOf } from "./text";
 
 export const STATUSES = [
   "draft", "accepted",
@@ -65,35 +65,47 @@ interface IntentFile {
 
 const REQUIRED_SECTIONS = ["Problem", "Proposed outcome", "Done when"] as const;
 
-/** The frontmatter block: `---` alone on the first line, the lines, and `---` starting a line (the file may end there). */
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+/**
+ * The frontmatter block, the one rule parseIntentFile and patchFrontmatter both read it by: `---`
+ * alone on the first line, the lines, and the first later line that is `---` with nothing but spaces
+ * after it (the file may end there). Gives that closing line's index in `parts` (see linesOf), or -1
+ * when the text has no such block. An empty block (`---` straight after `---`) is an empty
+ * frontmatter, as an older Loopstra wrote it. A line of more dashes (`----`) does not close it, and
+ * neither does an indented `---` (a block value's line).
+ */
+function closingFence(parts: readonly string[]): number {
+  if (!/^---\r?\n$/.test(parts[0] ?? "")) return -1;
+  return parts.findIndex((p, i) => i > 0 && lineText(p).trimEnd() === "---");
+}
 
 /**
  * True when the text's first line with anything on it is meant as the opening fence (`---`, maybe
- * with spaces after it). Such a file is frontmatter in the writer's eyes: one FRONTMATTER does not
- * take (a blank line above the fence, a space after the dashes, no closing line) is refused rather
- * than read as a draft with the real status in its body (see parseIntentFile and patchFrontmatter).
+ * with spaces before or after it). Such a file is frontmatter in the writer's eyes: one closingFence
+ * does not take (a blank line or spaces before the fence, a space after the dashes, no closing line)
+ * is refused rather than read as a draft with the real status in its body (see parseIntentFile and
+ * patchFrontmatter).
  */
 function looksFenced(text: string): boolean {
   const first = text.split(/\r?\n/).find((l) => l.trim() !== "") ?? "";
-  return first.trimEnd() === "---";
+  return first.trim() === "---";
 }
 
-/** What a person is told about a fence FRONTMATTER does not take (see looksFenced). */
+/** What a person is told about a fence closingFence does not take (see looksFenced). */
 const FENCE_PROBLEM = "intent.md must start with a line of exactly three dashes (---) and close its top lines with another, with nothing else on either line. Fix them, and the change is picked up again.";
 
 export function parseIntentFile(rawText: string): IntentFile {
   const text = rawText.replace(/^﻿/, "");
   let fmText = "";
   let body = text;
-  const m = FRONTMATTER.exec(text);
-  if (m) {
-    fmText = m[1] ?? "";
-    body = text.slice(m[0].length);
+  const parts = linesOf(text);
+  const close = closingFence(parts);
+  if (close >= 0) {
+    // The line break before the closing fence goes with the fence; YAML is given it back below.
+    fmText = parts.slice(1, close).join("").replace(/\r?\n$/, "");
+    body = parts.slice(close + 1).join("");
   } else if (looksFenced(text)) {
     throw new FrontmatterProblem("---", "intent.md frontmatter problem: its --- fence is not one Loopstra reads", false, FENCE_PROBLEM);
   }
-  // The line break before the closing fence is the frontmatter's last; FRONTMATTER takes it with the fence.
   const raw: unknown = fmText.trim() ? parse(`${fmText}\n`) : {};
   const fm = Frontmatter.safeParse(raw ?? {});
   if (!fm.success) {
@@ -252,9 +264,6 @@ function commentStart(rest: string): number {
   return start;
 }
 
-/** A line's text without its line ending. */
-const content = (p: string) => p.replace(/\r?\n$/, "");
-
 /**
  * The index after the last line of the value on `head[at]` (a `key: value` line): the indented lines
  * a block or folded scalar (`|`, `>`) went on over, blank lines among them, or a plain value's
@@ -262,16 +271,16 @@ const content = (p: string) => p.replace(/\r?\n$/, "");
  * value; inside a block scalar it is text, and goes with the value. Blank lines at the end are not the value's.
  */
 function valueEnd(head: string[], at: number): number {
-  const own = content(head[at]!);
+  const own = lineText(head[at]!);
   const block = /^\s*[|>]/.test(own.slice(own.indexOf(":") + 1));
   let end = at + 1;
   while (end < head.length) {
-    const line = content(head[end]!);
+    const line = lineText(head[end]!);
     if (!/^(\s+\S|\s*$)/.test(line)) break;
     if (!block && /^\s*#/.test(line)) break;
     end++;
   }
-  while (end > at + 1 && !content(head[end - 1]!).trim()) end--;
+  while (end > at + 1 && !lineText(head[end - 1]!).trim()) end--;
   return end;
 }
 
@@ -288,13 +297,13 @@ function valueEnd(head: string[], at: number): number {
 export function patchFrontmatter(raw: string, patch: Record<string, string>, remove: readonly string[] = []): string {
   const bom = raw.startsWith("﻿") ? "﻿" : "";
   const text = raw.slice(bom.length);
-  const parts = text.split(/(?<=\n)/);
+  const parts = linesOf(text);
   const eol = /\r\n/.exec(text) ? "\r\n" : "\n";
   const entries = Object.entries(patch);
   if (!entries.length && !remove.length) return raw;
 
-  // The closing fence, by the same rules as parseIntentFile: an opening fence it takes, then a line of dashes.
-  const close = /^---\r?\n/.test(text) ? parts.findIndex((p, i) => i > 0 && content(p).trimEnd() === "---") : -1;
+  // The closing fence, by the rule parseIntentFile reads it by.
+  const close = closingFence(parts);
   let out: string;
   if (close < 0 && !looksFenced(text)) {
     if (!entries.length) return raw;
@@ -306,16 +315,16 @@ export function patchFrontmatter(raw: string, patch: Record<string, string>, rem
     const head = parts.slice(0, close);
     const tail = parts.slice(close);
     for (const key of remove) {
-      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(lineText(p)));
       if (at < 0) continue;
       // The key's line and any lines its value went on over (a block or folded scalar).
       head.splice(at, valueEnd(head, at) - at);
     }
     for (const [key, value] of entries) {
-      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(content(p)));
+      const at = head.findIndex((p, i) => i > 0 && new RegExp(`^${key}\\s*:`).test(lineText(p)));
       const line = `${key}: ${scalar(value)}`;
       if (at < 0) { head.push(line + eol); continue; }
-      const own = content(head[at]!);
+      const own = lineText(head[at]!);
       const ending = head[at]!.slice(own.length) || eol;
       const rest = own.slice(own.indexOf(":") + 1);
       const c = commentStart(rest);

@@ -30,29 +30,50 @@ const MODIFIERS = new Set(["shift", "control", "alt", "altgraph", "meta", "os", 
 
 /** "mod+k" for Ctrl or Cmd with K, "escape", "j"; null with Alt, which the page leaves to the browser, and for a modifier on its own. */
 export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null {
-  if (e.altKey || MODIFIERS.has(e.key.toLowerCase())) return null;
+  // Some keydowns carry no key at all (Chrome's autofill sends one), and those are no key of the page's.
+  if (typeof e.key !== "string" || !e.key) return null;
   const key = e.key.toLowerCase();
+  if (e.altKey || MODIFIERS.has(key)) return null;
   return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
 }
 
 /**
  * Whether an input method (Japanese, Chinese, ...) is picking a character with this key: there Enter
- * confirms the character, not the message. Some browsers say so only with keyCode 229.
+ * confirms the character, not the message, Escape drops the character, not the form, and the arrows
+ * move among the candidates. Some browsers say so only with keyCode 229 (Safari's keydown that ends
+ * a composition has isComposing false), so no key of the page's counts while this holds.
  */
-const composing = (e: { isComposing: boolean; keyCode: number }): boolean => e.isComposing || e.keyCode === 229;
+export const composing = (e: { isComposing: boolean; keyCode: number }): boolean => e.isComposing || e.keyCode === 229;
+
+/** Whether a key press is Enter meant for the page (the palette picks its row on it): never while an input method is picking a character. */
+export function enterPressed(e: { key: string; isComposing: boolean; keyCode: number }): boolean {
+  return !composing(e) && e.key === "Enter";
+}
+
+/** Whether a key press is Escape meant for the page (a form closes on it): never while an input method is picking a character. */
+export function escapePressed(e: { key: string; isComposing: boolean; keyCode: number }): boolean {
+  return !composing(e) && e.key === "Escape";
+}
+
+/** What a key press does in a list picked from a box (the palette): the next or previous row, picking the row, or nothing, as while an input method is picking a character. */
+export function listKey(e: { key: string; isComposing: boolean; keyCode: number }): "next" | "prev" | "pick" | null {
+  if (composing(e)) return null;
+  return e.key === "ArrowDown" ? "next" : e.key === "ArrowUp" ? "prev" : e.key === "Enter" ? "pick" : null;
+}
 
 /** Whether a key press in a message box sends it: Ctrl or Cmd with Enter, never while an input method is picking a character. */
 export function sendsMessage(e: { key: string; ctrlKey: boolean; metaKey: boolean; isComposing: boolean; keyCode: number }): boolean {
-  return !composing(e) && e.key === "Enter" && (e.ctrlKey || e.metaKey);
+  return enterPressed(e) && (e.ctrlKey || e.metaKey);
 }
 
 /**
  * Whether a key press in a box where Enter alone sends (the orchestrator's, a tile's one-line box)
- * sends it: Enter without Shift (Shift with Enter is a line break), never while an input method is
- * picking a character.
+ * sends it, never while an input method is picking a character. In a box of several lines it is Enter
+ * without Shift (Shift with Enter is a line break); in a one-line box (`oneLine`), which has no line
+ * to break, Enter sends with or without Shift.
  */
-export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number }): boolean {
-  return !composing(e) && e.key === "Enter" && !e.shiftKey;
+export function sendsOnEnter(e: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number }, { oneLine = false } = {}): boolean {
+  return enterPressed(e) && (oneLine || !e.shiftKey);
 }
 
 /** What a key press does: one of the page's actions, the screen's own handler for that key, or nothing. */
