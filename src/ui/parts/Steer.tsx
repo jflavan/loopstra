@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { focusOr, onMac, sendsMessage, sendsOnEnter } from "../keys";
+import { escapePressed, focusOr, onMac, sendsMessage, sendsOnEnter } from "../keys";
 import { steer, type steerOffer } from "../requests";
 
 type SteerOffer = NonNullable<ReturnType<typeof steerOffer>>;
@@ -52,7 +52,7 @@ export function Steer({ slug, seq, offer, compact = false, extra }: { slug: stri
       setConfirming(false);
     }
   };
-  const escape = (e: KeyboardEvent) => { if (e.key === "Escape") setConfirming(false); };
+  const escape = (e: KeyboardEvent) => { if (escapePressed(e)) setConfirming(false); };
   const sendKey = `${onMac ? "⌘" : "Ctrl"}+Enter`;
 
   const stopButtonEl = (

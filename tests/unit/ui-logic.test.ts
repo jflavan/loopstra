@@ -2,7 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
-import { decide, enterPressed, focusOr, keyLabel, keyMatcher, keyName, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
+import { composing, decide, enterPressed, escapePressed, focusOr, keyLabel, keyMatcher, keyName, listKey, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
 import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore, stepAt } from "../../src/ui/palette";
 import { changesAddress, parseRoute, routePath, type Route } from "../../src/ui/router";
@@ -16,7 +16,7 @@ import { RECENT_DONE_MS, splitFinished, UP_NEXT, upNext } from "../../src/ui/boa
 import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
-import { follow } from "../../src/ui/stream";
+import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
 import { givesFocusBack, returnTarget } from "../../src/ui/parts/focus";
@@ -97,6 +97,8 @@ describe("keys", () => {
     expect(keyName(key("Escape"))).toBe("escape");
     expect(keyName(key("J"))).toBe("j");
     expect(keyName(key("x", { altKey: true }))).toBeNull();
+    // Some keydowns carry no key at all (Chrome's autofill): they are no key of the page's.
+    expect(keyName({ ...key("x"), key: undefined as unknown as string })).toBeNull();
     // A modifier pressed on its own is the start of a combination, not a key of its own.
     for (const mod of ["Shift", "Control", "Alt", "Meta", "CapsLock", "AltGraph", "OS", "NumLock", "ScrollLock", "Fn", "Hyper", "Super", "Symbol", "FnLock", "SymbolLock"]) {
       expect({ mod, name: keyName(key(mod)) }).toEqual({ mod, name: null });
@@ -145,6 +147,26 @@ describe("keys", () => {
     expect(enterPressed({ ...enter(), key: "a" })).toBe(false);
     expect(enterPressed(enter({ isComposing: true }))).toBe(false);
     expect(enterPressed(enter({ keyCode: 229 }))).toBe(false);
+  });
+
+  test("an input method picking a character keeps every key: Escape, the arrows and the shortcuts do nothing of the page's then", () => {
+    const press = (key: string, mods: Partial<{ isComposing: boolean; keyCode: number }> = {}) => ({ key, isComposing: false, keyCode: 0, ...mods });
+    expect(composing(press("a"))).toBe(false);
+    expect(composing(press("a", { isComposing: true }))).toBe(true);
+    // Safari's keydown that ends a composition says isComposing false, but keyCode 229.
+    expect(composing(press("Escape", { keyCode: 229 }))).toBe(true);
+    expect(escapePressed(press("Escape"))).toBe(true);
+    expect(escapePressed(press("a"))).toBe(false);
+    expect(escapePressed(press("Escape", { isComposing: true }))).toBe(false);
+    expect(escapePressed(press("Escape", { keyCode: 229 }))).toBe(false);
+    expect(listKey(press("ArrowDown"))).toBe("next");
+    expect(listKey(press("ArrowUp"))).toBe("prev");
+    expect(listKey(press("Enter"))).toBe("pick");
+    expect(listKey(press("a"))).toBeNull();
+    for (const k of ["ArrowDown", "ArrowUp", "Enter"]) {
+      expect({ k, what: listKey(press(k, { isComposing: true })) }).toEqual({ k, what: null });
+      expect({ k, what: listKey(press(k, { keyCode: 229 })) }).toEqual({ k, what: null });
+    }
   });
 
   test("after a form closes the focus goes to its button, or to the box when the button is gone or disabled (a stopped session)", () => {
@@ -321,9 +343,25 @@ describe("a transcript on the page", () => {
     ]);
     const s2 = addItems(s, [{ kind: "tool-result", id: "t1", ok: true, output: "done" }, { kind: "todos", items: [] }]);
     expect(s2.items.map((i) => i.kind)).toEqual(["text", "tool"]);
-    expect(s2.results.t1).toEqual({ ok: true, output: "done" });
+    expect(s2.results.get("t1")).toEqual({ ok: true, output: "done" });
     expect(s2.todos).toEqual([]);
-    expect(s.results).toEqual({});
+    expect(s.results.size).toBe(0);
+  });
+
+  test("a call whose id is a name every object has (constructor, toString) has no result until one comes", () => {
+    const s = addItems(EMPTY, [{ kind: "tool", id: "constructor", tool: "Bash", target: "x", input: {} }]);
+    expect(s.results.get("constructor")).toBeUndefined();
+    expect(s.results.get("toString")).toBeUndefined();
+    const s2 = addItems(s, [{ kind: "tool-result", id: "constructor", ok: false, output: "no" }]);
+    expect(s2.results.get("constructor")).toEqual({ ok: false, output: "no" });
+  });
+
+  test("a row whose frame id is not one is drawn as it comes, and moves nothing: \"12x\" is not row 12", () => {
+    const text = (t: string, id: string): Frame => ({ item: { kind: "text", text: t }, id });
+    let s = addFrames(EMPTY, [text("a", "100")]);
+    s = addFrames(s, [text("odd", "12x"), text("odd2", "50.1x"), text("none", "")]);
+    expect(s.items.map((i) => (i.kind === "text" ? i.text : i.kind))).toEqual(["a", "odd", "odd2", "none"]);
+    expect(s.line).toEqual({ end: 100, drawn: [] });
   });
 
   test("a call or edit that is already shown is not added again, as after a reconnect", () => {
@@ -412,9 +450,12 @@ describe("the activity feed read again after a gap", () => {
     expect(mergeFeed([], [], [item(5)], all)).toEqual({ items: [item(5)], joined: false });
   });
 
-  test("the live rows shown above the list count: a page that reaches them joins, and keeps them and what is below", () => {
+  test("only the history read joins: a page that reaches only the live rows stands alone, since they can straddle the gap", () => {
     // Read: 20 and 10. From the stream since: 40 and 30. The page read again after a gap: 50 and 40.
-    const { items, joined } = mergeFeed([item(20), item(10)], [item(40), item(30)], [item(50), item(40)], all);
+    // The stream missed events somewhere, so 40 and 30 are not known to follow 20 with nothing between.
+    expect(mergeFeed([item(20), item(10)], [item(40), item(30)], [item(50), item(40)], all)).toEqual({ items: [item(50), item(40)], joined: false });
+    // A page that reaches the history joins, and keeps the live rows and what is below.
+    const { items, joined } = mergeFeed([item(20), item(10)], [item(40), item(30)], [item(50), item(40), item(30), item(20)], all);
     expect(joined).toBe(true);
     expect(ids(items)).toEqual([50, 40, 30, 20, 10]);
     // A page that reaches neither stands alone; the live rows below it are left to Older.
@@ -462,9 +503,19 @@ describe("the activity feed read again after a gap", () => {
     expect(feedAfter(gapFailed, gap, { items: [item(40), item(30)], next: 30 }, all, [])).toEqual({ items: [item(40), item(30), item(20)], next: 20, failed: null });
   });
 
-  test("a gap reload that reaches only the live rows still joins, so the Older cursor and the rows below are kept", () => {
+  test("a gap reload that reaches only the live rows stands alone with its own cursor, so Older reads what lies between", () => {
     const merged = feedAfter(shown, gap, { items: [item(60), item(50)], next: 50 }, all, [item(50), item(40)]);
-    expect(merged).toEqual({ items: [item(60), item(50), item(40), item(30), item(20)], next: 20, failed: null });
+    expect(merged).toEqual({ items: [item(60), item(50)], next: 50, failed: null });
+  });
+
+  test("live rows on both sides of a gap: a page that reaches only the later ones hides nothing for good", () => {
+    // Read: 20 and 10. The stream sent 30, then missed more than the hub holds (it said gap), then sent 805 and 810.
+    const read: FeedState = { items: [item(20), item(10)], next: 10, failed: null };
+    const page = Array.from({ length: 200 }, (_, k) => item(810 - k)); // 810 down to 611
+    const merged = feedAfter(read, gap, { items: page, next: 611 }, all, [item(810), item(805), item(30)]);
+    expect(merged.items).toEqual(page);
+    // Older goes on from below the page, so 610 down to 31 are read in turn and then 30, 20 and 10.
+    expect(merged.next).toBe(611);
   });
 
   test("a new page replaces the list, and an Older page adds below it", () => {
@@ -644,6 +695,26 @@ describe("the page's live stream", () => {
       expect(FakeSource.opened[1]!.url).toBe("/s?from=150");
       stop();
     });
+  });
+
+  test("an id that is not a frame id moves nothing: a new stream resumes from the newest real one, as the server would", () => {
+    faked(() => {
+      const stop = follow((from) => (from > 0 ? `/s?from=${from}` : "/s"), { message() {} });
+      const first = FakeSource.opened[0]!;
+      first.onmessage!({ data: "{}", lastEventId: "100" });
+      first.onmessage!({ data: "{}", lastEventId: "900x" });
+      first.onmessage!({ data: "{}", lastEventId: "900.x" });
+      first.readyState = FakeSource.CLOSED;
+      first.onerror!();
+      jest.advanceTimersByTime(1000);
+      expect(FakeSource.opened[1]!.url).toBe("/s?from=100");
+      stop();
+    });
+  });
+
+  test("a stream closed before it said anything is gone only on a 404: a server error, a refusal or no answer is tried again", () => {
+    expect(streamGone(404)).toBe(true);
+    for (const status of [200, 403, 500, 503, null]) expect({ status, gone: streamGone(status) }).toEqual({ status, gone: false });
   });
 
   test("ending the stream from a message (the server said end) closes it and opens no other", () => {

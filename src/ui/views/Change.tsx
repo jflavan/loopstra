@@ -208,8 +208,9 @@ function Gates({ d }: { d: ChangeDetail }) {
       <table class="list">
         <thead><tr><th>Gate</th><th>Check</th><th>Result</th><th>When</th><th>Evidence</th></tr></thead>
         <tbody>
-          {[...d.gates].reverse().map((g) => (
-            <tr key={`${g.ts}:${g.gate}:${g.check}`}>
+          {/* Keyed by place too: two rows can share their time, gate and check. */}
+          {[...d.gates].reverse().map((g, k) => (
+            <tr key={`${k}:${g.ts}:${g.gate}:${g.check}`}>
               <td>{g.gate}</td>
               <td>{g.check}</td>
               <td><span class={`status ${g.result}`}>{g.result}</span></td>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { PRIORITY_NAMES, type ChangeSummary, type Offer } from "../../console/types";
-import { focusOr } from "../keys";
+import { escapePressed, focusOr } from "../keys";
 import { act, beforeOf, bodyFor, stopChange, unsentText } from "../requests";
 import { requests, toast } from "../store";
 
@@ -95,7 +95,8 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
     setForm({ kind, offer: o, seen: change });
   };
   const question = form?.kind === "answer" ? form.seen.question : null;
-  const escape = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+  // Escape while an input method is picking a character drops the character, not the form and what was typed.
+  const escape = (e: KeyboardEvent) => { if (escapePressed(e)) close(); };
   // A click here is not a click on the inbox item or card around it.
   const stop = (e: Event) => e.stopPropagation();
   return (
@@ -140,7 +141,8 @@ export function Actions({ change, compact = false }: { change: ChangeSummary; co
               {question.why && <span class="muted">{question.why}</span>}
               {question.options.length > 0 && (
                 <div class="options" role="group" aria-label="Its options: each fills in the answer">
-                  {question.options.map((opt) => <button key={opt} type="button" class="btn" onClick={() => { setText(opt); field.current?.focus(); }}>{opt}</button>)}
+                  {/* Keyed by place too: a question can repeat an option. */}
+                  {question.options.map((opt, k) => <button key={`${k}:${opt}`} type="button" class="btn" onClick={() => { setText(opt); field.current?.focus(); }}>{opt}</button>)}
                 </div>
               )}
             </div>

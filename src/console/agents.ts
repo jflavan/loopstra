@@ -60,7 +60,9 @@ export async function streamAgents(root: string, hub: Hub, send: Send, opts: Age
       if (seen.has(key)) continue;
       seen.add(key);
       if (!out({ type: "open", agent })) return;
-      const unfollow = followSession(root, agent.slug, agent.seq, 0, (msg) => out({ ...msg, key }), () => followers.delete(key), intervalMs);
+      // A session followed to its own end is let go here, with any note of when it went missing.
+      const ended = () => { followers.delete(key); missing.delete(key); };
+      const unfollow = followSession(root, agent.slug, agent.seq, 0, (msg) => out({ ...msg, key }), ended, intervalMs);
       // The hub saw it running, but its row cannot be read now: say it ended rather than leave its tile waiting.
       if (!unfollow) out({ type: "end", key });
       else if (done) unfollow();

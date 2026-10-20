@@ -21,17 +21,22 @@ export function liveRows(stream: ActivityItem[], shown: ActivityItem[], filter: 
  * What the Activity screen shows after it read the newest page again (the live stream said it
  * missed events): the page merged by id, newest first, into what was shown, which is the history
  * read (`older`) with the live rows above it (`live`, see liveRows), so what was shown is kept and
- * the holes are filled. When the page reaches neither (more was missed than one page holds) it is
- * shown on its own, since what lies between could not be read; `joined` says which, so the screen
- * knows whether its Older cursor still holds. With no history read there is no cursor to keep, so
- * the page stands alone with its own.
+ * the holes are filled. Only the history counts for joining: the page joins when it reaches down to
+ * the history's newest row, since the history and the page are each read whole. The live rows can
+ * lie on both sides of the events the stream missed, so a page that reaches only the later ones
+ * says nothing of what lies between them and the history. A page that does not join (more was
+ * missed than one page holds) is shown on its own, and Older goes on from below it; `joined` says
+ * which, so the screen knows whether its Older cursor still holds. With no history read there is
+ * no cursor to keep, so the page stands alone with its own.
  */
 export function mergeFeed(older: ActivityItem[], live: ActivityItem[], fresh: ActivityItem[], filter: FeedFilter): { items: ActivityItem[]; joined: boolean } {
   const page = fresh.filter((a) => fitsFeed(a, filter));
+  const top = older[0]?.id;
+  const joined = top !== undefined && fresh.some((a) => a.id <= top);
+  if (!joined) return { items: page, joined: false };
+  // Joined, the live rows above the history are kept too (the ones the page has are not drawn twice).
   const ids = new Set(page.map((a) => a.id));
   const shown = [...live, ...older];
-  const joined = older.length > 0 && shown.some((a) => ids.has(a.id));
-  if (!joined) return { items: page, joined: false };
   const items = [...page, ...shown.filter((a) => !ids.has(a.id))].sort((a, b) => b.id - a.id);
   return { items, joined: true };
 }
@@ -56,8 +61,9 @@ export function feedAfter(s: FeedState, read: FeedRead, page: { items: ActivityI
   if (!page) return { ...s, failed: read };
   if (read.how === "merge") {
     const merged = mergeFeed(s.items, live, page.items, filter);
-    // Not joined, the page stands alone with its own cursor. Joined, the Older cursor still points
-    // below what is shown, and an Older read that failed has still not been done, so it is still offered.
+    // Not joined, the page stands alone with its own cursor, so Older reads what lies below it.
+    // Joined, the Older cursor still points below what is shown, and an Older read that failed has
+    // still not been done, so it is still offered.
     if (!merged.joined) return { items: merged.items, next: page.next, failed: null };
     return { items: merged.items, next: s.next, failed: s.failed?.how === "more" ? s.failed : null };
   }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { notificationsOn, setNotifications } from "../alerts";
-import { enterPressed, keyLabel, onMac } from "../keys";
+import { keyLabel, listKey, onMac } from "../keys";
 import { navigate } from "../nav";
 import { clampAt, filterCommands, type Command } from "../palette";
 import { setLoopHeld } from "../requests";
@@ -90,9 +90,12 @@ function PaletteBox() {
           aria-activedescendant={items.length ? `palette-option-${cur}` : undefined}
           onInput={(e) => { setQuery(e.currentTarget.value); setAt(0); }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") { e.preventDefault(); setAt(clampAt(cur + 1, items.length)); }
-            else if (e.key === "ArrowUp") { e.preventDefault(); setAt(clampAt(cur - 1, items.length)); }
-            else if (enterPressed(e)) { e.preventDefault(); run(items[cur]); }
+            // Nothing while an input method is picking a character: the arrows move among its candidates then.
+            const what = listKey(e);
+            if (!what) return;
+            e.preventDefault();
+            if (what === "pick") run(items[cur]);
+            else setAt(clampAt(cur + (what === "next" ? 1 : -1), items.length));
           }}
         />
         <ul role="listbox" id="palette-list" aria-label="Results" hidden={!items.length}>
