@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { ID, newId } from "./ids";
 import { PRIORITIES, SLUG, STATUSES, type Status } from "./intents";
-import { readJson, readJsonAs, writeJson } from "./fsutil";
+import { readJsonAs, writeJson } from "./fsutil";
 import { chatDir } from "./chat/threads";
 import type { Trace } from "./trace";
 import { touchWake } from "./wake";
@@ -85,8 +85,26 @@ export type RequestBody = OmitEach<Request, keyof z.infer<typeof base>>;
 /** What submitRequest takes: everything but the id and the time, and what the loop notes while applying. */
 export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt">;
 
-/** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
-export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }
+/**
+ * What the loop did with a request, as its result file says (see finishRequest), for whoever asked:
+ * the console's page by id (see requestState), chat by transport (see waitingResults). `status` is
+ * the change's status after it (null when there is no change, or it names a status this loop does not
+ * know). A result chat left before requests had one folder (see drainOld) carries only the id, where
+ * it goes, the text and the time: it reads with no kind, no change, and `ok` unsaid.
+ */
+const ResultSchema = z.object({
+  id: z.string(),
+  kind: z.string().default(""),
+  slug: z.string().nullable().default(null),
+  transport: z.string(),
+  thread: z.string(),
+  text: z.string(),
+  ok: z.boolean().optional(),
+  status: status.nullable().catch(null),
+  at: z.string().default(""),
+});
+
+export type RequestResult = z.infer<typeof ResultSchema>;
 
 /** The part of a result the applier works out. */
 export interface Outcome { text: string; ok: boolean; status: Status | null }
@@ -284,31 +302,52 @@ export function cancelRequest(root: string, id: string): boolean {
 /**
  * Where a request is, for the console page that asked: still waiting or being applied, done (its
  * result, which this removes, so it is read once), or null (unknown, cancelled, its result already
- * read, or a result for another transport, which is left for chat to take: see takeResults).
+ * read or not a result, or a result for another transport, which is left for chat: see
+ * waitingResults).
  */
 export function requestState(root: string, id: string): ({ state: "pending" } | ({ state: "done" } & RequestResult)) | null {
   if (!ID.test(id)) return null;
   if (existsSync(join(requestsDir(root), `${id}.json`)) || existsSync(join(applyingDir(root), `${id}.json`))) return { state: "pending" };
   const path = join(resultsDir(root), `${id}.json`);
-  const r = readJson<RequestResult>(path);
+  const r = readJsonAs(path, ResultSchema);
   if (!r || r.transport !== CONSOLE) return null;
   rmSync(path, { force: true });
   return { state: "done", ...r };
 }
 
 /**
- * Results the loop left for the given transports, oldest first; each is removed as it is taken, so
- * it is passed on once. Results for transports another process serves (and the console's) are left.
+ * The transport a result file's text names, read without parsing it, for a file that is not JSON or
+ * not a result's shape; null when it names none.
  */
-export function takeResults(root: string, transports: ReadonlySet<string>): RequestResult[] {
+function ownerOf(text: string): string | null {
+  return /"transport"\s*:\s*"([^"\\]*)"/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * The results the loop left for the given transports (the files in `results/`, oldest first), each
+ * with its file, so chat removes it only once it was passed on (see ChatService.passOnResults). One
+ * that is not a result can never be passed on: it is removed here when it names one of these
+ * transports, and left when it names another or none (it may be another process's, and pruneResults
+ * removes what nobody takes in a day). Results for transports another process serves (and the
+ * console's) are left. A file that cannot be read now is passed over until the next look.
+ */
+export function waitingResults(root: string, transports: ReadonlySet<string>): Array<{ path: string; result: RequestResult }> {
   const dir = resultsDir(root);
   if (!existsSync(dir)) return [];
-  const out: RequestResult[] = [];
+  const ours = (transport: string | null) => transport !== null && transport !== CONSOLE && transports.has(transport);
+  const out: Array<{ path: string; result: RequestResult }> = [];
   for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
-    const r = readJson<RequestResult>(join(dir, n));
-    if (r && (r.transport === CONSOLE || !transports.has(r.transport))) continue;
-    rmSync(join(dir, n), { force: true });
-    if (r) out.push(r);
+    const path = join(dir, n);
+    let text: string;
+    try { text = readFileSync(path, "utf8"); } catch { continue; }
+    let raw: unknown = null;
+    try { raw = JSON.parse(text); } catch { /* not JSON: whose it is is read from the text below */ }
+    const parsed = ResultSchema.safeParse(raw);
+    if (parsed.success) {
+      if (ours(parsed.data.transport)) out.push({ path, result: parsed.data });
+      continue;
+    }
+    if (ours(ownerOf(text))) { try { rmSync(path, { force: true }); } catch { /* tried again next look */ } }
   }
   return out;
 }

@@ -1,14 +1,12 @@
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { loadConfig } from "../config";
 import { GitHub } from "../github";
 import { errorText, timerMs } from "../shell";
-import { Trace } from "../trace";
-import { CHAT_SLUG } from "./agents";
 import { AnnouncementLog, announce } from "./announcer";
-import { Orchestrator, type IncomingMessage } from "./orchestrator";
-import { CONSOLE, requestsDir } from "../requests";
+import { Orchestrator, traceChatError, type IncomingMessage } from "./orchestrator";
+import { waitingResults } from "../requests";
 import { readJsonAs, writeJson } from "../fsutil";
 import { chatDir } from "./threads";
 
@@ -50,48 +48,15 @@ const PR_CHECK_MS = 60_000;
  */
 const RESULT_GIVE_UP_MS = 60 * 60_000;
 
-/** A result file as far as chat reads it: whose it is, and what to post where. */
-const ResultFile = z.looseObject({ transport: z.string(), thread: z.string(), text: z.string() });
-type WaitingResult = z.infer<typeof ResultFile>;
-
 /** A bot's announcement cursor file (see ChatService.keptCursor). */
 const Cursor = z.object({ id: z.number().int().nonnegative() });
 
 /**
- * The transport a result file's text names, read without parsing it, for a file that is not JSON or
- * not a result's shape; null when it names none.
+ * Sends to a thread through the transport's sendOrThrow where it has one, so a reply that could not
+ * be posted throws and is kept (see Transport.sendOrThrow).
  */
-function ownerOf(text: string): string | null {
-  return /"transport"\s*:\s*"([^"\\]*)"/.exec(text)?.[1] ?? null;
-}
-
-/**
- * The results the loop left for the given transports (the files in `.loopstra/requests/results/`,
- * oldest first), each with its file, so it is removed only once it was passed on (see poll). One
- * that is not a result can never be passed on: it is removed here when it names one of these
- * transports, and left when it names another or none (it may be another process's, and pruneResults
- * removes what nobody takes in a day). Results for transports another process serves (and the
- * console's) are left. A file that cannot be read now is passed over until the next poll.
- */
-function waitingResults(root: string, transports: ReadonlySet<string>): Array<{ path: string; result: WaitingResult }> {
-  const dir = join(requestsDir(root), "results");
-  if (!existsSync(dir)) return [];
-  const ours = (transport: string | null) => transport !== null && transport !== CONSOLE && transports.has(transport);
-  const out: Array<{ path: string; result: WaitingResult }> = [];
-  for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
-    const path = join(dir, n);
-    let text: string;
-    try { text = readFileSync(path, "utf8"); } catch { continue; }
-    let raw: unknown = null;
-    try { raw = JSON.parse(text); } catch { /* not JSON: whose it is is read from the text below */ }
-    const parsed = ResultFile.safeParse(raw);
-    if (parsed.success) {
-      if (ours(parsed.data.transport)) out.push({ path, result: parsed.data });
-      continue;
-    }
-    if (ours(ownerOf(text))) { try { rmSync(path, { force: true }); } catch { /* tried again next poll */ } }
-  }
-  return out;
+function mustSend(t: Transport, thread: string): (text: string) => Promise<void> {
+  return (text) => (t.sendOrThrow ? t.sendOrThrow(thread, text) : t.send(thread, text));
 }
 
 export class ChatService {
@@ -164,8 +129,8 @@ export class ChatService {
     if (existsSync(path)) {
       const kept = readJsonAs(path, Cursor);
       if (kept) return kept.id;
-      this.traceError(`announce-${name}`, new Error(`${path} could not be read as a cursor, so ${name} starts from the newest announcement`));
-      return this.cursors.get(name) ?? this.log.lastId();
+      traceChatError(this.root, `announce-${name}`, new Error(`${path} could not be read as a cursor, so ${name} starts from the newest announcement`));
+      return this.log.lastId();
     }
     const id = this.log.lastId();
     writeJson(path, { id });
@@ -180,14 +145,14 @@ export class ChatService {
   async poll(): Promise<void> {
     try {
       if (this.opts.announce !== false) {
-        try { await announce(this.root, this.log); } catch (e) { this.traceError("announce", e); }
+        try { await announce(this.root, this.log); } catch (e) { traceChatError(this.root, "announce", e); }
       }
       for (const t of this.transports) {
         // The cursor moves past an announcement only once it is posted: one that fails is tried again
         // next poll (it and everything after it), never skipped.
         for (const a of this.log.since(this.cursors.get(t.name) ?? 0)) {
           if (t.announce) {
-            try { await t.announce(a.text); } catch (e) { this.traceError(`announce-${t.name}`, e); break; }
+            try { await t.announce(a.text); } catch (e) { traceChatError(this.root, `announce-${t.name}`, e); break; }
           }
           this.cursors.set(t.name, a.id);
           if (t.announceFrom === "kept") writeJson(this.cursorPath(t.name), { id: a.id });
@@ -199,31 +164,23 @@ export class ChatService {
         await this.checkPullRequests();
       }
     } catch (e) {
-      this.traceError("chat-poll", e);
+      traceChatError(this.root, "chat-poll", e);
     }
   }
 
   /**
    * Posts what the loop did with chat's requests. A result is removed once it was passed on, not
    * before: one whose post fails is tried again next poll (deliver posts before it records, so
-   * nothing of the failed try is kept), for up to RESULT_GIVE_UP_MS. Its failure is traced once, and
-   * its giving up once. One that was posted is never posted again, though its file could not be
-   * removed then.
+   * nothing of the failed try is kept), for up to RESULT_GIVE_UP_MS (see postOnce). One that was
+   * posted is never posted again, though its file could not be removed then.
    */
   private async passOnResults(): Promise<void> {
     for (const { path, result: r } of waitingResults(this.root, new Set(this.transports.map((t) => t.name)))) {
       const t = this.transport(r.transport);
       if (!t) continue;
-      if (!this.doneResults.has(path)) {
-        // The agent hears it too, on its next turn: it proposed the request, and would think it still open.
-        try {
-          await this.orchestrator.deliver(t.name, r.thread, r.text, (text) => (t.sendOrThrow ? t.sendOrThrow(r.thread, text) : t.send(r.thread, text)), `The loop answered: ${r.text}`);
-          this.failing.delete(path);
-        } catch (e) {
-          if (!this.failedPost(path, "chat-result", e, `what the loop did with a request to ${t.via}`)) continue;
-        }
-        this.doneResults.add(path);
-      }
+      // The agent hears it too, on its next turn: it proposed the request, and would think it still open.
+      const post = () => this.orchestrator.deliver(t.name, r.thread, r.text, mustSend(t, r.thread), `The loop answered: ${r.text}`);
+      if (!(await this.postOnce(path, this.doneResults, post, "chat-result", `what the loop did with a request to ${t.via}`))) continue;
       try {
         rmSync(path, { force: true });
         this.doneResults.delete(path);
@@ -232,27 +189,39 @@ export class ChatService {
   }
 
   /**
-   * Notes that posting `key` failed: traced on its first failure. True once it has failed for longer
-   * than the give-up wait (traced then too, and forgotten), so the caller stops trying it.
+   * Posts a message that must arrive (`key` names it), unless `told` says it was posted already:
+   * true once it is posted, now or before, or given up (see failedPost), and then in `told` until the
+   * caller has done what follows (removed the result, saved the pull request's state), so it is never
+   * posted twice. False: it is tried again next time.
+   */
+  private async postOnce(key: string, told: Set<string>, post: () => Promise<void>, where: string, what: string): Promise<boolean> {
+    if (told.has(key)) return true;
+    try {
+      await post();
+      this.failing.delete(key);
+    } catch (e) {
+      if (!this.failedPost(key, where, e, what)) return false;
+    }
+    told.add(key);
+    return true;
+  }
+
+  /**
+   * Notes that posting `key` failed: traced on its first failure (unless the same failure at the same
+   * part is traced already, see traceChatError). True once it has failed for longer than the give-up
+   * wait (traced then too, and forgotten), so the caller stops trying it.
    */
   private failedPost(key: string, where: string, e: unknown, what: string): boolean {
     const first = this.failing.get(key);
     if (first === undefined) {
       this.failing.set(key, Date.now());
-      this.traceError(where, e);
+      traceChatError(this.root, where, e);
       return false;
     }
     if (Date.now() - first < (this.opts.resultGiveUpMs ?? RESULT_GIVE_UP_MS)) return false;
     this.failing.delete(key);
-    this.traceError(where, new Error(`gave up posting ${what} after an hour of tries: ${errorText(e)}`));
+    traceChatError(this.root, where, new Error(`gave up posting ${what} after an hour of tries: ${errorText(e)}`));
     return true;
-  }
-
-  private traceError(where: string, e: unknown): void {
-    try {
-      const trace = Trace.open(this.root, () => {});
-      try { trace.event(CHAT_SLUG, "error", { where, error: errorText(e) }); } finally { trace.close(); }
-    } catch { /* nowhere to record it */ }
   }
 
   /**
@@ -274,18 +243,11 @@ export class ChatService {
         if (!("pr" in r) || !r.pr || r.pr.state === "OPEN") continue;
         const state = r.pr.state;
         const key = `${thread.key}#${number}`;
-        if (!this.toldPrs.has(key)) {
-          const text = state === "MERGED"
-            ? `The pull request for "${h.title}" was merged, so ${h.slugs.join(", ")} ${h.slugs.length > 1 ? "are" : "is"} in the queue as ${h.slugs.length > 1 ? "drafts" : "a draft"}. Ask me to start ${h.slugs.length > 1 ? "one" : "it"} when you are ready.`
-            : `The pull request for "${h.title}" was closed without merging, so nothing was added.`;
-          try {
-            await this.orchestrator.deliver(t.name, thread.thread, text, (s) => (t.sendOrThrow ? t.sendOrThrow(thread.thread, s) : t.send(thread.thread, s)));
-            this.failing.delete(key);
-          } catch (e) {
-            if (!this.failedPost(key, "chat-pr", e, `that the pull request for "${h.title}" was ${state.toLowerCase()} to ${t.via}`)) continue;
-          }
-          this.toldPrs.add(key);
-        }
+        const text = state === "MERGED"
+          ? `The pull request for "${h.title}" was merged, so ${h.slugs.join(", ")} ${h.slugs.length > 1 ? "are" : "is"} in the queue as ${h.slugs.length > 1 ? "drafts" : "a draft"}. Ask me to start ${h.slugs.length > 1 ? "one" : "it"} when you are ready.`
+          : `The pull request for "${h.title}" was closed without merging, so nothing was added.`;
+        const post = () => this.orchestrator.deliver(t.name, thread.thread, text, mustSend(t, thread.thread));
+        if (!(await this.postOnce(key, this.toldPrs, post, "chat-pr", `that the pull request for "${h.title}" was ${state.toLowerCase()} to ${t.via}`))) continue;
         await this.orchestrator.withThread(thread.transport, thread.thread, async (cur) => {
           const rec = cur.handoffs.find((x) => x.pr?.number === number);
           if (rec?.pr) rec.pr.state = state;

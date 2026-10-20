@@ -221,3 +221,24 @@ describe("the full review of #47", () => {
     } finally { r.cleanup(); }
   });
 });
+
+describe("cleanup after the full review", () => {
+  test("a failure that lasts over several polls is traced once, not once per poll", async () => {
+    const r = await chatRepo();
+    try {
+      const slack = bot("slack", "now");
+      slack.announce = async () => { throw new Error("Slack is unreachable"); };
+      const s = new ChatService(r.root, [slack], { announce: false, pollMs: 60_000 });
+      await s.start();
+      // After the start, so every poll tries to post it.
+      new AnnouncementLog(r.root).append("news", null);
+      for (let i = 0; i < 4; i++) await s.poll();
+      await s.stop();
+      const trace = Trace.open(r.root);
+      try {
+        const errors = trace.events("_chat").filter((e) => e.type === "error" && e.payload.includes('"where":"announce-slack"'));
+        expect(errors.map((e) => JSON.parse(e.payload) as unknown)).toEqual([{ where: "announce-slack", error: "Slack is unreachable" }]);
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+});

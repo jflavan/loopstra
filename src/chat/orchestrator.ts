@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { askedWords, askText, offers, retryOptions, type RequestShape } from "../actions";
-import { limitOf } from "../budget";
+import { limitOf, startOfToday } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, type Config } from "../config";
 import { Git } from "../git";
@@ -45,6 +45,21 @@ export interface IncomingMessage {
 
 /** Sends one message back into the thread. */
 export type Send = (text: string) => Promise<void>;
+
+/**
+ * Records a failure of chat's own work (`where`: which part) as an error of `_chat` in the trace,
+ * once while it lasts: the same error at the same part again today is passed over (see
+ * Trace.eventOnChange), so a bot that cannot reach Slack, or a file that cannot be read now, is one
+ * line, not one per poll. Never throws: there may be nowhere to record it.
+ */
+export function traceChatError(root: string, where: string, e: unknown): void {
+  try {
+    const trace = Trace.open(root, () => {});
+    try {
+      trace.eventOnChange(CHAT_SLUG, "error", `"where":${JSON.stringify(where)}`, { where, error: errorText(e) }, "error", startOfToday());
+    } finally { trace.close(); }
+  } catch { /* nowhere to record it */ }
+}
 
 /** A plain yes, and nothing else: anything more goes back into the conversation. */
 const YES = /^\s*(y|yes|yep|yeah|yup|sure|ok|okay|go|go ahead|do it|please do|yes please|confirm(ed)?|start it)\s*[.!]*\s*$/i;
@@ -151,10 +166,7 @@ export class Orchestrator {
         this.store.save(t);
       });
     } catch (e) {
-      try {
-        const trace = Trace.open(this.root, () => {});
-        try { trace.event(CHAT_SLUG, "error", { where: "chat-record", error: `posted to ${threadKey(transport, thread)} but not recorded in its thread: ${errorText(e)}` }); } finally { trace.close(); }
-      } catch { /* nowhere to record it */ }
+      traceChatError(this.root, "chat-record", new Error(`posted to ${threadKey(transport, thread)} but not recorded in its thread: ${errorText(e)}`));
     }
   }
 

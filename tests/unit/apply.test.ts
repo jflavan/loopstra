@@ -8,7 +8,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
-import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, takeResults, type Request, type Submission } from "../../src/requests";
+import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { until } from "../console-helpers";
@@ -895,7 +895,7 @@ describe("applying requests", () => {
       expect(requestState(r.root, missing.id)).toMatchObject({ ok: false, text: "There is no change called nope in the main code." });
       // Read the way chat reads it: the console never takes it.
       expect(requestState(r.root, chat.id)).toBeNull();
-      expect(takeResults(r.root, new Set(["slack"])).find((x) => x.id === chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
+      expect(waitingResults(r.root, new Set(["slack"])).map((w) => w.result).find((x) => x.id === chat.id)).toMatchObject({ ok: true, text: "Started c. I will say here when it needs anyone, and when it is done." });
       const trace = Trace.open(r.root, () => {});
       expect(JSON.parse(trace.lastEvent("c", "chat-request")!.payload)).toMatchObject({ via: "Slack", result: "accepted" });
       trace.close();
