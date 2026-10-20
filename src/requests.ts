@@ -30,8 +30,11 @@ const MAX_ANSWER = 20_000;
  * the commit and the trace; requests chat left before it existed came from chat.
  * `tries`: how many passes failed to apply it, and `firstFailedAt` (ISO) when the first did (see
  * applyRequests, which gives up after a few, and not before some minutes). A key the schema does not
- * name is dropped as the file is read: a claimed request an older loop saved with `written`,
- * `writtenHash` or `recordHash` (what it kept to put back an uncommitted write) still reads.
+ * name is dropped as the file is read: a claimed request an older loop saved with `written` or
+ * `recordHash` (what it kept to put back an uncommitted write) still reads.
+ * `writtenHash`: only on a request a loop from before records carried the request's id claimed, by
+ * slug, the sha256 (hex) of the intent.md it wrote for it; kept, since it is the only sign that loop
+ * wrote the request before it was killed (see doneBefore in src/apply.ts).
  */
 const base = z.object({
   id: z.string().regex(ID),
@@ -43,6 +46,7 @@ const base = z.object({
   at: z.string(),
   tries: z.number().optional(),
   firstFailedAt: z.string().optional(),
+  writtenHash: z.record(z.string(), z.string()).optional(),
 });
 const slug = z.string().regex(SLUG);
 const status = z.enum(STATUSES);
@@ -83,7 +87,7 @@ type OmitEach<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type RequestBody = OmitEach<Request, keyof z.infer<typeof base>>;
 
 /** What submitRequest takes: everything but the id and the time, and what the loop notes while applying. */
-export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt">;
+export type Submission = OmitEach<Request, "id" | "at" | "tries" | "firstFailedAt" | "writtenHash">;
 
 /** What the loop did with a request. `status` is the change's status after it (null when there is no change). */
 export interface RequestResult { id: string; kind: string; slug: string | null; transport: string; thread: string; text: string; ok: boolean; status: Status | null; at: string }

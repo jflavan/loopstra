@@ -163,6 +163,55 @@ describe("applying requests", () => {
     }
   });
 
+  /**
+   * Claims the request and leaves what a loop from before records carried the request's id left when
+   * it was hard-killed after writing the request (and, with `commit`, committing it): the write, and
+   * on the claimed request the sha256 of the intent.md it wrote (`writtenHash`).
+   */
+  async function writtenByOlderLoop(root: string, req: Request, slug: string, write: (text: string) => string, commit: boolean): Promise<void> {
+    claimRequest(root, req.id);
+    const path = join(root, "intent", slug, "intent.md");
+    writeFileSync(path, write(readFileSync(path, "utf8")));
+    if (commit) {
+      await run(["git", "add", "-A", `intent/${slug}`], root);
+      await run(["git", "commit", "-q", "-m", `loopstra(${slug}): written by an older loop`], root);
+    }
+    const hash = new Bun.CryptoHasher("sha256").update(readFileSync(path)).digest("hex");
+    const file = join(requestsDir(root), "applying", `${req.id}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), written: [slug], writtenHash: { [slug]: hash } }));
+  }
+
+  test("a request an older loop wrote, committed or not, before it was killed and upgraded is finished as applied, not refused as done already", async () => {
+    const r = await chatRepo({ intents: { x: INTENT("plan-review", "x"), a: INTENT("building", "y"), b: ASKING }, config: PEOPLE });
+    try {
+      asked(r.root);
+      const approve = submitRequest(r.root, { ...by, kind: "approve", slug: "x", expect: "plan-review" });
+      await writtenByOlderLoop(r.root, approve, "x", (t) => t.replace("status: plan-review", "status: plan-approved\nresume_from: plan-approved"), true);
+      const hold = submitRequest(r.root, { ...by, kind: "hold", slug: "a", expect: "building", reason: "legal" });
+      await writtenByOlderLoop(r.root, hold, "a", (t) => t.replace("status: building", "status: building\nhold: legal (John, the dashboard)"), false);
+      mkdirSync(join(r.root, ".loopstra", "runs", "b"), { recursive: true });
+      writeFileSync(join(r.root, ".loopstra", "runs", "b", "question.json"), readFileSync(join(r.root, ".loopstra", "runs", "a", "question.json")));
+      const answer = submitRequest(r.root, { ...by, kind: "answer", slug: "b", text: "Leave them out." });
+      await writtenByOlderLoop(r.root, answer, "b", (t) => t.replace("\nquestion: open", ""), true);
+      const commits = await commitCount(r.root);
+      expect(await apply(r.root)).toBe(3);
+      expect(requestState(r.root, approve.id)).toMatchObject({ ok: true, status: "plan-approved", text: "Plan approved: x is now plan approved, waiting to build." });
+      expect(requestState(r.root, hold.id)).toMatchObject({ ok: true, status: "building" });
+      expect(requestState(r.root, answer.id)).toMatchObject({ ok: true, text: "b has its answer; the loop goes on with it." });
+      expect(readQuestion(r.root, "b")!.open!.answer).toMatchObject({ text: "Leave them out." });
+      expect(await commitCount(r.root)).toBe(commits);
+      // A hash that no longer matches (the change moved on since) is no evidence: the request is refused as before.
+      const late = submitRequest(r.root, { ...by, kind: "approve", slug: "x", expect: "plan-review" });
+      claimRequest(r.root, late.id);
+      const file = join(requestsDir(r.root), "applying", `${late.id}.json`);
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), writtenHash: { x: "0".repeat(64) } }));
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, late.id)).toMatchObject({ ok: false, text: "x moved on to plan-approved; nothing changed." });
+    } finally {
+      r.cleanup();
+    }
+  }, 60_000);
+
   test("a change that moved on is left alone, and the result says so", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });
     try {
