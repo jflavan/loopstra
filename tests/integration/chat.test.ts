@@ -219,6 +219,26 @@ describe("chat with the loop", () => {
     } finally { r.cleanup(); }
   });
 
+  test("two results given up in the same poll are each traced: a give-up names its result", async () => {
+    const r = await chatRepo({ intents: { a: INTENT("draft"), b: INTENT("draft") } });
+    try {
+      for (const slug of ["a", "b"]) submitRequest(r.root, { kind: "accept", slug, by: "u", byName: "U", via: "the terminal", transport: "terminal", thread: "local" });
+      await tick(r.root).catch(() => {});
+      const t = recorder();
+      t.send = async () => {};
+      const never = async () => { throw new Error("channel_not_found"); };
+      const service = new ChatService(r.root, [Object.assign(t, { sendOrThrow: never })], { announce: false, pollMs: 60_000, resultGiveUpMs: 2_000 });
+      await service.poll();
+      await Bun.sleep(2_100);
+      await service.poll();
+      const trace = Trace.open(r.root);
+      try {
+        const gaveUp = trace.events("_chat").filter((e) => e.type === "error" && e.payload.includes("gave up"));
+        expect(gaveUp).toHaveLength(2);
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+
   test("a bot whose replies never throw still keeps a result it could not post: results go through sendOrThrow", async () => {
     const r = await chatRepo({ intents: { a: INTENT("draft") } });
     try {

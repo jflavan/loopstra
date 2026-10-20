@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { z } from "zod";
 import { loadConfig } from "../config";
 import { GitHub } from "../github";
@@ -209,7 +209,8 @@ export class ChatService {
   /**
    * Notes that posting `key` failed: traced on its first failure (unless the same failure at the same
    * part is traced already, see traceChatError). True once it has failed for longer than the give-up
-   * wait (traced then too, and forgotten), so the caller stops trying it.
+   * wait (traced then too, naming `key`, since each give-up is a message lost and is not passed over
+   * as the same failure again; and forgotten), so the caller stops trying it.
    */
   private failedPost(key: string, where: string, e: unknown, what: string): boolean {
     const first = this.failing.get(key);
@@ -220,7 +221,7 @@ export class ChatService {
     }
     if (Date.now() - first < (this.opts.resultGiveUpMs ?? RESULT_GIVE_UP_MS)) return false;
     this.failing.delete(key);
-    traceChatError(this.root, where, new Error(`gave up posting ${what} after an hour of tries: ${errorText(e)}`));
+    traceChatError(this.root, where, new Error(`gave up posting ${what} (${basename(key)}) after an hour of tries: ${errorText(e)}`));
     return true;
   }
 
