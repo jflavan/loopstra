@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ID, newId } from "./ids";
 import { PRIORITIES, SLUG, STATUSES, type Status } from "./intents";
@@ -135,7 +135,11 @@ export interface Tidy { trace?: Trace; badAfterMs?: number }
  */
 const BAD_AFTER_MS = 30_000;
 
-/** When this process first found each request file unreadable, by its path; forgotten once it reads, or is gone. */
+/**
+ * When the applier first found each request file unreadable, by its path. Only its looks (those
+ * given a Tidy) record one; an entry is forgotten once the file reads, or at the next such look of
+ * its folder once the file is gone (see forgetGone).
+ */
 const unreadableSince = new Map<string, number>();
 
 /**
@@ -145,7 +149,7 @@ const unreadableSince = new Map<string, number>();
  */
 const SET_ASIDE_RETRY_MS = 60_000;
 
-/** The last failed set-aside of each file, by its path: when it was, and the file's modification time then. */
+/** The last failed set-aside of each file, by its path: when it was, and the file's modification time then. Forgotten once the file is gone (see forgetGone). */
 const setAsideFailed = new Map<string, { at: number; mtimeMs: number }>();
 
 /** The file's modification time, or null when it cannot be read (gone meanwhile). */
@@ -162,6 +166,14 @@ function setAsideWaits(path: string): boolean {
   return false;
 }
 
+/** Forgets what unreadableSince and setAsideFailed hold for files of `dir` no longer among `names` (gone, or set aside). */
+function forgetGone(dir: string, names: readonly string[]): void {
+  const here = new Set(names.map((n) => join(dir, n)));
+  for (const map of [unreadableSince, setAsideFailed]) {
+    for (const path of map.keys()) if (dirname(path) === dir && !here.has(path)) map.delete(path);
+  }
+}
+
 /**
  * The request files in a folder, oldest first: the requests, and the ones someone waits on that are
  * not requests the loop knows (see Unreadable). A file that is not a request at all is passed over,
@@ -169,15 +181,17 @@ function setAsideWaits(path: string): boolean {
  */
 function readDir(root: string, dir: string, tidy?: Tidy): Read {
   const read: Read = { requests: [], unreadable: [], due: false };
-  if (!existsSync(dir)) return read;
-  for (const n of readdirSync(dir).filter((x) => x.endsWith(".json")).sort()) {
+  const names = existsSync(dir) ? readdirSync(dir).filter((x) => x.endsWith(".json")).sort() : [];
+  if (tidy) forgetGone(dir, names);
+  for (const n of names) {
     const file = readJsonAs(join(dir, n), RequestFile);
     // Named for its own id, or claiming, cancelling and finishing it would act on another file.
     if (!file || n !== `${file.id}.json`) {
+      if (!tidy) continue;
       const path = join(dir, n);
       const since = unreadableSince.get(path) ?? Date.now();
       unreadableSince.set(path, since);
-      if (tidy && Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS) && !setAsideWaits(path)) {
+      if (Date.now() - since >= (tidy.badAfterMs ?? BAD_AFTER_MS) && !setAsideWaits(path)) {
         if (!tidy.trace) read.due = true;
         else {
           const mtimeMs = mtimeOf(path);

@@ -190,6 +190,35 @@ describe("request files", () => {
     }
   });
 
+  test("only the applier's looks start a bad file's wait, and a file that is gone is forgotten", () => {
+    const t = tempDir();
+    const clock = spyOn(Date, "now");
+    try {
+      mkdirSync(requestsDir(t.path), { recursive: true });
+      const copy = join(requestsDir(t.path), "copy.json");
+      const start = Date.now();
+      clock.mockImplementation(() => start);
+      // The console's reads pass the file over without starting its wait.
+      writeFileSync(copy, "{ not json");
+      expect(pendingRequests(t.path)).toEqual([]);
+      clock.mockImplementation(() => start + 40_000);
+      expect(anythingToApply(t.path)).toBe(false);
+      // The applier's first look started it: the wait is up 30 s on.
+      clock.mockImplementation(() => start + 71_000);
+      expect(anythingToApply(t.path)).toBe(true);
+      // Gone at the next look, then a new bad file of that name: its wait starts afresh.
+      rmSync(copy);
+      clock.mockImplementation(() => start + 72_000);
+      expect(anythingToApply(t.path)).toBe(false);
+      writeFileSync(copy, "{ not json");
+      clock.mockImplementation(() => start + 73_000);
+      expect(anythingToApply(t.path)).toBe(false);
+    } finally {
+      clock.mockRestore();
+      t.cleanup();
+    }
+  });
+
   test("a file unreadable for a moment and then readable is never set aside, however old it is", () => {
     const t = tempDir();
     try {
