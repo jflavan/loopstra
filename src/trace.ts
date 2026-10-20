@@ -104,7 +104,8 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
  * (a kill part way leaves the version true), and then the schema, whose CREATE ... IF NOT EXISTS
  * adds the new tables and indexes, which may name a column a migration just added. Each step reads
  * the version again inside its transaction, which takes the write lock at once: another process (a
- * second loop, the console) that ran the step meanwhile is not followed by a second run of it.
+ * second loop, the console) that ran the step meanwhile is not followed by a second run of it. One
+ * already up to date enters no step, so opening it never takes the write lock.
  * `migrations` is for tests.
  */
 export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS): void {
@@ -123,16 +124,20 @@ export function migrate(db: Database, migrations: readonly string[] = MIGRATIONS
     })();
     return;
   }
-  for (;;) {
-    const done = db.transaction(() => {
-      const v = version();
-      if (v > target) throw newer(v);
-      if (v === target) return true;
-      db.run(migrations[v]!);
-      db.run(`PRAGMA user_version = ${v + 1}`);
-      return false;
-    }).immediate();
-    if (done) break;
+  // Up to date, the common case (every console request and chat turn opens the trace): no step's
+  // transaction is entered, so the open does not take the write lock and wait behind the loop's writes.
+  if (at < target) {
+    for (;;) {
+      const done = db.transaction(() => {
+        const v = version();
+        if (v > target) throw newer(v);
+        if (v === target) return true;
+        db.run(migrations[v]!);
+        db.run(`PRAGMA user_version = ${v + 1}`);
+        return false;
+      }).immediate();
+      if (done) break;
+    }
   }
   db.run(SCHEMA);
 }

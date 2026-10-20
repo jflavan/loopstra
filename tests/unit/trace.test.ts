@@ -302,6 +302,25 @@ describe("the schema version", () => {
     } finally { db.close(); }
   });
 
+  test("an up-to-date database opens without the write lock, so a reader does not queue behind the loop's writes", () => {
+    const t = tempDir();
+    try {
+      Trace.open(t.path).close();
+      // Another connection (the loop, mid-write) holds the write lock; opening for a read must not wait for it.
+      const writer = new Database(join(t.path, ".loopstra", "trace.db"));
+      try {
+        writer.run("BEGIN IMMEDIATE");
+        const started = Date.now();
+        const trace = Trace.open(t.path);
+        try {
+          expect(Date.now() - started).toBeLessThan(1000);
+          expect(trace.events("a")).toEqual([]);
+        } finally { trace.close(); }
+        writer.run("COMMIT");
+      } finally { writer.close(); }
+    } finally { t.cleanup(); }
+  }, 15_000);
+
   test("an older database is brought up without losing its rows", () => {
     const t = tempDir();
     try {
