@@ -271,7 +271,7 @@ export async function fixesNotMerged(ctx: StepContext, pr: PrInfo): Promise<bool
   }
   if (!known.length) return false;
   for (const target of known) {
-    if (await ctx.git.containsChanges(target, ctx.branch, ["intent/"], main)) return false;
+    if (await ctx.git.containsChanges(target, ctx.branch, { ignore: ["intent/"], base: main })) return false;
   }
   return true;
 }
@@ -607,8 +607,8 @@ async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
   if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
   await syncMain(ctx.root, ctx.cfg, ctx.trace);
   const hasIt = pr.mergeCommit
-    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, ["intent/"])))
-    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, ["intent/"]));
+    ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] })))
+    : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] }));
   if (!hasIt) {
     if (onceMarker(ctx, MAIN_BEHIND)) {
       const waiting = `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`;
@@ -830,15 +830,9 @@ async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   const [base = "", merge] = marker.split(/\r?\n/);
   if (merge && (await ctx.git.isAncestor(merge, main))) return true;
   const moved = (await ctx.git.commitOf(main)) !== base;
-  if (moved && (await ctx.git.containsChanges(main, ctx.branch, (await changesOutsideIntent(ctx)) ? ["intent/"] : []))) return true;
+  if (moved && (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"], ignoreOnlyWithOthers: true }))) return true;
   clearMarker(ctx, MERGING);
   return false;
-}
-
-/** True when the branch changed a file outside intent/ since it diverged from main (also when that cannot be read). */
-async function changesOutsideIntent(ctx: StepContext): Promise<boolean> {
-  const r = await ctx.git.run(["diff", "--name-only", "-z", `${ctx.cfg.main_branch}...${ctx.branch}`], true);
-  return r.code !== 0 || r.out.split("\0").some((f) => f && !f.startsWith("intent/"));
 }
 
 /** The change is on main: tidy up (best effort) and record it as merged. */
@@ -865,7 +859,7 @@ async function finishMerge(ctx: StepContext): Promise<StepResult> {
  */
 export async function cleanupChange(ctx: StepContext): Promise<boolean> {
   const main = ctx.cfg.main_branch;
-  if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, ["intent/"]))) {
+  if ((await ctx.git.branchExists(ctx.branch)) && !(await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] }))) {
     if (onceMarker(ctx, BRANCH_KEPT)) {
       ctx.trace.event(ctx.slug, "command", { command: "clean up after merge", kept: ctx.branch, reason: `${main} does not have this branch's changes, so the branch and its worktree were left in place` });
     }

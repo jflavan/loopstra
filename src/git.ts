@@ -155,8 +155,19 @@ export const DIFF_CHUNK = 200;
  */
 export const DIFF_CHARS = 24_000;
 
-/** What a path takes on a command line as a literal pathspec, beside its own characters: `:(literal)` and a space. */
-const PATHSPEC_EXTRA = ":(literal) ".length;
+/** The prefix that makes a pathspec literal. */
+const LITERAL = ":(literal)";
+
+/** What a path takes on a command line as a literal pathspec, beside its own characters: the prefix and a space. */
+const PATHSPEC_EXTRA = LITERAL.length + 1;
+
+/**
+ * The paths as literal pathspecs: each names only itself, never every file a * or [ in it would
+ * match. pathChunks counts each path at this length (PATHSPEC_EXTRA).
+ */
+export function literalPathspecs(paths: string[]): string[] {
+  return paths.map((p) => LITERAL + p);
+}
 
 /**
  * `paths` in consecutive slices of at most `size` paths and `chars` characters (see DIFF_CHARS), for
@@ -321,23 +332,28 @@ export class Git {
   /**
    * True when `target` already has `branch`'s changes: the branch is part of its history, or it has
    * the branch's version of every file the branch changed since the two diverged (a squash merge).
-   * Paths under an `ignore` prefix are left out of the comparison. The files compared are those the
-   * branch changed since it diverged from `base`, `target` itself unless given: a caller asking
-   * whether a merged pull request's head has the branch's commits names main as the base, since
-   * the branch may have been rebased onto a main that has that merge, and then only the commits on
-   * top are the branch's own.
+   * Paths under an `ignore` prefix are left out of the comparison; with `ignoreOnlyWithOthers`, only
+   * when the branch changed a file outside them too (a branch that changed nothing else has every
+   * file compared, since with nothing left the test would always pass). The files compared are
+   * those the branch changed since it diverged from `base`, `target` itself unless given: a caller
+   * asking whether a merged pull request's head has the branch's commits names main as the base,
+   * since the branch may have been rebased onto a main that has that merge, and then only the
+   * commits on top are the branch's own.
    */
-  async containsChanges(target: string, branch: string, ignore: string[] = [], base = target): Promise<boolean> {
+  async containsChanges(target: string, branch: string, opts: { ignore?: string[]; base?: string; ignoreOnlyWithOthers?: boolean } = {}): Promise<boolean> {
+    const { ignore = [], base = target, ignoreOnlyWithOthers = false } = opts;
     if (await this.isAncestor(branch, target)) return true;
     // -z: the names as they are; without it git quotes a non-ASCII name, and a quoted name matches no file.
     const changed = await this.run(["diff", "--name-only", "-z", `${base}...${branch}`], true);
     if (changed.code !== 0) return false;
-    const files = changed.out.split("\0").filter((f) => f && !ignore.some((p) => f.startsWith(p)));
+    const all = changed.out.split("\0").filter(Boolean);
+    const outside = all.filter((f) => !ignore.some((p) => f.startsWith(p)));
+    const files = ignoreOnlyWithOthers && !outside.length ? all : outside;
     if (!files.length) return true;
     // In chunks: one command line for thousands of paths would pass Windows' 32K character limit.
-    // Each name literal (see putBack), so one with * or [ in it is compared, not every file it matches.
+    // Each name literal, so one with * or [ in it is compared, not every file it matches.
     for (const chunk of pathChunks(files)) {
-      if ((await this.run(["diff", "--quiet", target, branch, "--", ...chunk.map((f) => `:(literal)${f}`)], true)).code !== 0) return false;
+      if ((await this.run(["diff", "--quiet", target, branch, "--", ...literalPathspecs(chunk)], true)).code !== 0) return false;
     }
     return true;
   }
@@ -364,7 +380,7 @@ export class Git {
   /** Puts tracked files back as HEAD has them, staged and unstaged edits alike. */
   async putBack(files: string[]): Promise<void> {
     // In chunks, as in containsChanges; each name literal, so one with * or [ in it names only itself.
-    for (const chunk of pathChunks(files)) await this.run(["checkout", "HEAD", "--", ...chunk.map((f) => `:(literal)${f}`)]);
+    for (const chunk of pathChunks(files)) await this.run(["checkout", "HEAD", "--", ...literalPathspecs(chunk)]);
   }
 
   /**

@@ -535,6 +535,28 @@ describe("Git across systems", () => {
     } finally { repo.cleanup(); }
   });
 
+  test("containsChanges ignores the given prefixes, and with ignoreOnlyWithOthers compares them when nothing else changed", async () => {
+    const repo = await tempGitRepo();
+    try {
+      const git = new Git(repo.path);
+      await run(["git", "checkout", "-q", "-b", "feature"], repo.path);
+      await Bun.write(join(repo.path, "intent", "x", "intent.md"), "the branch's record\n");
+      await git.commitAll("intent only");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"] })).toBe(true);
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"], ignoreOnlyWithOthers: true })).toBe(false);
+      // With a file outside the prefix that main has, the prefix is left out again.
+      await run(["git", "checkout", "-q", "feature"], repo.path);
+      await Bun.write(join(repo.path, "app.ts"), "export const a = 1;\n");
+      await git.commitAll("app");
+      await run(["git", "checkout", "-q", "main"], repo.path);
+      await run(["git", "checkout", "feature", "--", "app.ts"], repo.path);
+      await git.commitAll("app on main");
+      expect(await git.containsChanges("main", "feature", { ignore: ["intent/"], ignoreOnlyWithOthers: true })).toBe(true);
+      expect(await git.containsChanges("main", "feature")).toBe(false);
+    } finally { repo.cleanup(); }
+  });
+
   test("containsChanges and changedFilesSince read non-ASCII paths and names with spaces", async () => {
     const repo = await tempGitRepo();
     try {
