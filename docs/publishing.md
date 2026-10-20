@@ -115,6 +115,11 @@ upgrade` offers it to users.
 - **A staged version must not go out.** The maintainer rejects it (`npm stage reject <stage-id>`, or
   on npmjs.com). Delete its GitHub Release (`gh release delete v<version>`) but keep the tag, so the
   next release takes the next version number instead of reusing this one.
+- **A staged version was deleted or rejected by mistake, and its code should still go out.** Keep its
+  tag, so the release takes the next version number (npm may refuse the same one again), and keep its
+  GitHub Release: its notes are what an upgrade past it shows. While main's tip is still the tagged
+  commit, even a manual run releases nothing (the tip is already part of the latest release), so merge
+  a commit to main first, then run the workflow by hand.
 - **A version that went out is bad.** Fix it on main; the next release supersedes it. Deprecating it
   (`npm deprecate loopstra@<version> "<why>"`) is the maintainer's call and needs their 2FA.
 
