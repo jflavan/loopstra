@@ -10,6 +10,7 @@ import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, ST
 import { addFrames, addItems, EMPTY, lastCost, type Frame } from "../../src/ui/transcript";
 import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
+import { parseIntentFile } from "../../src/intents";
 import { nextTheme } from "../../src/ui/theme";
 import { RECENT_DONE_MS, splitFinished, UP_NEXT, upNext } from "../../src/ui/board";
 import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key";
@@ -245,6 +246,28 @@ describe("markdown", () => {
     expect(html).toContain("<table>");
     expect(stripFrontmatter("---\nstatus: draft\n---\n# Intent: x\n")).toBe("# Intent: x\n");
     expect(stripFrontmatter("# No frontmatter\n")).toBe("# No frontmatter\n");
+  });
+
+  test("the page leaves out the frontmatter block the parser reads, and only that", () => {
+    const inputs = [
+      "---\n---\n# Intent: x\n",
+      "---\r\nstatus: draft\r\n---\r\n# Intent: x\r\n",
+      "\uFEFF---\nstatus: draft\n---\n# Intent: x\n",
+      "---\nstatus: draft\nnote: |\n  a\n  ---\n  b\n---\n# Intent: x\n",
+      "---\nstatus: draft\n---   \n# Intent: x\n",
+      "---\nstatus: draft\n---",
+      "---\nstatus: draft\n----\n# Intent: x\n",
+      "--- \nstatus: draft\n---\n# Intent: x\n",
+      "# No frontmatter\n\n---\n\nA rule.\n",
+    ];
+    for (const text of inputs) {
+      let body: string | null = null;
+      try { body = parseIntentFile(text).body; } catch { /* a fence the parser refuses: the page shows the text whole */ }
+      expect(stripFrontmatter(text)).toBe(body ?? text.replace(/^\uFEFF/, ""));
+    }
+    // An empty block is frontmatter, not two rules; a closing line of four dashes closes nothing.
+    expect(stripFrontmatter("---\n---\n# Intent: x\n")).toBe("# Intent: x\n");
+    expect(stripFrontmatter("---\nstatus: draft\n----\n# Intent: x\n")).toBe("---\nstatus: draft\n----\n# Intent: x\n");
   });
 
   test("a link whose address hides a scheme behind tabs, control characters, spaces or a line break is shown as its text", () => {

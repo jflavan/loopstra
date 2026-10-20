@@ -246,7 +246,8 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
  * known here; false when neither is (nothing to compare with). The merge commit counts on its own:
  * a branch the merge checks only brought up to date (rebased onto a newer main) while a person
  * merged the old head differs from that head in the files main changed meanwhile, but not from what
- * the merge made of them. It is fetched with main when it is not here yet (it was made on GitHub).
+ * the merge made of them. It is fetched with main when it is not here yet (it was made on GitHub);
+ * a fetch that fails or hangs past its time leaves the head to compare with (a stop is passed on).
  * The head counts on its own too: a branch not brought up to date lacks what main changed, which
  * the merge commit has. The branch's own changes are those since it diverged from main, not from
  * either commit: the merge checks may have rebased it onto a main that already has the merge, and
@@ -256,8 +257,14 @@ export async function fixesNotMerged(ctx: StepContext, pr: PrInfo): Promise<bool
   if (!(await ctx.git.branchExists(ctx.branch))) return false;
   const main = ctx.cfg.main_branch;
   const remote = pr.mergeCommit && (await ctx.git.commitOf(pr.mergeCommit)) === null ? await ctx.git.remoteName() : null;
-  // A fetch that fails leaves the head to compare with.
-  if (remote) await ctx.git.fetch(["--quiet", remote, `+refs/heads/${main}:refs/remotes/${remote}/${main}`], true);
+  if (remote) {
+    try {
+      await ctx.git.fetch(["--quiet", remote, `+refs/heads/${main}:refs/remotes/${remote}/${main}`], true);
+    } catch (e) {
+      // A GitTimeout or another failure is not this look's: an already merged pull request must not read as one that could not be opened.
+      if (notTheStepsFault(e) || endsStepQuietly(e)) throw e;
+    }
+  }
   const known: string[] = [];
   for (const candidate of [pr.mergeCommit, pr.head]) {
     if (candidate && (await ctx.git.commitOf(candidate)) !== null) known.push(candidate);

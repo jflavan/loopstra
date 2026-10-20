@@ -585,7 +585,8 @@ export async function removeStaleLocks(root: string, maxAgeMs = STALE_LOCK_MS, n
  * Removes a worktree directory however it can: git first, then the file system, then git's record
  * of it, unlocked first in case a `worktree add` killed part way left it locked. A stop request met
  * on the way does not leave the folder (a throwaway checkout with its installed dependencies, say):
- * it is removed and git's record pruned all the same, and then the stop is thrown.
+ * its removal and git's unlock and prune are still tried, each on its own, and then the stop is
+ * thrown, never a failure of theirs (a folder Windows holds, say): the stop is what the caller sees.
  */
 export async function removeWorktree(git: Git, dir: string, opts: { cleanup?: boolean } = {}): Promise<void> {
   let stop: StopRequested | null = null;
@@ -593,17 +594,22 @@ export async function removeWorktree(git: Git, dir: string, opts: { cleanup?: bo
     try {
       await git.worktreeRemove(dir, { cleanup: opts.cleanup === true });
     } catch (e) {
-      if (e instanceof StopRequested) stop = e;
-      rmSync(dir, { recursive: true, force: true });
+      if (!(e instanceof StopRequested)) rmSync(dir, { recursive: true, force: true });
+      else {
+        stop = e;
+        try { rmSync(dir, { recursive: true, force: true }); } catch { /* the stop wins; the next add at this path removes what is left */ }
+      }
     }
   }
   // After a stop, the unlock and prune still run (as cleanup calls do), so no record of the folder is left.
   const cleanup = opts.cleanup === true || stop !== null;
-  await worktreeAdmin(git, async () => {
+  const admin = worktreeAdmin(git, async () => {
     await git.run(["worktree", "unlock", dir], { allowFail: true, cleanup });
     await git.run(["worktree", "prune"], { allowFail: true, cleanup });
   });
-  if (stop) throw stop;
+  if (!stop) return admin;
+  await admin.catch(() => { /* best effort: the stop wins */ });
+  throw stop;
 }
 
 /** Makes `dir` a detached worktree of `ref` (never the owner's checkout); a leftover directory there is removed first. */

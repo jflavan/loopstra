@@ -237,14 +237,18 @@ describe("a project command's environment", () => {
       expect(withoutGitLocation(env)).toEqual({ HOME: "h" });
       // The other variables a hook or alias exports that change what a git call does: how pathspecs
       // are read, the dates of the commit it is part of, and its -c settings. An author's name stays
-      // (gitEnv drops it for the runtime's own calls).
+      // (gitEnv drops it for the runtime's own calls), and so does configuration set on purpose
+      // (GIT_CONFIG_COUNT and its pairs: git never exports them, a container or CI job sets them).
       const hook: Record<string, string | undefined> = {
         GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "1", GIT_NOGLOB_PATHSPECS: "1", GIT_ICASE_PATHSPECS: "1",
         GIT_AUTHOR_DATE: "d", GIT_COMMITTER_DATE: "d", GIT_CONFIG_PARAMETERS: "'a.b'='c'", GIT_CONFIG_COUNT: "2",
         GIT_CONFIG_KEY_0: "a.b", GIT_CONFIG_VALUE_0: "c", GIT_CONFIG_KEY_1: "d.e", GIT_CONFIG_VALUE_1: "f",
         GIT_AUTHOR_NAME: "Person", GIT_CONFIG_GLOBAL: "/home/p/.gitconfig", HOME: "h",
       };
-      expect(withoutGitLocation(hook)).toEqual({ GIT_AUTHOR_NAME: "Person", GIT_CONFIG_GLOBAL: "/home/p/.gitconfig", HOME: "h" });
+      expect(withoutGitLocation(hook)).toEqual({
+        GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "a.b", GIT_CONFIG_VALUE_0: "c", GIT_CONFIG_KEY_1: "d.e", GIT_CONFIG_VALUE_1: "f",
+        GIT_AUTHOR_NAME: "Person", GIT_CONFIG_GLOBAL: "/home/p/.gitconfig", HOME: "h",
+      });
     } finally {
       for (const [k, v] of Object.entries(had)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
       t.cleanup();

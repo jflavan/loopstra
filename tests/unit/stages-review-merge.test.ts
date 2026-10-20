@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Git } from "../../src/git";
+import { Git, GitTimeout } from "../../src/git";
+import { StopRequested } from "../../src/stop";
 import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { EARLY_REVIEW } from "../../src/stages/early-review";
@@ -713,6 +714,22 @@ describe("merge", () => {
     expect(await fixesNotMerged(ctx, pr)).toBe(true);
     expect(await fixesNotMerged(ctx, { ...pr, mergeCommit: null })).toBe(true);
     trace.close(); repo.cleanup();
+  });
+
+  test("a merge commit that cannot be fetched (a remote that hangs) leaves the head to compare with; a stop is passed on", async () => {
+    const { repo, ctx, trace } = await reviewed(PERSON_MERGES);
+    const git = new Git(repo.path);
+    await git.run(["remote", "add", "origin", join(repo.path, "no-such-remote")]);
+    const head = await new Git(ctx.worktreeDir).headSha();
+    // GitHub names a merge commit this repository does not have yet.
+    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, merged: true, mergeCommit: "f".repeat(40), url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
+    const hangs = spyOn(ctx.git, "fetch").mockImplementation(() => Promise.reject(new GitTimeout(["fetch"], 1_000)));
+    try {
+      expect(await fixesNotMerged(ctx, pr)).toBe(false);
+      expect(hangs).toHaveBeenCalledTimes(1);
+      hangs.mockImplementation(() => Promise.reject(new StopRequested()));
+      await expect(fixesNotMerged(ctx, pr)).rejects.toBeInstanceOf(StopRequested);
+    } finally { hangs.mockRestore(); trace.close(); repo.cleanup(); }
   });
 
   test("a merge marker whose merge never landed is ignored", async () => {
