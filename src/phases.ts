@@ -460,7 +460,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   let asked: Question | null = null;
   let refused: string | null = null;
   const out = await tracedSession({
-    trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE,
+    trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE, ref: model.ref,
     run: {
       cwd,
       prompt,

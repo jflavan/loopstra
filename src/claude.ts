@@ -26,6 +26,8 @@ interface Collected {
   denied: string[];
   /** The HTTP status of the API call that failed, when the result event says (CLI 2.x's api_error_status); else null. */
   apiErrorStatus: number | null;
+  /** The models the session ran on: the init event's, then the result's modelUsage keys, without duplicates. Empty when the CLI named none. */
+  models: string[];
 }
 
 /** One permission denial as allow-rule text: the command for Bash, the path for file tools, else the tool name. */
@@ -51,13 +53,14 @@ function isStreamEvent(v: unknown): v is StreamEvent {
 /** The result event's fields the runner reads. Each is checked where it is used: the CLI's shape is not Loopstra's to trust. */
 interface ResultEvent extends StreamEvent {
   structured_output?: unknown; total_cost_usd?: number; usage?: unknown; result?: string; is_error?: boolean;
-  permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown;
+  permission_denials?: Array<{ tool_name?: string; tool_input?: Record<string, unknown> }>; api_error_status?: unknown; modelUsage?: unknown;
 }
 
 /** Accumulates `--output-format stream-json` lines into one result. A notification's result is not the result. */
 export class StreamCollector {
   private sessionId: string | null = null;
   private result: ResultEvent | null = null;
+  private initModel: string | null = null;
   readonly events: StreamEvent[] = [];
 
   push(line: string): StreamEvent | null {
@@ -70,12 +73,15 @@ export class StreamCollector {
     const e = parsed;
     this.events.push(e);
     if (e.session_id && !this.sessionId) this.sessionId = e.session_id;
+    if (e.type === "system" && e.subtype === "init" && this.initModel === null && typeof e.model === "string" && e.model) this.initModel = e.model;
     if (e.type === "result" && !answersNotification(e)) this.result = e;
     return e;
   }
 
   finish(): Collected {
     const r = this.result;
+    const usage = r?.modelUsage;
+    const used = typeof usage === "object" && usage !== null && !Array.isArray(usage) ? Object.keys(usage) : [];
     return {
       sessionId: this.sessionId ?? r?.session_id ?? null,
       subtype: r?.subtype ?? "missing_result",
@@ -88,6 +94,7 @@ export class StreamCollector {
       isError: r?.is_error ?? r === null,
       denied: Array.isArray(r?.permission_denials) ? r.permission_denials.map(deniedText) : [],
       apiErrorStatus: typeof r?.api_error_status === "number" ? r.api_error_status : null,
+      models: [...new Set([...(this.initModel ? [this.initModel] : []), ...used])],
     };
   }
 }

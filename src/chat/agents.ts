@@ -135,15 +135,16 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     const why = day - chatSpentToday(o.trace) < MIN_SESSION_USD ? "today" : "held";
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
+  const ref = stepModel(o.cfg, o.name);
   const out = await tracedSession({
-    trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd,
+    trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd, ref,
     dir: join(runDir(o.root, CHAT_SLUG), "phases", `${held.seq}-${o.name}`),
     run: {
       cwd: o.root,
       prompt: o.prompt,
       schema: jsonSchemaOf(o.schema),
       // Its step's model (see stepModel): chat loads the config for every message, so a change applies on the next turn.
-      model: modelFor(o.cfg, stepModel(o.cfg, o.name)),
+      model: modelFor(o.cfg, ref),
       permissionMode: "default",
       allowedTools: CHAT_TOOLS,
       disallowedTools: CHAT_DENIED,

@@ -32,6 +32,36 @@ describe("one session runner for the loop and chat", () => {
   });
 });
 
+describe("a traced session with a ref", () => {
+  const session = (trace: Trace, dir: string, prompt: string) => {
+    const seq = trace.phaseStart("add-numbers", "design", "agent");
+    return tracedSession({
+      trace, slug: "add-numbers", seq, dir: join(dir, "phase"), capUsd: 1, ref: "default",
+      read: (output) => ({ ok: true, value: output }),
+      run: { cwd: dir, prompt, schema: {}, model: "sonnet", permissionMode: "default", allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE_CLAUDE },
+    });
+  };
+
+  test("records its run", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "design.jsonl") }, () => session(trace, t.path, "hello"));
+      expect(trace.lastModelRuns().default).toMatchObject({ ref: "default", asked: "sonnet", ran: "fake", result: "ok" });
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("a crash writes none", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const out = await withEnv({ LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "crash.jsonl") }, () => session(trace, t.path, "hello"));
+      expect(out.ok).toBe(false);
+      expect(trace.lastModelRuns()).toEqual({});
+    } finally { trace.close(); t.cleanup(); }
+  });
+});
+
 describe("andList", () => {
   test("joins items as a plain list", () => {
     expect(andList([])).toBe("");

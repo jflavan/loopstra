@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
+import type { ModelRef } from "./models";
 import { runDir } from "./paths";
 import { errorText } from "./shell";
 
@@ -59,6 +60,11 @@ export interface JudgeRow {
   cheap_usd: number | null; strong_usd: number | null; cheap_ms: number | null; strong_ms: number | null;
 }
 
+/** What a named model ran on in one session that told: `ran` is the model Claude Code reported (null if it named none); `bad-model` is a model it did not accept. */
+export interface ModelRun {
+  ref: ModelRef; asked: string; ran: string | null; result: "ok" | "bad-model"; slug: string; seq: number; ts: string;
+}
+
 /** A judges row as written: the trace adds the id, the change and the time. */
 export type NewJudgeRow = Omit<JudgeRow, "id" | "slug" | "ts">;
 
@@ -81,6 +87,9 @@ CREATE TABLE IF NOT EXISTS judges (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TE
   cheap_model TEXT NOT NULL, strong_model TEXT NOT NULL, template_sha TEXT NOT NULL, prompt_sha TEXT NOT NULL,
   cheap TEXT NOT NULL, strong TEXT,
   cheap_usd REAL, strong_usd REAL, cheap_ms INTEGER, strong_ms INTEGER);
+CREATE TABLE IF NOT EXISTS model_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL, asked TEXT NOT NULL, ran TEXT,
+  result TEXT NOT NULL, slug TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS model_runs_ref ON model_runs (ref, id);
 CREATE INDEX IF NOT EXISTS signals_name ON signals (name, id);
 CREATE INDEX IF NOT EXISTS gates_check ON gates (slug, gate, "check", id);
 CREATE INDEX IF NOT EXISTS phases_started ON phases (started);
@@ -354,6 +363,17 @@ export class Trace {
   /** Every judges row, oldest first. They are few; src/judges.ts filters them. */
   judgeRows(): JudgeRow[] {
     return this.db.query<JudgeRow, []>("SELECT * FROM judges ORDER BY id").all();
+  }
+
+  /** Records what a named model ran on in one session (see ModelRun). */
+  recordModelRun(r: Omit<ModelRun, "ts">): void {
+    this.db.run("INSERT INTO model_runs (ref, asked, ran, result, slug, seq, ts) VALUES (?, ?, ?, ?, ?, ?, ?)", [r.ref, r.asked, r.ran, r.result, r.slug, r.seq, now()]);
+  }
+
+  /** The newest run of each named model that has one. */
+  lastModelRuns(): Partial<Record<ModelRef, ModelRun>> {
+    const rows = this.db.query<ModelRun, []>("SELECT ref, asked, ran, result, slug, seq, ts FROM model_runs WHERE id IN (SELECT MAX(id) FROM model_runs GROUP BY ref)").all();
+    return Object.fromEntries(rows.map((r) => [r.ref, r]));
   }
 
   signal(name: string, result: "pass" | "fail" | "error" | "waiting", output: string): void {

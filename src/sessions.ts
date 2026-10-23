@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { sessionCost } from "./budget";
 import { runPhase, type FailureReason, type RunPhaseInput, type RunPhaseResult, type StreamEvent } from "./claude";
+import type { ModelRef } from "./models";
 import { errorText } from "./shell";
 import { Cancelled, SessionStopped, StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -28,6 +29,8 @@ interface TracedSession<T> {
   dir: string;
   /** What runPhase is given, but onEvent. */
   run: Omit<RunPhaseInput, "onEvent">;
+  /** The named model the session runs on: when it gets through, or Claude Code does not accept the model, the run is recorded (see Trace.recordModelRun). */
+  ref?: ModelRef;
   /** The session's cap, to work out what a session that never reported its cost spent (see sessionCost). */
   capUsd: number;
   /** Reads the session's structured output. */
@@ -78,6 +81,8 @@ export async function tracedSession<T>(s: TracedSession<T>): Promise<SessionOutc
     raw = writer;
     const r = await runPhase({ ...s.run, onEvent: (e) => { void writer.write(JSON.stringify(e) + "\n"); s.onEvent?.(e); } });
     denied = r.denied;
+    // Only a session that got through, or was refused its model, says anything about the model.
+    if (s.ref && (r.ok || r.reason === "model")) s.trace.recordModelRun({ ref: s.ref, asked: s.run.model, ran: r.models[0] ?? null, result: r.ok ? "ok" : "bad-model", slug: s.slug, seq: s.seq });
     costUsd = sessionCost(r, r.durationMs, s.capUsd);
     if (!r.ok) {
       const stop = s.interrupt?.(r);
