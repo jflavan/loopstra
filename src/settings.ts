@@ -15,6 +15,9 @@ export const CONFIG_REL = "loopstra/config.yaml";
 /** What a settings record is traced and committed under, in place of a change's name: `loopstra(_settings): …`. */
 export const SETTINGS_SLUG = "_settings";
 
+/** Why a settings request is refused when the file is not the one the page read (the console and the loop both check). */
+export const STALE_SETTINGS = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
+
 /** The file's version, as the page and the applier compare it: the sha256 (hex) of its text. */
 export function configVersion(text: string): string {
   return createHash("sha256").update(text).digest("hex");

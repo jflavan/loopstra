@@ -15,7 +15,7 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
-import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG } from "./settings";
+import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG, STALE_SETTINGS } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
@@ -389,7 +389,6 @@ function settingsLanded(root: string, main: string, req: SettingsRequest): Promi
 }
 
 /** A settings request's refusals that are not a problem with the setting itself. */
-const STALE_SETTINGS = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
 const UNCOMMITTED_CONFIG = `${CONFIG_REL} has changes in the main checkout that are not committed. Commit or undo them first, then change the setting again.`;
 
 /**
