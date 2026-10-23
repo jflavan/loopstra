@@ -70,6 +70,21 @@ describe("writeIntents", () => {
     } finally { r.cleanup(); }
   });
 
+  test("write-intent follows chat.steps", async () => {
+    const r = await chatRepo({ config: "chat:\n  steps:\n    write-intent: cheap\n" });
+    try {
+      await r.answer("write-intent", 1, { status: "success", summary: "s", intents: [draft("csv-export")] });
+      const cfg = await loadConfig(r.root);
+      const trace = Trace.open(r.root);
+      try {
+        const w = await writeIntents({ root: r.root, cfg, trace, source: r.root, handoff: { title: "CSV", brief: "Export CSV.", updates: [] }, author: "Ana", via: "Slack", maxBudgetUsd: 1 });
+        expect(w.ok).toBe(true);
+        const args = r.prompts()[0]!.args;
+        expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+
   test("two bad answers: nothing is written and the problem is said plainly", async () => {
     const r = await chatRepo();
     try {

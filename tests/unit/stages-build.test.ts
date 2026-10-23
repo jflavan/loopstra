@@ -214,6 +214,18 @@ describe("build stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("a fix on another model than the build's still resumes the build's session, on its own model", async () => {
+    // Claude Code accepts --resume with a different --model (checked against the real CLI), so the build's context carries over.
+    const { repo, ctx, trace } = await planned({ test: "exit 1" }, "stages:\n  build:\n    max_fix_loops: 1\n    steps:\n      fix: cheap\n");
+    const callsFile = join(repo.path, "calls.jsonl");
+    await withEnv({ LOOPSTRA_FAKE_CALLS: callsFile }, () => runBuildStep(ctx));
+    const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+    const flag = (args: string[], name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
+    expect(calls.map((a) => [flag(a, "--model"), flag(a, "--resume")])).toEqual([["sonnet", null], ["haiku", "fake-build"]]);
+    expect(phaseNames(trace)).toContain("fix-1");
+    trace.close(); repo.cleanup();
+  });
+
   test("when the build session cannot be resumed, fix retries once in a fresh session and saves it", async () => {
     const { repo, ctx, trace } = await planned({ test: "bun test" });
     await Bun.write(join(repo.path, "loopstra", "prompts", "build.md"), "{{plan}} FIXTURE:build-broken");

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { validateConfig } from "../../src/config";
-import { Envelopes } from "../../src/envelopes";
-import { STAGE_NAMES, STEPS, STEP_KEYS, groupModel, ownStepModel, stepModel, stepsOf, withModels } from "../../src/models";
+import { Envelopes, type PhaseName } from "../../src/envelopes";
+import { STAGE_NAMES, STEPS, STEP_KEYS, groupModel, ownStepModel, stepModel, stepsOf, withModels, type StepKey } from "../../src/models";
 import { DEFAULTS } from "../../src/setup/defaults";
 
 const BASE = { version: 1, commands: { test: "x" } };
@@ -35,8 +35,9 @@ test("nothing is on max unless a person put it there", () => {
 });
 
 test("every agent phase name is a step key", () => {
-  // Type-level: PhaseName extends StepKey. Runtime: every Envelopes key is in STEP_KEYS.
-  for (const name of Object.keys(Envelopes)) expect(STEP_KEYS as readonly string[]).toContain(name);
+  // Type-level: this assignment compiles only while every PhaseName is a StepKey. Runtime: every Envelopes key is in STEP_KEYS.
+  const names: readonly StepKey[] = Object.keys(Envelopes) as PhaseName[];
+  for (const name of names) expect(STEP_KEYS).toContain(name);
 });
 
 test("the table lists every step key once, and each stage its own steps", () => {

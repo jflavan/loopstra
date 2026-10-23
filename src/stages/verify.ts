@@ -39,7 +39,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   // decided (work run alongside, a cheaper judge; see besideWork), whose failures never mattered to the change.
   const history = () => ctx.trace.phases(ctx.slug).filter((p) => p.status === "fail" && !besideWork(p.name)).map((p) => `${p.name}: ${p.error ?? ""}`).join("\n");
   const learn = (traceName?: string) => agentPhase(ctx, {
-    name: "lessons", traceName, model: "cheap", permissionMode: "default", tools: "read",
+    name: "lessons", traceName, permissionMode: "default", tools: "read",
     vars: { review: a.review, previous: history() }, skills: ctx.cfg.stages.verify.skills,
   });
   // Lessons never reads the done-check's result, so the two may run at the same time. Alongside, it
@@ -99,7 +99,7 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
         if (i.code !== 0) throw new Error(`install failed: ${i.lastLine || `exit ${i.code}`}`);
       }
       return agentPhase(ctx, {
-        name: "done-check", model: "strong", permissionMode: "default", tools: "read+commands", cwd,
+        name: "done-check", permissionMode: "default", tools: "read+commands", cwd,
         vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review },
         skills: ctx.cfg.stages.verify.skills,
       });

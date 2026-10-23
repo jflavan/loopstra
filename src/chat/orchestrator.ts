@@ -256,13 +256,13 @@ export class Orchestrator {
     const capUsd = limitOf(cfg.claude.max_budget_usd);
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
     let r = await runChatAgent({
-      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd,
+      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, capUsd,
       prompt: t.sessionId ? message : await fresh(), resume: t.sessionId,
     });
     // The session is gone (cleared, or another machine): start a new one; this thread's record of its hand-offs carries over.
     if (!r.ok && r.reason === "no-session") {
       t.sessionId = null;
-      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd, prompt: await fresh() });
+      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, capUsd, prompt: await fresh() });
     }
     if (r.sessionId) t.sessionId = r.sessionId;
     // Only what was in the message block counts as seen, and only once the agent has had it: a failed

@@ -4,7 +4,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
-import { AUDIT_EVERY, FIRST_NEEDS, runJudge, templateSha } from "../../src/judges";
+import { AUDIT_EVERY, FIRST_NEEDS, judgeReport, runJudge, templateSha } from "../../src/judges";
 import { claim, release } from "../../src/lanes";
 import { templatePath } from "../../src/package";
 import type { AgentPhaseSpec } from "../../src/phases";
@@ -14,7 +14,7 @@ import { fixture, fixtureDir, judgeNotes, seedCaught, setupRepo, withEnv } from 
 
 const SHADOW = "speed:\n  cheap_judges: shadow\n";
 const FIRST = "speed:\n  cheap_judges: first\n";
-const SPEC_CHECK: AgentPhaseSpec & { name: "spec-check" } = { name: "spec-check", model: "strong", permissionMode: "default", tools: "read", vars: { intent: "add numbers", spec: "# Spec" } };
+const SPEC_CHECK: AgentPhaseSpec & { name: "spec-check" } = { name: "spec-check", permissionMode: "default", tools: "read", vars: { intent: "add numbers", spec: "# Spec" } };
 
 /** A LOOPSTRA_FAKE_FIXTURE_DIR holding these fixtures (name without .jsonl → text), plus the calls and prompts files. */
 function fakeDir(files: Record<string, string>) {
@@ -65,7 +65,7 @@ describe("runJudge off, or not applicable", () => {
 
   for (const [what, config, spec] of [
     ["the cheaper model is the strong one", `${SHADOW}claude:\n  models:\n    default: opus\n`, SPEC_CHECK],
-    ["the judge runs on the default model (stages.review.model: default)", SHADOW, { ...SPEC_CHECK, model: "default" as const }],
+    ["the judge runs on the default model (stages.design.steps.spec-check: default)", `${SHADOW}stages:\n  design:\n    steps:\n      spec-check: default\n`, SPEC_CHECK],
   ] as const) {
     test(`not applicable when ${what}: one session and no row under shadow`, async () => {
       await withRepo(config, {}, async ({ ctx, trace, fake }) => {
@@ -73,6 +73,21 @@ describe("runJudge off, or not applicable", () => {
         expect(fake.models()).toHaveLength(1);
         expect(trace.judgeRows()).toEqual([]);
         expect(judgeNotes(trace)).toEqual([]);
+      });
+    });
+  }
+
+  for (const [mode, config] of [["shadow", SHADOW], ["first", FIRST]] as const) {
+    test(`${mode}: a judge on max gets no cheaper judge`, async () => {
+      await withRepo(`${config}stages:\n  design:\n    steps:\n      spec-check: max\n`, {}, async ({ repo, ctx, trace, fake }) => {
+        // Even a cheaper judge that has earned first does not stand in for one a person put on max.
+        if (mode === "first") seedCaught(repo.path, trace, "spec-check", FIRST_NEEDS);
+        expect(await runJudge(ctx, SPEC_CHECK)).toMatchObject({ ok: true, decidedBy: "strong" });
+        expect(fake.models()).toEqual(["fable"]);
+        expect(trace.phases("add-numbers").map((p) => p.name)).toEqual(["spec-check"]);
+        expect(trace.judgeRows().filter((r) => r.slug === "add-numbers")).toEqual([]);
+        const why = judgeReport(ctx.cfg, [], {}).judges.find((j) => j.judge === "spec-check")!.why;
+        expect(why).toContain("already runs on fable");
       });
     });
   }

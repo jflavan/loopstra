@@ -66,7 +66,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
       return block(ctx, "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.", { detail: { rounds: round, important } });
     }
     const revise = await buildSession(ctx, {
-      name: "revise", traceName: `revise-${round}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { findings: bullets(important), test_command: ctx.cfg.commands.test },
     });
     if (!revise.ok) return block(ctx, revise.note);

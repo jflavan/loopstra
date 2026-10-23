@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { writeMarker, type StepContext } from "../context";
-import { modelFor } from "../config";
 import { Git, withDetachedWorktree } from "../git";
 import { cheapMayDecide, runJudge, type JudgeResult } from "../judges";
-import { phasePrompt, type AgentPhaseSpec } from "../phases";
+import { phaseModel, phasePrompt, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { EARLY } from "../trace";
 import { takeKept, testResult } from "./shared";
@@ -19,14 +18,14 @@ export const EARLY_REVIEW = "review.early";
 export async function reviewPhase(ctx: StepContext, round: number, spec: string, plan: string): Promise<AgentPhaseSpec & { name: "review" }> {
   const stage = ctx.cfg.stages.review;
   return {
-    name: "review", traceName: `review-${round}`, model: stage.model, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
+    name: "review", traceName: `review-${round}`, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
     vars: { spec, plan, test_result: await testResult(ctx, new Git(ctx.worktreeDir)) }, skills: stage.skills,
   };
 }
 
 /** What a review is asked about, hashed: the commit, the model, and the whole rendered prompt. */
-function reviewKey(ctx: StepContext, sha: string, phase: AgentPhaseSpec, prompt: string): string {
-  return createHash("sha256").update([sha, modelFor(ctx.cfg, phase.model), prompt].join("\n")).digest("hex");
+async function reviewKey(ctx: StepContext, sha: string, phase: AgentPhaseSpec, prompt: string): Promise<string> {
+  return createHash("sha256").update([sha, (await phaseModel(ctx, phase)).name, prompt].join("\n")).digest("hex");
 }
 
 /**
@@ -46,7 +45,7 @@ export async function reviewAhead(ctx: StepContext, spec: string, plan: string):
   const dir = join(ctx.root, ".loopstra", "review", ctx.slug);
   const r = await withDetachedWorktree(ctx.git, dir, sha, (cwd) => runJudge(ctx, { ...phase, cwd }, { alongside: 1, prompt }),
     (e) => ctx.trace.event(ctx.slug, "error", { where: "early review", what: "removing the copy of the branch", error: errorText(e) }));
-  return r.ok ? JSON.stringify({ key: reviewKey(ctx, sha, phase, prompt), envelope: r.envelope, decidedBy: r.decidedBy }) : null;
+  return r.ok ? JSON.stringify({ key: await reviewKey(ctx, sha, phase, prompt), envelope: r.envelope, decidedBy: r.decidedBy }) : null;
 }
 
 /** Keeps an early review for round 1 (see reviewAhead). */
@@ -67,7 +66,7 @@ export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & 
   if (kept === null) return notUsed("it could not be read");
   const wt = new Git(ctx.worktreeDir);
   const same = prompt !== null && !ctx.cfg.stages.review.before.length && !(await wt.isDirty())
-    && kept.key === reviewKey(ctx, await wt.headSha(), phase, prompt);
+    && kept.key === (await reviewKey(ctx, await wt.headSha(), phase, prompt));
   if (!same) return notUsed("the change, its plan, the review prompt or its commands moved on since it ran");
   // One the cheaper judge decided stands only if it is still trusted now: since the build step, an
   // audit may have found a miss, or the setting may have moved. A marker without decidedBy is older, and strong.

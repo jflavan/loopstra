@@ -34,7 +34,7 @@ export function runDesignStep(ctx: StepContext): Promise<StepResult> {
 /** Intake, before the spec is written: the priority is recorded when the owner stated none. A question for the owner asks it (see agentPhase). */
 async function intake(ctx: StepContext): Promise<StepResult> {
   const r = await agentPhase(ctx, {
-    name: "intake", model: "cheap", permissionMode: "default", tools: "read",
+    name: "intake", permissionMode: "default", tools: "read",
     vars: { intent: ctx.intent.file.body, priority: ctx.intent.file.frontmatter.priority ?? "not stated" },
   });
   if (!r.ok) return block(ctx, r.note);

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
+import { stepModel } from "./models";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -36,7 +37,8 @@ export interface AgentPhaseSpec {
   name: PhaseName;
   /** Name used in the trace and the phase directory. Defaults to `name` (e.g. fix-1 for the fix phase). */
   traceName?: string;
-  model: ModelRef;
+  /** Runs on this named model instead of the step's (see phaseModel); only the cheaper judge sets it. */
+  model?: ModelRef;
   permissionMode: PermissionMode;
   tools: ToolSet;
   vars: PromptVars;
@@ -420,6 +422,17 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
   return { seq: held.seq, capUsd: held.heldUsd, fromDay: held.heldUsd < limitOf(c.max_budget_usd) };
 }
 
+/**
+ * The named model a phase's session runs on, and the CLI model it names: the spec's own, else its
+ * step's (see stepModel), from the model settings as loopstra/config.yaml has them now (see
+ * StepContext.models).
+ */
+export async function phaseModel(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "model">): Promise<{ ref: ModelRef; name: string }> {
+  const cfg = await ctx.models();
+  const ref = spec.model ?? stepModel(cfg, spec.name);
+  return { ref, name: modelFor(cfg, ref) };
+}
+
 /** The error on a phase row a stop request interrupted, and the note of the step's `stop` event. */
 export const STOPPED_NOTE = "stopped by request; the step resumes on the next start";
 
@@ -436,6 +449,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfCancelled(signal);
   throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
+  // Read as the session starts: a model a person changed since the step began applies from here.
+  const model = await phaseModel(ctx, spec);
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
@@ -449,7 +464,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       cwd,
       prompt,
       schema: jsonSchemaFor(spec.name),
-      model: modelFor(ctx.cfg, spec.model),
+      model: model.name,
       permissionMode: spec.permissionMode,
       allowedTools: toolsFor(ctx, spec.tools),
       disallowedTools: disallowedFor(spec.tools),
@@ -485,7 +500,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
     // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
     interrupt: (r) => unavailable(r.reason)
-      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model: modelFor(ctx.cfg, spec.model) }), note: `${r.reason}: ${r.detail}` }
+      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model: model.name }), note: `${r.reason}: ${r.detail}` }
       : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
   });
   // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
@@ -500,7 +515,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
-  if (spec.endsPause !== false) assistantReached(ctx, modelFor(ctx.cfg, spec.model));
+  if (spec.endsPause !== false) assistantReached(ctx, model.name);
   return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, ...(question ? { asked: question } : {}) };
 }
 

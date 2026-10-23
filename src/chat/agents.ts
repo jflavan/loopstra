@@ -3,15 +3,16 @@ import { runDir } from "../paths";
 import type { z } from "zod";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
 import type { FailureReason } from "../claude";
-import { modelFor, type Config, type ModelRef } from "../config";
+import { modelFor, type Config } from "../config";
 import { jsonSchemaOf } from "../envelopes";
+import { stepModel, type StepKey } from "../models";
 import { promptPath } from "../prompts";
 import { issuesText, tracedSession } from "../sessions";
 import type { Trace } from "../trace";
 
 export { CHAT_SLUG, MIN_SESSION_USD };
 
-type ChatPhase = "orchestrator" | "write-intent";
+type ChatPhase = Extract<StepKey, "orchestrator" | "write-intent">;
 
 /** Every variable a chat prompt template may use. A variable with no value renders as `(none)`. */
 export const CHAT_PROMPT_VARS = ["main_branch", "brief", "existing", "template", "updates", "problems"] as const;
@@ -110,7 +111,6 @@ interface ChatAgentInput<T> {
   name: ChatPhase;
   prompt: string;
   schema: z.ZodType<T>;
-  model: ModelRef;
   /** The most this one session may spend (Infinity: no cap of its own); it also never holds more than is left of the day's chat budget. */
   capUsd: number;
   resume?: string | null;
@@ -142,7 +142,8 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       cwd: o.root,
       prompt: o.prompt,
       schema: jsonSchemaOf(o.schema),
-      model: modelFor(o.cfg, o.model),
+      // Its step's model (see stepModel): chat loads the config for every message, so a change applies on the next turn.
+      model: modelFor(o.cfg, stepModel(o.cfg, o.name)),
       permissionMode: "default",
       allowedTools: CHAT_TOOLS,
       disallowedTools: CHAT_DENIED,

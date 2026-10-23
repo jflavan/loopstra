@@ -1,21 +1,23 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { noSessionCap, roomBeside } from "./budget";
-import { modelFor, type Config, type ModelRef } from "./config";
+import { modelFor, type Config } from "./config";
 import type { StepContext } from "./context";
 import type { Envelope } from "./envelopes";
 import { Git } from "./git";
-import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
+import { stepModel } from "./models";
+import { agentPhase, alongsideFirst, phaseModel, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "./phases";
 import { promptPath } from "./prompts";
 import { AssistantUnavailable } from "./stop";
 import { CHEAP, type JudgeRow, type NewJudgeRow } from "./trace";
 
 /**
  * Cheaper judges (speed.cheap_judges). The spec check, the plan challenge and the review run on the
- * strong model; a cheaper judge (claude.models.default) is asked the same question with the same
- * prompt. shadow: both run, and only the strong judge decides; the two verdicts are recorded. first:
- * once its record has earned it, the cheaper judge runs alone and a pass stands; anything it rejects,
- * or is unsure of, goes to the strong judge, which then decides.
+ * strong model by default; while one does, a cheaper judge (claude.models.default) is asked the same
+ * question with the same prompt. One on any other model (max too) gets no cheaper judge. shadow: both
+ * run, and only the strong judge decides; the two verdicts are recorded. first: once its record has
+ * earned it, the cheaper judge runs alone and a pass stands; anything it rejects, or is unsure of,
+ * goes to the strong judge, which then decides.
  */
 export type JudgeName = "spec-check" | "plan-challenge" | "review";
 
@@ -116,14 +118,9 @@ export function standingWhy(s: FirstStanding): string {
   return `the cheaper judge decides alone only after it has also rejected the last ${FIRST_NEEDS} things the strong judge rejected (${s.caught} so far)`;
 }
 
-/** The model alias each judge runs on: spec-check and plan-challenge always strong; review as configured. */
-function judgeModel(cfg: Config, judge: JudgeName): ModelRef {
-  return judge === "review" ? cfg.stages.review.model : "strong";
-}
-
 /** Why a cheaper judge is never compared with this one, in words, or null when it can be. */
 function notComparable(cfg: Config, judge: JudgeName): string | null {
-  const ref = judgeModel(cfg, judge);
+  const ref = stepModel(cfg, judge); // strong, unless a person set another (review follows its stage)
   if (ref !== "strong") return `${judge} already runs on ${modelFor(cfg, ref)}; there is nothing cheaper to compare`;
   if (modelFor(cfg, "default") === modelFor(cfg, "strong")) return `the cheaper and the strong model are both ${modelFor(cfg, "strong")}; there is nothing cheaper to compare`;
   const gate = judge === "spec-check" ? "spec" : judge === "plan-challenge" ? "plan" : null;
@@ -289,13 +286,15 @@ interface Comparison {
  * a change would read the same; its commit is added, so each round is its own question.
  */
 async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, prompt: string | null): Promise<Comparison | null> {
-  const cheap = modelFor(ctx.cfg, "default");
-  const strong = modelFor(ctx.cfg, "strong");
-  if (ctx.cfg.speed.cheap_judges === "off" || phase.model !== "strong" || cheap === strong) return null;
+  if (ctx.cfg.speed.cheap_judges === "off") return null;
+  // The models as the sessions will read them (see phaseModel). A judge on anything but strong (max too) is not compared.
+  const strong = await phaseModel(ctx, phase);
+  const cheap = (await phaseModel(ctx, { ...phase, model: "default" })).name;
+  if (strong.ref !== "strong" || cheap === strong.name) return null;
   const template = templateSha(ctx.root, phase.name);
   if (template === null || prompt === null) return null;
   const question = phase.name === "review" ? `${await new Git(phase.cwd ?? ctx.worktreeDir).headSha()}\n${prompt}` : prompt;
-  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong, template_sha: template }, promptSha: sha256(question) };
+  return { key: { judge: phase.name, cheap_model: cheap, strong_model: strong.name, template_sha: template }, promptSha: sha256(question) };
 }
 
 /** The strong judge's verdict: failed when its session did not end ok. */

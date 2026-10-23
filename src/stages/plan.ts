@@ -1,9 +1,9 @@
 import { roomBeside } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
-import { modelFor, type Config } from "../config";
+import type { Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
 import { scanRepo, type Status } from "../intents";
-import { agentPhase, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, phaseModel, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
@@ -56,8 +56,8 @@ export const PLAN_AHEAD = "plan.ahead";
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** What a plan session is asked: its model and the whole prompt (intent, spec, concerns, skills, template). */
-function planKey(ctx: StepContext, phase: AgentPhaseSpec, prompt: string): string {
-  return [modelFor(ctx.cfg, phase.model), prompt].join("\n");
+async function planKey(ctx: StepContext, phase: AgentPhaseSpec, prompt: string): Promise<string> {
+  return [(await phaseModel(ctx, phase)).name, prompt].join("\n");
 }
 
 /**
@@ -107,7 +107,7 @@ async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | nu
     return p;
   }));
   if (sent === null || !r.ok) return null;
-  return JSON.stringify({ key: planKey(ctx, phase, sent), base: await ctx.readCommit(), envelope: r.envelope });
+  return JSON.stringify({ key: await planKey(ctx, phase, sent), base: await ctx.readCommit(), envelope: r.envelope });
 }
 
 /** Keeps the plan written ahead for the plan step (see planAheadRun). */
@@ -154,7 +154,7 @@ async function whyNotUsed(ctx: StepContext, phase: AgentPhaseSpec, prompt: strin
   const ruled = ruledOut(ctx.cfg);
   if (ruled !== null) return ruled;
   if (prompt === null) return "the plan prompt is missing";
-  if (kept.key !== planKey(ctx, phase, prompt)) return "the intent, the spec, the plan prompt or its model changed";
+  if (kept.key !== (await planKey(ctx, phase, prompt))) return "the intent, the spec, the plan prompt or its model changed";
   // The code the plan read against the code this step reads; the loop's own commits (statuses,
   // artifacts, the queue) are all under intent/. A missing base commit counts as a change.
   if (await codeDiffers(ctx.git, base, await ctx.readCommit())) return "the code on main changed";

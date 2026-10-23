@@ -21,7 +21,7 @@ describe("one session runner for the loop and chat", () => {
     const trace = Trace.open(repo.path);
     try {
       await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE, LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "denied.jsonl") }, async () => {
-        const r = await runChatAgent({ root: repo.path, cfg, trace, name: "orchestrator", prompt: "hello", schema: z.object({ reply: z.string() }), model: "cheap", capUsd: 1 });
+        const r = await runChatAgent({ root: repo.path, cfg, trace, name: "orchestrator", prompt: "hello", schema: z.object({ reply: z.string() }), capUsd: 1 });
         expect(r).toMatchObject({ ok: false, reason: "invalid-envelope" });
         const row = trace.phases("_chat")[0]!;
         expect(row.status).toBe("fail");

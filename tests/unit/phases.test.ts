@@ -5,7 +5,8 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
+import { stepModel } from "../../src/models";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { hookSettings } from "../../src/package";
 import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lanes";
@@ -78,6 +79,54 @@ describe("agentPhase", () => {
     const r = await agentPhase(ctx, { name: "design", model: "strong", permissionMode: "default", tools: "read", vars: {} });
     expect(r.ok).toBe(false);
     expect(trace.phases("x")[0]?.status).toBe("fail");
+    trace.close(); repo.cleanup();
+  });
+});
+
+describe("phaseModel: each session's model, read fresh from the step table", () => {
+  test("a setting saved mid-step reaches the next session", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\nclaude:\n  models:\n    max: claude-fable-5-1\nstages:\n  verify:\n    steps:\n      done-check: max\n");
+    expect(await phaseModel(ctx, { name: "done-check" })).toEqual({ ref: "max", name: "claude-fable-5-1" });
+    // The tick's copy is left as it was: only the session's model is read again.
+    expect(stepModel(ctx.cfg, "done-check")).toBe("strong");
+    expect(ctx.cfg.claude.models.max).toBe("fable");
+    trace.close(); repo.cleanup();
+  });
+
+  test("a config that stops loading mid-tick keeps the tick's models, and says so once per problem", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\nstages:\n  design:\n    steps:\n      intak: max\n");
+    const errors = () => trace.events("_loop").filter((e) => e.type === "error" && (JSON.parse(e.payload) as { where?: string }).where === "models");
+    expect(await phaseModel(ctx, { name: "intake" })).toEqual({ ref: "cheap", name: "haiku" });
+    expect(errors()).toHaveLength(1);
+    expect(await phaseModel(ctx, { name: "intake" })).toEqual({ ref: "cheap", name: "haiku" });
+    expect(errors()).toHaveLength(1);
+    expect(errors()[0]!.payload).toContain("intak");
+    // Another problem is traced again.
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\nstages:\n  design:\n    steps:\n      intake: maxx\n");
+    expect(await phaseModel(ctx, { name: "intake" })).toEqual({ ref: "cheap", name: "haiku" });
+    expect(errors()).toHaveLength(2);
+    trace.close(); repo.cleanup();
+  });
+
+  test("the override wins", async () => {
+    const { repo, ctx, trace } = await setup();
+    expect(await phaseModel(ctx, { name: "spec-check", model: "default" })).toEqual({ ref: "default", name: "sonnet" });
+    expect(await phaseModel(ctx, { name: "spec-check" })).toEqual({ ref: "strong", name: "opus" });
+    trace.close(); repo.cleanup();
+  });
+
+  test("a lessons session runs on its step's model, as the file says when it starts", async () => {
+    const { repo, ctx, trace } = await setup();
+    const argsFile = join(repo.path, "args.json");
+    const lessons = () => agentPhase(ctx, { name: "lessons", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const model = async () => { const { args } = (await Bun.file(argsFile).json()) as { args: string[] }; return args[args.indexOf("--model") + 1]; };
+    expect((await lessons()).ok).toBe(true);
+    expect(await model()).toBe("haiku");
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\nstages:\n  verify:\n    steps:\n      lessons: default\n");
+    expect((await lessons()).ok).toBe(true);
+    expect(await model()).toBe("sonnet");
     trace.close(); repo.cleanup();
   });
 });

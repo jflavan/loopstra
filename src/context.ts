@@ -3,12 +3,13 @@ import { join } from "node:path";
 import { z } from "zod";
 import { readJsonAs, writeFileAtomic } from "./fsutil";
 import { loopstraDir, runDir } from "./paths";
-import type { Config } from "./config";
+import { loadConfig, type Config } from "./config";
 import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError } from "./git";
 import { onCheckout } from "./lanes";
 import { effectivePriority, parseIntentFile, readIntent, writeChangeFile, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { RecordDraft, type DraftChange } from "./record-draft";
 import { errorText } from "./shell";
+import { withModels } from "./models";
 import { RecordRaced, RecordUnsettled, throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
@@ -40,6 +41,20 @@ export class StepContext {
   get worktreeDir(): string { return join(this.root, ".loopstra", "worktrees", this.slug); }
   get branch(): string { return `intent/${this.slug}`; }
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
+
+  /**
+   * The step's config with its model settings read again from loopstra/config.yaml, so a change a
+   * person saved mid-step reaches the next session. When the file does not load now, the step's own
+   * copy stands, and the problem is traced once while it stays the same.
+   */
+  async models(): Promise<Config> {
+    try {
+      return withModels(this.cfg, await loadConfig(this.root));
+    } catch (e) {
+      this.trace.eventOnChange("_loop", "error", '"where":"models"', { where: "models", error: errorText(e) }, "error");
+      return this.cfg;
+    }
+  }
 
   /**
    * The commit this step's read-only sessions read: main's when the step first asks. It stays the

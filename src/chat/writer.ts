@@ -121,8 +121,7 @@ export async function writeIntents(o: {
     // The writer's tries share one cap; with too little of it left, there is no second try.
     if (o.maxBudgetUsd - cost < MIN_SESSION_USD) return { ok: false, costUsd: cost, problem: `The writer reached its spending limit before what it wrote passed the checks: ${problems.split("\n").map((l) => l.replace(/^- /, "")).join(" ")}` };
     const r = await runChatAgent({
-      root: o.root, cfg: o.cfg, trace: o.trace, name: "write-intent", prompt, schema: WriterResult,
-      model: o.cfg.stages.design.model, capUsd: o.maxBudgetUsd - cost,
+      root: o.root, cfg: o.cfg, trace: o.trace, name: "write-intent", prompt, schema: WriterResult, capUsd: o.maxBudgetUsd - cost,
     });
     cost += r.costUsd;
     if (!r.ok && r.budgetUsedUp) {
