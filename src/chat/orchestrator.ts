@@ -278,9 +278,10 @@ export class Orchestrator {
       return;
     }
     if (!r.ok) {
+      const orchestratorModel = stepModel(cfg, "orchestrator");
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
-        : r.reason === "model" ? badModelNote(stepModel(cfg, "orchestrator"), modelFor(cfg, stepModel(cfg, "orchestrator")), "orchestrator")
+        : r.reason === "model" ? badModelNote(orchestratorModel, modelFor(cfg, orchestratorModel), "orchestrator")
         : r.reason === "budget" ? "That answer hit its spending limit before it finished. Try asking something narrower."
         : r.reason === "timeout" ? "That took too long to answer. Please try again, or ask something narrower."
         : "Something went wrong answering that. Please try again; an engineer can find the details in the trace.");
@@ -409,6 +410,8 @@ export class Orchestrator {
       // Stopped by the budget: the proposal still stands, so a later yes writes it up.
       if (out.budget) t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
       this.store.noteSince(t, `${plainName(m.authorName)} said yes to handing off "${h.title.trim()}", but it could not be written up: ${out.problem}`);
+      // A model name Claude Code does not accept is said as its own sentence, which already says what to do.
+      if (out.badModel) { await say(out.problem); return; }
       await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`);
       return;
     }

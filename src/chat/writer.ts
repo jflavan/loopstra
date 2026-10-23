@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "../config";
+import { modelFor, type Config } from "../config";
 import { checkConsistency, parseIntentFile, scanRepo, SLUG, type Intent, type Status } from "../intents";
+import { badModelNote, stepModel } from "../models";
 import { templatePath } from "../package";
 import { localDate } from "../signals";
 import type { Trace } from "../trace";
@@ -75,7 +76,7 @@ export function draftProblems(drafts: DraftIntent[], rendered: string[], existin
 type WriteOutcome =
   | { ok: true; intents: WrittenIntent[]; summary: string; costUsd: number }
   /** `budget`: stopped by the day's chat budget, so the same hand-off can be confirmed again later. */
-  | { ok: false; problem: string; costUsd: number; budget?: "today" | "held" };
+  | { ok: false; problem: string; costUsd: number; budget?: "today" | "held"; badModel?: true };
 
 /** The repository's changes as `slug: status` lines, for the writer. */
 function existingList(existing: Map<string, Status | "unreadable">): string {
@@ -126,6 +127,10 @@ export async function writeIntents(o: {
     cost += r.costUsd;
     if (!r.ok && r.budgetUsedUp) {
       return { ok: false, costUsd: cost, budget: r.budgetUsedUp, problem: r.budgetUsedUp === "held" ? "Other conversations are using what is left of today's chat budget right now; say yes again in a few minutes." : `Today's chat budget is used up; say yes again tomorrow, or an engineer can raise or remove the limit with \`loopstra setup budgets\`.` };
+    }
+    if (!r.ok && r.reason === "model") {
+      const ref = stepModel(o.cfg, "write-intent");
+      return { ok: false, costUsd: cost, problem: badModelNote(ref, modelFor(o.cfg, ref), "write-intent"), badModel: true };
     }
     if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };

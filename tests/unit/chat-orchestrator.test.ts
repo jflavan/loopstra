@@ -70,6 +70,19 @@ describe("the orchestrator", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a bad writer model is said in chat, after the yes", async () => {
+    const r = await chatRepo({ config: "claude:\n  models:\n    strong: opuss\nstages:\n  design:\n    model: strong\n" });
+    try {
+      await r.answer("orchestrator", 1, turn("Here's the plan.", { handoff: { title: "CSV export", brief: "Export reports as CSV.", updates: [] } }));
+      await Bun.write(join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR!, "write-intent-1.jsonl"), await Bun.file(join(import.meta.dir, "..", "fake-claude", "fixtures", "bad-model.jsonl")).text());
+      const o = new Orchestrator(r.root);
+      const out = sink();
+      await o.handle(message("Let's do CSV export"), out.send);
+      await o.handle(message("yes"), out.send);
+      expect(out.sent.at(-1)).toBe(badModelNote("strong", "opuss", "write-intent"));
+    } finally { r.cleanup(); }
+  });
+
   test("a hand-off waits for a yes; anything else goes back into the conversation and nothing is written", async () => {
     const r = await chatRepo();
     try {
