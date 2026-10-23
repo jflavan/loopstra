@@ -152,8 +152,9 @@ A new page at `/settings`, with a Rail entry under Spend. Its one section for no
   ago (for example `opus → claude-opus-5-5, 2h ago`), or "not used yet".
 - **Stages:** one group per stage, and chat. The stage's own model is a picker of the four. Under it
   each step is a row with a picker. A step that has no setting of its own shows its default in a
-  muted way ("follows build: default", or "strong") and offers it as "Default". Picking a named
-  model writes `steps.<key>`. Picking "Default" removes the key.
+  muted way ("follows build: default", or "strong") and offers it as setup's word with the default
+  shown, "auto (follows build: default)". Picking a named model writes `steps.<key>`. Picking "auto"
+  removes the key.
 - **Chat:** its first picker is the orchestrator's model (`chat.model`), in the place a stage's own
   model goes. `write-intent` is the step row under it.
 - `max` is in every picker, and is never preselected.
@@ -243,7 +244,7 @@ outage.
   "`strong` is `opuss`, which Claude Code does not accept as a model (step spec-check). Change it in
   Settings or `loopstra setup models`, then retry." It lands in the inbox like other blocks, and
   retry works as it does for them.
-- *Last ran on* shows the failure for that named model ("failed: not a model") until a session on it
+- *Last ran on* shows the failure for that named model ("failed: opuss is not a model") until a session on it
   gets through.
 - Chat's agents (`orchestrator`, `write-intent`) are not change steps and leave no block. There the
   same sentence is chat's reply to the person, and the turn ends. *(My call.)*

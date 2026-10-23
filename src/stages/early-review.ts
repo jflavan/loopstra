@@ -23,9 +23,12 @@ export async function reviewPhase(ctx: StepContext, round: number, spec: string,
   };
 }
 
-/** What a review is asked about, hashed: the commit, the model, and the whole rendered prompt. */
-async function reviewKey(ctx: StepContext, sha: string, phase: AgentPhaseSpec, prompt: string): Promise<string> {
-  return createHash("sha256").update([sha, (await phaseModel(ctx, phase)).name, prompt].join("\n")).digest("hex");
+/**
+ * What a review is asked about, hashed: the commit, the model (the CLI name it ran on, or would run on
+ * now), and the whole rendered prompt.
+ */
+function reviewKey(sha: string, model: string, prompt: string): string {
+  return createHash("sha256").update([sha, model, prompt].join("\n")).digest("hex");
 }
 
 /**
@@ -45,7 +48,8 @@ export async function reviewAhead(ctx: StepContext, spec: string, plan: string):
   const dir = join(ctx.root, ".loopstra", "review", ctx.slug);
   const r = await withDetachedWorktree(ctx.git, dir, sha, (cwd) => runJudge(ctx, { ...phase, cwd }, { alongside: 1, prompt }),
     (e) => ctx.trace.event(ctx.slug, "error", { where: "early review", what: "removing the copy of the branch", error: errorText(e) }));
-  return r.ok ? JSON.stringify({ key: await reviewKey(ctx, sha, phase, prompt), envelope: r.envelope, decidedBy: r.decidedBy }) : null;
+  // The model the judge ran on: one a person changed while it ran is not the one it reviewed with.
+  return r.ok ? JSON.stringify({ key: reviewKey(sha, r.model, prompt), envelope: r.envelope, decidedBy: r.decidedBy }) : null;
 }
 
 /** Keeps an early review for round 1 (see reviewAhead). */
@@ -65,8 +69,9 @@ export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & 
   const notUsed = (why: string) => { ctx.trace.event(ctx.slug, "command", { command: "early review", note: `not used: ${why}` }); return null; };
   if (kept === null) return notUsed("it could not be read");
   const wt = new Git(ctx.worktreeDir);
+  const model = (await phaseModel(ctx, phase)).name;
   const same = prompt !== null && !ctx.cfg.stages.review.before.length && !(await wt.isDirty())
-    && kept.key === (await reviewKey(ctx, await wt.headSha(), phase, prompt));
+    && kept.key === reviewKey(await wt.headSha(), model, prompt);
   if (!same) return notUsed("the change, its plan, the review prompt or its commands moved on since it ran");
   // One the cheaper judge decided stands only if it is still trusted now: since the build step, an
   // audit may have found a miss, or the setting may have moved. A marker without decidedBy is older, and strong.
@@ -75,5 +80,5 @@ export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & 
     return notUsed("it was decided by the cheaper judge, which is no longer trusted to decide alone");
   }
   ctx.trace.event(ctx.slug, "command", { command: "early review", note: `${phase.traceName ?? phase.name} uses the review that ran alongside the verifier` });
-  return { ok: true, envelope: kept.envelope, sessionId: null, costUsd: 0, decidedBy };
+  return { ok: true, envelope: kept.envelope, sessionId: null, costUsd: 0, model, decidedBy };
 }

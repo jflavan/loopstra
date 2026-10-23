@@ -16,7 +16,7 @@ import { RECENT_DONE_MS, splitFinished, UP_NEXT, upNext } from "../../src/ui/boa
 import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
-import { pendingText, pickerChoices } from "../../src/ui/settings";
+import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
@@ -1154,11 +1154,20 @@ describe("the agents screen's tiles", () => {
 });
 
 describe("the Settings page", () => {
-  test("a step can be put back to its default; a group or a named model cannot", () => {
-    expect(pickerChoices({ path: "stages.verify.steps.lessons", own: null }).map((c) => c.label)).toEqual(["Default", "cheap", "default", "strong", "max"]);
-    expect(pickerChoices({ path: "stages.verify.steps.lessons", own: null })[0]!.value).toBeNull();
-    expect(pickerChoices({ path: "stages.verify.model", own: null }).map((c) => c.label)).toEqual(["cheap", "default", "strong", "max"]);
-    expect(pickerChoices({ path: null, own: null }).map((c) => c.value)).toEqual(["cheap", "default", "strong", "max"]);
+  test("a step can be put back to its default, offered as setup's auto with the default shown; a group or a named model cannot", () => {
+    expect(pickerChoices({ path: "stages.verify.steps.lessons", byDefault: "cheap" }).map((c) => c.label)).toEqual(["auto (cheap)", "cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: "stages.build.steps.revise", byDefault: "follows build: default" }).map((c) => c.label)).toEqual(["auto (follows build: default)", "cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: "stages.verify.steps.lessons", byDefault: "cheap" })[0]!.value).toBeNull();
+    expect(pickerChoices({ path: "stages.verify.model" }).map((c) => c.label)).toEqual(["cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: null }).map((c) => c.value)).toEqual(["cheap", "default", "strong", "max"]);
+  });
+  test("last ran on names what the session was asked for, not what the name holds now", () => {
+    const at = Date.parse("2026-10-23T12:00:00.000Z");
+    const ts = "2026-10-23T10:00:00.000Z";
+    expect(lastRanText(null, at)).toBe("not used yet");
+    expect(lastRanText({ asked: "opus", ran: "claude-opus-5-5", result: "ok", ts }, at)).toBe("opus → claude-opus-5-5, 2h ago");
+    expect(lastRanText({ asked: "opus", ran: null, result: "ok", ts }, at)).toBe("opus → opus, 2h ago");
+    expect(lastRanText({ asked: "opuss", ran: null, result: "bad-model", ts }, at)).toBe("failed: opuss is not a model");
   });
   test("a pending change says whether it waits for the loop", () => {
     expect(pendingText("stopped")).toBe("Saved when the loop next runs.");

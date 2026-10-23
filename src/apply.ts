@@ -397,7 +397,7 @@ const UNCOMMITTED_CONFIG = `${CONFIG_REL} has changes in the main checkout that 
  * finishes it as saved. Refused with nothing committed: a path that is not a model setting, a value it
  * cannot take or a config that would not load with it (the reason is the result), a file that
  * changed since the page read it (`version`), and a file with edits in the main checkout that are
- * not committed, which the record would otherwise commit with it. The last two are checked inside the
+ * not committed (or one the last commit does not have), which the record would otherwise commit with it. The last two are checked inside the
  * record, under the checkout lock and after a record a kill cut short is finished (which may bring the
  * file up itself). There is no change, so the result has no status, and it is traced under _loop.
  */
@@ -424,6 +424,9 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
     // 1 is "it differs"; anything else is git failing, which must not read as either answer.
     if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
     if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    // diff says nothing of a file the last commit does not have (never committed, or removed from git):
+    // the record would commit it whole, with whatever is in it. Any failure here refuses, which commits nothing.
+    if ((await git.run(["cat-file", "-e", `HEAD:${CONFIG_REL}`], { allowFail: true })).code !== 0) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
     const text = draft.read(CONFIG_REL);
     if (text === null) return refuse(() => notSaved(`there is no ${CONFIG_REL} in the main code.`));
     if (configVersion(text) !== req.version) return refuse(() => done("stale", false, STALE_SETTINGS));

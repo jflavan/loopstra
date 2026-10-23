@@ -26,6 +26,13 @@ describe("settings", () => {
   test("a named model needs one word; the others need a named model, and only a step may be unset", () => {
     expect(settingProblem(["claude", "models", "strong"], "claude opus")).toBe("A model name has no spaces, like sonnet or claude-opus-5-5.");
     expect(settingProblem(["claude", "models", "strong"], "opus[1m]")).toBeNull();
+    // Never a flag, a control character or an endless name: the name is passed to claude --model.
+    expect(settingProblem(["claude", "models", "strong"], "--dangerously-skip-permissions")).toBe("A model name does not start with -, like sonnet or claude-opus-5-5.");
+    expect(settingProblem(["claude", "models", "strong"], "opus\u0000")).toBe("A model name has only printable characters, like sonnet or claude-opus-5-5.");
+    expect(settingProblem(["claude", "models", "strong"], "opus\u007f")).toBe("A model name has only printable characters, like sonnet or claude-opus-5-5.");
+    expect(settingProblem(["claude", "models", "strong"], "o".repeat(201))).toBe("A model name is at most 200 characters long.");
+    expect(settingProblem(["claude", "models", "strong"], "o".repeat(200))).toBeNull();
+    expect(settingProblem(["claude", "models", "strong"], "claude-opus-5-5")).toBeNull();
     expect(settingProblem(["stages", "build", "model"], null)).not.toBeNull();
     expect(settingProblem(["claude", "models", "cheap"], null)).not.toBeNull();
     expect(settingProblem(["stages", "build", "model"], "opus")).not.toBeNull();

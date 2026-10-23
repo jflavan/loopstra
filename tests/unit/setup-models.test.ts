@@ -67,6 +67,17 @@ describe("the models section", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a model name is never a flag, a control character or longer than 200 characters", async () => {
+    const r = configRepo(BASE);
+    try {
+      const { text, shown } = await askSection(models, r.root, ["--some-flag", "son\u0007net", "s".repeat(201), "claude-sonnet-5", ...Array<string>(15).fill("")]);
+      expect(shown).toContain("A model name does not start with -, like sonnet or claude-opus-5-5.");
+      expect(shown).toContain("A model name has only printable characters, like sonnet or claude-opus-5-5.");
+      expect(shown).toContain("A model name is at most 200 characters long.");
+      expect(parse(text).claude).toEqual({ models: { cheap: "claude-sonnet-5" } });
+    } finally { r.cleanup(); }
+  });
+
   test("--defaults adds nothing", async () => {
     const r = configRepo(BASE);
     try {

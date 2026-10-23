@@ -209,7 +209,8 @@ export interface SettingsView {
   version: string | null;
   /** Why the config does not load; the page shows this instead of the pickers. */
   problem: string | null;
-  models: Array<{ ref: ModelRef; name: string; last: { ran: string | null; result: "ok" | "bad-model"; ts: string } | null }>;
+  /** `last`: the newest session on the named model: the name it was asked for then, and the model Claude Code reported. */
+  models: Array<{ ref: ModelRef; name: string; last: { asked: string; ran: string | null; result: "ok" | "bad-model"; ts: string } | null }>;
   groups: Array<{
     group: StepGroup; model: ModelRef;
     /** Where the group's model is set: "stages.design.model" or "chat.model". */

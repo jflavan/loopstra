@@ -55,9 +55,12 @@ export const PLAN_AHEAD = "plan.ahead";
 /** A full commit id (SHA-1, or SHA-256). */
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
-/** What a plan session is asked: its model and the whole prompt (intent, spec, concerns, skills, template). */
-async function planKey(ctx: StepContext, phase: AgentPhaseSpec, prompt: string): Promise<string> {
-  return [(await phaseModel(ctx, phase)).name, prompt].join("\n");
+/**
+ * What a plan session is asked: its model (the CLI name it ran on, or would run on now) and the whole
+ * prompt (intent, spec, concerns, skills, template).
+ */
+function planKey(model: string, prompt: string): string {
+  return [model, prompt].join("\n");
 }
 
 /**
@@ -107,7 +110,8 @@ async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | nu
     return p;
   }));
   if (sent === null || !r.ok) return null;
-  return JSON.stringify({ key: await planKey(ctx, phase, sent), base: await ctx.readCommit(), envelope: r.envelope });
+  // The model the session ran on: one a person changed while it ran is not the one it was written by.
+  return JSON.stringify({ key: planKey(r.model, sent), base: await ctx.readCommit(), envelope: r.envelope });
 }
 
 /** Keeps the plan written ahead for the plan step (see planAheadRun). */
@@ -132,8 +136,10 @@ async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "
   const kept = takeKept(ctx, PLAN_AHEAD, "plan");
   if (kept === undefined) return null;
   let why: string | null;
+  let model = "";
   try {
-    why = await whyNotUsed(ctx, phase, prompt, kept);
+    model = (await phaseModel(ctx, phase)).name;
+    why = await whyNotUsed(ctx, model, prompt, kept);
   } catch (e) {
     if (notTheStepsFault(e)) throw e;
     why = `it could not be checked: ${errorText(e)}`;
@@ -144,17 +150,17 @@ async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "
   }
   ctx.trace.event(ctx.slug, "command", { command: "plan ahead", note: "the plan step uses the plan written while the spec was being checked" });
   // Plan sessions are never resumed, so a missing session id loses nothing.
-  return { ok: true, envelope: kept!.envelope, sessionId: null, costUsd: 0 };
+  return { ok: true, envelope: kept!.envelope, sessionId: null, costUsd: 0, model };
 }
 
-/** In plain words, the first rule the kept plan breaks; null when it keeps them all. */
-async function whyNotUsed(ctx: StepContext, phase: AgentPhaseSpec, prompt: string | null, kept: Kept<"plan"> | null): Promise<string | null> {
+/** In plain words, the first rule the kept plan breaks, for a plan step on `model`; null when it keeps them all. */
+async function whyNotUsed(ctx: StepContext, model: string, prompt: string | null, kept: Kept<"plan"> | null): Promise<string | null> {
   const { base } = kept?.saved ?? {};
   if (!kept || typeof base !== "string" || !COMMIT.test(base)) return "it could not be read";
   const ruled = ruledOut(ctx.cfg);
   if (ruled !== null) return ruled;
   if (prompt === null) return "the plan prompt is missing";
-  if (kept.key !== (await planKey(ctx, phase, prompt))) return "the intent, the spec, the plan prompt or its model changed";
+  if (kept.key !== planKey(model, prompt)) return "the intent, the spec, the plan prompt or its model changed";
   // The code the plan read against the code this step reads; the loop's own commits (statuses,
   // artifacts, the queue) are all under intent/. A missing base commit counts as a change.
   if (await codeDiffers(ctx.git, base, await ctx.readCommit())) return "the code on main changed";

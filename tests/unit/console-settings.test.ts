@@ -28,13 +28,13 @@ describe("the settings view", () => {
     } finally { t.cleanup(); }
   });
 
-  test("the last run of a named model is the name Claude Code reported", async () => {
+  test("the last run of a named model is the name it was asked for and the name Claude Code reported", async () => {
     const t = tempDir();
     try {
       await config(t.path);
       withTrace(t.path, (tr) => tr.recordModelRun({ ref: "strong", asked: "opus", ran: "claude-opus-5-5", result: "ok", slug: "a-b", seq: 1 }));
       const v = await view(t.path);
-      expect(v.models[2]!.last?.ran).toBe("claude-opus-5-5");
+      expect(v.models[2]!.last).toMatchObject({ asked: "opus", ran: "claude-opus-5-5", result: "ok" });
       expect(v.models[0]!.last).toBeNull();
     } finally { t.cleanup(); }
   });

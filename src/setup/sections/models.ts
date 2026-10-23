@@ -10,8 +10,20 @@ const NAMES = DEFAULTS.claude.models;
 /** The word that removes a step's own setting (`default` is already the name of a model). */
 const AUTO = "auto";
 
-/** A model name is one word, like sonnet or claude-opus-5-5. */
-export const modelName = (s: string) => (/\s/.test(s) ? "A model name has no spaces, like sonnet or claude-opus-5-5." : null);
+/** The longest model name taken; a real one is far shorter. */
+const MAX_NAME = 200;
+
+/**
+ * Why a model name cannot be taken, or null: it is one word, like sonnet or claude-opus-5-5. It is
+ * passed to `claude --model`, so it never starts with - (it would read as a flag), holds no control
+ * character, and is at most MAX_NAME characters.
+ */
+export function modelName(s: string): string | null {
+  if (/\s/.test(s)) return "A model name has no spaces, like sonnet or claude-opus-5-5.";
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(s)) return "A model name has only printable characters, like sonnet or claude-opus-5-5.";
+  if (s.startsWith("-")) return "A model name does not start with -, like sonnet or claude-opus-5-5.";
+  return s.length > MAX_NAME ? `A model name is at most ${MAX_NAME} characters long.` : null;
+}
 
 const isRef = (v: unknown): v is ModelRef => typeof v === "string" && (MODEL_REFS as readonly string[]).includes(v);
 

@@ -244,6 +244,27 @@ describe("plan written ahead", () => {
     });
   }
 
+  test("not used when the plan's model changed while it was being written: it is keyed on the model it ran on", async () => {
+    // The plan written ahead runs on opus (strong); while it runs, a person moves the plan stage to default (sonnet).
+    const dir = fixtureDir({});
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const s = await designed("", async (path) => {
+          const config = configPath(path);
+          const moved = JSON.stringify({ type: "fake_action", write: { path: config, content: `${readFileSync(config, "utf8")}stages:\n  plan:\n    model: default\n` } });
+          writeFileSync(join(dir.path, "plan@opus.jsonl"), `${moved}\n${fixture("plan")}`);
+        });
+        expect(readFileSync(configPath(s.repo.path), "utf8")).toContain("model: default"); // moved while it ran
+        await runPlanStep(s.ctx);
+        expect(phaseNames(s.trace).slice(s.designPhases)).toEqual(["plan", "plan-challenge"]);
+        expect(planAheadNotes(s.trace).at(-1)).toBe(`not used: ${ASKED_ELSE}`);
+        s.trace.close(); s.repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
   test("still used whatever is left uncommitted in the main checkout: no session sees it, during the design step or after", async () => {
     const { repo, ctx, trace, designPhases } = await designed("", async (path) => { await Bun.write(join(path, "README.md"), "# test repo\n\nEdited.\n"); });
     await new Git(repo.path).run(["checkout", "--", "README.md"]);

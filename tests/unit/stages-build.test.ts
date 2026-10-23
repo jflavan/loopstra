@@ -13,7 +13,7 @@ import { readMarker, writeMarker, writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
-import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
+import { fixture, fixtureDir, judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
@@ -523,6 +523,29 @@ describe("the first review alongside the verifier", () => {
     await runMergeStep(ctx);
     expect(reviews(trace)).toEqual(["review-1"]);
     trace.close(); repo.cleanup();
+  });
+
+  test("a review whose model changed while it ran is not used: it is keyed on the model it ran on, and round 1 runs again", async () => {
+    // The early review runs on opus (strong); while it runs, a person moves the review stage to max (fable).
+    const dir = fixtureDir({});
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await planned({ test: "bun test" });
+        const config = configPath(repo.path);
+        const moved = JSON.stringify({ type: "fake_action", write: { path: config, content: `${await Bun.file(config).text()}stages:\n  review:\n    model: max\n` } });
+        await Bun.write(join(dir.path, "review@opus.jsonl"), `${moved}\n${fixture("review")}`);
+        await runBuildStep(ctx);
+        expect(existsSync(join(ctx.runDir, "review.early"))).toBe(true);
+        expect(await Bun.file(config).text()).toContain("model: max"); // moved while it ran
+        await ctx.reload();
+        await runMergeStep(ctx);
+        expect(earlyNotes(trace)).toEqual(["not used: the change, its plan, the review prompt or its commands moved on since it ran"]);
+        expect(reviews(trace)).toEqual(["review-1"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
   });
 
   test("an early review that cannot reach the assistant is dropped; the build still ends at reviewing", async () => {

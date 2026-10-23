@@ -38,7 +38,7 @@ export async function settingsView(root: string, trace: Trace): Promise<Settings
     problem: null,
     models: MODEL_REFS.map((ref) => {
       const run = runs[ref];
-      return { ref, name: modelFor(cfg, ref), last: run ? { ran: run.ran, result: run.result, ts: run.ts } : null };
+      return { ref, name: modelFor(cfg, ref), last: run ? { asked: run.asked, ran: run.ran, result: run.result, ts: run.ts } : null };
     }),
     groups: GROUPS.map((group) => ({
       group,

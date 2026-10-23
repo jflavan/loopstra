@@ -9,6 +9,7 @@ import { readIntent } from "../../src/intents";
 import { stepModel } from "../../src/models";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
+import { settingsView } from "../../src/console/settings";
 import { configVersion } from "../../src/settings";
 import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
@@ -1002,6 +1003,26 @@ describe("settings requests", () => {
     }
   });
 
+  test("a config that starts with a byte order mark has the version the page read, and its setting is saved", async () => {
+    const r = await chatRepo();
+    try {
+      writeFileSync(join(r.root, CONFIG), `﻿${config(r.root)}`);
+      await new Git(r.root).commitAll("a BOM");
+      // The version the console's page gets (it reads the file as Bun.file(...).text()).
+      const trace = Trace.open(r.root);
+      let version: string | null;
+      try { version = (await settingsView(r.root, trace)).version; } finally { trace.close(); }
+      // The applier hashes the file as the record's draft reads it, mark and all.
+      expect(version).toBe(configVersion(new RecordDraft(r.root, "_settings", [CONFIG]).read(CONFIG)!));
+      const q = setting(r.root, "chat.model", "strong", version!);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, text: "Saved: chat.model is now strong. Sessions that start from now on use it." });
+      expect((await loadConfig(r.root)).chat.model).toBe("strong");
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("a settings request with an old version is refused", async () => {
     const r = await chatRepo();
     try {
@@ -1046,6 +1067,24 @@ describe("settings requests", () => {
       expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: DIRTY });
       expect(await commitCount(r.root)).toBe(commits);
       expect(config(r.root)).toBe(edited);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, result: "refused" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a config that is not in the last commit (never committed, or removed from git) is never committed by a setting", async () => {
+    const r = await chatRepo();
+    try {
+      await run(["git", "rm", "-q", "--cached", CONFIG], r.root);
+      await run(["git", "commit", "-q", "-m", "untrack the config"], r.root);
+      const commits = await commitCount(r.root);
+      const before = config(r.root);
+      const q = setting(r.root, "chat.model", "strong");
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: DIRTY });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(config(r.root)).toBe(before);
       expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, result: "refused" });
     } finally {
       r.cleanup();

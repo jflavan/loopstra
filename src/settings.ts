@@ -18,9 +18,13 @@ export const SETTINGS_SLUG = "_settings";
 /** Why a settings request is refused when the file is not the one the page read (the console and the loop both check). */
 export const STALE_SETTINGS = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
 
-/** The file's version, as the page and the applier compare it: the sha256 (hex) of its text. */
+/**
+ * The file's version, as the page and the applier compare it: the sha256 (hex) of its text, less one
+ * leading byte order mark. The page reads the file as Bun.file(...).text(), which drops the mark, and
+ * the applier as a record's draft reads it, which keeps it: both must give the same version.
+ */
 export function configVersion(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
+  return createHash("sha256").update(text.startsWith("\uFEFF") ? text.slice(1) : text).digest("hex");
 }
 
 /** The steps a group's `steps` map holds: the orchestrator is chat.model itself, not a step of chat's. */

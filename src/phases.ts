@@ -57,7 +57,8 @@ export interface AgentPhaseSpec {
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
-  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number; seq?: number }
+  /** `model`: the CLI model the session ran on, as read when it started (see phaseModel). */
+  | { ok: true; envelope: Envelope<N>; sessionId: string | null; costUsd: number; model: string; seq?: number }
   | { ok: false; reason: FailureReason; note: string; sessionId: string | null };
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -519,7 +520,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx, model.name);
-  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, seq, ...(question ? { asked: question } : {}) };
+  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, model: model.name, seq, ...(question ? { asked: question } : {}) };
 }
 
 /**

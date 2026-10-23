@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { SettingsView } from "../../console/types";
-import { ago } from "../format";
 import { cancelSetting, sendSetting } from "../requests";
-import { pendingText, pickerChoices, nameProblem } from "../settings";
+import { lastRanText, pendingText, pickerChoices, nameProblem } from "../settings";
 import { getJson, now, toast } from "../store";
 
 /** The change waiting for the loop: where, and what the loop's state says about it. */
@@ -102,7 +101,7 @@ export function Settings() {
                   <input id={`m-${m.ref}`} key={`${m.ref}-${rev}`} type="text" defaultValue={m.name} disabled={locked} autocomplete="off" spellcheck={false}
                     onKeyDown={(e) => { if (e.key === "Enter") send(e.currentTarget); }}
                     onBlur={(e) => send(e.currentTarget)} />
-                  <span class="muted">{lastRan(m, now.value)}</span>
+                  <span class="muted">{lastRanText(m.last, now.value)}</span>
                   {wait(path)}
                 </div>
               );
@@ -113,14 +112,14 @@ export function Settings() {
             <div key={g.group} class="set-group">
               <div class="set-row set-head">
                 <label for={`g-${g.group}`}>{g.group}</label>
-                <Picker id={`g-${g.group}`} rev={rev} row={{ path: g.path, own: g.model }} value={g.model} disabled={locked} onPick={(x) => void change(g.path, x)} />
+                <Picker id={`g-${g.group}`} rev={rev} row={{ path: g.path }} value={g.model} disabled={locked} onPick={(x) => void change(g.path, x)} />
                 {g.group === "chat" && <span class="muted">orchestrator</span>}
                 {wait(g.path)}
               </div>
               {g.steps.filter((s) => s.path !== null).map((s) => (
                 <div key={s.key} class="set-row set-step">
                   <label for={`s-${s.key}`}><code>{s.key}</code> <span class="muted">{s.what}</span></label>
-                  <Picker id={`s-${s.key}`} rev={rev} row={{ path: s.path, own: s.own }} value={s.own} disabled={locked} onPick={(x) => void change(s.path!, x)} />
+                  <Picker id={`s-${s.key}`} rev={rev} row={{ path: s.path, byDefault: s.byDefault }} value={s.own} disabled={locked} onPick={(x) => void change(s.path!, x)} />
                   {s.own === null && <span class="muted">{s.byDefault}</span>}
                   {wait(s.path)}
                 </div>
@@ -134,19 +133,11 @@ export function Settings() {
 }
 
 /** One picker. `max` is offered but never the value unless the file says so. */
-function Picker(p: { id: string; rev: number; row: { path: string | null; own: string | null }; value: string | null; disabled: boolean; onPick: (value: string | null) => void }) {
+function Picker(p: { id: string; rev: number; row: { path: string | null; byDefault?: string }; value: string | null; disabled: boolean; onPick: (value: string | null) => void }) {
   return (
     <select id={p.id} key={`${p.id}-${p.rev}`} value={p.value ?? ""} disabled={p.disabled}
       onChange={(e) => { const x = e.currentTarget.value; p.onPick(x === "" ? null : x); }}>
       {pickerChoices(p.row).map((c) => <option key={c.label} value={c.value ?? ""}>{c.label}</option>)}
     </select>
   );
-}
-
-/** "sonnet → claude-sonnet-5, 4m ago", "failed: not a model" or "not used yet". */
-function lastRan(m: SettingsView["models"][number], at: number): string {
-  if (!m.last) return "not used yet";
-  if (m.last.result === "bad-model") return "failed: not a model";
-  const t = ago(m.last.ts, at);
-  return `${m.name} → ${m.last.ran ?? m.name}, ${t === "now" || t === "–" ? t : `${t} ago`}`;
 }

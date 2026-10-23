@@ -234,7 +234,11 @@ export function judgeReport(cfg: Config, rows: readonly JudgeRow[], templates: P
   };
 }
 
-/** The verdict a judge gave, and who decided it: the strong judge, or a trusted cheaper judge that passed alone. */
+/**
+ * The verdict a judge gave, and who decided it: the strong judge, or a trusted cheaper judge that passed
+ * alone. Its `model` is always the judge's own (the strong model's CLI name): the one its session ran
+ * on, or, when the cheaper judge decided alone, the one it stood in for as the call began.
+ */
 export type JudgeResult<J extends JudgeName> = AgentPhaseResult<J> & { decidedBy: "strong" | "cheap" };
 
 /** One session and how long it took. */
@@ -438,9 +442,9 @@ async function cheapFirst<J extends JudgeName>(ctx: StepContext, pair: Pair<J>, 
     if (!(e instanceof AssistantUnavailable)) throw e; // its phase row already ended interrupted
   }
   const verdict = cheap ? cheapVerdict(judge, cheap.r) : "failed";
-  if (cheap && verdict === "pass") {
+  if (cheap?.r.ok && verdict === "pass") {
     record(ctx, pair.strong, c, { how: "alone", cheap, cheapVerdict: verdict, strong: null });
-    return { ...cheap.r, decidedBy: "cheap" };
+    return { ...cheap.r, model: c.key.strong_model, decidedBy: "cheap" };
   }
   const strong = await timed(ctx, pair.strong, pair.prompt);
   record(ctx, pair.strong, c, { how: "escalated", cheap, cheapVerdict: verdict, strong });
