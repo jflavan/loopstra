@@ -14,6 +14,7 @@ claude:
     default: sonnet
     cheap: haiku
     strong: opus
+    max: fable # aliases follow Claude Code's newest model; a full name (claude-opus-5-5) pins one
   # What a build session may do without asking. The commands above (test, lint, build, run, install)
   # are always added. Git stays read-only: Loopstra makes every commit itself. The default:
   # allowed_tools: [Read, Edit, Write, Glob, Grep, "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]
@@ -32,6 +33,8 @@ gates:
   done: { human: none, agent: true }
 
 # Per-stage model, skills to load, and deterministic commands to run before and after.
+# A step of a stage can have its own model too, for example under a stage:
+#   steps: { done-check: max }  # a step's own model; see the step table in the README
 stages:
   design: { model: strong, skills: [], before: [], after: [] }
   plan: { model: strong, skills: [], before: [], after: [] }
@@ -99,4 +102,4 @@ signals:
 # Spending limits (off unless set): max_budget_usd_per_day for chat turns and write-ups together,
 # max_budget_usd_per_session for what one of them may hold of it, so others can run meanwhile.
 chat:
-  model: default # the orchestrator; the writer uses stages.design.model
+  model: default # the orchestrator; write-intent: chat.steps (default: stages.design.model)
