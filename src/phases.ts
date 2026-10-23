@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
-import { stepModel } from "./models";
+import { badModelNote, stepModel } from "./models";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -156,6 +156,7 @@ export function ownerNote(reason: BlockingReason): string {
     case "budget": return "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
     case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
+    case "model": return "Claude Code did not accept this step's model. Change it in Settings or `loopstra setup models`, then retry.";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
     // The agent's own summary is not written for the owner; it goes to the trace.
@@ -512,6 +513,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   if (!out.ok) {
     if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
     const reason = out.reason as BlockingReason;
+    // The step's own words: which named model, which CLI name, which step.
+    if (reason === "model") return { ok: false, reason, note: badModelNote(model.ref, model.name, spec.name), sessionId: out.sessionId };
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }

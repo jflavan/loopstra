@@ -85,3 +85,8 @@ export function withModels(base: Config, fresh: ModelSettings): Config {
     chat: { ...base.chat, model: fresh.chat.model, steps: fresh.chat.steps },
   };
 }
+
+/** What a person is told when Claude Code did not accept a step's model: which setting, and where to change it. */
+export function badModelNote(ref: ModelRef, name: string, step: StepKey): string {
+  return `\`${ref}\` is \`${name}\`, which Claude Code does not accept as a model (step ${step}). Change it in Settings or \`loopstra setup models\`, then retry.`;
+}

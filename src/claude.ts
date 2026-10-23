@@ -108,8 +108,9 @@ export type PermissionMode = "default" | "manual" | "plan" | "acceptEdits" | "do
  * - agent-fail: the agent answered, and its envelope says status "fail"
  * - missing-prompt: the phase's prompt file is missing (raised by agentPhase)
  * - environment: the assistant could not be used at all (see ENVIRONMENT_PATTERNS); not the agent's doing
+ * - model: Claude Code does not accept the model name (see MODEL_PATTERN); a setting to change, not an outage
  */
-export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt" | "environment";
+export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt" | "environment" | "model";
 
 /**
  * Text that means the assistant itself could not be used, so a failed session is the environment's
@@ -125,12 +126,20 @@ export const ENVIRONMENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; catches: str
   { pattern: /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|getaddrinfo|socket hang up|fetch failed|unable to connect|network error|connection error/i, catches: "the network is down or the service cannot be reached" },
 ];
 
+/** Text of a model name Claude Code does not accept: a typo or a model the person has no access to. Matched like the environment patterns, and first. */
+const MODEL_PATTERN = /issue with the selected model|model[_ ]not[_ ]found|not_found_error[^\n]*model/i;
+
 /**
  * Whether an error result's API status means the assistant could not be used: signed out (401, 403), a limit
  * (429), or the service down (5xx, 529 overloaded). Read when the result carries one, so new wording is caught too.
  */
 function environmentStatus(status: number | null): boolean {
   return status === 401 || status === 403 || status === 429 || (status !== null && status >= 500);
+}
+
+/** The first line of `text` that names a model Claude Code does not accept, or null. */
+function modelLine(text: string): string | null {
+  return text.split(/\r?\n/).find((line) => MODEL_PATTERN.test(line))?.trim() ?? null;
 }
 
 /** The first line of `text` that an environment pattern matches, or null. */
@@ -565,6 +574,8 @@ export function classify(collected: Collected, r: SpawnResult, ctx: ClassifyCont
   if (/budget/i.test(collected.subtype)) return fail("budget", `claude ended with ${collected.subtype}`);
   if (collected.subtype !== "success" || collected.isError) {
     const answered = collected.events.some((e) => e.type === "assistant");
+    const badModel = modelLine(collected.resultText) ?? (answered ? null : modelLine(stderr));
+    if (badModel) return fail("model", `Claude Code does not accept the model: ${badModel}`, badModel);
     const outage = environmentLine(collected.resultText) ?? (answered ? null : environmentLine(stderr))
       ?? (environmentStatus(collected.apiErrorStatus) ? `API error ${collected.apiErrorStatus ?? ""}` : null);
     if (outage) return fail("environment", `the assistant is unavailable: ${outage}`, outage);

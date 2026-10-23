@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classify, StreamCollector } from "../../src/claude";
+import { classify, StreamCollector, unavailable } from "../../src/claude";
 import { Cancelled, StopRequested } from "../../src/stop";
 
 /** What a session printed, collected as runPhase collects it. */
@@ -57,6 +57,15 @@ describe("classify: the end of a session as a phase result, without a process", 
     expect(classify(collected(init, assistant), spawned({ code: 1, err: "fetch failed" }), ctx).reason).toBe("crash");
     const status = classify(collected(init, { type: "result", subtype: "success", is_error: true, session_id: "s1", api_error_status: 529, result: "something new" }), spawned({ code: 1 }), ctx);
     expect(status).toMatchObject({ reason: "environment", matched: "API error 529" });
+  });
+
+  test("a bad model name is reason model", () => {
+    const text = "There's an issue with the selected model (opuss). It may not exist or you may not have access to it.";
+    const r = classify(collected(init, { type: "result", subtype: "success", is_error: true, session_id: "s1", api_error_status: 404, result: text }), spawned({ code: 1 }), ctx);
+    expect(r).toMatchObject({ ok: false, reason: "model" });
+    expect(unavailable("model")).toBe(false);
+    // A session that never answered says it on stderr.
+    expect(classify(collected(init), spawned({ code: 1, err: text }), ctx).reason).toBe("model");
   });
 
   test("notification-only: the session answered background notifications and never the prompt", () => {

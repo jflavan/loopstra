@@ -5,7 +5,7 @@ import { configPath, loadConfig } from "../../src/config";
 import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
-import { stepModel } from "../../src/models";
+import { badModelNote, stepModel } from "../../src/models";
 import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { hookSettings } from "../../src/package";
@@ -449,6 +449,18 @@ describe("agentPhase failures", () => {
     expect((thrown as AssistantUnavailable).model).toBe("haiku");
     expect(trace.phases("x").map((p) => `${p.name}:${p.status}`)).toEqual(["intake:interrupted"]);
     expect(trace.phases("x")[0]?.error).toMatch(/^environment: /);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a bad model blocks the step with words that name it", async () => {
+    const { repo, ctx, trace } = await setup();
+    await Bun.write(configPath(repo.path), "version: 1\ncommands:\n  test: echo ok\nclaude:\n  models:\n    strong: opuss\n");
+    await Bun.write(join(repo.path, "loopstra", "prompts", "spec-check.md"), "x FIXTURE:bad-model");
+    const r = await agentPhase(ctx, { name: "spec-check", permissionMode: "default", tools: "read", vars: { intent: "i", spec: "s" } });
+    expect(r).toMatchObject({ ok: false, reason: "model", note: "`strong` is `opuss`, which Claude Code does not accept as a model (step spec-check). Change it in Settings or `loopstra setup models`, then retry." });
+    expect(r.ok ? "" : r.note).toBe(badModelNote("strong", "opuss", "spec-check"));
+    expect(trace.phases("x").map((p) => `${p.name}:${p.status}`)).toEqual(["spec-check:fail"]);
+    expect(readPause(repo.path)).toBeNull();
     trace.close(); repo.cleanup();
   });
 

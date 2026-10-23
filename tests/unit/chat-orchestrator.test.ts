@@ -13,6 +13,7 @@ import { PR_CHECKS_NOTE, PR_WAIT } from "../../src/stages/shared";
 import { CHAT_DENIED, CHAT_SLUG, secretEnvNames } from "../../src/chat/agents";
 import { ThreadStore } from "../../src/chat/threads";
 import { loadConfig } from "../../src/config";
+import { badModelNote } from "../../src/models";
 import { run, tempDir } from "../helpers";
 import { writeJson } from "../../src/fsutil";
 import { chatRepo, fixture, INTENT, message, sink, turn } from "../chat-helpers";
@@ -388,6 +389,16 @@ describe("the orchestrator", () => {
       const out = sink();
       await new Orchestrator(r.root).handle(message("hello"), out.send);
       expect(out.sent[0]).toMatch(/^I cannot reach the assistant right now \(.*overloaded.*\)\. Please try again in a few minutes\.$/);
+    } finally { r.cleanup(); }
+  });
+
+  test("a bad orchestrator model is said in chat", async () => {
+    const r = await chatRepo({ config: "claude:\n  models:\n    strong: opuss\nchat:\n  model: strong\n" });
+    try {
+      await Bun.write(join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR!, "orchestrator-1.jsonl"), await Bun.file(join(import.meta.dir, "..", "fake-claude", "fixtures", "bad-model.jsonl")).text());
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hello"), out.send);
+      expect(out.sent).toEqual([badModelNote("strong", "opuss", "orchestrator")]);
     } finally { r.cleanup(); }
   });
 

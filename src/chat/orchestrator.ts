@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { askedWords, askText, offers, retryOptions, type RequestShape } from "../actions";
 import { limitOf, startOfToday } from "../budget";
 import { unavailable } from "../claude";
-import { loadConfig, type Config } from "../config";
+import { loadConfig, modelFor, type Config } from "../config";
+import { badModelNote, stepModel } from "../models";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
@@ -279,6 +280,7 @@ export class Orchestrator {
     if (!r.ok) {
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
+        : r.reason === "model" ? badModelNote(stepModel(cfg, "orchestrator"), modelFor(cfg, stepModel(cfg, "orchestrator")), "orchestrator")
         : r.reason === "budget" ? "That answer hit its spending limit before it finished. Try asking something narrower."
         : r.reason === "timeout" ? "That took too long to answer. Please try again, or ask something narrower."
         : "Something went wrong answering that. Please try again; an engineer can find the details in the trace.");

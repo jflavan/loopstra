@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fake-bad-model","cwd":"/","tools":[],"model":"fake"}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":404,"session_id":"fake-bad-model","total_cost_usd":0,"usage":{},"result":"There's an issue with the selected model (opuss). It may not exist or you may not have access to it."}
