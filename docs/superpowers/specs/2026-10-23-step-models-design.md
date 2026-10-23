@@ -26,6 +26,7 @@ not go stale when Anthropic ships a new model or Claude Code changes how it name
 ## Goals
 
 - Every step listed below can be given its own model, in the console and in setup.
+- Chat's orchestrator has its own model setting too, in the same two places.
 - Four named models: `cheap` (latest Haiku), `default` (latest Sonnet), `strong` (latest Opus),
   `max` (latest Fable).
 - "Latest" follows Claude Code, not Loopstra: a named model holds an alias that Claude Code resolves.
@@ -153,6 +154,8 @@ A new page at `/settings`, with a Rail entry under Spend. Its one section for no
   each step is a row with a picker. A step that has no setting of its own shows its default in a
   muted way ("follows build: default", or "strong") and offers it as "Default". Picking a named
   model writes `steps.<key>`. Picking "Default" removes the key.
+- **Chat:** its first picker is the orchestrator's model (`chat.model`), in the place a stage's own
+  model goes. `write-intent` is the step row under it.
 - `max` is in every picker, and is never preselected.
 
 Saving goes through a request, like every other console write. `loopstra/config.yaml` is tracked
@@ -217,7 +220,7 @@ language.
 1. The four named models, each suggested from the config's current value or the default (now
    including `max`). Its intro line says aliases follow Claude Code's latest and that a full name
    pins a version.
-2. Each stage's model, as today, now offered from four.
+2. Each stage's model, and the orchestrator's (`chat.model`), as today, now offered from four.
 3. After each stage (and chat): "Choose models for <stage>'s steps one by one? (y/N)". No, the
    default, keeps the step settings as they are. Yes asks each of that stage's steps, suggesting its
    current setting or "default". Answering "default" removes the step's own setting.
