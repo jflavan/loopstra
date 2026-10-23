@@ -6,6 +6,7 @@ import { StepContext } from "../../src/context";
 import { Git, GitTimeout } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { runStepGuarded, tick } from "../../src/scheduler";
+import { MAIN_BEHIND_NOTE } from "../../src/stages/merge";
 import { resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { fixture, run, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
@@ -193,7 +194,8 @@ describe("the loop with a GitHub remote", () => {
       // Not recorded as merged against a stale main, so the done-check does not run on it yet.
       const git = new Git(s.repo);
       expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
-      expect((await intentOf(s.repo)).status).toBe("merge-review");
+      // The note says the pull request merged, not that it waits for GitHub's checks.
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: MAIN_BEHIND_NOTE });
       expect(existsSync(join(s.repo, ".loopstra", "health-pending"))).toBe(false);
       // gh is not asked to delete the branch (the worktree still has it checked out); Loopstra
       // deletes the remote branch itself and keeps the local one until main has its changes.
@@ -206,7 +208,7 @@ describe("the loop with a GitHub remote", () => {
       // The person puts the file back: the next tick brings main up to date and finishes, without merging again.
       await Bun.write(smoke, original);
       await tick(s.repo);
-      expect((await intentOf(s.repo)).status).toBe("merged");
+      expect(await intentOf(s.repo)).toMatchObject({ status: "merged", note: "" });
       expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).toBe(0);
       expect(await git.branchExists(BRANCH)).toBe(false);
       expect(await Bun.file(join(s.repo, ".loopstra", "health-pending")).text()).toBe(SLUG);
