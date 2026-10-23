@@ -5,7 +5,7 @@ import { activePause, agoText, readLoopHold } from "./heartbeat";
 import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
-import { humanNote } from "./stages/shared";
+import { humanNote, prWait } from "./stages/shared";
 import type { Trace } from "./trace";
 
 /** One thing a person should do or know. The same list in `loopstra status` and the dashboard. */
@@ -128,8 +128,16 @@ export async function attention(root: string, config: Config | { problem: string
       add("waiting", i.slug, i.file.title || i.slug, wait.note);
       continue;
     }
-    if (fm.status === "blocked" || !waitsForPerson(i, human)) continue;
     const title = i.file.title || i.slug;
+    // Its pull request waits (see prWait): for an engineer, whoever is on the gate; or for nothing a
+    // person does on this change (GitHub merged it or is merging it, or main here must catch up, which
+    // the sync item asks for), so the gate's note no longer applies.
+    const pr = prWait(root, i);
+    if (pr.needsPerson) {
+      add("waiting", i.slug, title, pr.wait);
+      continue;
+    }
+    if (fm.status === "blocked" || !waitsForPerson(i, human) || pr.wait) continue;
     if (fm.status === "draft") {
       add("waiting", i.slug, title, fm.note || "A draft. When it says what you want, change the status line to accepted. To drop it, set it to closed.");
       continue;

@@ -7,6 +7,9 @@ import { Orchestrator, isYes, untagged } from "../../src/chat/orchestrator";
 import { pendingRequests } from "../../src/requests";
 import { holdLoop, releaseLoop, writeHeartbeat } from "../../src/heartbeat";
 import { Trace } from "../../src/trace";
+import { SYNC_TEXT } from "../../src/remote";
+import { MERGED_NOT_HERE } from "../../src/stages/merge";
+import { PR_CHECKS_NOTE, PR_WAIT } from "../../src/stages/shared";
 import { CHAT_DENIED, CHAT_SLUG, secretEnvNames } from "../../src/chat/agents";
 import { ThreadStore } from "../../src/chat/threads";
 import { loadConfig } from "../../src/config";
@@ -664,6 +667,18 @@ describe("the change a person opened chat from", () => {
       expect(await aboutContext(r.root, { slug: "a" })).toContain("text: step 59");
       // A change that is not there gives nothing to say, never an error.
       expect(await aboutContext(r.root, { slug: "nope" })).not.toContain("Intent:");
+    } finally { r.cleanup(); }
+  });
+
+  test("a change whose pull request merged on GitHub, but not into main here yet, says so in place of the merge gate's note", async () => {
+    const r = await aboutRepo();
+    try {
+      writeFileSync(join(r.root, "intent", "a", "intent.md"), `---\nstatus: merge-review\nnote: ${PR_CHECKS_NOTE}\n---\n# Intent: add numbers\n`);
+      const behind = `${MERGED_NOT_HERE} ${SYNC_TEXT.unsaved}`;
+      writeFileSync(join(r.root, ".loopstra", "runs", "a", PR_WAIT), behind);
+      const text = await aboutContext(r.root, { slug: "a" });
+      expect(text).toContain(`  Why it waits now:\n    ${behind}`);
+      expect(text).not.toContain("  Note:");
     } finally { r.cleanup(); }
   });
 

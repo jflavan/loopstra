@@ -110,7 +110,7 @@ function Overview({ d }: { d: ChangeDetail }) {
         {d.dependsOn.length > 0 && <span>Depends on <b>{d.dependsOn.join(", ")}</b></span>}
       </div>
       {d.waiting && <span class="badge warn">{d.waiting}</span>}
-      {d.note && <div class="panel"><h2>Note</h2><Markdown text={d.note} /></div>}
+      {d.shownNote && <div class="panel"><h2>Note</h2><Markdown text={d.shownNote} /></div>}
       <div class="panel">{intent === null ? <p class="muted">Loading the intent…</p> : <Markdown text={stripFrontmatter(intent)} />}</div>
     </div>
   );

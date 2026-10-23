@@ -6,27 +6,29 @@ import { GitHub, recordGitHub, type PrInfo } from "../github";
 import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
 import type { Status } from "../intents";
 import { codePhase } from "../phases";
-import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain } from "../remote";
+import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain, type SyncOutcome } from "../remote";
 import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, KEEP_UNFINISHED, MERGING, openBranchWorktree, PR_LEASE, PR_NUMBER, PR_PUSHING, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
-export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
 const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
 const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
-const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
-const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
 const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
 const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
 const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";
+/** Why a change watching its pull request waits, for PR_WAIT (see prWait). */
+export const MERGED_NOT_HERE = "The pull request was merged on GitHub, and is recorded as merged once main here has it.";
+export const RECORDING_FAILED = "The pull request was merged on GitHub, but recording it here failed; the next look tries again. An engineer can find the error in the trace.";
+export const GITHUB_MERGING = "GitHub took the merge of the pull request but has not merged it yet (for example, in a merge queue); the next look checks again.";
+export const READY_BEHIND = "The pull request is ready to merge, and merges once main here has what was merged on GitHub meanwhile.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
@@ -326,24 +328,32 @@ async function headOnGitHub(ctx: StepContext): Promise<string | null> {
  * not reported yet on a new pull request whose branch has workflows), gh not answering, or
  * (merge.human pr) not approved yet → wait, changing nothing. Checks failed → block. Otherwise
  * merge through gh. Whether GitHub answered the look (the pull request, its checks) is recorded once
- * it is over, as the `github` signal (see recordGitHub), not traced on every look.
+ * it is over, as the `github` signal (see recordGitHub), not traced on every look. Why it waits on
+ * a pull request its gate has nothing more to decide on is its PR_WAIT, written or removed by each
+ * look that ends.
  */
 async function runRemoteMerge(ctx: StepContext): Promise<StepResult> {
   const gh = new GitHub(ctx.root);
   let unanswered: string | null = null;
-  const r = await watchPullRequest(ctx, gh, (error) => { unanswered ??= error; });
+  let why: string | null = null;
+  const r = await watchPullRequest(ctx, gh, (error) => { unanswered ??= error; }, (text) => { why = text; });
   recordGitHub(ctx.trace, unanswered);
+  if (why === null) clearMarker(ctx, PR_WAIT);
+  else if (readMarker(ctx, PR_WAIT) !== why) writeMarker(ctx, PR_WAIT, why);
   return r;
 }
 
-async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error: string) => void): Promise<StepResult> {
+/** `waits`: says why the step waits, for PR_WAIT (see runRemoteMerge). */
+type Waits = (why: string) => void;
+
+async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error: string) => void, waits: Waits): Promise<StepResult> {
   const found = await ownPr(ctx, gh);
   if ("error" in found) {
     unanswered(found.error);
     return { ok: true, waiting: true };
   }
   const pr = found.pr;
-  if (pr?.merged) return finishRemoteMerge(ctx, pr);
+  if (pr?.merged) return finishRemoteMerge(ctx, pr, waits);
   if (pr?.state === "CLOSED") {
     clearMarker(ctx, REMOTE_AHEAD); // a later wait, after a person sorts this out, is traced again
     return block(ctx, PR_CLOSED_NOTE, { detail: { pr: pr.number, url: pr.url } });
@@ -383,7 +393,7 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
   // At every speed.max_parallel_changes: the watcher runs beside the lanes even at one, so another
   // pull request may merge while this one waits, and it is then out of date.
-  return mergeWhenUpToDate(ctx, gh, pr);
+  return mergeWhenUpToDate(ctx, gh, pr, waits);
 }
 
 /** The trace's plain line when a pull request was brought up to date before it could merge. */
@@ -413,18 +423,20 @@ type Freshness = "up to date" | "taken" | "main ahead" | "not pushed" | "remote 
  * later look does it. Commits a person added to the pull request are kept: taken into the branch
  * here, or, when the branch here changed too, the change is blocked for an engineer.
  */
-async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
+async function mergeWhenUpToDate(ctx: StepContext, gh: GitHub, pr: PrInfo, waits: Waits): Promise<StepResult> {
+  let synced: SyncOutcome | null = null;
   const r = await oneMergeAtATime(ctx, async () => {
-    await syncMain(ctx.root, ctx.cfg, ctx.trace);
+    synced = await syncMain(ctx.root, ctx.cfg, ctx.trace);
     const seen = await upToDate(ctx);
     if (typeof seen !== "string") return block(ctx, seen.note, { ...seen, retryFrom: mergeRetry(ctx) });
-    return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr) : seen;
+    return seen === "up to date" ? mergeOnGitHub(ctx, gh, pr, waits) : seen;
   });
   const main = ctx.cfg.main_branch;
   if (r === "remote ahead") {
     if (onceMarker(ctx, REMOTE_AHEAD)) {
       ctx.trace.event(ctx.slug, "command", { command: "up to date", waiting: `${main} on GitHub has changes merged meanwhile that ${main} here could not take yet (the main_sync signal says why); this change is brought up to date once it has them` });
     }
+    waits(withReason(READY_BEHIND, synced));
     return { ok: true, waiting: true };
   }
   if (r !== "unreachable") clearMarker(ctx, REMOTE_AHEAD);
@@ -529,7 +541,7 @@ async function checksMayStillStart(ctx: StepContext, pr: PrInfo): Promise<boolea
  * read: commits pushed since are not merged untested. When GitHub refuses because the branch moved
  * on, the step waits, and the next look reads the checks of the new head.
  */
-async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<StepResult> {
+async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo, waits: Waits): Promise<StepResult> {
   // Loopstra's own merge, from here on (see GH_MERGE): the marker outlives a look that fails right after.
   writeMarker(ctx, GH_MERGE, String(pr.number));
   const merged = await codePhase(ctx, "merge", async () => {
@@ -550,9 +562,10 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
     if (!merged.ok) return block(ctx, "The pull request could not be merged on GitHub. An engineer should look at it.", { detail: { pr: pr.number, error: merged.detail }, retryFrom: mergeRetry(ctx) });
     // gh accepted the merge but it has not happened yet (a merge queue, or GitHub not answering):
     // the branch stays, since deleting it would close the pull request, and the next tick looks again.
+    waits(GITHUB_MERGING);
     return { ok: true, waiting: true };
   }
-  return finishRemoteMerge(ctx, after);
+  return finishRemoteMerge(ctx, after, waits);
 }
 
 /**
@@ -568,7 +581,7 @@ async function mergeOnGitHub(ctx: StepContext, gh: GitHub, pr: PrInfo): Promise<
  * pull request is merged, so the next look records it (a block would advise building it again). Once
  * the failures have lasted FINISH_FAILING_MS, it blocks, and a person asks for another look.
  */
-async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
+async function finishRemoteMerge(ctx: StepContext, pr: PrInfo, waits: Waits): Promise<StepResult> {
   try {
     // Only for the pull request the marker names: one left by an earlier build's failed merge says
     // nothing about a later pull request a person merged.
@@ -578,7 +591,7 @@ async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
       if (!deleted.ok) ctx.trace.event(ctx.slug, "command", { command: "delete merged branch on the remote", kept: ctx.branch, reason: deleted.detail });
     }
     if (ours !== null) clearMarker(ctx, GH_MERGE);
-    const recorded = await recordRemoteMerge(ctx, pr);
+    const recorded = await recordRemoteMerge(ctx, pr, waits);
     clearMarker(ctx, FINISH_FAILING);
     return recorded;
   } catch (e) {
@@ -595,17 +608,18 @@ async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
     }
     writeMarker(ctx, FINISH_FAILING, `${new Date(since).toISOString()}\n${new Date(now).toISOString()}`);
     ctx.trace.eventOnChange(ctx.slug, "error", '"where":"finish merge"', { where: "finish merge", error, note: "the pull request is merged; recording it is tried again on the next look" }, "error");
+    waits(RECORDING_FAILED);
     return { ok: true, waiting: true };
   }
 }
 
 /** finishRemoteMerge's body: sync main, then record the merge once main has it. */
-async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
+async function recordRemoteMerge(ctx: StepContext, pr: PrInfo, waits: Waits): Promise<StepResult> {
   const main = ctx.cfg.main_branch;
   // A status a person saved without committing would keep the sync from touching main. Off main,
   // the sync is skipped anyway and says so.
   if ((await ctx.git.currentBranch()) === main) await recordPersonEdits(ctx);
-  await syncMain(ctx.root, ctx.cfg, ctx.trace);
+  const synced = await syncMain(ctx.root, ctx.cfg, ctx.trace);
   const hasIt = pr.mergeCommit
     ? (await ctx.git.isAncestor(pr.mergeCommit, main)) || ((await ctx.git.branchExists(ctx.branch)) && (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] })))
     : !(await ctx.git.branchExists(ctx.branch)) || (await ctx.git.containsChanges(main, ctx.branch, { ignore: ["intent/"] }));
@@ -614,10 +628,19 @@ async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
       const waiting = `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`;
       ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting, pr: pr.number, mergeCommit: pr.mergeCommit });
     }
+    // Main here took all of GitHub's main, merge commit included, and still lacks the change: it
+    // merged elsewhere. Without the merge commit here, GitHub may not show it on main yet.
+    const elsewhere = synced && !synced.behind && (!pr.mergeCommit || (await ctx.git.commitOf(pr.mergeCommit)) !== null);
+    waits(elsewhere ? PR_MERGED_ELSEWHERE : withReason(MERGED_NOT_HERE, synced));
     return { ok: true, waiting: true };
   }
   clearMarker(ctx, MAIN_BEHIND);
   return finishMerge(ctx);
+}
+
+/** `text`, then why main here could not take main on GitHub, when the sync stopped before it could. */
+function withReason(text: string, synced: SyncOutcome | null): string {
+  return synced?.behind ? `${text} ${synced.text}` : text;
 }
 
 /** The merge gate sent the change back for one more review round (the round marker names it). */

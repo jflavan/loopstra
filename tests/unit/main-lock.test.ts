@@ -104,7 +104,7 @@ describe("main-lock sections", () => {
         const [synced, wrote] = await Promise.allSettled([syncMain(s.root, s.cfg, s.trace), setStatus(ctx, "designing")]);
         expect(wrote.status === "rejected" ? wrote.reason : null).not.toBeInstanceOf(MainCheckoutMoved);
         expect(wrote.status).toBe("fulfilled");
-        expect(synced.status === "fulfilled" ? synced.value : String(synced.reason)).toBe("pass");
+        expect(synced.status === "fulfilled" ? synced.value?.result : String(synced.reason)).toBe("pass");
         // Both commits are on main, and no rebase is left in progress.
         expect((await run(["git", "cat-file", "-e", `main:theirs-${i}.md`], s.root)).code).toBe(0);
         expect((await run(["git", "log", "-1", "--format=%s", "main", "--", `intent/c${i}`], s.root)).out).toContain(`loopstra(c${i})`);

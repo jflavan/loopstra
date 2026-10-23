@@ -5,6 +5,7 @@ import { effectivePriority, orderQueue, plainStatus, scanRepo, shownNote } from 
 import { Trace } from "../trace";
 import { errorText } from "../shell";
 import { openQuestions } from "../questions";
+import { prWait } from "../stages/shared";
 
 function pad(s: string, n: number): string { return s.length >= n ? s : s + " ".repeat(n - s.length); }
 
@@ -46,7 +47,7 @@ async function renderTable(root: string, trace: Trace, width: number): Promise<s
     const s = trace.intentSummary(i.slug);
     const phase = s?.lastPhase ? `${s.lastPhase} (${s.lastPhaseStatus ?? "running"})` : "-";
     const cost = `$${(s?.costUsd ?? 0).toFixed(2)}`;
-    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents, undefined, questions.get(i.slug))];
+    return [i.slug, effectivePriority(i.file.frontmatter), plainStatus(i.file.frontmatter.status), phase, cost, shownNote(i, intents, undefined, questions.get(i.slug), prWait(root, i))];
   });
   // An intent.md that cannot be read still shows, with what to fix.
   for (const u of scan.unreadable) rows.push([u.slug, "-", plainStatus("blocked"), "-", "-", u.problem]);
