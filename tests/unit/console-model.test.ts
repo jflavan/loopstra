@@ -5,8 +5,11 @@ import { buildModel, nowLine, stripOf } from "../../src/console/model";
 import { scanRepo } from "../../src/intents";
 import { holdLoop, pauseAfterUnavailable, writeHeartbeat } from "../../src/heartbeat";
 import { CONSOLE, requestsDir, submitRequest } from "../../src/requests";
+import { runDir } from "../../src/paths";
 import { SYNC_TEXT } from "../../src/remote";
 import { tick } from "../../src/scheduler";
+import { MERGED_NOT_HERE } from "../../src/stages/merge";
+import { PR_CHECKS_NOTE, PR_WAIT } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
 import { config, intent, model, setStarted, withTrace } from "../console-helpers";
 import { tempDir } from "../helpers";
@@ -32,6 +35,21 @@ describe("changes", () => {
       expect(m.sections.changes[1]?.waiting).toContain("one");
       expect(m.meta).toEqual({ chat: false, usdPerMinute: 0.2, pollSeconds: 60 });
       expect((await model(t.path, new Date(), { chat: true })).meta.chat).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("one whose pull request merged but is not on main here yet says so, in place of the merge gate's note", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "one", `status: merge-review\nnote: ${PR_CHECKS_NOTE}`);
+      const behind = `${MERGED_NOT_HERE} ${SYNC_TEXT.unsaved}`;
+      mkdirSync(runDir(t.path, "one"), { recursive: true });
+      writeFileSync(join(runDir(t.path, "one"), PR_WAIT), behind);
+      // The note in intent.md is kept as it is, for an undo to put back.
+      expect((await model(t.path)).sections.changes[0]).toMatchObject({ waiting: behind, note: PR_CHECKS_NOTE, shownNote: "" });
     } finally {
       t.cleanup();
     }

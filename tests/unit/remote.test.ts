@@ -53,7 +53,10 @@ describe("syncMain", () => {
     await personCommits(s.repo, "ours.md", "ours\n");
     await Bun.write(join(s.repo, "intent", "x", "intent.md"), "---\nstatus: draft\n---\n# Intent: x\n");
     await new Git(s.repo).commitPaths(["intent/x"], "loopstra(x): record");
-    await syncMain(s.repo, s.cfg, s.trace);
+    // Main here took GitHub's main before it waited to share: it is not behind.
+    const synced = await syncMain(s.repo, s.cfg, s.trace);
+    expect(synced).toMatchObject({ result: "waiting", text: SYNC_TEXT.ownCommits });
+    expect(synced?.behind).toBeUndefined();
     expect(existsSync(join(s.repo, "theirs.md"))).toBe(true);
     expect(existsSync(join(s.repo, "ours.md"))).toBe(true);
     // Local commits are replayed on top. The person's commit is theirs to share, so nothing is pushed.
@@ -177,7 +180,8 @@ describe("syncMain", () => {
     const s = await setup();
     await pushFromOther(s.other, "theirs.md", "theirs\n");
     await Bun.write(join(s.repo, "README.md"), "# work in progress\n");
-    await syncMain(s.repo, s.cfg, s.trace);
+    // Main here could not take GitHub's main, and the outcome says so (the merge step names it).
+    expect(await syncMain(s.repo, s.cfg, s.trace)).toMatchObject({ result: "waiting", text: SYNC_TEXT.unsaved, behind: true });
     // A condition that lasts is recorded once, not on every tick.
     await syncMain(s.repo, s.cfg, s.trace);
     expect(s.trace.lastSignal(SYNC_SIGNAL)).toMatchObject({ result: "waiting", output: SYNC_TEXT.unsaved });
@@ -198,7 +202,7 @@ describe("syncMain", () => {
     await Bun.write(hook, `#!/bin/sh\npwd >> "${seen.replaceAll("\\", "/")}"\n`);
     chmodSync(hook, 0o755);
     try {
-      expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
+      expect((await syncMain(s.repo, s.cfg, s.trace))?.result).toBe("pass");
       const where = (await Bun.file(seen).text()).trim().split(/\r?\n/);
       expect(where.every((w) => w.replaceAll("\\", "/").endsWith(".loopstra/sync"))).toBe(true);
       expect(existsSync(join(s.repo, ".loopstra", "sync"))).toBe(false);
@@ -228,7 +232,7 @@ describe("syncMain", () => {
     ].join("\n"));
     chmodSync(hook, 0o755);
     await Bun.write(join(s.repo, ".git", "once"), "");
-    expect(await syncMain(s.repo, s.cfg, s.trace)).toBe("pass");
+    expect((await syncMain(s.repo, s.cfg, s.trace))?.result).toBe("pass");
     expect((await run(["git", "log", "-3", "--format=%s", "main"], s.repo)).out.trim().split(/\r?\n/)).toEqual(["loopstra(y): record", "loopstra(x): record", "elsewhere: theirs.md"]);
     expect(existsSync(join(s.repo, "intent", "y", "intent.md"))).toBe(true);
     expect(await new Git(s.repo).isDirty()).toBe(false);

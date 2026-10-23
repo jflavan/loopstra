@@ -562,11 +562,13 @@ function questionNote(intent: Intent, text?: string): string {
 }
 
 /**
- * The note shown for a change: its waiting question, that it is held, why it waits for others, then its
- * own note. `question`: the question's text (see questionNote).
+ * The note shown for a change: its waiting question, that it is held, why it waits for others, why
+ * it waits for its pull request, then its own note. `question`: the question's text (see
+ * questionNote). `pr`: the pull request's wait and the note shown beside it (see prWait in
+ * src/stages/shared.ts); without it, the change's own note.
  */
-export function shownNote(intent: Intent, intents: Intent[], heldBy?: string, question?: string): string {
-  return [questionNote(intent, question), heldNote(intent), waitNote(intent, intents, heldBy), intent.file.frontmatter.note].filter(Boolean).join(" ");
+export function shownNote(intent: Intent, intents: Intent[], heldBy?: string, question?: string, pr = { wait: "", note: intent.file.frontmatter.note }): string {
+  return [questionNote(intent, question), heldNote(intent), waitNote(intent, intents, heldBy), pr.wait, pr.note].filter(Boolean).join(" ");
 }
 
 /** Statuses whose change holds the files its plan lists until it merges. */

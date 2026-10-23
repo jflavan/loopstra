@@ -10,6 +10,7 @@ import { readQuestion } from "../questions";
 import { pendingRequests, type Request } from "../requests";
 import { sameFileHolds } from "../scheduler";
 import { errorText } from "../shell";
+import { prWait } from "../stages/shared";
 import { nowText } from "../tools";
 import type { EventRow, PhaseRow, Trace } from "../trace";
 import { parsePayload } from "./describe";
@@ -90,10 +91,11 @@ function nextCheck(lastTickAt: string | null | undefined, pollSeconds: number): 
 export function changeSummary(root: string, trace: Trace, i: Intent, all: Intent[], heldBy: string | undefined, busy: ReadonlySet<string>, now: Date, human: HumanGates): ChangeSummary {
   const fm = i.file.frontmatter;
   const since = statusSince(trace, i);
+  const pr = prWait(root, i);
   return {
     slug: i.slug, title: i.file.title || i.slug, status: fm.status, plain: plainStatus(fm.status), priority: effectivePriority(fm),
     stage: STAGE[fm.status], since, inStatus: since ? agoText(now.getTime() - Date.parse(since)) : null,
-    costUsd: endedCost(trace.phases(i.slug)), waiting: waitNote(i, all, heldBy) || null, note: fm.note, running: busy.has(i.slug),
+    costUsd: endedCost(trace.phases(i.slug)), waiting: [pr.wait, waitNote(i, all, heldBy)].filter(Boolean).join(" ") || null, note: fm.note, shownNote: pr.note, running: busy.has(i.slug),
     held: fm.hold.trim() || null, statedPriority: fm.priority ?? null,
     offers: offers(fm, human, fm.status === "blocked" ? retryOptions(trace, i.slug, fm.note) : []),
     question: openQuestion(root, i),

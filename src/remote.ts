@@ -26,7 +26,11 @@ export const SYNC_TEXT = {
   unexpected: "Something unexpected went wrong bringing main up to date with GitHub; an engineer can find the details in the trace.",
 } as const;
 
-type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown> };
+/**
+ * What a sync came to. `behind`: it stopped before main here could take main on GitHub, so main may
+ * lack what GitHub has (`text` says why); a sync that got that far and then could not share main does not set it.
+ */
+export type SyncOutcome = { result: "pass" | "waiting" | "fail"; text: string; detail?: Record<string, unknown>; behind?: true };
 
 /**
  * Records the sync outcome as the `main_sync` signal, only when it differs from the last one, so a
@@ -49,9 +53,10 @@ function recordSync(trace: Trace, o: SyncOutcome | null): void {
  * no staged or unstaged changes to tracked files (the generated queue.md aside), so a person's work
  * there is never touched. Safe at any time, beside running steps: main only ever moves from one
  * whole commit to the next. Never throws (except for a stop request) and never stops the tick: the
- * outcome is the `main_sync` signal. Returns the outcome's result (null without a remote).
+ * outcome is the `main_sync` signal. Returns the outcome (null without a remote, or when a newer main on
+ * GitHub beat the push, which the next sync shares).
  */
-export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome["result"] | null> {
+export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncOutcome | null> {
   return oneSync.run(async () => {
     const git = new Git(root);
     let outcome: SyncOutcome | null;
@@ -59,10 +64,10 @@ export function syncMain(root: string, cfg: Config, trace: Trace): Promise<SyncO
       outcome = await sync(git, cfg.main_branch, trace);
     } catch (e) {
       if (e instanceof StopRequested) throw e;
-      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) } };
+      outcome = { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "unexpected problem", error: errorText(e) }, behind: true };
     }
     recordSync(trace, outcome);
-    return outcome?.result ?? null;
+    return outcome;
   });
 }
 
@@ -70,17 +75,17 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
   const remote = await git.remoteName();
   if (!remote) return null;
   const notReady = await checkoutReady(git, main);
-  if (notReady) return notReady;
+  if (notReady) return { ...notReady, behind: true };
 
   const fetched = await git.fetch(["--quiet", remote], true);
-  if (fetched.code !== 0) return { result: "fail", text: SYNC_TEXT.unreachable, detail: { what: "fetch failed", remote, error: lastLine(fetched.err) || `exit ${fetched.code}` } };
+  if (fetched.code !== 0) return { result: "fail", text: SYNC_TEXT.unreachable, detail: { what: "fetch failed", remote, error: lastLine(fetched.err) || `exit ${fetched.code}` }, behind: true };
 
   const upstream = `${remote}/${main}`;
   if ((await git.commitOf(`refs/remotes/${upstream}`)) === null) {
-    return { result: "fail", text: SYNC_TEXT.noMain, detail: { what: "remote has no main", upstream } };
+    return { result: "fail", text: SYNC_TEXT.noMain, detail: { what: "remote has no main", upstream }, behind: true };
   }
   const brought = await bringIn(git, main, upstream);
-  if (!brought.ok) return brought.outcome;
+  if (!brought.ok) return { ...brought.outcome, behind: true };
   if (brought.pulled) trace.event("_loop", "command", { command: "sync main", pulled: brought.pulled, ...(brought.tookRemote.length ? { tookRemote: brought.tookRemote } : {}) });
   return push(git, remote, main, trace);
 }

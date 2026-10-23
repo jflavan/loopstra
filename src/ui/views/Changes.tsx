@@ -93,7 +93,7 @@ function ListView({ items }: { items: ChangeSummary[] }) {
               <td>{c.plain}</td>
               <td>{c.inStatus ?? ""}</td>
               <td class="num">{usd(c.costUsd)}</td>
-              <td class="muted">{[c.waiting, c.note].filter(Boolean).join(" ")}</td>
+              <td class="muted">{[c.waiting, c.shownNote].filter(Boolean).join(" ")}</td>
             </tr>
           ))}
         </tbody>

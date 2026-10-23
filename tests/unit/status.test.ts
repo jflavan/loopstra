@@ -6,6 +6,10 @@ import { renderStatus } from "../../src/commands/status";
 import { configPath, loadConfig } from "../../src/config";
 import { recordGitHub } from "../../src/github";
 import { holdLoop, pauseAfterUnavailable } from "../../src/heartbeat";
+import { runDir } from "../../src/paths";
+import { SYNC_TEXT } from "../../src/remote";
+import { MERGED_NOT_HERE } from "../../src/stages/merge";
+import { PR_APPROVE_NOTE, PR_MERGED_ELSEWHERE, PR_WAIT } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
 import { tempDir } from "../helpers";
 
@@ -94,6 +98,41 @@ describe("renderStatus", () => {
       expect(block).not.toContain("(second)");
       expect(block).toContain("- Waiting for you (third): Waits for frist, which Loopstra cannot find or read in intent/. Fix the name in depends_on, or remove it.");
       expect(block).toContain("- Waiting for you (fourth): Waits for gone, which was closed. Remove it from depends_on to go ahead.");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a change whose pull request waits says why in place of the merge gate's note; one only an engineer can end needs attention whoever is on the gate", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "loopstra"), { recursive: true });
+      await Bun.write(configPath(t.path), "version: 1\ncommands:\n  test: echo ok\ngates:\n  merge:\n    human: pr\n");
+      const behind = `${MERGED_NOT_HERE} ${SYNC_TEXT.unsaved}`;
+      const wait = async (slug: string, text: string) => {
+        mkdirSync(runDir(t.path, slug), { recursive: true });
+        await Bun.write(join(runDir(t.path, slug), PR_WAIT), text);
+      };
+      await intent(t.path, "merged", `status: merge-review\nnote: ${PR_APPROVE_NOTE}`);
+      await wait("merged", behind);
+      await intent(t.path, "elsewhere", "status: merge-review\nnote: Main has my migration in progress.");
+      await wait("elsewhere", PR_MERGED_ELSEWHERE);
+      await intent(t.path, "open", `status: merge-review\nnote: ${PR_APPROVE_NOTE}`);
+      // Left by an earlier build's pull request: no longer shown once the change moved on.
+      await intent(t.path, "rebuilt", "status: building");
+      await wait("rebuilt", behind);
+      const text = await renderStatus(t.path, 1000);
+      const [block = "", table = ""] = text.split("\n\nChange");
+      const row = (slug: string) => table.split("\n").find((l) => l.startsWith(slug)) ?? "";
+      // Its pull request merged: nothing for the person on it, and the gate's note is out of date.
+      expect(row("merged")).toContain(behind);
+      expect(row("merged")).not.toContain(PR_APPROVE_NOTE);
+      expect(block).not.toContain("(merged)");
+      // A person's own note stays beside the wait.
+      expect(row("elsewhere")).toContain(`${PR_MERGED_ELSEWHERE} Main has my migration in progress.`);
+      expect(block).toContain(`- Waiting for you (elsewhere): ${PR_MERGED_ELSEWHERE}`);
+      expect(block).toContain(`- Waiting for you (open): ${PR_APPROVE_NOTE}`);
+      expect(row("rebuilt")).not.toContain(behind);
     } finally {
       t.cleanup();
     }

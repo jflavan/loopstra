@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, passOn } from "../git";
 import { onCheckout, slotEnv } from "../lanes";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
-import type { Status } from "../intents";
+import { WATCHING_PR, type Intent, type Status } from "../intents";
+import { runDir } from "../paths";
 import { errorText } from "../shell";
 
 /**
@@ -36,6 +39,12 @@ export function humanNote(artifact: string, approvedStatus: Status, surface: "st
   }
   return `Read ${artifact}. When you are happy with it, change the status line to ${approvedStatus}. To stop this change, set it to closed.`;
 }
+
+/** The notes the merge gate leaves as a change starts waiting in merge-review, by who decides the merge (see passMergeGate). */
+export const MERGE_WAIT_NOTE = "Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.";
+export const PR_CHECKS_NOTE = "Waiting for the automatic checks on GitHub.";
+export const PR_APPROVE_NOTE = "A pull request is open. Approve it on GitHub to merge, or close it to stop.";
+const GATE_NOTES: ReadonlySet<string> = new Set([MERGE_WAIT_NOTE, PR_CHECKS_NOTE, PR_APPROVE_NOTE]);
 
 /** Run-folder file: the plan as reconciled with what the current build changed. Cleared when a new build starts. */
 export const RECONCILED_PLAN = "plan.reconciled.md";
@@ -173,6 +182,33 @@ export const MERGING = "merging";
 
 /** Run-folder marker: the pull request waits for main here to get changes merged on GitHub that the sync could not bring in yet (traced once). */
 export const REMOTE_AHEAD = "remote-ahead";
+
+/**
+ * Run-folder marker: why the merge step waits on a pull request its gate has nothing more to decide
+ * on, in plain words: it merged on GitHub but main here does not have it yet, or recording that
+ * failed; GitHub is merging it; or it is ready and merges once main here has what GitHub merged
+ * meanwhile. Each look at the pull request writes it or removes it. Kept here, not as the note in
+ * intent.md: it changes with the sync's reason, and recording it would commit to a main that is out
+ * of step with GitHub (#79).
+ */
+export const PR_WAIT = "pr-wait";
+
+/** The PR_WAIT that only an engineer can end. */
+export const PR_MERGED_ELSEWHERE = "The pull request was merged on GitHub, but main here does not have its changes, although it has everything on main on GitHub: was it merged into another branch? An engineer needs to look at it.";
+
+/**
+ * How a change watching its pull request reads: `wait`, its PR_WAIT ("" for none), and `note`, its
+ * own note, which is "" when a wait stands in for the note the merge gate left (which then says what
+ * is no longer so). A note a person wrote stays. Any other status reads as its note alone.
+ * `needsPerson`: only an engineer can end the wait.
+ */
+export function prWait(root: string, intent: Intent): { wait: string; note: string; needsPerson: boolean } {
+  const note = intent.file.frontmatter.note;
+  if (!WATCHING_PR.has(intent.file.frontmatter.status)) return { wait: "", note, needsPerson: false };
+  let wait = "";
+  try { wait = readFileSync(join(runDir(root, intent.slug), PR_WAIT), "utf8").trim(); } catch { /* none */ }
+  return { wait, note: wait && GATE_NOTES.has(note.trim()) ? "" : note, needsPerson: wait === PR_MERGED_ELSEWHERE };
+}
 
 /**
  * Run-folder marker: the commit the pull request's branch on GitHub may be force-pushed over (what

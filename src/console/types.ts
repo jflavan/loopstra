@@ -17,10 +17,12 @@ export interface ChangeSummary {
   since: string | null; inStatus: string | null;
   /** What its ended phases cost. */
   costUsd: number;
-  /** Why it waits for other changes, in plain words, or null. */
+  /** Why it waits, for its pull request (see prWait) or for other changes, in plain words, or null. */
   waiting: string | null;
   /** Its own note from intent.md. */
   note: string;
+  /** Its note as shown: "" while its pull request's wait stands in for the note the merge gate left (see prWait). */
+  shownNote: string;
   /** A step of it is running now. */
   running: boolean;
   /** Why it is held (the hold line), or null. */

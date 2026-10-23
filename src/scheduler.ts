@@ -123,7 +123,7 @@ export async function tick(root: string): Promise<TickResult> {
     // Loopstra's own records when only its commits are ahead. Best effort; never stops the tick.
     const hasRemote = (await new Git(root).remoteName()) !== null;
     // Shared at the end only after a sync that went through: a sync that waits or fails says why itself.
-    share = hasRemote && (await syncMain(root, cfg, trace)) === "pass";
+    share = hasRemote && (await syncMain(root, cfg, trace))?.result === "pass";
 
     // What people asked for (chat, the console): only the loop writes main.
     await applyRequests(root, cfg, trace);
