@@ -450,7 +450,8 @@ describe("a record with its own paths", () => {
       writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: "_settings", paths: [CONFIG] }));
       expect(await git.moveRef("refs/heads/main", parent, commit)).toBe(true);
       expect(await settleRecord(repo.path, "main", trace)).toBe(true);
-      expect(readFileSync(join(repo.path, CONFIG), "utf8")).toBe(text);
+      // Settling checks the file out through git, so it has the checkout's line endings (CRLF with core.autocrlf on Windows).
+      expect(readFileSync(join(repo.path, CONFIG), "utf8").replace(/\r\n/g, "\n")).toBe(text);
       expect((await run(["git", "status", "--porcelain", "--", CONFIG], repo.path)).out.trim()).toBe("");
     } finally { trace.close(); repo.cleanup(); }
   });
