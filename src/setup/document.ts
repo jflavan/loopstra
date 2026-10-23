@@ -211,6 +211,19 @@ export class ConfigDocument {
   }
 
   /**
+   * Removes a key if it is there, and the `steps` map above it when that leaves it empty. Unlike
+   * clear, other maps stay, so `stages.verify` is kept with its model.
+   */
+  unset(path: Path): void {
+    if (!this.doc.hasIn(path)) return;
+    this.remove(path);
+    const parent = path.slice(0, -1);
+    const map = parent.length ? this.doc.getIn(parent, true) : undefined;
+    if (parent[parent.length - 1] === "steps" && isMap(map) && !map.items.length) this.remove(parent);
+    this.dirty = true;
+  }
+
+  /**
    * Deletes one key. Comments above it, or anywhere inside what it held, move to the next key (or the
    * end of its map), followed by `# <key>:` with `placeholder`.
    */
