@@ -21,6 +21,7 @@ import { Inbox } from "./views/Inbox";
 import { Live } from "./views/Live";
 import { Session } from "./views/Session";
 import { Spend } from "./views/Spend";
+import { Settings } from "./views/Settings";
 
 function Screen() {
   const r = route.value;
@@ -33,6 +34,7 @@ function Screen() {
     case "activity": return <Activity />;
     case "agents": return <Agents />;
     case "spend": return <Spend />;
+    case "settings": return <Settings />;
     case "missing":
       return (
         <section class="view">

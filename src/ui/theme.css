@@ -481,3 +481,14 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .toast .btn { background: transparent; color: inherit; border-color: color-mix(in srgb, currentColor 45%, transparent); box-shadow: none; padding: 2px 10px; }
 .toast .btn:hover { color: inherit; border-color: currentColor; background: color-mix(in srgb, currentColor 12%, transparent); }
 .toast.bad { background: var(--bad-fill); color: var(--on-bad); }
+
+/* The Settings page: rows of a label, a picker and a note. */
+.callout { padding: 12px 14px; border-radius: var(--radius); background: var(--bg-sunk); }
+.callout.bad { background: var(--bad-bg); color: var(--bad); }
+.set-rows, .set-group { display: grid; gap: 8px; margin-bottom: 14px; }
+.set-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.set-row > label { flex: 0 0 11rem; min-width: 0; }
+.set-row > input[type="text"] { flex: 0 1 16rem; min-width: 0; }
+.set-head > label { font-weight: 600; text-transform: capitalize; }
+.set-step { padding-left: 16px; }
+.set-wait { display: inline-flex; align-items: center; gap: 8px; }
