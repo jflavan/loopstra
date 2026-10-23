@@ -37,29 +37,32 @@ export function Settings() {
 
   /** Sends one change; the result is toasted, then the settings are read again so the next change carries the new version. */
   const change = async (path: string, value: string | null): Promise<void> => {
-    if (busy.current || !v?.version) return;
+    // A pick while one is saving or read back is not sent; its picker goes back to what the file holds.
+    if (busy.current || !v?.version) { setRev((n) => n + 1); return; }
     busy.current = true;
     const r = await sendSetting({ kind: "settings", path, value, version: v.version }, (d) => {
       toast(d.text, d.ok ? "info" : "bad");
-      busy.current = false;
-      if (alive.current) setPending(null);
-      void load();
+      // Everything stays locked until the re-read has settled, so the next pick carries the new version.
+      void load().then(() => {
+        busy.current = false;
+        if (alive.current) setPending(null);
+      });
     });
     if (!r.ok) {
       toast(r.error, "bad");
-      busy.current = false;
       // A stale page is read again; a refused picker goes back either way.
-      void load();
+      void load().then(() => { busy.current = false; });
       return;
     }
     if (alive.current) setPending({ id: r.id, path, loop: r.loop });
   };
   const cancel = async (p: Pending): Promise<void> => {
     if (await cancelSetting(p.id)) {
-      busy.current = false;
-      setPending(null);
       toast("Cancelled; nothing changed.");
-      void load();
+      void load().then(() => {
+        busy.current = false;
+        if (alive.current) setPending(null);
+      });
     } else {
       toast("The loop has taken it already; it will say how it went.");
     }
@@ -109,14 +112,14 @@ export function Settings() {
           {v.groups.map((g) => (
             <div key={g.group} class="set-group">
               <div class="set-row set-head">
-                <label for={`g-${g.group}`}>{g.group === "chat" ? "Orchestrator" : g.group}</label>
+                <label for={`g-${g.group}`}>{g.group}</label>
                 <Picker id={`g-${g.group}`} rev={rev} row={{ path: g.path, own: g.model }} value={g.model} disabled={locked} onPick={(x) => void change(g.path, x)} />
-                {g.group === "chat" && <span class="muted">chat</span>}
+                {g.group === "chat" && <span class="muted">orchestrator</span>}
                 {wait(g.path)}
               </div>
               {g.steps.filter((s) => s.path !== null).map((s) => (
                 <div key={s.key} class="set-row set-step">
-                  <label for={`s-${s.key}`}>{s.what}</label>
+                  <label for={`s-${s.key}`}><code>{s.key}</code> <span class="muted">{s.what}</span></label>
                   <Picker id={`s-${s.key}`} rev={rev} row={{ path: s.path, own: s.own }} value={s.own} disabled={locked} onPick={(x) => void change(s.path!, x)} />
                   {s.own === null && <span class="muted">{s.byDefault}</span>}
                   {wait(s.path)}
