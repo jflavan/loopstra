@@ -40,6 +40,14 @@ describe("RecordDraft", () => {
     expect(() => d.write("intent/queue.md", "q")).not.toThrow();
   });
 
+  test("a draft given its own paths may write only those", () => {
+    const d = new RecordDraft("/r", "_settings", ["loopstra/config.yaml"]);
+    expect(() => d.write("loopstra/config.yaml", "x")).not.toThrow();
+    expect(() => d.write("intent/x/intent.md", "x")).toThrow("a record of _settings cannot write intent/x/intent.md");
+    expect(() => d.write("intent/queue.md", "q")).toThrow();
+    expect(() => d.write("intent/_settings/a.md", "q")).toThrow();
+  });
+
   test("remembers what a file held on disk when first read there, and nothing for one never read", () => {
     const t = tempDir();
     try {

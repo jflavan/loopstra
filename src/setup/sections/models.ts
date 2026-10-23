@@ -11,7 +11,7 @@ const NAMES = DEFAULTS.claude.models;
 const AUTO = "auto";
 
 /** A model name is one word, like sonnet or claude-opus-5-5. */
-const modelName = (s: string) => (/\s/.test(s) ? "A model name has no spaces, like sonnet or claude-opus-5-5." : null);
+export const modelName = (s: string) => (/\s/.test(s) ? "A model name has no spaces, like sonnet or claude-opus-5-5." : null);
 
 const isRef = (v: unknown): v is ModelRef => typeof v === "string" && (MODEL_REFS as readonly string[]).includes(v);
 

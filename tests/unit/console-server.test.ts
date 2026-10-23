@@ -352,6 +352,8 @@ describe("writes", () => {
       expect((await post(base, "/api/requests", { kind: "approve", slug: "../x", expect: "plan-review" })).status).toBe(400);
       expect((await post(base, "/api/requests", { kind: "send-back", slug: "a", expect: "plan-review", note: "  " })).status).toBe(400);
       expect((await post(base, "/api/requests", { kind: "approve", slug: "nope", expect: "plan-review" })).status).toBe(404);
+      // The console does not send settings requests yet: one is an unknown action.
+      expect((await post(base, "/api/requests", { kind: "settings", slug: "a", path: "chat.model", value: "max", version: "x" })).status).toBe(400);
     });
   }, 30_000);
 

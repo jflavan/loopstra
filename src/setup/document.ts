@@ -35,7 +35,11 @@ export class ConfigDocument {
 
   static load(root: string): ConfigDocument {
     const path = configPath(root);
-    const text = readFileSync(path, "utf8");
+    return ConfigDocument.fromText(path, readFileSync(path, "utf8"));
+  }
+
+  /** The config from its text, as load reads it from `path` (where save() would write it). */
+  static fromText(path: string, text: string): ConfigDocument {
     const doc = parseDocument(text);
     if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
     // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.

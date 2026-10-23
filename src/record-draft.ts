@@ -8,20 +8,26 @@ export interface DraftChange { rel: string; text: string | null }
  * The files one record changes, held in memory until commitRecord has committed them (see
  * src/context.ts): a record's write callback writes here, never into the checkout. A read gives the
  * draft's version, else the file on disk. Only the change's own folder (`intent/<slug>/`) and the
- * generated `intent/queue.md` may be written: a record never writes elsewhere.
+ * generated `intent/queue.md` may be written, or, for a record given its own `paths` (a settings
+ * record's loopstra/config.yaml), exactly those files: a record never writes elsewhere.
  */
 export class RecordDraft {
   private readonly drafted = new Map<string, string | null>();
   /** What each file held on disk when the draft first read it there (null: not there). */
   private readonly onDisk = new Map<string, Buffer | null>();
 
-  constructor(readonly root: string, readonly slug: string) {}
+  constructor(readonly root: string, readonly slug: string, private readonly paths?: readonly string[]) {}
 
   /**
-   * Throws for a path outside the change's folder and queue.md. Inside the folder, an empty, `.` or
-   * `..` segment (each names a file two ways, climbs out, or names none) and a backslash are refused too.
+   * Throws for a path outside the change's folder and queue.md, or not one of `paths` when it was
+   * given. Inside the folder, an empty, `.` or `..` segment (each names a file two ways, climbs out,
+   * or names none) and a backslash are refused too.
    */
   private check(rel: string): void {
+    if (this.paths) {
+      if (!this.paths.includes(rel)) throw new Error(`a record of ${this.slug} cannot write ${rel}`);
+      return;
+    }
     const prefix = `intent/${this.slug}/`;
     const inFolder = rel.startsWith(prefix) && !rel.includes("\\")
       && rel.slice(prefix.length).split("/").every((s) => s !== "" && s !== "." && s !== "..");

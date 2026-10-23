@@ -197,23 +197,25 @@ const markerPath = (root: string) => join(loopstraDir(root), "recording.json");
  * record once the checkout is back on main. A stop
  * request ends it only before a commit is built (nothing has landed then, on a retry too); from there
  * on it does not stop it. `opts.request` tags the commit with the request it applies
- * (`Loopstra-Request: <id>`), so a later pass can ask git whether it landed. False when nothing was
- * committed.
+ * (`Loopstra-Request: <id>`), so a later pass can ask git whether it landed. `opts.paths`: the
+ * record's paths in place of the change's folder and queue.md (a settings record's
+ * loopstra/config.yaml), the only files its draft may write; `slug` then only names the record in
+ * its subject, the marker and the trace. False when nothing was committed.
  */
-export function commitRecord(root: string, main: string, slug: string, what: string, write: (draft: RecordDraft) => Promise<boolean | void> = async () => {}, opts: { request?: string; trace?: Trace } = {}): Promise<boolean> {
+export function commitRecord(root: string, main: string, slug: string, what: string, write: (draft: RecordDraft) => Promise<boolean | void> = async () => {}, opts: { request?: string; trace?: Trace; paths?: string[] } = {}): Promise<boolean> {
   return onCheckout(root, async () => {
     const git = new Git(root);
     await assertOnMain(git, main);
     if (!(await settleRecord(root, main, opts.trace))) throw new RecordUnsettled();
     throwIfStopping();
-    const paths = [`intent/${slug}`, "intent/queue.md"];
+    const paths = opts.paths ?? [`intent/${slug}`, "intent/queue.md"];
     const ref = `refs/heads/${main}`;
     const message = bookkeeping(`loopstra(${slug}): ${what}`) + (opts.request ? `\n\nLoopstra-Request: ${opts.request}` : "");
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) await assertStillOnMain(git, root, main);
       const parent = await git.commitOf(ref);
       if (!parent) throw new Error(`there is no branch ${main} to record on`);
-      const draft = new RecordDraft(root, slug);
+      const draft = new RecordDraft(root, slug, opts.paths);
       if ((await write(draft)) === false) return false;
       const changes = draft.changes();
       // What each drafted file held on disk when the draft read it, or now for one it never read: a
@@ -276,14 +278,15 @@ const LANDED_SLACK_MS = 60 * 60_000;
  * have switched branches) has a commit with the line `Loopstra-Request: <id>`, the whole line (a subject naming the id, or a longer id it begins, is not it). A pass the loop was
  * killed in after that commit and before it finished leaves exactly this; the caller then finishes
  * as if it had just committed, and writes nothing again. `since` (ISO, when the request or message
- * was made) bounds the walk to an hour before it; one that is not a date bounds nothing. A git that
- * fails throws: "not landed" would write the record twice.
+ * was made) bounds the walk to an hour before it; one that is not a date bounds nothing. `paths`: the
+ * record's paths when it was given its own (see commitRecord's `opts.paths`). A git that fails
+ * throws: "not landed" would write the record twice.
  */
-export async function landed(root: string, main: string, id: string, slug: string, since?: string): Promise<boolean> {
+export async function landed(root: string, main: string, id: string, slug: string, since?: string, paths = [`intent/${slug}`]): Promise<boolean> {
   const from = since === undefined ? NaN : Date.parse(since);
   const bound = Number.isFinite(from) ? [`--since=${new Date(from - LANDED_SLACK_MS).toISOString()}`] : [];
   // An id is digits and hyphens (see ID in src/ids.ts), so it needs no escaping in the pattern.
-  const r = await new Git(root).run(["log", "-1", "--format=%H", ...bound, `--grep=^Loopstra-Request: ${id}$`, `refs/heads/${main}`, "--", `intent/${slug}`]);
+  const r = await new Git(root).run(["log", "-1", "--format=%H", ...bound, `--grep=^Loopstra-Request: ${id}$`, `refs/heads/${main}`, "--", ...paths]);
   return r.out.trim() !== "";
 }
 
@@ -361,7 +364,8 @@ async function settle(root: string, main: string, trace?: Trace): Promise<boolea
         if (inCommit) await git.run(["checkout", m.commit, "--", rel], { cleanup: true });
         else rmSync(join(root, rel), { force: true });
       }
-      await git.run(["reset", "-q", "--", `intent/${m.slug}`, "intent/queue.md"], { cleanup: true });
+      // The files it names too: a record given its own paths (see commitRecord) has them outside the folder.
+      await git.run(["reset", "-q", "--", ...new Set([`intent/${m.slug}`, "intent/queue.md", ...m.paths])], { cleanup: true });
       trace?.event(m.slug, "command", { command: "finish a record a kill cut short", commit: m.commit });
     } else if (head !== m.parent) {
       trace?.event(m.slug, "command", { command: "drop the marker of a record main no longer has (main was reset)", commit: m.commit });

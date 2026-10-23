@@ -424,6 +424,38 @@ describe("commitRecord beside a person's branch switch", () => {
   });
 });
 
+describe("a record with its own paths", () => {
+  const ID = "000000000000001-1-0002";
+  const CONFIG = "loopstra/config.yaml";
+
+  test("commits only its paths, is found by landed there, and a kill after main moved is finished for them", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      // An edit of the change's own folder on disk is not taken along: the record's paths are only the config.
+      writeFileSync(md(repo.path), "a person's version\n");
+      const config = readFileSync(join(repo.path, CONFIG), "utf8");
+      expect(await commitRecord(repo.path, "main", "_settings", "chat.model → strong", async (d) => {
+        d.write(CONFIG, `${d.read(CONFIG)}chat:\n  model: strong\n`);
+      }, { request: ID, paths: [CONFIG] })).toBe(true);
+      expect((await run(["git", "show", "--name-only", "--format=", "HEAD"], repo.path)).out.trim()).toBe(CONFIG);
+      expect(readFileSync(join(repo.path, CONFIG), "utf8")).toBe(`${config}chat:\n  model: strong\n`);
+      expect(readFileSync(md(repo.path), "utf8")).toBe("a person's version\n");
+      expect(await landed(repo.path, "main", ID, "_settings", undefined, [CONFIG])).toBe(true);
+      expect(await landed(repo.path, "main", ID, "_settings")).toBe(false);
+      // Killed after main moved, before the checkout was written: settling brings the config up and clears the index.
+      const git = new Git(repo.path);
+      const parent = await git.headSha();
+      const text = `${readFileSync(join(repo.path, CONFIG), "utf8")}# later\n`;
+      const commit = (await git.commitFiles(parent, [CONFIG], [{ rel: CONFIG, text }], "loopstra(_settings): killed [skip ci]"))!;
+      writeFileSync(join(repo.path, ".loopstra", "recording.json"), JSON.stringify({ parent, commit, slug: "_settings", paths: [CONFIG] }));
+      expect(await git.moveRef("refs/heads/main", parent, commit)).toBe(true);
+      expect(await settleRecord(repo.path, "main", trace)).toBe(true);
+      expect(readFileSync(join(repo.path, CONFIG), "utf8")).toBe(text);
+      expect((await run(["git", "status", "--porcelain", "--", CONFIG], repo.path)).out.trim()).toBe("");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
 describe("landed", () => {
   const ID = "000000000000001-1-0001";
   /** A record of SLUG that adds one file, so each commits something. */

@@ -14,9 +14,9 @@ import { changeExists, decode, fromPage, json, jsonWrite, ownSite, plain, refuse
 /** The longest note a send back takes, and the longest hold reason. */
 const MAX_NOTE = 4_000;
 const MAX_REASON = 300;
-/** Every request kind but chat's written intents. */
-type Kind = Exclude<RequestKind, "new">;
-const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new");
+/** Every request kind on a change: not chat's written intents, nor a change of a setting. */
+type Kind = Exclude<RequestKind, "new" | "settings">;
+const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new" && k !== "settings");
 
 /**
  * The console's writes: requests for the loop (`/api/requests`, with GET and DELETE of one by id)
@@ -64,7 +64,7 @@ function loop(root: string, body: Record<string, unknown>): Response {
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 
 /** The body as a request, or why it is not one (a 400). */
-function parse(body: Record<string, unknown>): RequestBody | string {
+function parse(body: Record<string, unknown>): Exclude<RequestBody, { kind: "settings" }> | string {
   const kind = str(body.kind);
   const slug = str(body.slug);
   if (!kind || !KINDS.includes(kind)) return "Unknown action.";
@@ -106,7 +106,7 @@ function parse(body: Record<string, unknown>): RequestBody | string {
  * True when the change offers the action now (see offers), or, for an undo, when it takes back the
  * step that happened last (see undoMatches). Reads the trace, which it opens and closes.
  */
-function allowed(root: string, r: Exclude<RequestBody, { kind: "new" }>, fm: Frontmatter, cfg: Config | null): boolean {
+function allowed(root: string, r: Exclude<RequestBody, { kind: "new" | "settings" }>, fm: Frontmatter, cfg: Config | null): boolean {
   const trace = Trace.open(root, () => {});
   try {
     if (r.kind === "undo") return undoMatches(trace, r.slug, r.expect, r.to);

@@ -6,8 +6,10 @@ import { loadConfig } from "../../src/config";
 import { commitRecord } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
+import { stepModel } from "../../src/models";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
+import { configVersion } from "../../src/settings";
 import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -959,6 +961,110 @@ describe("applying requests", () => {
       const q = submitRequest(r.root, { ...by, kind: "close", slug: "nope", expect: "building" });
       await apply(r.root);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: false, status: null, text: "There is no change called nope in the main code." });
+    } finally {
+      r.cleanup();
+    }
+  });
+});
+
+describe("settings requests", () => {
+  const CONFIG = "loopstra/config.yaml";
+  const STALE = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
+  const DIRTY = "loopstra/config.yaml has changes in the main checkout that are not committed. Commit or undo them first, then change the setting again.";
+  const config = (root: string) => readFileSync(join(root, CONFIG), "utf8");
+  const setting = (root: string, path: string, value: string | null, version = configVersion(config(root))) =>
+    submitRequest(root, { ...by, kind: "settings", path, value, version });
+  const lastSettingsEvent = (root: string) => {
+    const trace = Trace.open(root, () => {});
+    try { return JSON.parse(trace.lastEvent("_loop", "request")!.payload); } finally { trace.close(); }
+  };
+
+  test("a settings request lands as one commit", async () => {
+    const r = await chatRepo();
+    try {
+      const q = setting(r.root, "stages.verify.steps.done-check", "max");
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): stages.verify.steps.done-check → max by John from the dashboard");
+      expect((await run(["git", "log", "-1", "--format=%B"], r.root)).out).toContain(`Loopstra-Request: ${q.id}`);
+      expect((await run(["git", "show", "--name-only", "--format=", "HEAD"], r.root)).out.trim()).toBe(CONFIG);
+      expect(stepModel(await loadConfig(r.root), "done-check")).toBe("max");
+      expect((await run(["git", "status", "--porcelain"], r.root)).out.trim()).toBe("");
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: true, status: null, text: "Saved: stages.verify.steps.done-check is now max. Sessions that start from now on use it." });
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, kind: "settings", path: "stages.verify.steps.done-check", value: "max", result: "applied" });
+      // Unset again: the step goes back to its default, and the empty steps map goes with it.
+      const back = setting(r.root, "stages.verify.steps.done-check", null);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, back.id)).toMatchObject({ ok: true, text: "Saved: stages.verify.steps.done-check is now its default. Sessions that start from now on use it." });
+      expect(await lastCommit(r.root)).toContain("stages.verify.steps.done-check → default by John");
+      expect(stepModel(await loadConfig(r.root), "done-check")).toBe("strong");
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a settings request with an old version is refused", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const q = setting(r.root, "chat.model", "strong", configVersion("version: 1\n"));
+      expect(await apply(r.root)).toBe(1);
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: STALE });
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, kind: "settings", result: "stale" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a path that is not a model setting, or a value it cannot take, is refused with the reason", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const a = setting(r.root, "claude.timeout_minutes", "5");
+      const b = setting(r.root, "claude.models.strong", "claude opus");
+      const c = setting(r.root, "stages.build.model", null);
+      expect(await apply(r.root)).toBe(3);
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(requestState(r.root, a.id)).toMatchObject({ ok: false, status: null, text: "That setting was not saved: claude.timeout_minutes is not a setting the page can change." });
+      expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: "That setting was not saved: A model name has no spaces, like sonnet or claude-opus-5-5." });
+      expect(requestState(r.root, c.id)).toMatchObject({ ok: false });
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: c.id, result: "refused" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("uncommitted config edits are never committed by a setting", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const edited = `${config(r.root)}# a hand edit\n`;
+      writeFileSync(join(r.root, CONFIG), edited);
+      // The page read the file as it is now, hand edit and all.
+      const q = setting(r.root, "chat.model", "strong");
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: DIRTY });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(config(r.root)).toBe(edited);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, result: "refused" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a settings request killed after landing is finished as applied", async () => {
+    const r = await chatRepo();
+    try {
+      const req = setting(r.root, "chat.model", "strong");
+      claimRequest(r.root, req.id);
+      expect(await commitRecord(r.root, "main", "_settings", "chat.model → strong by John from the dashboard", async (d) => {
+        d.write(CONFIG, `${d.read(CONFIG)}chat:\n  model: strong\n`);
+      }, { request: req.id, paths: [CONFIG] })).toBe(true);
+      const commits = await commitCount(r.root);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, req.id)).toMatchObject({ state: "done", ok: true, status: null, text: "Saved: chat.model is now strong. Sessions that start from now on use it." });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: req.id, result: "applied" });
     } finally {
       r.cleanup();
     }
