@@ -28,7 +28,7 @@ const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch
 const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";
 /** The pull request merged, but main here cannot be brought up to date with it yet (see recordRemoteMerge). */
-export const MAIN_BEHIND_NOTE = "The pull request was merged on GitHub, but main here is not up to date with it yet; the main_sync signal in loopstra status says why. The merge is recorded once main has it.";
+export const MAIN_BEHIND_NOTE = "The pull request was merged on GitHub, but main here does not have it yet; \"Main and GitHub\" under Needs attention (loopstra status or the console) says why. The merge is recorded once main has it.";
 export const NO_REMOTE_PR_NOTE = "This change passed its checks, but it is set to be approved through a pull request and this repository has no GitHub remote. To merge it here instead, set status to merge-approved.";
 
 /**
@@ -603,7 +603,7 @@ async function finishRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
 
 /**
  * finishRemoteMerge's body: sync main, then record the merge once main has it. Until then the note
- * says the pull request merged (written once), not what the change waited for before it did.
+ * says the pull request merged, not what the change waited for before it did.
  */
 async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResult> {
   const main = ctx.cfg.main_branch;
@@ -618,8 +618,9 @@ async function recordRemoteMerge(ctx: StepContext, pr: PrInfo): Promise<StepResu
     if (onceMarker(ctx, MAIN_BEHIND)) {
       const waiting = `the pull request is merged, but ${main} here does not have it yet; the merge is recorded once the sync brings it in`;
       ctx.trace.event(ctx.slug, "command", { command: "finish merge", waiting, pr: pr.number, mergeCommit: pr.mergeCommit });
-      await setStatus(ctx, ctx.intent.file.frontmatter.status, MAIN_BEHIND_NOTE);
     }
+    // By the note, not the marker: a write that did not land is tried again on the next look.
+    if (ctx.intent.file.frontmatter.note !== MAIN_BEHIND_NOTE) await setStatus(ctx, ctx.intent.file.frontmatter.status, MAIN_BEHIND_NOTE);
     return { ok: true, waiting: true };
   }
   clearMarker(ctx, MAIN_BEHIND);

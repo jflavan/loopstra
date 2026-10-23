@@ -187,15 +187,19 @@ describe("the loop with a GitHub remote", () => {
       const original = await Bun.file(smoke).text();
       await Bun.write(smoke, `${original}// editing\n`);
       const r = await tick(s.repo);
+      const git = new Git(s.repo);
       expect(r.picked).toBe(SLUG);
       expect(r.result).toEqual({ ok: true, waiting: true });
       expect((await s.pr()).merged).toBe(true);
       expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
       // Not recorded as merged against a stale main, so the done-check does not run on it yet.
-      const git = new Git(s.repo);
       expect((await git.run(["cat-file", "-e", "main:src/add.ts"], true)).code).not.toBe(0);
       // The note says the pull request merged, not that it waits for GitHub's checks.
       expect(await intentOf(s.repo)).toMatchObject({ status: "merge-review", note: MAIN_BEHIND_NOTE });
+      // A further look while main still lacks it does not write the note again.
+      const head = await git.headSha();
+      await tick(s.repo);
+      expect((await git.run(["diff", "--name-only", head, "main"], true)).out).not.toContain(`intent/${SLUG}/intent.md`);
       expect(existsSync(join(s.repo, ".loopstra", "health-pending"))).toBe(false);
       // gh is not asked to delete the branch (the worktree still has it checked out); Loopstra
       // deletes the remote branch itself and keeps the local one until main has its changes.
