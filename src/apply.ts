@@ -8,17 +8,19 @@ import { withEntry, type ConversationEntry } from "./conversation";
 import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
-import { Git } from "./git";
+import { Git, GitError } from "./git";
 import { errorText } from "./shell";
 import { recordNotYet, StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
+import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG, STALE_SETTINGS } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
 type AnswerRequest = Extract<Request, { kind: "answer" }>;
+type SettingsRequest = Extract<Request, { kind: "settings" }>;
 
 /**
  * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
@@ -216,16 +218,17 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
 }
 
 /**
- * True when a record of the request landed (see doneBefore): for a new request, for any of its drafts.
- * Such a request is not given up on at the give-up point but finished as applied (see finishLanded). A
+ * True when a record of the request landed (see doneBefore): for a new request, for any of its drafts;
+ * for a settings request, its one record of loopstra/config.yaml (see landed). Such a request is not given up on at the give-up point but finished as applied (see finishLanded). A
  * git that cannot answer counts as not landed, so a request is still given up on when git itself
  * keeps failing; a stop request passes through.
  */
 async function anyLanded(root: string, main: string, req: Request): Promise<boolean> {
-  const slugs = req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug];
-  for (const slug of slugs.filter((x) => SLUG.test(x))) {
+  const asks = req.kind === "settings" ? [() => settingsLanded(root, main, req)]
+    : (req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug]).filter((x) => SLUG.test(x)).map((slug) => () => doneBefore(root, main, req, slug));
+  for (const ask of asks) {
     try {
-      if (await doneBefore(root, main, req, slug)) return true;
+      if (await ask()) return true;
     } catch (e) {
       if (e instanceof StopRequested) throw e;
     }
@@ -284,6 +287,7 @@ function applyOne(root: string, cfg: Config, trace: Trace, req: Request, lastTry
     case "new": return applyNew(root, cfg.main_branch, trace, req, lastTry);
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
     case "answer": return applyAnswer(root, cfg, trace, req, lastTry);
+    case "settings": return applySettings(root, cfg, trace, req);
     default: return applyStatus(root, cfg, trace, req, lastTry);
   }
 }
@@ -377,6 +381,63 @@ async function applyNew(root: string, main: string, trace: Trace, req: Extract<R
   if (skipped.length) parts.push(`Not written, because something changed meanwhile: ${skipped.join("; ")}.`);
   if (failed.length) parts.push(`Could not be written: ${failed.join(", ")}; an engineer can find why in the trace.`);
   return { ok: added.length > 0, status: null, text: parts.join(" ") || "Nothing was written." };
+}
+
+/** True when the settings request's record landed (see landed): it has loopstra/config.yaml, not a change's folder. */
+function settingsLanded(root: string, main: string, req: SettingsRequest): Promise<boolean> {
+  return landed(root, main, req.id, SETTINGS_SLUG, req.at, [CONFIG_REL]);
+}
+
+/** A settings request's refusals that are not a problem with the setting itself. */
+const UNCOMMITTED_CONFIG = `${CONFIG_REL} has changes in the main checkout that are not committed. Commit or undo them first, then change the setting again.`;
+
+/**
+ * Changes one model setting (see src/settings.ts) as one record of loopstra/config.yaml on main,
+ * tagged with the request's id like every request's record, so a pass killed after it landed
+ * finishes it as saved. Refused with nothing committed: a path that is not a model setting, a value it
+ * cannot take or a config that would not load with it (the reason is the result), a file that
+ * changed since the page read it (`version`), and a file with edits in the main checkout that are
+ * not committed (or one the last commit does not have), which the record would otherwise commit with it. The last two are checked inside the
+ * record, under the checkout lock and after a record a kill cut short is finished (which may bring the
+ * file up itself). There is no change, so the result has no status, and it is traced under _loop.
+ */
+async function applySettings(root: string, cfg: Config, trace: Trace, req: SettingsRequest): Promise<Outcome> {
+  const main = cfg.main_branch;
+  const done = (result: string, ok: boolean, text: string, more: Record<string, unknown> = {}): Outcome => {
+    trace.event("_loop", "request", { id: req.id, kind: req.kind, by: req.byName, byId: req.by, via: req.via, transport: req.transport, path: req.path, value: req.value, result, ...more });
+    return { ok, status: null, text };
+  };
+  const saved = () => done("applied", true, `Saved: ${req.path} is now ${req.value ?? "its default"}. Sessions that start from now on use it.`);
+  const notSaved = (problem: string) => done("refused", false, `That setting was not saved: ${problem}`, { problem });
+  if (await settingsLanded(root, main, req)) return saved();
+  const path = settingPath(req.path);
+  if (!path) return notSaved(`${oneLine(req.path, 80)} is not a setting the page can change.`);
+  const problem = settingProblem(path, req.value);
+  if (problem) return notSaved(problem);
+  // The result of the record's write refusing, when it did (a refusal ends the record: see commitRecord).
+  const refused: { outcome?: () => Outcome } = {};
+  const refuse = (outcome: () => Outcome) => { refused.outcome = outcome; return false; };
+  const git = new Git(root);
+  await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${req.value ?? "default"} by ${byWhom(req)}`, async (draft) => {
+    const args = ["diff", "--quiet", "HEAD", "--", CONFIG_REL];
+    const diff = await git.run(args, { allowFail: true });
+    // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+    if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+    if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    // diff says nothing of a file the last commit does not have (never committed, or removed from git):
+    // the record would commit it whole, with whatever is in it. Any failure here refuses, which commits nothing.
+    if ((await git.run(["cat-file", "-e", `HEAD:${CONFIG_REL}`], { allowFail: true })).code !== 0) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    const text = draft.read(CONFIG_REL);
+    if (text === null) return refuse(() => notSaved(`there is no ${CONFIG_REL} in the main code.`));
+    if (configVersion(text) !== req.version) return refuse(() => done("stale", false, STALE_SETTINGS));
+    const r = applySetting(join(root, CONFIG_REL), text, path, req.value);
+    if (!r.ok) return refuse(() => notSaved(r.problem));
+    draft.write(CONFIG_REL, r.text);
+    return true;
+  }, { request: req.id, trace, paths: [CONFIG_REL] });
+  if (refused.outcome) return refused.outcome();
+  // Committed, or nothing to commit: the file already says it.
+  return saved();
 }
 
 /** The change a request is about, or the plain reason it cannot be read. */

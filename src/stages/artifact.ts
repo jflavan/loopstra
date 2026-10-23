@@ -101,7 +101,7 @@ export async function runArtifactStep<W extends Writer, J extends Judge>(ctx: St
 export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, a: Artifacts, findings: string): AgentPhaseSpec & { name: W } {
   const cfg = ctx.cfg.stages[s.stage];
   // Read-only sessions in plan mode: it returns the structured output normally (verified live).
-  return { name: s.stage, model: cfg.model, permissionMode: "plan", tools: "read", vars: s.vars(a, findings), skills: cfg.skills };
+  return { name: s.stage, permissionMode: "plan", tools: "read", vars: s.vars(a, findings), skills: cfg.skills };
 }
 
 /** One writing session (or an answer written earlier, see take): the artifact is written, then the after commands run. */
@@ -271,7 +271,7 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // Beside that work, a cheaper judge in shadow needs room for a third session. The strong judge's
       // verdict comes back without waiting for the cheaper one, so a rejection calls the work off at once.
       const judge = async () => {
-        const j = await judgeFirst(ctx, { name: s.judge.name, model: "strong", permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
+        const j = await judgeFirst(ctx, { name: s.judge.name, permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
         pending.comparison = j;
         return j.result;
       };

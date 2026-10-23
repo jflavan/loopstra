@@ -355,6 +355,25 @@ describe("writes", () => {
     });
   }, 30_000);
 
+  test("the settings: a read view, and a request that is checked against the file as it is now", async () => {
+    await withRepoConsole(async (base, root) => {
+      expect((await fetch(`${base}/settings`)).status).toBe(200);
+      const view = await (await fetch(`${base}/api/settings`)).json() as { version: string };
+      expect(view.version).toBeTruthy();
+      const set = { kind: "settings", path: "stages.verify.steps.done-check", value: "max", version: view.version };
+      expect((await post(base, "/api/requests", set)).status).toBe(202);
+      expect(pendingRequests(root).map((q) => q.kind)).toEqual(["settings"]);
+      const stale = await post(base, "/api/requests", { ...set, version: "old" });
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as { error: string }).error).toContain("The settings changed since the page read them");
+      expect((await post(base, "/api/requests", { ...set, path: "claude.timeout_minutes" })).status).toBe(400);
+      expect((await post(base, "/api/requests", { ...set, value: "bogus" })).status).toBe(400);
+      expect((await post(base, "/api/requests", { ...set, version: 3 })).status).toBe(400);
+      const noOrigin = await fetch(`${base}/api/requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(set) });
+      expect(noOrigin.status).toBe(403);
+    });
+  }, 30_000);
+
   test("an undo is taken only for the step that really happened last", async () => {
     await withRepoConsole(async (base, root) => {
       // Never approved: there is nothing to take back.

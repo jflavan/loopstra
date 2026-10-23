@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { MODEL_REFS, stepsOf, type ModelRef, type StageName, type StepGroup } from "./models";
 import { errorText } from "./shell";
 
 /** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
@@ -22,10 +23,17 @@ export class ConfigError extends Error {
 const humanGate = z.enum(["status", "pr", "none"]);
 /** A person on the status line, or nobody: spec, plan, and done have no pull request to approve. */
 const statusGate = z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" });
-const modelRef = z.enum(["default", "cheap", "strong"]);
+const modelRef = z.enum(MODEL_REFS);
 
-const stage = z.object({
+type Steps = Partial<Record<string, ModelRef>>;
+
+/** Each step of a group may name its own model; unset, the step's built-in default applies (see STEPS). */
+const stepModels = (group: StepGroup) =>
+  z.object(Object.fromEntries(stepsOf(group).filter((s) => s.key !== "orchestrator").map((s) => [s.key, modelRef.optional()]))).strict().prefault({}) as unknown as z.ZodPrefault<z.ZodType<Steps, Steps>>;
+
+const stage = (name: StageName) => z.object({
   model: modelRef,
+  steps: stepModels(name),
   skills: z.array(z.string()).default([]),
   before: z.array(z.string()).default([]),
   after: z.array(z.string()).default([]),
@@ -63,8 +71,9 @@ const discordTransport = z.object({
 }).strict();
 
 const chat = z.object({
-  /** The orchestrator's model; the writer uses stages.design.model. */
+  /** The orchestrator's model; write-intent is chat.steps (default: stages.design.model). */
   model: modelRef.default("default"),
+  steps: stepModels("chat"),
   /** What chat turns and writer runs may spend in a day, together. Unset: no limit. */
   max_budget_usd_per_day: z.number().positive().optional(),
   /** What one chat turn or writer run may hold of that, so others can run at the same time. Unset: no limit. */
@@ -107,6 +116,7 @@ export const ConfigSchema = z.object({
       default: modelName("sonnet"),
       cheap: modelName("haiku"),
       strong: modelName("opus"),
+      max: modelName("fable"),
     }).strict().prefault({}),
     timeout_minutes: z.number().positive().default(30),
     /** What one session may spend. Unset: no limit (timeout_minutes still ends a session). */
@@ -125,11 +135,11 @@ export const ConfigSchema = z.object({
     done: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
   }).strict().prefault({}),
   stages: z.object({
-    design: stage.extend({ model: modelRef.default("strong") }).prefault({}),
-    plan: stage.extend({ model: modelRef.default("strong") }).prefault({}),
-    build: stage.extend({ model: modelRef.default("default"), max_fix_loops: z.number().int().min(1).default(3) }).prefault({}),
-    review: stage.extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
-    verify: stage.extend({ model: modelRef.default("default") }).prefault({}),
+    design: stage("design").extend({ model: modelRef.default("strong") }).prefault({}),
+    plan: stage("plan").extend({ model: modelRef.default("strong") }).prefault({}),
+    build: stage("build").extend({ model: modelRef.default("default"), max_fix_loops: z.number().int().min(1).default(3) }).prefault({}),
+    review: stage("review").extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
+    verify: stage("verify").extend({ model: modelRef.default("default") }).prefault({}),
   }).strict().prefault({}),
   // Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides: once earned, a cheaper judge's pass stands.
   speed: z.object({
@@ -194,9 +204,9 @@ export function validateConfig(raw: unknown): Config {
   return result.data;
 }
 
-/** Resolve a stage's model alias to the CLI model name. */
-export type ModelRef = z.infer<typeof modelRef>;
+export type { ModelRef };
 
-export function modelFor(cfg: Config, ref: ModelRef): string {
+/** Resolve a model alias to the CLI model name. */
+export function modelFor(cfg: Pick<Config, "claude">, ref: ModelRef): string {
   return cfg.claude.models[ref];
 }

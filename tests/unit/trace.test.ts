@@ -5,6 +5,22 @@ import { Database } from "bun:sqlite";
 import { judgeNote, migrate, SCHEMA_VERSION, Trace, useJournal, type NewJudgeRow } from "../../src/trace";
 import { tempDir } from "../helpers";
 
+describe("the last run per named model", () => {
+  test("is the newest row of each ref", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.recordModelRun({ ref: "strong", asked: "opus", ran: "claude-opus-5-5", result: "ok", slug: "a-b", seq: 1 });
+      trace.recordModelRun({ ref: "strong", asked: "nope", ran: null, result: "bad-model", slug: "a-b", seq: 2 });
+      trace.recordModelRun({ ref: "cheap", asked: "haiku", ran: "claude-haiku-5-5", result: "ok", slug: "a-b", seq: 3 });
+      const last = trace.lastModelRuns();
+      expect(last.strong?.result).toBe("bad-model");
+      expect(last.cheap?.ran).toBe("claude-haiku-5-5");
+      expect(last.max).toBeUndefined();
+    } finally { trace.close(); t.cleanup(); }
+  });
+});
+
 describe("Trace", () => {
   test("writes events to jsonl and sqlite, and reports intent summaries", () => {
     const t = tempDir();

@@ -41,7 +41,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
 
   const feedback = readMarker(ctx, SENT_BACK)?.trim() ?? "";
   const phase: AgentPhaseSpec & { name: "build" } = {
-    name: "build", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+    name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
     vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback }, skills: stage.skills,
   };
   // The note reaches the session even through an older build.md without {{feedback}}.
@@ -71,7 +71,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (!drift.ok) return block(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", { detail: drift.detail });
   if (drift.extra.length) {
     const rec = await buildSession(ctx, {
-      name: "reconcile", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "reconcile", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { plan, findings: bullets(drift.extra) },
     });
     if (!rec.ok) return block(ctx, rec.note);
@@ -97,7 +97,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (verified.passed && early) keepEarlyReview(ctx, early);
   if (!verified.passed) {
     const fix = await buildSession(ctx, {
-      name: "fix", traceName: "fix-after-verify", model: stage.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "fix", traceName: "fix-after-verify", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { failure_output: `${VERIFY_FAILED}\n${verified.observations}`, test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return block(ctx, fix.note);
@@ -151,7 +151,7 @@ type Verified = { ok: true; passed: boolean; observations: string } | Failure;
 /** Runs the verifier (a fresh, read-only session that exercises the change). */
 async function verifyChange(ctx: StepContext, spec: string, plan: string, traceName: string): Promise<Verified> {
   const r = await agentPhase(ctx, {
-    name: "verify", traceName, model: ctx.cfg.stages.verify.model, permissionMode: "default", tools: "read+commands", cwd: ctx.worktreeDir,
+    name: "verify", traceName, permissionMode: "default", tools: "read+commands", cwd: ctx.worktreeDir,
     vars: { spec, plan, run_command: ctx.cfg.commands.run || "none configured", test_result: await testResult(ctx, new Git(ctx.worktreeDir)) },
     skills: ctx.cfg.stages.verify.skills,
   });
@@ -191,7 +191,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       return { ok: false, note, detail: `${failure.command} still failing after ${max} fix attempts: ${failure.lastLine}` };
     }
     const fix = await buildSession(ctx, {
-      name: "fix", traceName: `fix-${i}`, model: ctx.cfg.stages.build.model, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "fix", traceName: `fix-${i}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
       vars: { failure_output: failureOutput(failure), test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return { ok: false, note: fix.note, detail: `fix-${i} failed: ${fix.reason}` };

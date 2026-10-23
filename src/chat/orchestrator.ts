@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { askedWords, askText, offers, retryOptions, type RequestShape } from "../actions";
 import { limitOf, startOfToday } from "../budget";
 import { unavailable } from "../claude";
-import { loadConfig, type Config } from "../config";
+import { loadConfig, modelFor, type Config } from "../config";
+import { badModelNote, stepModel } from "../models";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
@@ -256,13 +257,13 @@ export class Orchestrator {
     const capUsd = limitOf(cfg.claude.max_budget_usd);
     const fresh = async () => `${renderChatPrompt(await chatTemplate(this.root, "orchestrator"), { main_branch: cfg.main_branch })}\n\n${message}`;
     let r = await runChatAgent({
-      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd,
+      root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, capUsd,
       prompt: t.sessionId ? message : await fresh(), resume: t.sessionId,
     });
     // The session is gone (cleared, or another machine): start a new one; this thread's record of its hand-offs carries over.
     if (!r.ok && r.reason === "no-session") {
       t.sessionId = null;
-      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, model: cfg.chat.model, capUsd, prompt: await fresh() });
+      r = await runChatAgent({ root: this.root, cfg, trace, name: "orchestrator", schema: OrchestratorTurn, capUsd, prompt: await fresh() });
     }
     if (r.sessionId) t.sessionId = r.sessionId;
     // Only what was in the message block counts as seen, and only once the agent has had it: a failed
@@ -277,8 +278,10 @@ export class Orchestrator {
       return;
     }
     if (!r.ok) {
+      const orchestratorModel = stepModel(cfg, "orchestrator");
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
+        : r.reason === "model" ? badModelNote(orchestratorModel, modelFor(cfg, orchestratorModel), "orchestrator")
         : r.reason === "budget" ? "That answer hit its spending limit before it finished. Try asking something narrower."
         : r.reason === "timeout" ? "That took too long to answer. Please try again, or ask something narrower."
         : "Something went wrong answering that. Please try again; an engineer can find the details in the trace.");
@@ -407,6 +410,8 @@ export class Orchestrator {
       // Stopped by the budget: the proposal still stands, so a later yes writes it up.
       if (out.budget) t.pending = { kind: "handoff", handoff: h, by: m.authorId, at: new Date().toISOString() };
       this.store.noteSince(t, `${plainName(m.authorName)} said yes to handing off "${h.title.trim()}", but it could not be written up: ${out.problem}`);
+      // A model name Claude Code does not accept is said as its own sentence, which already says what to do.
+      if (out.badModel) { await say(out.problem); return; }
       await say(`I could not write that up: ${out.problem}${out.pushed ? "" : " Nothing was opened."}`);
       return;
     }

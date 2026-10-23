@@ -130,6 +130,20 @@ describe("ConfigDocument", () => {
     } finally { t.cleanup(); }
   });
 
+  test("unset removes a key, keeps the comments around it, and drops a steps map it empties", () => {
+    const { t, doc } = load("version: 1\ncommands:\n  test: x\nstages:\n  verify:\n    model: strong\n    # why\n    steps:\n      done-check: max # judge\n      lessons: cheap\n");
+    try {
+      doc.unset(["stages", "verify", "steps", "lessons"]);
+      doc.unset(["stages", "verify", "steps", "nothing"]);
+      expect(doc.get(["stages", "verify", "steps"])).toEqual({ "done-check": "max" });
+      expect(doc.text()).toContain("# why");
+      doc.unset(["stages", "verify", "steps", "done-check"]);
+      expect(doc.get(["stages", "verify"])).toEqual({ model: "strong" });
+      expect(doc.text()).toContain("# why");
+      expect(() => doc.validate()).not.toThrow();
+    } finally { t.cleanup(); }
+  });
+
   test("clear removes a key and ignores one that is not there", () => {
     const { t, doc } = load();
     try {

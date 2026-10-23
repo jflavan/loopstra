@@ -1,6 +1,7 @@
 import type { AttentionItem } from "../attention";
 import type { JudgesView } from "../commands/judges";
 import type { LoopStatus } from "../heartbeat";
+import type { ModelRef, StepGroup, StepKey } from "../models";
 
 /*
  * What the console's server sends and its page reads. Only types, plain constants and small pure
@@ -201,3 +202,26 @@ export interface Offer { kind: ActionKind; label: string; to?: string; confirm?:
 
 /** The priorities, in order (the same list as src/intents.ts; the page cannot import that file). */
 export const PRIORITY_NAMES = ["urgent", "high", "normal", "low"] as const;
+
+/** The Settings page: the named models and where each step runs, read from one text of loopstra/config.yaml. */
+export interface SettingsView {
+  /** configVersion of the file; null when it cannot be read. A settings request names it. */
+  version: string | null;
+  /** Why the config does not load; the page shows this instead of the pickers. */
+  problem: string | null;
+  /** `last`: the newest session on the named model: the name it was asked for then, and the model Claude Code reported. */
+  models: Array<{ ref: ModelRef; name: string; last: { asked: string; ran: string | null; result: "ok" | "bad-model"; ts: string } | null }>;
+  groups: Array<{
+    group: StepGroup; model: ModelRef;
+    /** Where the group's model is set: "stages.design.model" or "chat.model". */
+    path: string;
+    steps: Array<{
+      key: StepKey; what: string;
+      /** Null for the orchestrator, which is the group's own picker. */
+      path: string | null;
+      own: ModelRef | null; effective: ModelRef;
+      /** The muted text: "follows build: default" for a step that follows a group, or "strong" for a fixed one. */
+      byDefault: string;
+    }>;
+  }>;
+}

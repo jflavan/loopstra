@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseDocument } from "yaml";
+import { configPath, loadConfig } from "../../src/config";
+import { init } from "../../src/init";
+import { STEPS, stepModel } from "../../src/models";
+import { tempGitRepo } from "../helpers";
 import { Envelopes } from "../../src/envelopes";
 import { parseIntentFile, patchFrontmatter } from "../../src/intents";
 import { CONTRACT_LINES, withContract } from "../../src/phases";
@@ -83,5 +88,17 @@ describe("prompt templates", () => {
     expect(PROMPT_VARS as readonly string[]).not.toContain("skills");
     const all = (await Promise.all(Object.keys(Envelopes).map((n) => Bun.file(join(ROOT, `${n}.md`)).text()))).join("\n");
     for (const v of PROMPT_VARS) expect({ v, used: all.includes(`{{${v}}}`) }).toEqual({ v, used: true });
+  });
+
+  test("the config template names all four models, and no step starts on max", async () => {
+    const repo = await tempGitRepo();
+    try {
+      await Bun.write(join(repo.path, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+      await init(repo.path);
+      expect(parseDocument(await Bun.file(configPath(repo.path)).text()).getIn(["claude", "models", "max"])).toBe("fable");
+      const cfg = await loadConfig(repo.path);
+      expect(cfg.claude.models).toEqual({ cheap: "haiku", default: "sonnet", strong: "opus", max: "fable" });
+      for (const s of STEPS) expect({ step: s.key, model: stepModel(cfg, s.key) }).not.toEqual({ step: s.key, model: "max" });
+    } finally { repo.cleanup(); }
   });
 });

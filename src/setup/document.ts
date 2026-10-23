@@ -35,7 +35,11 @@ export class ConfigDocument {
 
   static load(root: string): ConfigDocument {
     const path = configPath(root);
-    const text = readFileSync(path, "utf8");
+    return ConfigDocument.fromText(path, readFileSync(path, "utf8"));
+  }
+
+  /** The config from its text, as load reads it from `path` (where save() would write it). */
+  static fromText(path: string, text: string): ConfigDocument {
     const doc = parseDocument(text);
     if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
     // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.
@@ -207,6 +211,19 @@ export class ConfigDocument {
       const parent = at.length ? this.doc.getIn(at, true) : undefined;
       if (!isMap(parent) || parent.items.length) break;
     }
+    this.dirty = true;
+  }
+
+  /**
+   * Removes a key if it is there, and the `steps` map above it when that leaves it empty. Unlike
+   * clear, other maps stay, so `stages.verify` is kept with its model.
+   */
+  unset(path: Path): void {
+    if (!this.doc.hasIn(path)) return;
+    this.remove(path);
+    const parent = path.slice(0, -1);
+    const map = parent.length ? this.doc.getIn(parent, true) : undefined;
+    if (parent[parent.length - 1] === "steps" && isMap(map) && !map.items.length) this.remove(parent);
     this.dirty = true;
   }
 

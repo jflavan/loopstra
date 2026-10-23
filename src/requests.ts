@@ -76,6 +76,12 @@ const RequestSchema = z.discriminatedUnion("kind", [
   base.extend({ kind: z.literal("answer"), slug, text: z.string().max(MAX_ANSWER).refine((t) => t.trim() !== ""), question: z.string().optional() }),
   /** Takes back an approve or a send back (see undoAllowed): from `expect` to `to`, restoring the note it replaced. */
   base.extend({ kind: z.literal("undo"), slug, expect: status, to: status, note: z.string().default("") }),
+  /**
+   * Changes one model setting in loopstra/config.yaml (see src/settings.ts): `path` dotted, like
+   * `stages.verify.steps.done-check`; `value` null removes a step's own setting; `version` is the
+   * file's version (see configVersion) as the page last read it, which must still be the file's.
+   */
+  base.extend({ kind: z.literal("settings"), path: z.string(), value: z.string().nullable(), version: z.string() }),
 ]);
 
 export type Request = z.infer<typeof RequestSchema>;

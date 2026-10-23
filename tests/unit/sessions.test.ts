@@ -21,7 +21,7 @@ describe("one session runner for the loop and chat", () => {
     const trace = Trace.open(repo.path);
     try {
       await withEnv({ LOOPSTRA_CLAUDE_EXECUTABLE: FAKE_CLAUDE, LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "denied.jsonl") }, async () => {
-        const r = await runChatAgent({ root: repo.path, cfg, trace, name: "orchestrator", prompt: "hello", schema: z.object({ reply: z.string() }), model: "cheap", capUsd: 1 });
+        const r = await runChatAgent({ root: repo.path, cfg, trace, name: "orchestrator", prompt: "hello", schema: z.object({ reply: z.string() }), capUsd: 1 });
         expect(r).toMatchObject({ ok: false, reason: "invalid-envelope" });
         const row = trace.phases("_chat")[0]!;
         expect(row.status).toBe("fail");
@@ -29,6 +29,36 @@ describe("one session runner for the loop and chat", () => {
         expect(trace.deniedCommands("_chat").get(row.seq)).toEqual(["Bash(git tag v1)", "Write(/repo/notes.txt)"]);
       });
     } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("a traced session with a ref", () => {
+  const session = (trace: Trace, dir: string, prompt: string) => {
+    const seq = trace.phaseStart("add-numbers", "design", "agent");
+    return tracedSession({
+      trace, slug: "add-numbers", seq, dir: join(dir, "phase"), capUsd: 1, ref: "default",
+      read: (output) => ({ ok: true, value: output }),
+      run: { cwd: dir, prompt, schema: {}, model: "sonnet", permissionMode: "default", allowedTools: [], timeoutMs: 60_000, maxBudgetUsd: 1, executable: FAKE_CLAUDE },
+    });
+  };
+
+  test("records its run", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "design.jsonl") }, () => session(trace, t.path, "hello"));
+      expect(trace.lastModelRuns().default).toMatchObject({ ref: "default", asked: "sonnet", ran: "fake", result: "ok" });
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("a crash writes none", async () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      const out = await withEnv({ LOOPSTRA_FAKE_FIXTURE: join(FIXTURES, "crash.jsonl") }, () => session(trace, t.path, "hello"));
+      expect(out.ok).toBe(false);
+      expect(trace.lastModelRuns()).toEqual({});
+    } finally { trace.close(); t.cleanup(); }
   });
 });
 

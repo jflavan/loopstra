@@ -199,3 +199,23 @@ export async function setLoopHeld(held: boolean): Promise<void> {
   if (!r.ok) { toast(r.error, "bad"); return; }
   toast(held ? "The loop is paused: running steps finish, nothing new starts." : "The loop goes on.");
 }
+
+/** The words the console gave a settings request, as a person reads them. */
+interface SettingBody { kind: "settings"; path: string; value: string | null; version: string }
+
+/**
+ * Sends one setting change and follows the loop's answer to `onDone`. Gives the request (its id, and the
+ * loop's state, which says whether it waits for the loop to run) or why it was not sent, a stale page included.
+ */
+export async function sendSetting(body: SettingBody, onDone: (d: { ok: boolean; text: string }) => void): Promise<{ ok: true; id: string; loop: string } | { ok: false; error: string }> {
+  const sent = await post("/api/requests", body);
+  if (!sent.ok) return sent;
+  const id = String(sent.data.id);
+  follow(id, (d) => onDone({ ok: d.ok, text: d.text }));
+  return { ok: true, id, loop: typeof sent.data.loop === "string" ? sent.data.loop : "" };
+}
+
+/** Takes a setting change back while the loop has not claimed it; true when it was (nothing changed). */
+export function cancelSetting(id: string): Promise<boolean> {
+  return cancel(id);
+}

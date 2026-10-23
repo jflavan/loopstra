@@ -16,6 +16,7 @@ import { RECENT_DONE_MS, splitFinished, UP_NEXT, upNext } from "../../src/ui/boa
 import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key";
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
+import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
@@ -71,7 +72,7 @@ describe("routes", () => {
     expect(parseRoute("/s/_chat/3")).toEqual({ name: "session", slug: "_chat", seq: 3 });
     for (const bad of ["/c/Bad", "/c/one/nope", "/s/one/x", "/nope", "/c/one/code/more", "/c/%E0%A4%A"]) expect(parseRoute(bad)).toEqual({ name: "missing", path: bad });
     const all: Route[] = [
-      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "agents" }, { name: "spend" },
+      { name: "live" }, { name: "inbox" }, { name: "changes" }, { name: "activity" }, { name: "agents" }, { name: "spend" }, { name: "settings" },
       { name: "change", slug: "a", tab: "overview" }, { name: "change", slug: "a", tab: "gates" }, { name: "session", slug: "a", seq: 4 },
     ];
     for (const r of all) expect(parseRoute(routePath(r))).toEqual(r);
@@ -1149,5 +1150,28 @@ describe("the agents screen's tiles", () => {
   test("the cost a transcript's last result names", () => {
     expect(lastCost(EMPTY)).toBeNull();
     expect(lastCost(addItems(EMPTY, [{ kind: "result", ok: true, summary: "", costUsd: 0.5 }, { kind: "text", text: "after" }]))).toBe(0.5);
+  });
+});
+
+describe("the Settings page", () => {
+  test("a step can be put back to its default, offered as setup's auto with the default shown; a group or a named model cannot", () => {
+    expect(pickerChoices({ path: "stages.verify.steps.lessons", byDefault: "cheap" }).map((c) => c.label)).toEqual(["auto (cheap)", "cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: "stages.build.steps.revise", byDefault: "follows build: default" }).map((c) => c.label)).toEqual(["auto (follows build: default)", "cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: "stages.verify.steps.lessons", byDefault: "cheap" })[0]!.value).toBeNull();
+    expect(pickerChoices({ path: "stages.verify.model" }).map((c) => c.label)).toEqual(["cheap", "default", "strong", "max"]);
+    expect(pickerChoices({ path: null }).map((c) => c.value)).toEqual(["cheap", "default", "strong", "max"]);
+  });
+  test("last ran on names what the session was asked for, not what the name holds now", () => {
+    const at = Date.parse("2026-10-23T12:00:00.000Z");
+    const ts = "2026-10-23T10:00:00.000Z";
+    expect(lastRanText(null, at)).toBe("not used yet");
+    expect(lastRanText({ asked: "opus", ran: "claude-opus-5-5", result: "ok", ts }, at)).toBe("opus → claude-opus-5-5, 2h ago");
+    expect(lastRanText({ asked: "opus", ran: null, result: "ok", ts }, at)).toBe("opus → opus, 2h ago");
+    expect(lastRanText({ asked: "opuss", ran: null, result: "bad-model", ts }, at)).toBe("failed: opuss is not a model");
+  });
+  test("a pending change says whether it waits for the loop", () => {
+    expect(pendingText("stopped")).toBe("Saved when the loop next runs.");
+    expect(pendingText("not-responding")).toBe("Saved when the loop next runs.");
+    expect(pendingText("running")).toBe("Saving…");
   });
 });

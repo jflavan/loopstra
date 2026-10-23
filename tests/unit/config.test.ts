@@ -167,3 +167,23 @@ describe("loadConfig", () => {
     t.cleanup();
   });
 });
+
+describe("per-step models", () => {
+  const load = (extra: string) => loadConfig2(`version: 1\ncommands:\n  test: x\n${extra}`);
+  async function loadConfig2(text: string) {
+    const t = tempDir();
+    try { await writeConfig(t.path, text); return await loadConfig(t.path); } finally { t.cleanup(); }
+  }
+
+  test("a step under the wrong stage is refused, naming the step", async () => {
+    await expect(load("stages:\n  design:\n    steps:\n      lessons: cheap\n")).rejects.toThrow(/stages\.design\.steps.*lessons/);
+  });
+
+  test("a step's model must be one of the four names", async () => {
+    await expect(load("stages:\n  design:\n    steps:\n      intake: huge\n")).rejects.toThrow("stages.design.steps.intake");
+  });
+
+  test("the orchestrator is chat.model, not a chat step", async () => {
+    await expect(load("chat:\n  steps:\n    orchestrator: max\n")).rejects.toThrow(/chat\.steps.*orchestrator/);
+  });
+});

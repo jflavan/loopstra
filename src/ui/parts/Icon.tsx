@@ -7,6 +7,7 @@ const PATHS: Record<string, string> = {
   agents: "M4 5h7v6H4zM13 5h7v6h-7zM4 13h7v6H4zM13 13h7v6h-7z",
   open: "M14 4h6v6M20 4l-9 9M18 14v5H5V6h5",
   spend: "M12 3v18M16.5 7.5c0-1.7-2-3-4.5-3s-4.5 1.3-4.5 3 2 2.6 4.5 3 4.5 1.3 4.5 3-2 3-4.5 3-4.5-1.3-4.5-3",
+  settings: "M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M9 14v6",
   ask: "M4 5h16v11H9l-5 4z",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
   bell: "M6 16v-5a6 6 0 0 1 12 0v5l2 2H4zM10 20h4",

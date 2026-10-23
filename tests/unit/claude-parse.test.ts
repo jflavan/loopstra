@@ -27,6 +27,22 @@ describe("StreamCollector", () => {
   });
 });
 
+describe("the models a session ran on", () => {
+  test("the init event's model first, then the result's modelUsage keys, without duplicates", () => {
+    const c = new StreamCollector();
+    c.push('{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5-5"}');
+    c.push('{"type":"result","subtype":"success","session_id":"s1","modelUsage":{"claude-opus-5-5":{"costUSD":1},"claude-haiku-5-5":{"costUSD":0.1}}}');
+    expect(c.finish().models).toEqual(["claude-opus-5-5", "claude-haiku-5-5"]);
+  });
+
+  test("a value that is not a string is left out", () => {
+    const c = new StreamCollector();
+    c.push('{"type":"system","subtype":"init","session_id":"s1","model":7}');
+    c.push('{"type":"result","subtype":"success","session_id":"s1","modelUsage":[1,2]}');
+    expect(c.finish().models).toEqual([]);
+  });
+});
+
 describe("StreamCollector with lines that are JSON but not events", () => {
   test("ignores null, numbers, strings, arrays and objects without a type", () => {
     const c = new StreamCollector();

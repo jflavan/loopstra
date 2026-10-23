@@ -4,6 +4,7 @@
 // $LOOPSTRA_FAKE_FIXTURE_DIR/<$LOOPSTRA_PHASE>.jsonl, fixtures/<$LOOPSTRA_PHASE>.jsonl, fixtures/simple-success.jsonl.
 // A fixture line {"type":"fake_action","write":{"path":"...","content":"..."}} writes a file
 // under the current directory before the remaining lines are emitted, so a fake "build" can change code.
+// An absolute path is written as it is (a person changing loopstra/config.yaml while a session runs, say).
 // A fixture line {"type":"fake_action","wait_for":"<absolute path>"} holds the session until that file exists,
 // so a test decides when it ends (judging what happens meanwhile by order, not by time).
 // A fixture line {"type":"fake_action","refuse":"<path>"} records <path> in $LOOPSTRA_PROTECTED_LOG, as the
@@ -40,7 +41,7 @@
 // stdin closes the fake ends, after its turn and one for each message already queued. "hang" never ends, but
 // still echoes and logs what it is sent; a session that answers only notifications ends after its turn.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 const args = Bun.argv.slice(2);
 const phase = process.env.LOOPSTRA_PHASE ?? "";
@@ -229,7 +230,7 @@ async function playTurn(turn: number, heard: string[]): Promise<void> {
       continue;
     }
     if (e.type === "fake_action" && e.write) {
-      const target = join(process.cwd(), e.write.path);
+      const target = isAbsolute(e.write.path) ? e.write.path : join(process.cwd(), e.write.path);
       mkdirSync(dirname(target), { recursive: true });
       await Bun.write(target, e.write.content);
       continue;

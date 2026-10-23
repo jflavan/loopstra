@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { draftProblems, renderDraft, writeIntents } from "../../src/chat/writer";
+import { join } from "node:path";
+import { badModelNote } from "../../src/models";
 import { loadConfig } from "../../src/config";
 import { parseIntentFile, type Status } from "../../src/intents";
 import { Trace } from "../../src/trace";
@@ -66,6 +68,34 @@ describe("writeIntents", () => {
         expect(second!.prompt).toContain('- "auth" already exists (merged); choose another slug.');
         // The writer runs on the design stage's model, read-only.
         expect(first!.args[first!.args.indexOf("--model") + 1]).toBe("opus");
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+
+  test("write-intent follows chat.steps", async () => {
+    const r = await chatRepo({ config: "chat:\n  steps:\n    write-intent: cheap\n" });
+    try {
+      await r.answer("write-intent", 1, { status: "success", summary: "s", intents: [draft("csv-export")] });
+      const cfg = await loadConfig(r.root);
+      const trace = Trace.open(r.root);
+      try {
+        const w = await writeIntents({ root: r.root, cfg, trace, source: r.root, handoff: { title: "CSV", brief: "Export CSV.", updates: [] }, author: "Ana", via: "Slack", maxBudgetUsd: 1 });
+        expect(w.ok).toBe(true);
+        const args = r.prompts()[0]!.args;
+        expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+      } finally { trace.close(); }
+    } finally { r.cleanup(); }
+  });
+
+  test("a bad writer model is said as that sentence", async () => {
+    const r = await chatRepo({ config: "claude:\n  models:\n    strong: opuss\nstages:\n  design:\n    model: strong\n" });
+    try {
+      await Bun.write(join(process.env.LOOPSTRA_FAKE_FIXTURE_DIR!, "write-intent-1.jsonl"), await Bun.file(join(import.meta.dir, "..", "fake-claude", "fixtures", "bad-model.jsonl")).text());
+      const cfg = await loadConfig(r.root);
+      const trace = Trace.open(r.root);
+      try {
+        const w = await writeIntents({ root: r.root, cfg, trace, source: r.root, handoff: { title: "CSV", brief: "Export CSV.", updates: [] }, author: "Ana", via: "Slack", maxBudgetUsd: 1 });
+        expect(w).toMatchObject({ ok: false, problem: badModelNote("strong", "opuss", "write-intent") });
       } finally { trace.close(); }
     } finally { r.cleanup(); }
   });

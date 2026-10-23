@@ -10,6 +10,7 @@ const SCREENS = [
   { href: "/activity", label: "Activity", icon: "activity", on: ["activity"] },
   { href: "/agents", label: "Agents", icon: "agents", on: ["agents"] },
   { href: "/spend", label: "Spend", icon: "spend", on: ["spend"] },
+  { href: "/settings", label: "Settings", icon: "settings", on: ["settings"] },
 ];
 
 export function Rail() {

@@ -13,7 +13,7 @@ import { readMarker, writeMarker, writeSentBack } from "../../src/context";
 import type { Trace } from "../../src/trace";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
-import { judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
+import { fixture, fixtureDir, judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
@@ -211,6 +211,18 @@ describe("build stage", () => {
     expect(recorded.env.LOOPSTRA_PROTECTED_LOG).toBe(join(ctx.runDir, "phases", `${trace.phases("add-numbers").find((p) => p.name === "fix-2")!.seq}-fix-2`, "protected-tests.txt"));
     expect(recorded.args).toEqual(expect.arrayContaining(["--resume", "fake-build"]));
     expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("exit 1"))).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a fix on another model than the build's still resumes the build's session, on its own model", async () => {
+    // Claude Code accepts --resume with a different --model (checked against the real CLI), so the build's context carries over.
+    const { repo, ctx, trace } = await planned({ test: "exit 1" }, "stages:\n  build:\n    max_fix_loops: 1\n    steps:\n      fix: cheap\n");
+    const callsFile = join(repo.path, "calls.jsonl");
+    await withEnv({ LOOPSTRA_FAKE_CALLS: callsFile }, () => runBuildStep(ctx));
+    const calls = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+    const flag = (args: string[], name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
+    expect(calls.map((a) => [flag(a, "--model"), flag(a, "--resume")])).toEqual([["sonnet", null], ["haiku", "fake-build"]]);
+    expect(phaseNames(trace)).toContain("fix-1");
     trace.close(); repo.cleanup();
   });
 
@@ -511,6 +523,29 @@ describe("the first review alongside the verifier", () => {
     await runMergeStep(ctx);
     expect(reviews(trace)).toEqual(["review-1"]);
     trace.close(); repo.cleanup();
+  });
+
+  test("a review whose model changed while it ran is not used: it is keyed on the model it ran on, and round 1 runs again", async () => {
+    // The early review runs on opus (strong); while it runs, a person moves the review stage to max (fable).
+    const dir = fixtureDir({});
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await planned({ test: "bun test" });
+        const config = configPath(repo.path);
+        const moved = JSON.stringify({ type: "fake_action", write: { path: config, content: `${await Bun.file(config).text()}stages:\n  review:\n    model: max\n` } });
+        await Bun.write(join(dir.path, "review@opus.jsonl"), `${moved}\n${fixture("review")}`);
+        await runBuildStep(ctx);
+        expect(existsSync(join(ctx.runDir, "review.early"))).toBe(true);
+        expect(await Bun.file(config).text()).toContain("model: max"); // moved while it ran
+        await ctx.reload();
+        await runMergeStep(ctx);
+        expect(earlyNotes(trace)).toEqual(["not used: the change, its plan, the review prompt or its commands moved on since it ran"]);
+        expect(reviews(trace)).toEqual(["review-1"]);
+        trace.close(); repo.cleanup();
+      });
+    } finally {
+      dir.cleanup();
+    }
   });
 
   test("an early review that cannot reach the assistant is dropped; the build still ends at reviewing", async () => {
