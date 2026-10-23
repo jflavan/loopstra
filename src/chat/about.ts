@@ -5,6 +5,7 @@ import { TranscriptReader } from "../console/transcript";
 import type { TranscriptItem } from "../console/types";
 import { readConversation } from "../conversation";
 import { readIntent, SLUG } from "../intents";
+import { prWait } from "../stages/shared";
 import { besideWork, Trace, type PhaseRow } from "../trace";
 
 /** The change (and the session of it) the drawer was opened from, as the page sends it with the first message. */
@@ -75,7 +76,7 @@ function lastSteps(root: string, slug: string, phase: PhaseRow): string[] {
 
 /**
  * What the orchestrator is told about the change a person opened chat from (see IncomingMessage.about):
- * the intent, conversation.md, the note, the newest failed phase and its error, and the last steps of
+ * the intent, conversation.md, why it waits on its pull request (see prWait), the note, the newest failed phase and its error, and the last steps of
  * the session (`seq`, else the newest agent session), each cut to a few thousand characters. Each part
  * is read on its own; one that cannot be read is left out. "" when there is nothing. Every part is
  * quoted: they sit indented under one label (see QUOTED), so none can pass for Loopstra's own words.
@@ -89,8 +90,10 @@ export async function aboutContext(root: string, about: About): Promise<string> 
   if (intentText?.trim()) parts.push(quoted("Intent", head(intentText.trim())));
   const record = safely(() => readConversation(root, about.slug));
   parts.push(quoted("conversation.md", record?.trim() ? tail(record.trim()) : "(nothing yet)"));
-  const note = await readIntent(root, about.slug).then((i) => i.file.frontmatter.note.trim(), () => "");
-  if (note) parts.push(quoted("Note", head(note)));
+  // Why it waits on its pull request, newer than the note in intent.md, which it may stand in for (see prWait).
+  const pr = await readIntent(root, about.slug).then((i) => prWait(root, i), () => ({ wait: "", note: "" }));
+  if (pr.wait) parts.push(quoted("Why it waits now", head(pr.wait)));
+  if (pr.note.trim()) parts.push(quoted("Note", head(pr.note.trim())));
   const rows = safely(() => {
     const trace = Trace.open(root, () => {});
     try { return trace.phases(about.slug); } finally { trace.close(); }
