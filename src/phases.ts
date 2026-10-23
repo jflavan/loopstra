@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
-import { modelFor, type Config } from "./config";
+import { modelFor, type Config, type ModelRef } from "./config";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -36,7 +36,7 @@ export interface AgentPhaseSpec {
   name: PhaseName;
   /** Name used in the trace and the phase directory. Defaults to `name` (e.g. fix-1 for the fix phase). */
   traceName?: string;
-  model: "default" | "cheap" | "strong";
+  model: ModelRef;
   permissionMode: PermissionMode;
   tools: ToolSet;
   vars: PromptVars;
