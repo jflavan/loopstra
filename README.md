@@ -14,7 +14,7 @@ There are two audiences and two surfaces:
 
 ## Requirements
 
-- [Bun](https://bun.sh) 1.4.2 or later
+- [Bun](https://bun.sh) 1.4.4 or later
 - git 2.28 or later
 - Claude Code CLI (`claude` on PATH), signed in with a subscription. Loopstra drives the CLI, not the API, so no API key is needed.
 - GitHub CLI (`gh`), signed in, when the repo has a remote. `loopstra start` refuses to run otherwise.
@@ -383,7 +383,7 @@ There is one install per machine, so an upgrade reaches loops already running in
 
 ## Platforms
 
-Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Requirements are the same everywhere: Bun 1.4.2+, git 2.28+, Claude Code, and `gh` when the repo has a remote.
+Loopstra runs on Windows, macOS and Linux; the suite runs on all three in CI. Requirements are the same everywhere: Bun 1.4.4+, git 2.28+, Claude Code, and `gh` when the repo has a remote.
 
 - **Project commands** (`commands.*`, `before`/`after`) run in Bun's own shell on every system, not in `sh` or `cmd`. Write them portably: `bun test`, `npm test`, `make test`, `&&`, `$VAR`. Avoid sh-only builtins such as `source` or `set -e` (Bun's shell does not have them), or put that in a script the command calls.
 - **Git** runs in the C locale, so its messages are English whatever the machine's language.
