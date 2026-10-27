@@ -273,26 +273,150 @@ This copies the bullets under "Proposed CLAUDE.md additions" into a `## Lessons`
 
 ## How it works
 
-Status moves through:
+A change moves through five stages. Each stage runs a few steps, each step is one Claude Code session, and a gate at the end of the stage decides whether the change moves on. A person always accepts a change (`draft` to `accepted`); by default nobody has to do anything after that.
 
-```
-draft -> accepted -> designing -> spec-review -> spec-approved
-      -> planning -> plan-review -> plan-approved
-      -> building -> reviewing -> merge-review -> merge-approved -> merged
-      -> verifying -> done
-any status -> blocked | closed
+```mermaid
+flowchart TD
+  draft(["draft"]) -->|a person accepts| accepted
+  subgraph sDesign ["Design"]
+    accepted(["accepted"]) --> designing(["designing"]) --> specGate{"spec gate"}
+    specGate -->|pass, person set| specReview(["spec-review"])
+    specGate -.->|"fail: written again once"| designing
+  end
+  subgraph sPlan ["Plan"]
+    specApproved(["spec-approved"]) --> planning(["planning"]) --> planGate{"plan gate"}
+    planGate -->|pass, person set| planReview(["plan-review"])
+    planGate -.->|"fail: written again once"| planning
+  end
+  subgraph sBuild ["Build"]
+    planApproved(["plan-approved"]) --> building(["building"]) --> buildChecks["tests, then verify"]
+    buildChecks -.->|"fail: fix, test again"| building
+  end
+  subgraph sReview ["Review and merge"]
+    reviewing(["reviewing"]) -->|review rounds, merge checks| mergeGate{"merge gate"}
+    mergeGate -->|"pull request, or person set"| mergeReview(["merge-review"])
+    mergeGate -.->|"checks made fixes: review again"| reviewing
+    mergeReview -->|person approves| mergeApproved(["merge-approved"])
+  end
+  subgraph sVerify ["Verify"]
+    merged(["merged"]) --> doneGate{"done gate"}
+    doneGate -->|pass, person set| verifying(["verifying"])
+  end
+  specGate -->|pass| specApproved
+  specReview -->|person approves| specApproved
+  planGate -->|pass| planApproved
+  planReview -->|person approves| planApproved
+  buildChecks -->|pass| reviewing
+  mergeGate -->|"pass, no remote, no person"| merged
+  mergeReview -->|pull request merges| merged
+  mergeApproved --> merged
+  doneGate -->|pass| done(["done"])
+  verifying -->|person confirms| done
+  classDef person stroke-dasharray: 5 4
+  class draft,specReview,planReview,mergeReview,verifying person
 ```
 
-- **Design and plan** sessions are read-only and return content; the runtime writes `spec.md`, `plan.md`, `review.md`, `outcome.md`. They (and intake, the spec and plan judges, and lessons) read a snapshot of `main`'s last commit taken once per step (`.loopstra/snapshots/<slug>`, removed when the step ends), never the main checkout: a person's uncommitted edits there are not part of a spec or plan, and `main` moving meanwhile (another change merging) does not change what one step reads. Only the build session edits code, in a worktree on its own branch `intent/<slug>`, and the runtime makes every commit and merge. The build session may run the configured commands (test, lint, build, run, install) on top of `claude.allowed_tools`. Sessions run with background tasks turned off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), so a long command runs in the foreground and no task is left pending for the next session that resumes it. A chained command (`a && b`, `||`, `;`) is allowed whole and part by part, since Claude Code checks each part on its own.
-- **Merge checks** bring the branch up to date with `main`, make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), and read the newest review. Files changed in the change's worktree and not committed (a review `after` command, or a `lint --fix` in the build's own test runs, that rewrote them) are committed to the branch and reviewed once more first, so a formatting fix still reaches review. What the merge checks' own commands rewrite in tracked files (a `lint --fix`, a report with a timestamp) is put back, never kept, so it cannot start one review round after another; fixes the checks commit are reviewed once more. A review `after` command that changes the same files again right after they were kept blocks the change with a note naming them. New files the test, lint and build commands write (a coverage folder, a test report) are removed after each run, during the build as well; a fix session that runs the tests itself can still leave one, and the fix's commit takes it, so list such outputs in `.gitignore`.
-- **Gates** sit at every boundary. Each is a list of checks: deterministic code, a fresh-context agent reviewer, or a person. A gate's checks run in the step that produced the artifact; a pass goes straight to the approved status, or to the review status if a person is set. A failure gets one automatic rewrite with the findings, then blocks.
+Rounded boxes are statuses; the Steps table below says which steps run in each stage. The dashed ones wait for a person, and the review statuses appear only when a person is set on that gate (see When something needs a person); with nobody set, a passing gate goes straight on. Dotted arrows go back for another try, within the limits below. Any status can also go to `blocked` or `closed`. The step called `verify` belongs to the build stage, where it runs the finished change's checks; the Verify stage runs `done-check` and `lessons` after the merge.
+
+### Steps
+
+Each step is one session, with its own prompt (see Prompts), model (see Models for each step) and, if you set one, agent setup (see Agents for each step).
+
+| Step | Stage | What it does | What it may do |
+| --- | --- | --- | --- |
+| `intake` | design | reads a new intent, and sets its priority when the owner gave none | read |
+| `design` | design | writes the spec | read (plan mode) |
+| `spec-check` | design | judges the spec | read |
+| `plan` | plan | writes the plan | read (plan mode) |
+| `plan-challenge` | plan | judges the plan | read |
+| `build` | build | writes the code | edit, and run the project's commands |
+| `reconcile` | build | rewrites the plan when the build changed files it did not list | edit, and run commands |
+| `fix` | build | fixes failing checks, or a failed verify | edit, and run commands |
+| `verify` | build | runs the checks and reads what they show | read, and run commands |
+| `review` | review | reviews the code | read, and read-only git (`diff`, `log`, `show`, `status`) |
+| `revise` | review | fixes the review's important findings | edit, and run commands |
+| `done-check` | verify | judges whether the change did what "Done when" says, on a copy of `main` | read, and run commands |
+| `lessons` | verify | writes `lessons.md` | read |
+| `orchestrator` | chat | talks with you (see Chat) | read |
+| `write-intent` | chat | writes an agreed brief up as intents | read |
+
+"Run the project's commands" means the configured test, lint, build, run and install commands; build sessions also get `claude.allowed_tools`.
+
+### Gates
+
+Gates sit at every stage boundary. Each is a list of checks: deterministic code, a fresh-context agent reviewer, or a person. A gate's checks run in the step that produced the artifact; a pass goes straight to the approved status, or to the review status if a person is set. A failure gets one automatic rewrite with the findings, then blocks.
+
+```mermaid
+flowchart LR
+  writer["writer session<br/>design or plan"] -->|spec.md or plan.md| checks{"code checks,<br/>then a fresh-context judge"}
+  checks -->|pass, no person on the gate| approved(["spec-approved"])
+  checks -->|pass, person set| waiting(["spec-review"])
+  waiting -->|person approves| approved
+  checks -.->|"first failure: the findings"| writer
+  checks -.->|"second failure, or the judge cannot run"| blocked(["blocked"])
+  classDef person stroke-dasharray: 5 4
+  class waiting person
+```
+
+The spec gate is drawn; the plan gate has the same shape. The merge and done gates run their checks the same way, but a failure is not written again:
+
+| Gate | Its checks | A person can be | When it fails |
+| --- | --- | --- | --- |
+| `spec` | the required headings; the `spec-check` judge | `none` or `status` | written again once with the findings, then blocked |
+| `plan` | the required headings; every file it lists exists or is new; the `plan-challenge` judge | `none` or `status` | written again once with the findings, then blocked |
+| `merge` | the branch is up to date with `main`, the tests pass, and the newest review has no important findings | `none`, `status` or `pr` | fixes the checks had to make go back to review; anything else blocks |
+| `done` | the `done-check` judge, against "Done when" | `none` or `status` | unmet criteria block, and `outcome.md` lists them |
+
+### Build and review
+
+```mermaid
+flowchart LR
+  nBuild["build"] --> nDrift{"files outside<br/>the plan?"}
+  nDrift -->|yes| nReconcile["reconcile<br/>rewrites the plan"] --> nTests
+  nDrift -->|no| nTests{"tests, lint, build"}
+  nTests -.->|fail| nFix["fix<br/>up to 3 tries"] -->|test again| nTests
+  nTests -->|pass| nVerify{"verify"}
+  nVerify -.->|fail| nFixOnce["fix<br/>one try"] -->|"test, verify again"| nTests
+  nVerify -->|pass| nReviewing(["reviewing"])
+  nReviewing --> nReview{"review round"}
+  nReview -.->|important findings| nRevise["revise<br/>up to 2 rounds"] -->|test again| nReview
+  nReview -->|none| nMergeChecks{"merge checks"}
+  nMergeChecks -.->|checks made fixes| nReview
+  nMergeChecks -->|pass| nMergeGate{"merge gate"}
+```
+
+Every loop has a limit: `stages.build.max_fix_loops` (3) fixes while the tests fail, one fix when `verify` fails, and `stages.review.max_rounds` (2) revisions after review. Past a limit the change is blocked, and its note says so. `reconcile`, `fix` and `revise` continue the build's own session, so they know what the build did. With `speed.overlap_judges`, round 1's review runs beside `verify` on the same commit, and is used only if verify passes.
+
+**Merge checks** bring the branch up to date with `main`, make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), and read the newest review. Files changed in the change's worktree and not committed (a review `after` command, or a `lint --fix` in the build's own test runs, that rewrote them) are committed to the branch and reviewed once more first, so a formatting fix still reaches review. What the merge checks' own commands rewrite in tracked files (a `lint --fix`, a report with a timestamp) is put back, never kept, so it cannot start one review round after another; fixes the checks commit are reviewed once more. A review `after` command that changes the same files again right after they were kept blocks the change with a note naming them. New files the test, lint and build commands write (a coverage folder, a test report) are removed after each run, during the build as well; a fix session that runs the tests itself can still leave one, and the fix's commit takes it, so list such outputs in `.gitignore`.
+
+### Where sessions read and write
+
+```mermaid
+flowchart TB
+  main[("main checkout<br/>branch main, records, people's edits")]
+  snap[("snapshot of main's last commit<br/>one per step")]
+  wt[("change worktree<br/>branch intent/#lt;slug#gt;")]
+  main -->|copied for each step| snap
+  main -->|branched| wt
+  snap -->|read| ro["read-only steps<br/>intake, design, spec-check,<br/>plan, plan-challenge, lessons"]
+  wr["writing steps<br/>build, fix, reconcile, revise"] -->|edit| wt
+  wt -->|read, run checks| chk["review, verify"]
+  ro -->|return spec, plan| rt["Loopstra runtime<br/>code, not an agent"]
+  rt -->|commits| wt
+  rt -->|merges, records| main
+```
+
+**Design and plan** sessions are read-only and return content; the runtime writes `spec.md`, `plan.md`, `review.md`, `outcome.md`. They (and intake, the spec and plan judges, and lessons) read a snapshot of `main`'s last commit taken once per step (`.loopstra/snapshots/<slug>`, removed when the step ends), never the main checkout: a person's uncommitted edits there are not part of a spec or plan, and `main` moving meanwhile (another change merging) does not change what one step reads. Only the build session edits code, in a worktree on its own branch `intent/<slug>`, and the runtime makes every commit and merge. The build session may run the configured commands (test, lint, build, run, install) on top of `claude.allowed_tools`. Sessions run with background tasks turned off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), so a long command runs in the foreground and no task is left pending for the next session that resumes it. A chained command (`a && b`, `||`, `;`) is allowed whole and part by part, since Claude Code checks each part on its own.
+
+### Around the stages
+
 - **After a merge**, the done-when criteria are checked, `outcome.md` and `lessons.md` are written, and main's tests are run. If main goes from green to red, a new draft intent describing the breach is opened.
 - **The trace** is in `.loopstra/` (gitignored): `trace.db` (SQLite), and per change `runs/<slug>/events.jsonl` plus a folder per phase holding the prompt, the result envelope and the raw session. `status`, `tail` and `ui` read it, and it stays on your machine. Chat sessions are traced there too, under `_chat`, with their state in `.loopstra/chat/`. The only things that leave it are what you set up: pull requests on GitHub, and chat messages and announcements posted to Slack or Discord.
 - **Design and plan beside the lanes** (`speed.think_ahead`, on): while any change runs a step, design and plan steps of other changes run beside it, one at a time, in queue order, so a change accepted during another's build is designed and planned by the time the build ends. Those steps only read code and run none of the project's commands, so they do not count against `max_parallel_changes`; a design or plan stage with `before` or `after` commands is left to the lanes. The lanes take build, review, merge and verify steps first. It starts nothing once every lane has ended (the next tick takes over), and only with room in the day's budget for its session beside the others, so never with a daily budget and no session limit.
 - **More than one change at a time** (`speed.max_parallel_changes` above 1): each tick runs a step for up to that many changes at once, each in its own worktree, and waits for all of them before the next tick. Fewer run when what is left of the day's budget covers fewer whole sessions (`claude.max_budget_usd`); the trace says so. Loopstra's own writes to the main checkout (its records, moving `main`, a local merge) go one at a time, and nothing slower waits with them: checking out a change's worktree and talking to GitHub happen beside them. Changes merge one at a time: without GitHub, a change that merges after another is brought up to date and tested again first; with GitHub, a pull request that another change's merge left out of date is brought up to date and waits for GitHub's checks again. A change whose plan lists a file another change in progress also lists (in its plan, or in the files its build added to the plan) waits until that change has merged, and `queue.md` says so ("Waits for add-numbers to be merged first, because both change the same files."), so the two do not clash when they merge. That wait holds at one change at a time too, since a pull request can wait to merge while the one lane works on the next change. The loop line names every change being worked on ("working on add-numbers and say-goodbye").
 - **Chat** is a separate process (`loopstra chat`, or the console). It never runs a stage or writes the main checkout: what it needs there (starting a draft, acting on a change, or adding written intents when there is no remote) it leaves as a request in `.loopstra/requests/`, as the console does, and the loop applies it at the start of a tick and every 2 seconds beside the running steps.
 
-The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`, and packaging and `loopstra upgrade` in `docs/superpowers/specs/2026-10-18-packaging-upgrade-design.md`; `docs/decisions.md` records why.
+The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`, packaging and `loopstra upgrade` in `docs/superpowers/specs/2026-10-18-packaging-upgrade-design.md`, and agents for each step in `docs/superpowers/specs/2026-10-26-agent-setup-design.md`; `docs/decisions.md` records why.
 
 ## Configuration
 
@@ -301,7 +425,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 - `main_branch`, `poll_seconds`
 - `commands`: test (required), install, lint, build, run
 - `claude`: models (`cheap`, `default`, `strong`, `max`: by default the aliases `haiku`, `sonnet`, `opus` and `fable`, which Claude Code resolves to the newest model of each family; a full name such as `claude-opus-5-5` pins one), `timeout_minutes`, optional spending limits (`max_budget_usd` per session, `max_budget_usd_per_day` for the loop's sessions together; unset means no limit), and `allowed_tools` for build sessions (the configured commands are always added; anything else a build needs, like `"Bash(make *)"`, goes here). Sessions load the MCP servers, skills and CLAUDE.md files of the machine and repository they run in, but without an allow rule an MCP call is refused (a session cannot ask). A server can still be connecting when a session starts, so its tools may only appear after the first turn
-- `agents`: which agents, subagents, skills and tools each step's session gets. `sources` is `all` (the default: also the personal skills, agents, plugins and MCP servers of whoever runs `loopstra start`) or `repo` (only what the repository declares, the same on every machine; the user's `apiKeyHelper` and `env` still pass through so sessions can sign in). `teams` names groups of subagents (`members`, and `way`: `parallel` gives each the same task, `pick` hands each piece of work to the member that fits). `all` applies to every loop step and `steps.<step>` adds to it; each takes `agent`, `subagents`, `teams`, `skills`, `tools` and `mcp_tools` (`mcp__<server>` for all of a server's tools, `mcp__<server>__<tool>` for one; MCP tools reach every session of the step, judges included). Lists add up, each name once; `agent` is one value and the step's own wins. Agents and skills are Claude Code's own files, committed in the repository's `.claude/`; Loopstra reads agent files from main and passes them to the session inline as `loopstra-<name>`, so a change cannot rewrite the role that reviews it. Safety does not move: read-only steps never get `Edit`, `Write`, `NotebookEdit` or a bare `Bash`, and no step's `tools` may hold git that changes history or a remote (`commit`, `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`, `tag`, `stash`, bare `git`). `agent` cannot be set on `fix`, `reconcile` or `revise`, which continue the build's session and run as the build's agent, and a built-in agent such as `Explore` can be a subagent but not a step's agent. Chat's two steps (`orchestrator`, `write-intent`) take only their own entries under `steps` (never `all`, and not the old shared MCP rule), and anyone allowed to chat can steer the tools given there. `loopstra start` refuses while a step names an agent that is missing, and only warns about a missing skill (built-in and claude.ai skills are not files on disk). If a session starts without a named agent or skill, the step fails with the reason `setup` and is not retried; the owner note says what is missing. What each step ran as shows in its trace (`agent_setup`).
+- `agents`: which agents, subagents, teams, skills, tools and MCP tools each step's session gets (see Agents for each step)
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, `steps` (a model for single steps; see Models for each step), skills, `before`/`after` commands, and loop limits
 - `speed`: work that runs at the same time to save waiting; only `cheap_judges: first` changes who decides (once earned, a cheaper judge's pass stands). `overlap_judges` (on) runs the first review alongside the verifier (in a copy of the tested commit), and lessons alongside the final check; when the verifier fails, the review running beside it is stopped at once and round 1 runs after the fix. With `claude.max_budget_usd_per_day` set, they overlap only when what is left of the day covers two whole sessions (`claude.max_budget_usd`), so never without a session limit. `parallel_checks` (off) starts test, lint and build together, and stops the rest once one fails; leave it off if they write the same folder. `plan_ahead` (on) writes the first plan while the spec is being checked. The plan is stopped if the spec does not pass, and it is used only if the code on `main` it read (outside `intent/` and `loopstra/config.yaml`) is still the same commit's code when planning starts. It follows the same daily budget rule, and does not run with a person on the spec gate, without a spec judge, with plan `before` commands, or while another change is about to merge. `cheap_judges` (off) asks a cheaper model (`claude.models.default`) the same question as the spec check, the plan challenge and the review: `shadow` only records whether it agreed with the strong judge, which still decides, and `first` lets it pass something alone once it has also caught the strong judge's last 30 rejections, sending anything it rejects or is unsure of to the strong judge (`loopstra judges` shows the record). In `first`, every 5th call still runs both judges as an audit, with the strong judge deciding, so a later miss sends it back to `shadow`. Like the overlaps, `shadow` and the audits run only with room for every session at once (three when the early review runs beside the verifier, or the spec check beside a plan written ahead), so never with a daily budget and no session limit; then the strong judge decides alone, and in `first` the cheaper judge never decides alone. `think_ahead` (on) runs design and plan steps beside the changes running a step (see How it works). `max_parallel_changes` (1, up to 4) is how many changes may each run a step at the same time. Raise it only if the project's commands (test, lint, build, install) can run twice at once on this machine: no fixed ports, no shared test database, no output outside the worktree. Each command, and each session that may run commands, gets `LOOPSTRA_SLUG` and `LOOPSTRA_SLOT`: a small number (0, 1, ...) that no other change running at the same time has, so it can pick its own ports, database and Docker project names (port `3100 + LOOPSTRA_SLOT`, say). Main's health check runs alone and gets no slot. More changes at once also spend the daily budget and the subscription's usage limits faster. With `claude.max_budget_usd_per_day` set, only as many run at once as what is left of the day covers whole sessions (`claude.max_budget_usd`), so one at a time without a session limit; each overlap above also counts the sessions of the other changes running.
@@ -332,11 +456,56 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 
 Change them in `loopstra setup models` (it asks the four names, then each stage's model, then "Choose models for <stage>'s steps one by one? (y/N)"; answer `auto` for a step to remove its own setting, since `default` is a model's name), or on the console's Settings page (`/settings`). Each change on that page saves on its own, as a `settings` request that the loop commits as `loopstra(_settings): <path> → <value> by <who> from the dashboard`. It applies to sessions that start after it is saved; model settings are read fresh before each session, so a running one is not disturbed. One change is made at a time, and it is refused if the file changed since the page read it, or if `loopstra/config.yaml` has uncommitted edits in the main checkout. When the loop is not running, the change waits ("Saved when the loop next runs.") and can be cancelled. *Last ran on* shows the model each name actually ran on, so a moved alias is visible. `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL` still apply to the aliases. A name Claude Code does not accept fails the step with reason `model` (not an outage, so it is not retried): "`strong` is `opuss`, which Claude Code does not accept as a model (step spec-check). Change it in Settings or `loopstra setup models`, then retry." In chat, that sentence is the reply. A cheaper judge (`speed.cheap_judges`) never stands in for a judge put on `max`. Fix, reconcile and revise resume the build's session even when their model differs from the build's; the first turn on the new model is not cached.
 
-The Settings page also has an **Agents** part: each step's agent, subagents, skills and teams, the tools, and the repository's agents and skills (copy one from this machine, fetch from a git repository, write a new one, edit or remove one). The console never writes the repository itself: a config change is a `settings` request (`agents.*` paths), and a file change is an `agent-files` request, both applied by the loop. The loop refuses a file change when its target has uncommitted changes in the main checkout, goes through a link, is outside `.claude/agents` and `.claude/skills`, or changed since the page read it. Fetching from a git repository runs on the server, in a temporary folder removed afterwards. One write is pending at a time across the page.
+The Settings page also has an **Agents** part; see Agents for each step.
 
 **Budgets.** No spending limit is set by default: on a subscription the dollar figures are only an estimate, and `timeout_minutes` already ends a stuck session. Set limits with `loopstra setup budgets`, as minutes (`30m`, `2h`, turned into dollars at $0.20 a minute unless you give another rate in that run) or dollars (`$6`); `none` removes one, and amounts are shown with two decimals. Its check uses the same rate and warns when `claude.max_budget_usd` runs out before `timeout_minutes`, when a session limit is above its day limit, or when `chat.max_budget_usd_per_day` is set without `chat.max_budget_usd_per_session`. A config from the old template (every limit there is `5` or `2` as it wrote them, and no `claude.max_budget_usd_per_day`) shows them as old defaults, and Enter, or `--defaults`, removes them; any other mix counts as chosen and is kept.
 
 A step that hits `claude.max_budget_usd` blocks with a note naming it. `claude.max_budget_usd_per_day` counts every change's sessions since local midnight, not chat's, including what an interrupted or crashed session cost; a session killed before it reported its cost (at `timeout_minutes`, or by a stop) counts at about $0.20 a minute, never more than it held. Each step holds its share of what is left while it runs; when what has ended reaches the limit, no new step starts until midnight. A session cut short by the day's limit is not the step's fault: the step keeps its status and resumes, the loop line reads "Paused — " with the reason, and `loopstra status` and the console list "The loop has used today's budget" under "Needs attention". A step that runs out partway on two days at the same status, having had (nearly) the whole day to itself both times (at least 90% of the limit spent by that change), would never finish, so it is blocked with a note saying it needs more than the daily budget; one that other changes left less of the day only waits. When the rest of the day is only held by a step still running, the loop waits for it to end, with nothing for a person to do (a hold left by a killed process stops counting after `timeout_minutes` plus 10 minutes).
+
+## Agents for each step
+
+Each step's session can run as an agent of your own, hand work to subagents or to teams of them, load skills, and get extra tools and MCP tools. All of it is optional: with no `agents` block in `loopstra/config.yaml`, sessions start exactly as they did before. Set it up with `loopstra setup agents`, on the console's Settings page, or by hand.
+
+```mermaid
+flowchart LR
+  all["agents.all<br/>every loop step"] --> one
+  stage["stages.#lt;stage#gt;.skills"] --> one
+  own["agents.steps.#lt;step#gt;<br/>the step's own"] --> one
+  rules{{"rules: read-only steps,<br/>no history-changing git"}} --> one
+  one["one step's setup"] --> cli["claude -p flags"] --> init{"session starts:<br/>did it load them?"}
+  init -->|yes| work["the step runs"]
+  init -.->|"an agent or skill is missing"| fail(["step fails: setup"])
+```
+
+**What a step gets.** `agents.all` applies to every loop step and `agents.steps.<step>` adds to it; each takes `agent`, `subagents`, `teams`, `skills`, `tools` and `mcp_tools` (`mcp__<server>` for all of a server's tools, `mcp__<server>__<tool>` for one; MCP tools reach every session of the step, judges included). Lists add up (`all`, then the stage's `skills`, then the step's own), each name once; `agent` is one value and the step's own wins. `teams` names groups of subagents (`members`, and `way`: `parallel` gives each the same task, `pick` hands each piece of work to the member that fits). `sources` is `all` (the default: also the personal skills, agents, plugins and MCP servers of whoever runs `loopstra start`) or `repo` (only what the repository declares, the same on every machine; the user's `apiKeyHelper` and `env` still pass through so sessions can sign in). Agents and skills are Claude Code's own files, committed in the repository's `.claude/`.
+
+**How the session gets it.**
+
+| Setting | On the `claude -p` command |
+| --- | --- |
+| `agent` | `--agent loopstra-<name>`. Loopstra reads the agent's file from main's last commit and passes it inline with `--agents`, so a change cannot rewrite the role that reviews it. |
+| `subagents`, `teams` | their files inline in `--agents`; a line in the prompt naming them, and how each team works; and `--forward-subagent-text`, so their work shows on the session page |
+| `skills` | a line in the prompt naming them. A session that works outside the main checkout also gets the snapshot of `main` with `--add-dir`, so it finds the repository's skills as `main` has them, and may not edit them there. |
+| `tools`, `mcp_tools` | added to `--allowedTools`, on top of the step's own tools |
+| `sources: repo` | `--setting-sources project`, with Loopstra's hook and your `apiKeyHelper` and `env` passed back in `--settings` |
+| a read-only step | `--disallowedTools` removes `Edit`, `Write` and `NotebookEdit`, for the step's agent and every subagent |
+
+**Rules that do not move.** Read-only steps never get `Edit`, `Write`, `NotebookEdit` or a bare `Bash`, and no step's `tools` may hold git that changes history or a remote (`commit`, `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`, `tag`, `stash`, bare `git`). `agent` cannot be set on `fix`, `reconcile` or `revise`, which continue the build's session and run as the build's agent, and a built-in agent such as `Explore` can be a subagent but not a step's agent. Chat's two steps (`orchestrator`, `write-intent`) take only their own entries under `steps` (never `all`, and not the old shared MCP rule), and anyone allowed to chat can steer the tools given there.
+
+**Subagents and teams.**
+
+```mermaid
+flowchart LR
+  main["the step's agent<br/>returns the step's result"] -->|Agent call| sub["a subagent"]
+  main -->|the same task to each| par["team, way: parallel<br/>sec, perf, a11y"]
+  main -->|each piece to the member that fits| pick["team, way: pick<br/>db, ui, api"]
+```
+
+The step's agent hands work on with Claude Code's Agent tool. Claude Code's own agent teams are deprecated, so a Loopstra team is a named group of subagents, and the prompt tells the agent how to use it. Subagents help but never answer for the step: the agent still returns the structured result Loopstra reads. The cost a session reports includes its subagents, and the session page nests each subagent's work under the call that started it (see What a session ran as, under Watch).
+
+**When something is missing.** `loopstra start` refuses while a step names an agent that is missing, and only warns about a missing skill (built-in and claude.ai skills are not files on disk). If a session starts without a named agent or skill, the step fails with the reason `setup` and is not retried; the owner note says what is missing. What each step ran as shows in its trace (`agent_setup`) and on its session page.
+
+**Adding agents and skills.** `loopstra setup agents` can add them from this machine's own, from a git repository or folder, or as a new agent written from a short form (see Set up a repo). The console's Settings page has an **Agents** part: each step's agent, subagents, skills and teams, the tools, and the repository's agents and skills (copy one from this machine, fetch from a git repository, write a new one, edit or remove one). The console never writes the repository itself: a config change is a `settings` request (`agents.*` paths), and a file change is an `agent-files` request, both applied by the loop. The loop refuses a file change when its target has uncommitted changes in the main checkout, goes through a link, is outside `.claude/agents` and `.claude/skills`, or changed since the page read it. Fetching from a git repository runs on the server, in a temporary folder removed afterwards. One write is pending at a time across the page.
 
 ## Prompts
 
