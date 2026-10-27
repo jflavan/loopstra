@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { isCollection, isMap, isNode, isPair, isScalar, isSeq, parseDocument, Scalar, type Document, type Node } from "yaml";
 import { ConfigError, configPath, validateConfig, type Config } from "../config";
 import { writeFileAtomic } from "../fsutil";
+import { isCrlf } from "../text";
 
 /** Where a value is in the config, like ["claude", "max_budget_usd"]. */
 type Path = readonly (string | number)[];
@@ -43,7 +44,7 @@ export class ConfigDocument {
     const doc = parseDocument(text);
     if (doc.errors.length) throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${doc.errors[0]!.message}`);
     // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.
-    const crlf = (text.match(/\r\n/g)?.length ?? 0) * 2 > (text.match(/\n/g)?.length ?? 0);
+    const crlf = isCrlf(text);
     return new ConfigDocument(path, doc, crlf);
   }
 

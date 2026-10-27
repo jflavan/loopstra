@@ -61,7 +61,7 @@ export async function releaseNotes(from: string, to: string, api = githubApi()):
 const DAY_MS = 24 * 60 * 60_000;
 
 /** True for a published version, not a development checkout's. */
-const released = (v: string): boolean => !v.startsWith(DEV_VERSION);
+export const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VERSION);
 
 /**
  * One line for `start` and `status` when the repository was set up before the stamp (`stamp` is ""),

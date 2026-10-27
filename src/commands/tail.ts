@@ -1,4 +1,5 @@
 import { pollSeconds } from "../config";
+import { parsePayload, payloadFields } from "../console/describe";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { Trace, type EventRow } from "../trace";
 
@@ -50,13 +51,9 @@ function clock(d: Date): string {
 
 /** One line per event; a phase that was refused commands gets a second line naming them. */
 function format(e: EventRow): string[] {
-  let payload: Record<string, unknown>;
-  try { payload = JSON.parse(e.payload) as Record<string, unknown>; } catch { payload = { payload: e.payload }; }
-  const denied = Array.isArray(payload?.denied) ? (payload.denied as string[]) : [];
-  const detail = Object.entries(payload ?? {})
-    .filter(([k]) => k !== "stack" && k !== "denied")
-    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
-    .join(" ").replace(/\s*\r?\n\s*/g, " ").slice(0, 200);
+  const payload = parsePayload(e.payload);
+  const denied = Array.isArray(payload.denied) ? (payload.denied as string[]) : [];
+  const detail = payloadFields(payload, ["denied"]).slice(0, 200);
   const head = `${clock(new Date(e.ts))} ${e.slug.padEnd(24)} `;
   const lines = [`${head}${e.type.padEnd(13)} ${detail}`];
   if (denied.length) lines.push(`${head}${"not allowed".padEnd(13)} ${deniedText(denied)}`);
