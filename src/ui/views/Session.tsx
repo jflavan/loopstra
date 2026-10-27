@@ -1,3 +1,4 @@
+import { Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { ChangeDetail, PhaseView, SessionMessage } from "../../console/types";
 import { clock, duration, shortModel, stepWord, usd } from "../format";
@@ -152,7 +153,7 @@ function Facts({ phase, live, model, detail, chatCost }: { phase: Phase | null; 
   return (
     <dl>
       {model && <><dt>Model</dt><dd>{shortModel(model)}</dd></>}
-      {setupFacts(detail?.agentSetup ?? null).map(([label, text]) => <><dt>{label}</dt><dd>{text}</dd></>)}
+      {setupFacts(detail?.agentSetup ?? null).map(([label, text]) => <Fragment key={label}><dt>{label}</dt><dd>{text}</dd></Fragment>)}
       {phase && <><dt>Started</dt><dd>{clock(phase.started, t)}</dd></>}
       {facts && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(facts.elapsedMs)}</dd></>}
       <dt>Cost</dt>

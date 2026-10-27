@@ -706,7 +706,7 @@ describe("the change a person opened chat from", () => {
         ...Array.from({ length: 60 }, (_, i) => ({ type: "assistant", message: { content: [{ type: "text", text: `step ${i}` }] } })),
         // A subagent's prompt (see toItems): its own line, never a person's message.
         { type: "user", message: { content: [{ type: "text", text: "Check the parser." }] }, parent_tool_use_id: "a1" },
-        { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] } },
+        { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] }, parent_tool_use_id: "a1" },
         { type: "result", subtype: "success", is_error: false, total_cost_usd: 0.1, structured_output: { summary: "Fixed it." } },
       ];
       const dir = join(r.root, ".loopstra", "runs", "a", "phases", `${fix}-fix-1`);
@@ -730,7 +730,7 @@ describe("the change a person opened chat from", () => {
       expect(text).toContain("  The session's last steps:\n");
       expect(text).toContain("    text: step 59\n");
       expect(text).toContain("    subagent's prompt: Check the parser.\n");
-      expect(text).toContain("    tool Bash: bun test\n");
+      expect(text).toContain("    subagent tool Bash: bun test\n");
       expect(text).toContain("    result: success");
       // The last 50 items: 47 of the 60 texts, the subagent's prompt, the tool and the result.
       expect(text).toContain("    text: step 13\n");

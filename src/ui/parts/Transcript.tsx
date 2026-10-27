@@ -120,6 +120,10 @@ function ToolRow({ item, result }: { item: Extract<TranscriptItem, { kind: "tool
 function HandOffRow({ item, result, results, compact }: { item: Extract<Item, { kind: "tool" }>; result: Result; results: Shown["results"]; compact: boolean }) {
   const [open, setOpen] = useState(!compact);
   const input = item.input as { subagent_type?: unknown } | null;
+  const [all, setAll] = useState(false);
+  const children = item.children ?? [];
+  // A subagent can do as much as the session: its rows are capped like the transcript's.
+  const skipped = all ? 0 : Math.max(0, children.length - SHOWN);
   const to = typeof input?.subagent_type === "string" && input.subagent_type !== "";
   return (
     <div class={`t-tool t-handoff ${stateOf(result)}`}>
@@ -131,7 +135,8 @@ function HandOffRow({ item, result, results, compact }: { item: Extract<Item, { 
       {open && (
         <div class="t-body">
           <div class="t-sub">
-            {(item.children ?? []).map((child, k) => <Row key={k} item={child} results={results} compact={compact} />)}
+            {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
+            {children.slice(skipped).map((child, k) => <Row key={skipped + k} item={child} results={results} compact={compact} />)}
           </div>
           {result ? <Output text={result.output} /> : <span class="muted">Still running…</span>}
         </div>

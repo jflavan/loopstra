@@ -27,7 +27,8 @@ export function addItems(s: Shown, more: TranscriptItem[]): Shown {
   for (const it of items) if ("id" in it) seen.add(it.id);
   for (const it of more) {
     if (it.kind === "tool-result") results.set(it.id, { ok: it.ok, output: it.output });
-    else if (it.kind === "todos") todos = it.items;
+    // Only the session's own todo list counts: a subagent's todos stay a row in its block.
+    else if (it.kind === "todos") { if (!it.parent) todos = it.items; }
     else if ("id" in it) {
       if (seen.has(it.id)) continue;
       seen.add(it.id);

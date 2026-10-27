@@ -399,6 +399,7 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .t-msg-label { display: block; font-size: var(--text-xs); font-weight: 600; color: var(--accent); }
 /* A subagent's work, inside the call that handed it off: indented under a rule, so whose it is shows at a glance. */
 .t-sub { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; padding-left: 12px; border-left: 2px solid var(--line); }
+.t-sub > * { content-visibility: auto; contain-intrinsic-size: auto 40px; }
 .t-prompt { box-shadow: none; background: var(--bg-sunk); }
 .t-handoff > .t-head .t-name { flex: none; white-space: nowrap; }
 /* A subagent's row whose call is not shown. */

@@ -353,6 +353,12 @@ describe("a transcript on the page", () => {
     expect(s.results.size).toBe(0);
   });
 
+  test("a subagent's todo list does not replace the session's", () => {
+    const own = [{ text: "mine", state: "pending" }];
+    const s = addItems(EMPTY, [{ kind: "todos", items: own }, { kind: "todos", items: [{ text: "theirs", state: "pending" }], parent: "a1" }]);
+    expect(s.todos).toEqual(own);
+  });
+
   test("a call whose id is a name every object has (constructor, toString) has no result until one comes", () => {
     const s = addItems(EMPTY, [{ kind: "tool", id: "constructor", tool: "Bash", target: "x", input: {} }]);
     expect(s.results.get("constructor")).toBeUndefined();

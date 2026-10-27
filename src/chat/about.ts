@@ -43,6 +43,11 @@ function quoted(label: string, text: string): string {
 
 /** A transcript item as one line of text for the orchestrator. */
 function itemLine(item: TranscriptItem): string {
+  // A subagent's rows say so (its prompt already does), so they do not read as the session's own.
+  return item.parent && item.kind !== "delegated" ? `subagent ${itemText(item)}` : itemText(item);
+}
+
+function itemText(item: TranscriptItem): string {
   switch (item.kind) {
     case "text": return `text: ${one(item.text)}`;
     case "tool": return `tool ${item.tool}: ${one(item.target)}`;
