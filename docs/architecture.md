@@ -4,7 +4,7 @@ Loopstra is an unattended development loop on top of the Claude Code CLI. Code o
 
 ## Layers
 
-About 150 modules under `src/`, in eight layers. A module imports only from its own layer or the ones below it. There is no runtime import cycle, and every exported name is imported somewhere: `bun run deadcode` fails otherwise.
+About 165 modules under `src/`, in eight layers. A module imports only from its own layer or the ones below it. There is no runtime import cycle, and every exported name is imported somewhere: `bun run deadcode` fails otherwise.
 
 1. **Foundations**, which import no other Loopstra module.
    - `text.ts`, `ids.ts`, `paths.ts` and `fsutil.ts` hold small helpers: `writeFileAtomic`, and `readJsonAs`, which reads a file through a zod schema.
@@ -22,6 +22,7 @@ About 150 modules under `src/`, in eight layers. A module imports only from its 
    - `heartbeat.ts` holds the loop's lock and pause.
    - `requests.ts`, `inbox.ts`, `conversation.ts` and `questions.ts` are what people leave for the loop.
    - `stamp.ts` holds what an upgrade knows.
+   - `agents.ts` resolves a step's agent setup from the config (`resolveSetup`) and holds its rules: which steps are read-only, which git a step may never get, and which steps run as the build's agent.
 4. **Records.**
    - `record-draft.ts` holds `RecordDraft`.
    - `context.ts` holds `StepContext` and `commitRecord`, the one way anything is written to main, with `settleRecord` and `landed` (see Records).
@@ -31,6 +32,8 @@ About 150 modules under `src/`, in eight layers. A module imports only from its 
    - `sessions.ts` traces each session.
    - `phases.ts` holds `agentPhase` and `codePhase`, plus `alongside`, for work that runs beside another phase.
    - `judges.ts` holds the cheaper first-pass judges.
+   - `agent-files.ts` finds the agents and skills a setup names, reading the repository's agents from main's last commit so a change cannot rewrite the agent that judges it, and turns a setup into session options (`setupSession`) and a check of the session's start.
+   - `agent-library.ts` lists, copies and fetches agents and skills, for `loopstra setup agents` and the console.
 6. **Stages**: `stages/*`. Design, plan, build, review, merge and verify, one step per tick, each a short sequence of phases and gates.
 7. **The loop.**
    - `scheduler.ts` runs `tick`, with up to `speed.max_parallel_changes` lanes, a thinker for design and plan, and a pull-request watcher beside them.
