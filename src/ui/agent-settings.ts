@@ -53,6 +53,18 @@ export function fromNote(e: Effective, row: AgentStepRow, field: Field): string 
 }
 
 /**
+ * What a step gets for a field, as text beside its control: the value with where it comes from
+ * ("Read (from all steps)", "lead (as build)"), "none" when it gets nothing, and "" when it gets
+ * only its own value, which the control shows already.
+ */
+export function getsText(e: Effective, row: AgentStepRow, field: Field): string {
+  const shown = Array.isArray(e.value) ? listText(e.value) : e.value ?? "none";
+  const note = fromNote(e, row, field);
+  if (note) return `${shown} (${note})`;
+  return e.from === null ? "none" : "";
+}
+
+/**
  * What a step's picker offers for a field: for its own agent, the library's agents but Claude Code's
  * built-ins (a step runs as an agent defined in a file), none for a step that runs as the build's;
  * for subagents (and a team's members), the library's agents and the built-ins; the teams by name;

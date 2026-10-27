@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 import type { AgentFilesOp, AgentsView, AgentStepRow, LibraryItemView, SourceItems } from "../../console/types";
-import { choicesFor, effective, fromNote, listText, parseList, withChosen, type Field } from "../agent-settings";
+import { choicesFor, effective, getsText, listText, parseList, withChosen, type Field } from "../agent-settings";
 import { listSource, sendAgentFiles, sendSetting } from "../requests";
 import { toast } from "../store";
 
@@ -105,8 +105,9 @@ function StepRow({ w, row, build }: { w: Writes; row: AgentStepRow; build: Agent
         {(["agent", ...LIST_FIELDS, "tools", "mcp_tools"] as Field[]).map((field) => {
           const path = `${base}.${field}`;
           const e = effective(row, field, build);
-          const note = fromNote(e, row, field);
-          const shown = Array.isArray(e.value) ? listText(e.value) : e.value ?? "none";
+          const typed = field === "tools" || field === "mcp_tools";
+          // What it gets, beside the control. A picker or a select shows "none" itself; a typed field, empty, does not.
+          const gets = getsText(e, row, field);
           const id = `ag-${row.key}-${field}`;
           return (
             <div key={field} class="agent-field">
@@ -115,7 +116,7 @@ function StepRow({ w, row, build }: { w: Writes; row: AgentStepRow; build: Agent
                 : <label class="agent-field-name" for={id}>{FIELD_LABELS[field]}</label>}
               {field === "agent" ? (
                 row.continuesBuild
-                  ? <span>{shown}</span>
+                  ? <span>{gets}</span>
                   : <AgentPicker w={w} id={id} row={row} path={path} />
               ) : field === "tools" || field === "mcp_tools" ? (
                 <ToolsInput w={w} id={id} row={row} field={field} path={path} />
@@ -123,7 +124,7 @@ function StepRow({ w, row, build }: { w: Writes; row: AgentStepRow; build: Agent
                 <ListPicker w={w} id={id} label={`${FIELD_LABELS[field]} for ${row.key === "all" ? "all steps" : row.key}`} chosen={asList(row.own[field])}
                   choices={choicesFor(w.view, field, row.key)} onSave={(list, after) => w.setting(path, list, after)} />
               )}
-              {note && <span class="muted">{field === "agent" && row.continuesBuild ? note : `${shown} (${note})`}</span>}
+              {gets && !(field === "agent" && row.continuesBuild) && (typed || gets !== "none") && <span class="muted">{gets}</span>}
               {row.chat && (field === "tools" || field === "mcp_tools") && <span class="agent-warn">{CHAT_WARNING}</span>}
               {w.wait(path)}
             </div>
@@ -155,9 +156,8 @@ function ToolsInput({ w, id, row, field, path }: { w: Writes; id: string; row: A
     if (same(list, own)) return;
     w.setting(path, list);
   };
-  const example = field === "tools" ? (row.readOnly ? "Read, Bash(bun test)" : "Bash(bun test), Edit") : "mcp__github";
   return (
-    <input id={id} key={`${id}-${w.rev}`} type="text" defaultValue={own.join(", ")} placeholder={example} disabled={w.locked} autocomplete="off" spellcheck={false}
+    <input id={id} key={`${id}-${w.rev}`} type="text" defaultValue={own.join(", ")} placeholder={row.key === "all" ? "comma-separated" : undefined} disabled={w.locked} autocomplete="off" spellcheck={false}
       onKeyDown={(e) => { if (e.key === "Enter") send(e.currentTarget); }}
       onBlur={(e) => send(e.currentTarget)} />
   );

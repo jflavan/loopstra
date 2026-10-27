@@ -17,7 +17,7 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
-import { choicesFor, effective, fromNote, listText, parseList, withChosen } from "../../src/ui/agent-settings";
+import { choicesFor, effective, fromNote, getsText, listText, parseList, withChosen } from "../../src/ui/agent-settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
@@ -1222,6 +1222,23 @@ describe("the Agents section of the Settings page", () => {
     expect(fromNote({ value: ["style", "tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] }, fromAll: { skills: ["style"] } }), "skills")).toBe("with all steps");
     expect(fromNote({ value: ["tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] } }), "skills")).toBe("");
     expect(fromNote({ value: null, from: null }, row({ key: "build" }), "agent")).toBe("");
+  });
+
+  test("what a step gets, beside its control: inherited with where from, none when nothing, nothing more when only its own", () => {
+    const plan = row({ key: "plan", fromAll: { tools: ["Read"] } });
+    expect(getsText(effective(plan, "tools"), plan, "tools")).toBe("Read (from all steps)");
+    const bare = row({ key: "verify" });
+    expect(getsText(effective(bare, "tools"), bare, "tools")).toBe("none");
+    expect(getsText(effective(bare, "mcp_tools"), bare, "mcp_tools")).toBe("none");
+    expect(getsText(effective(bare, "agent"), bare, "agent")).toBe("none");
+    // Its own alone: the control shows it already.
+    const own = row({ key: "build", own: { tools: ["Edit"] } });
+    expect(getsText(effective(own, "tools"), own, "tools")).toBe("");
+    const mixed = row({ key: "build", own: { tools: ["Edit"] }, fromAll: { tools: ["Read"] } });
+    expect(getsText(effective(mixed, "tools"), mixed, "tools")).toBe("Read, Edit (with all steps)");
+    const fix = row({ key: "fix", continuesBuild: true });
+    expect(getsText(effective(fix, "agent", row({ key: "build", own: { agent: "lead" } })), fix, "agent")).toBe("lead (as build)");
+    expect(getsText(effective(fix, "agent"), fix, "agent")).toBe("none (as build)");
   });
 
   test("parseList splits, trims, dedupes and keeps order", () => {
