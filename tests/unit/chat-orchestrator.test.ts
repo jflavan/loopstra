@@ -704,6 +704,8 @@ describe("the change a person opened chat from", () => {
       const raw = [
         { type: "system", subtype: "init", cwd: r.root, session_id: "s" },
         ...Array.from({ length: 60 }, (_, i) => ({ type: "assistant", message: { content: [{ type: "text", text: `step ${i}` }] } })),
+        // A subagent's prompt (see toItems): its own line, never a person's message.
+        { type: "user", message: { content: [{ type: "text", text: "Check the parser." }] }, parent_tool_use_id: "a1" },
         { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] } },
         { type: "result", subtype: "success", is_error: false, total_cost_usd: 0.1, structured_output: { summary: "Fixed it." } },
       ];
@@ -727,11 +729,12 @@ describe("the change a person opened chat from", () => {
       expect(text).toContain("  Newest failure:\n    build: agent-fail: the tests would not pass");
       expect(text).toContain("  The session's last steps:\n");
       expect(text).toContain("    text: step 59\n");
+      expect(text).toContain("    subagent's prompt: Check the parser.\n");
       expect(text).toContain("    tool Bash: bun test\n");
       expect(text).toContain("    result: success");
-      // The last 50 items: 48 of the 60 texts, the tool and the result.
-      expect(text).toContain("    text: step 12\n");
-      expect(text).not.toContain("text: step 11\n");
+      // The last 50 items: 47 of the 60 texts, the subagent's prompt, the tool and the result.
+      expect(text).toContain("    text: step 13\n");
+      expect(text).not.toContain("text: step 12\n");
       // Each part at most 4000 characters before its indent (the record is longer).
       const record = text.slice(text.indexOf("  conversation.md:\n") + "  conversation.md:\n".length, text.indexOf("\n\n  Note:"));
       expect(record.replace(/^ {4}/gm, "").length).toBeLessThanOrEqual(4000);

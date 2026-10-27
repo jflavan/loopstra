@@ -376,7 +376,8 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .session { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
 @media (max-width: 1080px) { .session { grid-template-columns: minmax(0, 1fr); } }
 .transcript-wrap { position: relative; }
-.transcript { display: grid; gap: 8px; max-height: calc(100vh - 190px); overflow: auto; padding: 2px 4px 24px 0; }
+/* One column as wide as the box: a row with a long line that does not wrap (a call's target, a prompt) ellipsizes instead of widening every row. */
+.transcript { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; max-height: calc(100vh - 190px); overflow: auto; padding: 2px 4px 24px 0; }
 /* The browser skips laying out and painting rows that are off screen, so a session of thousands of rows stays smooth. */
 .transcript > * { content-visibility: auto; contain-intrinsic-size: auto 40px; }
 .t-tool, .t-edit { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-raised); box-shadow: var(--shadow-sm); }
@@ -399,6 +400,7 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 /* A subagent's work, inside the call that handed it off: indented under a rule, so whose it is shows at a glance. */
 .t-sub { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; padding-left: 12px; border-left: 2px solid var(--line); }
 .t-prompt { box-shadow: none; background: var(--bg-sunk); }
+.t-handoff > .t-head .t-name { flex: none; white-space: nowrap; }
 /* A subagent's row whose call is not shown. */
 .t-orphan { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
 .t-from { font-size: var(--text-xs); color: var(--fg-3); }
