@@ -16,6 +16,8 @@ import { lastCommit, setEnv, tempDir, write } from "../helpers";
 
 const agentText = (name: string) => `---\nname: ${name}\ndescription: Does ${name}\n---\nYou are ${name}.\n`;
 const LEAD = ".claude/agents/lead.md";
+/** The loop's and the console's words for a file that is not the version the page read. */
+const STALE = "The settings changed since the page read them";
 
 const CONFIG = `stages:
   review:
@@ -128,6 +130,12 @@ describe("the agents view", () => {
       expect(view.problems).toContainEqual({ level: "fail", step: "plan", name: "ghost", text: expect.stringContaining("`ghost`") as string });
       expect(view.problems).toContainEqual({ level: "warn", step: "build", name: "tone", text: expect.stringContaining("only on this machine") as string });
 
+      // A repo agent whose name the edit operation would not take is shown, but not offered for editing.
+      write(join(root, ".claude/agents/Odd_Name.md"), agentText("odd"));
+      const odd = (await (await fetch(`${base}/api/agents`)).json() as AgentsView).library.find((i) => i.name === "Odd_Name");
+      expect(odd).toMatchObject({ from: "repo", editable: false });
+      expect(odd).not.toHaveProperty("text");
+
       // A config that does not load says why, in words, and shows nothing to edit.
       writeFileSync(join(root, "loopstra/config.yaml"), "version: 1\ncommands:\n  test: echo ok\nagents:\n  sources: nowhere\n");
       const broken = await (await fetch(`${base}/api/agents`)).json() as AgentsView;
@@ -161,10 +169,20 @@ describe("agent file operations", () => {
       expect(again.status).toBe(409);
       expect((await again.json() as { error: string }).error).toContain("There is already a skill called tone in the repo");
       expect(filesRequests(root)).toEqual([]);
-      const replaced = await post(base, { op: "copy", kind: "skill", name: "tone", from: "personal", replace: true });
+      // A replacement names the version of SKILL.md the page read, and is refused when it is stale.
+      const replace = { op: "copy", kind: "skill", name: "tone", from: "personal", replace: true };
+      expect((await post(base, replace)).status).toBe(400);
+      const stale = await post(base, { ...replace, base: fileVersion("an older SKILL.md") });
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as { error: string }).error).toContain(STALE);
+      expect(filesRequests(root)).toEqual([]);
+      const view = await (await fetch(`${base}/api/agents`)).json() as AgentsView;
+      const read = view.library.find((i) => i.from === "repo" && i.name === "tone")!.base;
+      const replaced = await post(base, { ...replace, base: read });
       expect(replaced.status).toBe(202);
       const [r2] = filesRequests(root);
       expect(r2!.what).toBe("replace skill tone (4 files)");
+      expect(r2!.base[".claude/skills/tone/SKILL.md"]).toBe(read);
       expect(r2!.base[".claude/skills/tone/scripts/run.sh"]).toBe(fileVersion("echo hi\n"));
 
       // Something that is not on this machine, or a copy copyItem refuses.
@@ -178,21 +196,28 @@ describe("agent file operations", () => {
 
   test("POST /api/agents/files remove is refused while a step uses the agent", async () => {
     await withAgentsConsole(async (base, root) => {
-      const used = await post(base, { op: "remove", kind: "agent", name: "lead" });
+      const used = await post(base, { op: "remove", kind: "agent", name: "lead", base: fileVersion(agentText("lead")) });
       expect(used.status).toBe(409);
       const { error } = await used.json() as { error: string };
       expect(error).toContain("agents.steps.review");
       expect(error).toContain("team reviewers");
-      const skill = await post(base, { op: "remove", kind: "skill", name: "house" });
+      const skill = await post(base, { op: "remove", kind: "skill", name: "house", base: "absent" });
       expect(skill.status).toBe(409);
       expect((await skill.json() as { error: string }).error).toContain("stages.review");
       expect(filesRequests(root)).toEqual([]);
 
-      const spare = await post(base, { op: "remove", kind: "agent", name: "spare" });
+      // A remove names the version the page read: without one it is not well formed, and a stale one is refused.
+      const remove = { op: "remove", kind: "agent", name: "spare" };
+      expect((await post(base, remove)).status).toBe(400);
+      const stale = await post(base, { ...remove, base: fileVersion("an older spare") });
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as { error: string }).error).toContain(STALE);
+      expect(filesRequests(root)).toEqual([]);
+      const spare = await post(base, { ...remove, base: fileVersion(agentText("spare")) });
       expect(spare.status).toBe(202);
       const [q] = filesRequests(root);
       expect(q).toMatchObject({ what: "remove .claude/agents/spare.md", writes: [{ path: ".claude/agents/spare.md", content: null }], base: { ".claude/agents/spare.md": fileVersion(agentText("spare")) } });
-      expect((await post(base, { op: "remove", kind: "agent", name: "nobody" })).status).toBe(404);
+      expect((await post(base, { op: "remove", kind: "agent", name: "nobody", base: "absent" })).status).toBe(404);
     });
   }, 30_000);
 
@@ -203,6 +228,7 @@ describe("agent file operations", () => {
         const r = await post(base, { ...form, name });
         expect({ name, status: r.status }).toEqual({ name, status: 400 });
       }
+      expect(await (await post(base, { ...form, name: "Critic" })).json()).toEqual({ error: "An agent name is lowercase letters, digits and dashes (at most 64), like lead-reviewer." });
       expect((await post(base, { ...form, name: "lead" })).status).toBe(409);
       expect((await post(base, { ...form, model: "two words" })).status).toBe(400);
       expect((await post(base, { ...form, tools: ["Read, Grep"] })).status).toBe(400);
@@ -231,7 +257,7 @@ describe("agent file operations", () => {
       try {
         mkdirSync(join(outside.path, "linked"), { recursive: true });
         symlinkSync(join(outside.path, "linked"), join(root, ".claude/skills/linked"));
-        const r = await post(base, { op: "remove", kind: "skill", name: "linked" });
+        const r = await post(base, { op: "remove", kind: "skill", name: "linked", base: "absent" });
         expect(r.status).toBe(409);
         expect((await r.json() as { error: string }).error).toContain("link");
       } finally {
@@ -267,6 +293,11 @@ describe("agent file operations", () => {
         expect(q!.writes.find((w) => w.path === ".claude/skills/y/SOURCE.md")!.content).toContain(`Copied from ${url} (skills/y)`);
         expect(clones(tmp.path)).toEqual([]);
         expect((await post(base, { op: "fetch", url, names: ["zzz"], kind: "skill" })).status).toBe(404);
+        // A replacing fetch names the version it read of each item; a stale one is refused.
+        expect((await post(base, { op: "fetch", url, names: ["y"], kind: "skill", replace: true })).status).toBe(400);
+        const stale = await post(base, { op: "fetch", url, names: ["y"], kind: "skill", replace: true, base: { y: fileVersion("a SKILL.md the repo never had") } });
+        expect(stale.status).toBe(409);
+        expect((await stale.json() as { error: string }).error).toContain(STALE);
         expect(clones(tmp.path)).toEqual([]);
       });
     } finally {
@@ -278,7 +309,7 @@ describe("agent file operations", () => {
 
   test("a write without the page's Origin is refused (403)", async () => {
     await withAgentsConsole(async (base, root) => {
-      const op = { op: "remove", kind: "agent", name: "spare" };
+      const op = { op: "remove", kind: "agent", name: "spare", base: fileVersion(agentText("spare")) };
       expect((await post(base, op, { origin: "http://evil.example" })).status).toBe(403);
       expect((await post(base, op, { origin: "" })).status).toBe(403);
       expect((await fetch(`${base}/api/agents/files`, { method: "POST", headers: { origin: base, "content-type": "text/plain" }, body: JSON.stringify(op) })).status).toBe(415);

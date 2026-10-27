@@ -228,7 +228,7 @@ export interface SettingsView {
 
 /** The fields of a step's agent setup (agents.all, agents.steps.<step>), as the config names them. */
 export const AGENT_FIELDS = ["agent", "subagents", "teams", "skills", "tools", "mcp_tools"] as const;
-type AgentField = (typeof AGENT_FIELDS)[number];
+export type AgentField = (typeof AGENT_FIELDS)[number];
 
 /** What a field holds: `agent` one name, the others a list. Only fields that are set are given. */
 export type AgentFields = Partial<Record<AgentField, string | string[]>>;
@@ -262,7 +262,7 @@ export interface LibraryItemView {
   usedBy: string[];
   /** fileVersion of the agent file, or of the skill's SKILL.md. */
   base: string;
-  /** A repo agent, which the page may edit. */
+  /** A repo agent named as Loopstra names one (lowercase letters, digits and dashes), which the page may edit. */
   editable: boolean;
   /** A repo agent's file, for the edit form. */
   text?: string;
@@ -294,13 +294,19 @@ export interface AgentsView {
  * What the page asks of `/api/agents/files`: the server turns it into an `agent-files` request.
  * `copy` takes an item from this machine or a plugin (`from`); `fetch` clones `url` again and copies
  * the named items. Copy, fetch and new refuse a target the repository has unless `replace` is true.
+ * `base` is the version the page read of the agent file or SKILL.md it changes (LibraryItemView.base,
+ * or "absent" when the repository has none): an edit and a remove always name it, a replacement does
+ * too (a fetch by item name). It is refused as stale when the file is no longer that version.
  */
 export type AgentFilesOp =
-  | { op: "copy"; kind: "agent" | "skill"; name: string; from: "personal" | "plugin"; replace?: boolean }
-  | { op: "fetch"; url: string; names: string[]; kind: "agent" | "skill"; replace?: boolean }
-  | { op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null; replace?: boolean }
+  | ({ op: "copy"; kind: "agent" | "skill"; name: string; from: "personal" | "plugin" } & Replacing<string>)
+  | ({ op: "fetch"; url: string; names: string[]; kind: "agent" | "skill" } & Replacing<Record<string, string>>)
+  | ({ op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null } & Replacing<string>)
   | { op: "edit"; name: string; text: string; base: string }
-  | { op: "remove"; kind: "agent" | "skill"; name: string };
+  | { op: "remove"; kind: "agent" | "skill"; name: string; base: string };
+
+/** An add that replaces what the repository has names the version it read; one that does not, none. */
+type Replacing<B> = { replace?: false; base?: undefined } | { replace: true; base: B };
 
 /** What `/api/agents/source` lists: the items a git repository or folder holds. */
 export type SourceItems = { items: Array<{ kind: "agent" | "skill"; name: string; description: string }> } | { error: string };

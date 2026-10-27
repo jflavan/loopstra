@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { ConfigError, configPath, modelFor, parseConfig } from "../config";
+import { ConfigError, configPath, modelFor, parseConfig, type Config } from "../config";
 import { groupModel, MODEL_REFS, ownStepModel, STAGE_NAMES, stepModel, stepsOf, type StepGroup } from "../models";
 import { configVersion } from "../settings";
 import type { Trace } from "../trace";
@@ -12,23 +12,31 @@ const groupPath = (g: StepGroup) => (g === "chat" ? "chat.model" : `stages.${g}.
 const stepPath = (g: StepGroup, key: string) => (g === "chat" ? `chat.steps.${key}` : `stages.${g}.steps.${key}`);
 
 /**
+ * loopstra/config.yaml for a settings view, read once so its version and its values come from the
+ * same text; or why it cannot be used, in words (with the version when the file could be read).
+ */
+export async function readConfig(root: string): Promise<{ cfg: Config; version: string } | { version: string | null; problem: string }> {
+  const path = configPath(root);
+  if (!existsSync(path)) return { version: null, problem: "There is no loopstra/config.yaml. Run `loopstra init` first." };
+  let text: string;
+  try { text = await Bun.file(path).text(); } catch { return { version: null, problem: "loopstra/config.yaml cannot be read." }; }
+  const version = configVersion(text);
+  try {
+    return { cfg: parseConfig(text), version };
+  } catch (e) {
+    if (e instanceof ConfigError) return { version, problem: e.message };
+    throw e;
+  }
+}
+
+/**
  * What the Settings page shows. The file is read once, so its version and the values come from the
  * same text. A file that cannot be read or does not load gives a problem in words and no pickers.
  */
 export async function settingsView(root: string, trace: Trace): Promise<SettingsView> {
-  const none = (version: string | null, problem: string): SettingsView => ({ version, problem, models: [], groups: [] });
-  const path = configPath(root);
-  if (!existsSync(path)) return none(null, "There is no loopstra/config.yaml. Run `loopstra init` first.");
-  let text: string;
-  try { text = await Bun.file(path).text(); } catch { return none(null, "loopstra/config.yaml cannot be read."); }
-  const version = configVersion(text);
-  let cfg;
-  try {
-    cfg = parseConfig(text);
-  } catch (e) {
-    if (e instanceof ConfigError) return none(version, e.message);
-    throw e;
-  }
+  const loaded = await readConfig(root);
+  if ("problem" in loaded) return { version: loaded.version, problem: loaded.problem, models: [], groups: [] };
+  const { cfg, version } = loaded;
   const runs = trace.lastModelRuns();
   return {
     version,
