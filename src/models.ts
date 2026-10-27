@@ -50,8 +50,8 @@ export function stepsOf(group: StepGroup): readonly StepInfo[] {
   return STEPS.filter((s) => s.group === group);
 }
 
-/** The parts of a config that say which model runs what. */
-export type ModelSettings = Pick<Config, "claude" | "stages" | "chat">;
+/** The parts of a config that say which model runs what, and the agent settings each step's session gets. */
+export type ModelSettings = Pick<Config, "claude" | "stages" | "chat" | "agents">;
 
 /** The model of a stage, or of chat's orchestrator. */
 export function groupModel(cfg: ModelSettings, group: StepGroup): ModelRef {
@@ -74,7 +74,10 @@ export function stepModel(cfg: ModelSettings, step: StepKey): ModelRef {
   return "ref" in by ? by.ref : groupModel(cfg, by.follows);
 }
 
-/** `base` with every model setting (the names, each stage's model and steps, chat's model and steps) taken from `fresh`. */
+/**
+ * `base` with every model setting (the names, each stage's model and steps, chat's model and steps)
+ * and the agent settings (`agents`) taken from `fresh`.
+ */
 export function withModels(base: Config, fresh: ModelSettings): Config {
   const stages = { ...base.stages };
   for (const name of STAGE_NAMES) stages[name] = { ...base.stages[name], model: fresh.stages[name].model, steps: fresh.stages[name].steps } as never;
@@ -83,6 +86,7 @@ export function withModels(base: Config, fresh: ModelSettings): Config {
     claude: { ...base.claude, models: fresh.claude.models },
     stages,
     chat: { ...base.chat, model: fresh.chat.model, steps: fresh.chat.steps },
+    agents: fresh.agents,
   };
 }
 

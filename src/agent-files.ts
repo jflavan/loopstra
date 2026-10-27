@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { BUILTIN_AGENTS, inlineName, resolveSetup } from "./agents";
+import { BUILTIN_AGENTS, inlineName, resolveSetup, type AgentSetup } from "./agents";
 import type { Config } from "./config";
 import { STEP_KEYS, STEPS, type StepKey } from "./models";
 
@@ -119,28 +120,49 @@ export async function findSkill(name: string, where: Where): Promise<AgentDefini
 export interface SetupProblem { level: "fail" | "warn"; step: StepKey | "all"; name: string; text: string }
 
 /**
+ * Every agent a step's setup names, each once with the first part it plays: the agent the step runs
+ * as, a subagent, a team's member. Built-in agents included.
+ */
+function setupRoles(setup: AgentSetup, step: string): { name: string; role: string }[] {
+  const roles: { name: string; role: string }[] = [
+    ...(setup.agent ? [{ name: setup.agent, role: `the agent ${step} runs as` }] : []),
+    ...setup.subagents.map((name) => ({ name, role: `a subagent of ${step}` })),
+    ...setup.teams.flatMap((t) => t.members.map((name) => ({ name, role: `in the team ${t.name} of ${step}` }))),
+  ];
+  const seen = new Set<string>();
+  return roles.filter(({ name }) => {
+    if (seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
+}
+
+/** Where a named agent was looked for, in words: "on main", and "or on this machine" with `sources: all`. */
+function placesText(mainBranch: string, where: Where): string {
+  return `on ${mainBranch}${where.sources === "all" ? " or on this machine" : ""}`;
+}
+
+/** What a person is told about a named agent that is not found. */
+function missingAgentText(name: string, role: string, places: string): string {
+  return `\`${name}\`, ${role}, is not in .claude/agents/ ${places}. Add it with \`loopstra setup agents\`, or commit it.`;
+}
+
+/**
  * Every agent, subagent, team member and skill each step would use, checked against `where`.
  * One problem per name per step: missing, else only on this machine, else keys Loopstra leaves out.
  */
 export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupProblem[]> {
   const problems: SetupProblem[] = [];
-  const places = `on ${cfg.main_branch}${where.sources === "all" ? " or on this machine" : ""}`;
+  const places = placesText(cfg.main_branch, where);
   for (const step of STEP_KEYS) {
     const group = STEPS.find((s) => s.key === step)!.group;
     const stageSkills = group === "chat" ? [] : cfg.stages[group].skills;
     const setup = resolveSetup(cfg.agents, step, stageSkills);
-    const roles: { name: string; role: string }[] = [
-      ...(setup.agent ? [{ name: setup.agent, role: `the agent ${step} runs as` }] : []),
-      ...setup.subagents.map((name) => ({ name, role: `a subagent of ${step}` })),
-      ...setup.teams.flatMap((t) => t.members.map((name) => ({ name, role: `in the team ${t.name} of ${step}` }))),
-    ];
-    const seen = new Set<string>();
-    for (const { name, role } of roles) {
-      if (BUILTIN_AGENTS.has(name) || seen.has(name)) continue;
-      seen.add(name);
+    for (const { name, role } of setupRoles(setup, step)) {
+      if (BUILTIN_AGENTS.has(name)) continue;
       const def = await findAgent(name, where);
       if (!def) {
-        problems.push({ level: "fail", step, name, text: `\`${name}\`, ${role}, is not in .claude/agents/ ${places}. Add it with \`loopstra setup agents\`, or commit it.` });
+        problems.push({ level: "fail", step, name, text: missingAgentText(name, role, places) });
       } else if (def.from !== "repo") {
         problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
       } else if (def.dropped.length) {
@@ -157,6 +179,71 @@ export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupP
     }
   }
   return problems;
+}
+
+/**
+ * The definitions of the agents a step's setup names, read from `where`: the agent it runs as (null
+ * when none, or a built-in), then its subagents and team members, each once and built-ins left out.
+ * `missing`: what a person is told about the first one not found, in checkAgentSetup's words.
+ */
+export async function setupAgents(setup: AgentSetup, step: string, where: Where, mainBranch: string): Promise<{ main: AgentDefinition | null; others: AgentDefinition[] } | { missing: string }> {
+  let main: AgentDefinition | null = null;
+  const others: AgentDefinition[] = [];
+  for (const { name, role } of setupRoles(setup, step)) {
+    if (BUILTIN_AGENTS.has(name)) continue;
+    const def = await findAgent(name, where);
+    if (!def) return { missing: missingAgentText(name, role, placesText(mainBranch, where)) };
+    if (name === setup.agent) main = def;
+    else others.push(def);
+  }
+  return { main, others };
+}
+
+/**
+ * What a session's init event says it did not load of a setup, or null when it loaded everything (or
+ * the event does not list it). Agents are listed by their inline names, built-ins by their own; a
+ * skill counts under its name or as `<x>:<name>`. A built-in agent the step runs as is not passed, so
+ * not expected.
+ */
+export function initProblem(setup: AgentSetup, init: { agents?: string[]; skills?: string[] }): string | null {
+  const missing: string[] = [];
+  if (init.agents) {
+    const names = [...new Set([
+      ...(setup.agent && !BUILTIN_AGENTS.has(setup.agent) ? [setup.agent] : []),
+      ...setup.subagents, ...setup.teams.flatMap((t) => t.members),
+    ])];
+    for (const name of names) {
+      if (!init.agents.includes(BUILTIN_AGENTS.has(name) ? name : inlineName(name))) missing.push(`the agent \`${name}\``);
+    }
+  }
+  if (init.skills) {
+    const listed = init.skills;
+    for (const name of setup.skills) {
+      if (!listed.some((k) => k === name || k.endsWith(`:${name}`))) missing.push(`the skill \`${name}\``);
+    }
+  }
+  return missing.length ? `The session did not load ${missing.join(", ")}. Add it with \`loopstra setup agents\`, then retry.` : null;
+}
+
+/** The user's home folder, read as each session starts (a test may change HOME or USERPROFILE meanwhile). */
+export function userHome(): string {
+  return (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || homedir();
+}
+
+/**
+ * The sign-in settings of `<home>/.claude/settings.json` (`apiKeyHelper`, `env`), when it has them.
+ * A `sources: repo` session loads only project settings, so Loopstra passes these through its own
+ * `--settings`: a machine that signs in with them can still start sessions.
+ */
+export function userSettingsPassthrough(home: string): { apiKeyHelper?: string; env?: Record<string, string> } {
+  const settings = readJson(join(home, ".claude", "settings.json"));
+  const out: { apiKeyHelper?: string; env?: Record<string, string> } = {};
+  if (typeof settings?.apiKeyHelper === "string") out.apiKeyHelper = settings.apiKeyHelper;
+  const env = settings?.env;
+  if (env && typeof env === "object" && !Array.isArray(env)) {
+    out.env = Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === "string"));
+  }
+  return out;
 }
 
 /** One entry of the `--agents` JSON. */

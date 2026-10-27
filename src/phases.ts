@@ -2,9 +2,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
-import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
+import { runPhase, unavailable, type FailureReason, type PermissionMode, type RunPhaseInput } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
-import { badModelNote, stepModel } from "./models";
+import { badModelNote, STEP_KEYS, stepModel, type StepKey } from "./models";
+import { BUILTIN_AGENTS, inlineName, isEmptySetup, resolveSetup, setupLines, type AgentSetup } from "./agents";
+import { findAgent, initProblem, inlineAgents, setupAgents, userHome, userSettingsPassthrough, type AgentDefinition, type Where } from "./agent-files";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -96,12 +98,15 @@ function commandParts(cmd: string): string[] {
   return parts.map((p) => p.trim()).filter((p) => p);
 }
 
-/** Tools a session may use without asking: the set's own, each once. Always a fresh array. */
-export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
-  return [...new Set([...setTools(ctx, set)])];
+/**
+ * Tools a session may use without asking: the set's own, then the step's setup's `tools`, then its
+ * `mcp_tools` (see stepSetup), each once. Always a fresh array.
+ */
+export function toolsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string[] {
+  return [...new Set([...setTools(ctx, set), ...(setup?.tools ?? []), ...(setup?.mcpTools ?? [])])];
 }
 
-/** The tool set's own tools, before the MCP rules every set gets. */
+/** The tool set's own tools, before the setup's. */
 function setTools(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
@@ -177,6 +182,36 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 /** What heads conversation.md in a work session's prompt (the shipped templates say the same). */
 export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
 
+const isStepKey = (name: string): name is StepKey => (STEP_KEYS as readonly string[]).includes(name);
+
+/**
+ * The agent setup a phase's session gets (see resolveSetup): its step's, from the agent settings as
+ * loopstra/config.yaml has them now (see StepContext.models), with the stage's skills the spec names.
+ * A phase that is not a step gets the spec's skills alone.
+ */
+export async function stepSetup(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<AgentSetup> {
+  if (!isStepKey(spec.name)) return { sources: "all", agent: null, subagents: [], teams: [], skills: [...(spec.skills ?? [])], tools: [], mcpTools: [] };
+  return resolveSetup((await ctx.models()).agents, spec.name, spec.skills ?? []);
+}
+
+/** Where a step's named agents and skills are looked for: the step's snapshot of main, then (with `sources: all`) this machine. */
+async function setupWhere(ctx: StepContext, setup: AgentSetup): Promise<Where> {
+  return { repo: await ctx.snapshot(), home: userHome(), sources: setup.sources };
+}
+
+/** Each subagent's and team member's description, from its file (see setupWhere), for the prompt's lines; null when it has none. */
+async function describer(ctx: StepContext, setup: AgentSetup): Promise<(name: string) => string | null> {
+  const names = new Set([...setup.subagents, ...setup.teams.flatMap((t) => t.members)].filter((n) => !BUILTIN_AGENTS.has(n)));
+  if (!names.size) return () => null;
+  const where = await setupWhere(ctx, setup);
+  const found = new Map<string, AgentDefinition>();
+  for (const name of names) {
+    const def = await findAgent(name, where);
+    if (def) found.set(name, def);
+  }
+  return (name) => found.get(name)?.description || null;
+}
+
 /** A note a phase's prompt must carry: `text` is added at its end when there is a `note` and the prompt file has no `{{variable}}` to carry it. */
 export type PromptNote = { variable: string; note: string; text: string };
 
@@ -189,11 +224,13 @@ export type PromptNote = { variable: string; note: string; text: string };
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?: PromptNote): Promise<string | null> {
   const path = promptPath(ctx.root, spec.name);
   if (path === null) return null;
-  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
+  // With only skills, or none, this is the skills line prompts always had.
+  const setup = await stepSetup(ctx, spec);
+  const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
   const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
   const template = await Bun.file(path).text();
-  let rendered = skillsLine + renderPrompt(template, vars);
+  let rendered = setupText + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
   const prompt = withContract(rendered);
@@ -444,9 +481,21 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfCancelled(signal);
   throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
-  // Read as the session starts: a model a person changed since the step began applies from here.
+  // Read as the session starts: a model or agent setting a person changed since the step began applies from here.
   const model = await phaseModel(ctx, spec);
+  const setup = await stepSetup(ctx, spec);
+  const extra = isEmptySetup(setup) ? null : await setupRun(ctx, spec, setup, cwd);
+  if (extra && "missing" in extra) {
+    ctx.trace.event(ctx.slug, "error", { where: traceName, reason: "setup", detail: extra.missing });
+    return { ok: false, reason: "setup", note: `${ownerNote("setup")} ${extra.missing}`, sessionId: null };
+  }
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+  if (extra) {
+    ctx.trace.event(ctx.slug, "agent_setup", {
+      agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name), skills: setup.skills,
+      tools: setup.tools, mcp_tools: setup.mcpTools, sources: setup.sources, models: extra.models,
+    }, seq);
+  }
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");
@@ -461,10 +510,12 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       schema: jsonSchemaFor(spec.name),
       model: model.name,
       permissionMode: spec.permissionMode,
-      allowedTools: toolsFor(ctx, spec.tools),
+      allowedTools: toolsFor(ctx, spec.tools, setup),
       disallowedTools: disallowedFor(spec.tools),
       // The test-protection hook, from the installed package; it acts only in a fix session.
       settings: hookSettings(),
+      // The step's agent setup (see setupRun), which may also replace the settings.
+      ...extra?.run,
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: capUsd,
       resume: spec.resume,
@@ -509,11 +560,45 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const reason = out.reason as BlockingReason;
     // The step's own words: which named model, which CLI name, which step.
     if (reason === "model") return { ok: false, reason, note: badModelNote(model.ref, model.name, spec.name), sessionId: out.sessionId };
+    // What the session did not load, in the init check's words (see initProblem).
+    if (reason === "setup") return { ok: false, reason, note: `${ownerNote(reason)} ${out.detail}`, sessionId: out.sessionId };
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx, model.name);
   return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, model: model.name, seq, ...(question ? { asked: question } : {}) };
+}
+
+/**
+ * What a session's run gets from its step's setup when that is not empty, and the models of its
+ * inline agents for the trace; `missing`, instead, when an agent it names is not found.
+ * - `tools` and `mcp_tools` go on the allow list (see toolsFor).
+ * - Every agent it names is read from main (see setupWhere), never the change's branch, and passed
+ *   inline under its Loopstra name (see inlineAgents); the session runs as its agent with `--agent`.
+ * - `sources: repo` loads project settings only, so the user's sign-in settings ride along in `--settings`.
+ * - A session outside the snapshot of main (a worktree) also loads main's skills (`--add-dir`).
+ * - Subagents' text reaches the trace; the init event must list every agent and skill (see initProblem).
+ */
+async function setupRun(ctx: StepContext, spec: AgentPhaseSpec, setup: AgentSetup, cwd: string): Promise<{ run: Partial<RunPhaseInput>; models: Record<string, string> } | { missing: string }> {
+  const run: Partial<RunPhaseInput> = { checkInit: (init) => initProblem(setup, init) };
+  let models: Record<string, string> = {};
+  const usesMain = setup.agent !== null || setup.subagents.length > 0 || setup.teams.length > 0 || setup.skills.length > 0;
+  const where = usesMain ? await setupWhere(ctx, setup) : null;
+  if (where) {
+    const found = await setupAgents(setup, spec.name, where, ctx.cfg.main_branch);
+    if ("missing" in found) return found;
+    const agents = inlineAgents(found.main, found.others);
+    if (Object.keys(agents).length) run.agents = agents;
+    if (found.main) run.agent = inlineName(found.main.name);
+    models = Object.fromEntries(Object.entries(agents).flatMap(([name, a]) => (a.model ? [[name, a.model]] : [])));
+    if (setup.skills.length && cwd !== where.repo) run.addDirs = [where.repo];
+  }
+  if (setup.sources === "repo") {
+    run.settingSources = "project";
+    run.settings = JSON.stringify({ ...(JSON.parse(hookSettings()) as Record<string, unknown>), ...userSettingsPassthrough(userHome()) });
+  }
+  if (setup.subagents.length || setup.teams.length) run.forwardSubagentText = true;
+  return { run, models };
 }
 
 /**

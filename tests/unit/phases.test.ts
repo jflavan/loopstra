@@ -6,7 +6,7 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { badModelNote, stepModel } from "../../src/models";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, probeAssistant, projectCommand, toolsFor, withContract } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, probeAssistant, projectCommand, stepSetup, toolsFor, withContract, type AgentPhaseSpec } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { hookSettings } from "../../src/package";
 import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lanes";
@@ -843,6 +843,207 @@ describe("the step's snapshot of main", () => {
       expect(a.ok && b?.ok).toBe(true);
       expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x", "intent", "x", "intent.md"))).toBe(true);
       await ctx.dropSnapshot();
+    } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("a step's agent setup", () => {
+  /** Writes loopstra/config.yaml with this `agents` block (none when undefined); sessions read it fresh. */
+  const writeAgents = (root: string, agents?: unknown) =>
+    Bun.write(configPath(root), `version: 1\ncommands:\n  test: echo ok\n${agents === undefined ? "" : `agents: ${JSON.stringify(agents)}\n`}`);
+  /** Commits agent files on main, before the step's snapshot of main is made. */
+  const commitAgents = async (root: string, files: Record<string, string>) => {
+    mkdirSync(join(root, ".claude", "agents"), { recursive: true });
+    for (const [name, text] of Object.entries(files)) await Bun.write(join(root, ".claude", "agents", `${name}.md`), text);
+    await new Git(root).commitAll("agents");
+  };
+  /** Runs a phase with its argv recorded: the args, the prompt sent, and the allow list. */
+  const recorded = async (ctx: StepContext, spec: Omit<AgentPhaseSpec, "env" | "vars"> & { env?: Record<string, string> }) => {
+    const file = join(ctx.root, "..", `args-${Date.now()}-${Math.random()}.json`);
+    try {
+      const r = await agentPhase(ctx, { ...spec, vars: {}, env: { LOOPSTRA_FAKE_ARGS: file, ...spec.env } });
+      if (!existsSync(file)) return { r, args: null, prompt: null, allowed: [] as string[] };
+      const { args, prompt } = (await Bun.file(file).json()) as { args: string[]; prompt: string };
+      const allowed = (args[args.indexOf("--allowedTools") + 1] ?? "").split(",");
+      return { r, args, prompt, allowed };
+    } finally { rmSync(file, { force: true }); }
+  };
+  /** The change's worktree, on its own branch from main. */
+  const worktree = async (ctx: StepContext) => {
+    await ctx.git.run(["branch", ctx.branch]);
+    await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+  };
+  const NEW_FLAGS = ["--agents", "--agent", "--setting-sources", "--add-dir", "--forward-subagent-text"];
+
+  test("with nothing set, a session's args and prompt are what they were", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await worktree(ctx);
+      const runs: { args: string[] | null; prompt: string | null }[][] = [];
+      for (const agents of [undefined, {}, { sources: "all", all: {}, steps: {} }]) {
+        await writeAgents(repo.path, agents);
+        const intake = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
+        const build = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir });
+        runs.push([intake, build].map(({ args, prompt }) => ({ args, prompt })));
+      }
+      expect(runs[1]).toEqual(runs[0]);
+      expect(runs[2]).toEqual(runs[0]);
+      for (const { args } of runs[0]!) {
+        expect(args).not.toBeNull();
+        for (const flag of NEW_FLAGS) expect(args).not.toContain(flag);
+        expect(args![args!.indexOf("--settings") + 1]).toBe(hookSettings());
+      }
+      expect(trace.events("x").some((e) => e.type === "agent_setup")).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a step's agent, subagents, team and tools reach its session", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await commitAgents(repo.path, {
+        lead: "---\nname: lead\ndescription: Leads the review\ntools: Read\n---\nYou lead.\n",
+        sec: "---\ndescription: Looks for security holes\nmodel: haiku\n---\nSecurity.\n",
+        perf: "---\ndescription: Looks for slow code\n---\nSpeed.\n",
+      });
+      await writeAgents(repo.path, {
+        teams: { reviewers: { members: ["sec", "perf"], way: "parallel" } },
+        steps: { review: { agent: "lead", teams: ["reviewers"], tools: ["WebFetch"], mcp_tools: ["mcp__gh"] } },
+      });
+      await Bun.write(join(repo.path, "loopstra", "prompts", "review.md"), "Review {{slug}}.\n");
+      await worktree(ctx);
+      const { r, args, prompt, allowed } = await recorded(ctx, { name: "review", permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir });
+      expect(r.ok).toBe(true);
+      expect(args![args!.indexOf("--agent") + 1]).toBe("loopstra-lead");
+      const inline = JSON.parse(args![args!.indexOf("--agents") + 1]!) as Record<string, { tools?: string[]; prompt: string; model?: string }>;
+      expect(Object.keys(inline)).toEqual(["loopstra-lead", "loopstra-sec", "loopstra-perf"]);
+      expect(inline["loopstra-lead"]!.tools).toEqual(["Read", "StructuredOutput"]);
+      expect(allowed).toEqual(expect.arrayContaining(["WebFetch", "mcp__gh"]));
+      expect(args).toContain("--forward-subagent-text");
+      expect(prompt).toContain("`loopstra-sec`, `loopstra-perf`");
+      expect(prompt).toStartWith("Team `reviewers`: `loopstra-sec`, `loopstra-perf`.");
+      // The setup is traced once, on the session's phase row.
+      const events = trace.events("x").filter((e) => e.type === "agent_setup");
+      expect(events).toHaveLength(1);
+      expect(JSON.parse(events[0]!.payload)).toEqual({
+        agent: "lead", subagents: [], teams: ["reviewers"], skills: [], tools: ["WebFetch"], mcp_tools: ["mcp__gh"], sources: "all",
+        models: { "loopstra-sec": "haiku" },
+      });
+      expect(events[0]!.phase_seq).toBe(trace.phases("x")[0]!.seq);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("subagents are described in the prompt by their files", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await commitAgents(repo.path, { sec: "---\ndescription: Looks for security holes\n---\nSecurity.\n", bare: "No frontmatter.\n" });
+      await writeAgents(repo.path, { steps: { intake: { subagents: ["sec", "bare", "Explore"] } } });
+      const { r, args, prompt } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
+      expect(r.ok).toBe(true);
+      expect(prompt).toStartWith("You can hand work to these subagents: `loopstra-sec` (Looks for security holes), `loopstra-bare`, `Explore`.");
+      // A built-in is Claude Code's own: no inline copy, and no --agent without a main agent.
+      expect(Object.keys(JSON.parse(args![args!.indexOf("--agents") + 1]!) as object)).toEqual(["loopstra-sec", "loopstra-bare"]);
+      expect(args).not.toContain("--agent");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("agent files come from main, not from the change's branch", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await commitAgents(repo.path, { lead: "---\ndescription: Builds\n---\nMAIN\n" });
+      await writeAgents(repo.path, { steps: { build: { agent: "lead" } } });
+      await worktree(ctx);
+      await Bun.write(join(ctx.worktreeDir, ".claude", "agents", "lead.md"), "---\ndescription: Builds\n---\nBRANCH\n");
+      await new Git(ctx.worktreeDir).commitAll("the branch rewrites its builder");
+      const { r, args } = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir });
+      expect(r.ok).toBe(true);
+      const inline = JSON.parse(args![args!.indexOf("--agents") + 1]!) as Record<string, { prompt: string }>;
+      expect(inline["loopstra-lead"]!.prompt).toBe("MAIN");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a named agent nobody has stops the step before a session starts", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await writeAgents(repo.path, { steps: { design: { agent: "ghost" } } });
+      const { r, args } = await recorded(ctx, { name: "design", permissionMode: "plan", tools: "read" });
+      expect(args).toBeNull();
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe("setup");
+        expect(r.note).toStartWith(ownerNote("setup"));
+        expect(r.note).toContain("`ghost`");
+        expect(r.note).toContain("`loopstra setup agents`");
+      }
+      expect(trace.phases("x")).toHaveLength(0);
+      const error = trace.events("x").find((e) => e.type === "error");
+      expect(JSON.parse(error!.payload)).toMatchObject({ where: "design", reason: "setup", detail: expect.stringContaining("`ghost`") });
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a session that did not load a named skill or agent stops as a setup failure, not retried", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await writeAgents(repo.path, { all: { skills: ["house", "a"] } });
+      // The init event lists skills ["a"] and agents ["loopstra-x"].
+      const { r } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", env: { LOOPSTRA_FAKE_FIXTURE: join(FAKE, "..", "fixtures", "init-lists.jsonl") } });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe("setup");
+        expect(r.note).toStartWith(ownerNote("setup"));
+        expect(r.note).toContain("`house`");
+        expect(r.note).not.toContain("`a`");
+        expect(r.note).toContain("Add it with `loopstra setup agents`, then retry.");
+      }
+      expect(trace.phases("x")).toHaveLength(1);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("repo-only sessions load project settings and keep the user's sign-in", async () => {
+    const { repo, ctx, trace } = await setup();
+    const home = tempDir();
+    mkdirSync(join(home.path, ".claude"), { recursive: true });
+    await Bun.write(join(home.path, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "/bin/key", env: { A: "1" }, theme: "x" }));
+    const restore = setEnv({ HOME: home.path, USERPROFILE: home.path });
+    try {
+      await writeAgents(repo.path, { sources: "repo" });
+      const { r, args } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
+      expect(r.ok).toBe(true);
+      expect(args![args!.indexOf("--setting-sources") + 1]).toBe("project");
+      const settings = JSON.parse(args![args!.indexOf("--settings") + 1]!) as Record<string, unknown>;
+      expect(settings).toMatchObject({ apiKeyHelper: "/bin/key", env: { A: "1" }, hooks: expect.any(Object) });
+      expect(settings.theme).toBeUndefined();
+      expect(settings.hooks).toEqual((JSON.parse(hookSettings()) as { hooks: unknown }).hooks);
+    } finally { restore(); home.cleanup(); trace.close(); repo.cleanup(); }
+  });
+
+  test("a worktree step that names skills also gets main's snapshot as an added dir", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await writeAgents(repo.path, { all: { skills: ["house"] } });
+      await worktree(ctx);
+      const build = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir });
+      expect(build.args![build.args!.indexOf("--add-dir") + 1]).toBe(await ctx.snapshot());
+      expect(build.prompt).toStartWith("Use these skills: `house`.\n\n");
+      const design = await recorded(ctx, { name: "design", permissionMode: "plan", tools: "read" });
+      expect(design.args).not.toContain("--add-dir");
+      await ctx.dropSnapshot();
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("mcp rules from agents.all reach every tool set, once each", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await writeAgents(repo.path, { all: { mcp_tools: ["mcp__github", "mcp__docs__guide", "mcp__github"] } });
+      const setup = await stepSetup(ctx, { name: "intake" });
+      for (const set of ["read", "read+git", "read+commands", "build"] as const) {
+        const tools = toolsFor(ctx, set, setup);
+        expect(tools.slice(-2)).toEqual(["mcp__github", "mcp__docs__guide"]);
+        expect(new Set(tools).size).toBe(tools.length);
+      }
+      // MCP rules are not shell commands.
+      expect(commandsFor(ctx, "read")).toBe("none");
+      const { allowed } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
+      expect(allowed).toEqual(["Read", "Glob", "Grep", "mcp__github", "mcp__docs__guide"]);
     } finally { trace.close(); repo.cleanup(); }
   });
 });

@@ -54,7 +54,7 @@ test("a group's model is its stage's, or chat's", () => {
 
 test("withModels takes the model settings and keeps the rest", () => {
   const base = validateConfig({ ...BASE, poll_seconds: 5, stages: { build: { max_fix_loops: 7 } } });
-  const fresh = validateConfig({ ...BASE, claude: { models: { max: "x" } }, stages: { build: { model: "strong", steps: { fix: "max" } } }, chat: { model: "cheap", steps: { "write-intent": "max" } } });
+  const fresh = validateConfig({ ...BASE, agents: { all: { skills: ["house"] } }, claude: { models: { max: "x" } }, stages: { build: { model: "strong", steps: { fix: "max" } } }, chat: { model: "cheap", steps: { "write-intent": "max" } } });
   const got = withModels(base, fresh);
   expect(got.poll_seconds).toBe(5);
   expect(got.stages.build.max_fix_loops).toBe(7);
@@ -62,4 +62,5 @@ test("withModels takes the model settings and keeps the rest", () => {
   expect(got.stages.build.steps).toEqual({ fix: "max" });
   expect(got.claude.models.max).toBe("x");
   expect(got.chat).toMatchObject({ model: "cheap", steps: { "write-intent": "max" } });
+  expect(got.agents).toBe(fresh.agents);
 });

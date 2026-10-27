@@ -43,9 +43,9 @@ export class StepContext {
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
 
   /**
-   * The step's config with its model settings read again from loopstra/config.yaml, so a change a
-   * person saved mid-step reaches the next session. When the file does not load now, the step's own
-   * copy stands, and the problem is traced once while it stays the same.
+   * The step's config with its model and agent settings read again from loopstra/config.yaml, so a
+   * change a person saved mid-step reaches the next session. When the file does not load now, the
+   * step's own copy stands, and the problem is traced once while it stays the same.
    */
   async models(): Promise<Config> {
     try {

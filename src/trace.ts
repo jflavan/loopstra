@@ -8,7 +8,7 @@ import { errorCode, errorText } from "./shell";
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
   | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
-  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge" | "steer" | "question";
+  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge" | "steer" | "question" | "agent_setup";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
