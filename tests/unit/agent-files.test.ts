@@ -90,3 +90,17 @@ test("pathRule writes an absolute path as Claude Code's rules do: two slashes, f
   expect(pathRule("/home/me/r/.loopstra/snapshots/x")).toBe("//home/me/r/.loopstra/snapshots/x");
   expect(pathRule("C:\\Users\\me\\r\\.loopstra\\snapshots\\x")).toBe("//c/Users/me/r/.loopstra/snapshots/x");
 });
+
+test("checkAgentSetup names a missing agent once: build's not again for the steps that continue it, agents.all's under all", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: {
+    all: { agent: "ghost" },
+    steps: { build: { agent: "builder" }, fix: { subagents: ["helper"] }, review: { agent: "reviewer" } },
+  } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["fail", "all", "ghost"], ["fail", "build", "builder"], ["fail", "fix", "helper"], ["fail", "review", "reviewer"],
+  ]);
+  expect(p[0]!.text).toStartWith("`ghost`, the agent every step runs as (agents.all), is not in .claude/agents/");
+  t.cleanup();
+});

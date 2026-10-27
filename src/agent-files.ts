@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { BUILTIN_AGENTS, inlineName, resolveSetup, type AgentSetup } from "./agents";
+import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, resolveSetup, type AgentSetup } from "./agents";
 import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
 import type { Git } from "./git";
@@ -171,25 +171,31 @@ function missingAgentText(name: string, role: string, places: string): string {
 /**
  * Every agent, subagent, team member and skill each step would use, checked against `where`.
  * One problem per name per step: missing, else only on this machine, else keys Loopstra leaves out.
+ * The agent a step runs as is checked where it is set: agents.all's once (under "all"), and none for
+ * the steps that continue the build's session (they run as build's).
  */
 export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupProblem[]> {
   const problems: SetupProblem[] = [];
   const places = placesText(cfg.main_branch, where);
+  const checkAgent = async (name: string, role: string, step: SetupProblem["step"]) => {
+    if (BUILTIN_AGENTS.has(name)) return;
+    const def = await findAgent(name, where);
+    if (!def) {
+      problems.push({ level: "fail", step, name, text: missingAgentText(name, role, places) });
+    } else if (def.from !== "repo") {
+      problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
+    } else if (def.dropped.length) {
+      problems.push({ level: "warn", step, name, text: `${def.path}: Loopstra leaves out ${def.dropped.join(", ")} when it runs this agent.` });
+    }
+  };
+  if (cfg.agents.all.agent !== undefined) await checkAgent(cfg.agents.all.agent, "the agent every step runs as (agents.all)", "all");
   for (const step of STEP_KEYS) {
     const group = STEPS.find((s) => s.key === step)!.group;
     const stageSkills = group === "chat" ? [] : cfg.stages[group].skills;
     const setup = resolveSetup(cfg.agents, step, stageSkills);
-    for (const { name, role } of setupRoles(setup, step)) {
-      if (BUILTIN_AGENTS.has(name)) continue;
-      const def = await findAgent(name, where);
-      if (!def) {
-        problems.push({ level: "fail", step, name, text: missingAgentText(name, role, places) });
-      } else if (def.from !== "repo") {
-        problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
-      } else if (def.dropped.length) {
-        problems.push({ level: "warn", step, name, text: `${def.path}: Loopstra leaves out ${def.dropped.join(", ")} when it runs this agent.` });
-      }
-    }
+    // Without an agent of its own, a step runs as agents.all's (checked above), or as build's.
+    const ownAgent = !CONTINUES_BUILD.has(step) && cfg.agents.steps[step]?.agent !== undefined;
+    for (const { name, role } of setupRoles(ownAgent ? setup : { ...setup, agent: null }, step)) await checkAgent(name, role, step);
     for (const name of setup.skills) {
       const from = await findSkill(name, where);
       if (from === null) {
