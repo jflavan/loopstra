@@ -572,9 +572,17 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   return classify(sends.total(collector.finish()), r, { started, timeoutMs: input.timeoutMs, resume, nudged });
 }
 
-/** An init event's agent and skill names, each list only when the event has it; null when it has neither. */
+/**
+ * An init event's agent and skill names, each list only when the event has it; null when it has
+ * neither. A list with entries but no names among them (a shape this does not know) cannot tell, so
+ * it counts as absent, not as empty.
+ */
 function initLists(e: StreamEvent): { agents?: string[]; skills?: string[] } | null {
-  const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+  const names = (v: unknown) => {
+    if (!Array.isArray(v)) return undefined;
+    const out = v.filter((x): x is string => typeof x === "string");
+    return out.length || !v.length ? out : undefined;
+  };
   const agents = names(e.agents);
   const skills = names(e.skills);
   if (!agents && !skills) return null;

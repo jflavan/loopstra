@@ -285,6 +285,21 @@ describe("runPhase", () => {
       } finally { t.cleanup(); }
     });
 
+    test("a list with no names in it (not strings) is one the init event cannot tell, not an empty one", async () => {
+      const t = tempDir();
+      const objects = fixture("init-lists").replace('"skills":["a"]', '"skills":[{"name":"a"}]');
+      const neither = objects.replace('"agents":["loopstra-x"]', '"agents":[{"name":"loopstra-x"}]');
+      const fixtures = fixtureDir({ "fix-1": objects, "fix-2": neither });
+      try {
+        const seen: Array<{ agents?: string[]; skills?: string[] }> = [];
+        const run = () => runPhase({ ...base(t.path), prompt: "go", env: { LOOPSTRA_PHASE: "fix", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, checkInit: (i) => { seen.push(i); return null; } });
+        expect((await run()).ok).toBe(true);
+        expect(seen).toEqual([{ agents: ["loopstra-x"] }]);
+        expect((await run()).ok).toBe(true);
+        expect(seen).toHaveLength(1);
+      } finally { fixtures.cleanup(); t.cleanup(); }
+    });
+
     test("an init check that passed is not made again when the session is sent again", async () => {
       const t = tempDir();
       // The first send finishes without structured output, so the session is asked again (resumed) for it.
