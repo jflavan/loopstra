@@ -16,11 +16,12 @@ export type PromptVars = Partial<Record<(typeof PROMPT_VARS)[number], string>>;
 
 const VARIABLE = /\{\{([a-z_]+)\}\}/g;
 
-export function renderPrompt(template: string, vars: PromptVars): string {
+/** Fills a template's `{{variable}}`s; `names`: the variables it may use (a phase prompt's, unless given). */
+export function renderPrompt(template: string, vars: Partial<Record<string, string>>, names: readonly string[] = PROMPT_VARS): string {
   return template.replace(VARIABLE, (match: string, name: string) => {
     // Only a declared variable is a placeholder: `{{constructor}}` in a prompt override is text, not Object's constructor.
-    if (!(PROMPT_VARS as readonly string[]).includes(name)) return match;
-    const value = vars[name as (typeof PROMPT_VARS)[number]];
+    if (!names.includes(name)) return match;
+    const value = vars[name];
     return value === undefined || value === "" ? "(none)" : value;
   });
 }

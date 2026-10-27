@@ -176,6 +176,11 @@ export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 /** A change's folder name: lowercase letters and digits, words joined by dashes. */
 export const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
+/** True when `slug` is a change name and the change has its intent.md. */
+export function changeExists(root: string, slug: string): boolean {
+  return SLUG.test(slug) && existsSync(join(intentRoot(root), slug, "intent.md"));
+}
+
 /** The Markdown files that belong directly in intent/: the owner guide and the generated queue. */
 const LOOSE_OK = new Set(["readme.md", "queue.md"]);
 

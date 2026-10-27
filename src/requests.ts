@@ -5,6 +5,7 @@ import { ID, newId } from "./ids";
 import { PRIORITIES, SLUG, STATUSES, type Status } from "./intents";
 import { readJsonAs, writeJson } from "./fsutil";
 import { chatDir } from "./chat/threads";
+import { loopstraDir } from "./paths";
 import type { Trace } from "./trace";
 import { touchWake } from "./wake";
 
@@ -119,7 +120,7 @@ export type RequestResult = z.infer<typeof ResultSchema>;
 /** The part of a result the applier works out. */
 export interface Outcome { text: string; ok: boolean; status: Status | null }
 
-export function requestsDir(root: string): string { return join(root, ".loopstra", "requests"); }
+export function requestsDir(root: string): string { return join(loopstraDir(root), "requests"); }
 function applyingDir(root: string): string { return join(requestsDir(root), "applying"); }
 function resultsDir(root: string): string { return join(requestsDir(root), "results"); }
 /** Where files that are not requests go (see setAside). */

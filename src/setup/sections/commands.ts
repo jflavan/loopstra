@@ -3,6 +3,7 @@ import { resolveClaude } from "../../claude";
 import type { Config } from "../../config";
 import { Git, withDetachedWorktree } from "../../git";
 import { detectCommands } from "../../init";
+import { loopstraDir } from "../../paths";
 import { errorText, runCommand } from "../../shell";
 import type { Check, Section } from "../types";
 
@@ -92,7 +93,7 @@ async function testOnMain(root: string, cfg: Config): Promise<Check> {
   const left = () => Math.max(1000, deadline - Date.now());
   const main = cfg.main_branch;
   try {
-    const r = await withDetachedWorktree(new Git(root), join(root, ".loopstra", "setup-main"), main, async (cwd) => {
+    const r = await withDetachedWorktree(new Git(root), join(loopstraDir(root), "setup-main"), main, async (cwd) => {
       if (cfg.commands.install) {
         const i = await runCommand(cfg.commands.install, cwd, { timeoutMs: left() });
         if (i.code !== 0) return { ...i, what: "commands.install" };

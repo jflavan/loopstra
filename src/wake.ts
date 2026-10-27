@@ -1,12 +1,13 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { loopstraDir } from "./paths";
 
 /**
  * `.loopstra/wake`: written whenever someone asks the loop for something (a request, a resume). The
  * loop's sleep between ticks checks it every second and starts the next tick as soon as it changes.
  */
 function wakePath(root: string): string {
-  return join(root, ".loopstra", "wake");
+  return join(loopstraDir(root), "wake");
 }
 
 let touches = 0;

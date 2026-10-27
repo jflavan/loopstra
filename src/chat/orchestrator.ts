@@ -7,7 +7,7 @@ import { loadConfig, modelFor, type Config } from "../config";
 import { badModelNote, stepModel } from "../models";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
-import { humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
+import { changeExists, humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
 import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
@@ -443,7 +443,7 @@ export class Orchestrator {
       await say(`You cannot change work from here; ${m.acceptors} can. They can ask me, or edit intent/${slug}/intent.md.`);
       return;
     }
-    if (!SLUG.test(slug) || !existsSync(join(this.root, "intent", slug, "intent.md"))) { await say(`There is no change called ${slug} in the main code.`); return; }
+    if (!changeExists(this.root, slug)) { await say(`There is no change called ${slug} in the main code.`); return; }
     let fm: Frontmatter;
     try { fm = (await readIntent(this.root, slug)).file.frontmatter; } catch { await say(`${slug}'s intent.md cannot be read, so I cannot do that.`); return; }
     const offered = offers(fm, humanGates(cfg), fm.status === "blocked" ? retryOptions(trace, slug, fm.note) : []).filter((o) => o.kind === a.kind);

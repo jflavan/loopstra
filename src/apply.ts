@@ -5,7 +5,7 @@ import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resu
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, landed, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { withEntry, type ConversationEntry } from "./conversation";
-import { effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { changeExists, effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
 import { Git, GitError } from "./git";
@@ -442,7 +442,7 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
 
 /** The change a request is about, or the plain reason it cannot be read. */
 async function current(root: string, slug: string): Promise<{ intent: Intent } | { problem: string }> {
-  if (!SLUG.test(slug) || !existsSync(join(root, "intent", slug, "intent.md"))) return { problem: `There is no change called ${slug} in the main code.` };
+  if (!changeExists(root, slug)) return { problem: `There is no change called ${slug} in the main code.` };
   try {
     return { intent: await readIntent(root, slug) };
   } catch {

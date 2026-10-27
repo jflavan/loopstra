@@ -1,8 +1,10 @@
 import { closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
-import { loadConfig } from "./config";
-import { writeFileAtomic } from "./fsutil";
+import { pollSeconds } from "./config";
+import { readJson, writeJson } from "./fsutil";
+import { loopstraDir } from "./paths";
+import { errorCode } from "./shell";
 import { onStop } from "./stop";
 import { andList } from "./text";
 
@@ -54,13 +56,13 @@ function workingOf(hb: Heartbeat): Array<{ slug: string }> {
 const BEAT_MS = 5_000;
 
 export function heartbeatPath(root: string): string {
-  return join(root, ".loopstra", "heartbeat.json");
+  return join(loopstraDir(root), "heartbeat.json");
 }
 
 /** Writes the heartbeat whole (temp file, then rename), so a reader never sees half of it. Never throws. */
 export function writeHeartbeat(root: string, hb: Heartbeat): void {
   try {
-    writeFileAtomic(heartbeatPath(root), JSON.stringify(hb, null, 2));
+    writeJson(heartbeatPath(root), hb);
   } catch {
     /* The heartbeat is for display only; it must never stop the loop. */
   }
@@ -68,13 +70,8 @@ export function writeHeartbeat(root: string, hb: Heartbeat): void {
 
 /** The heartbeat, or null when there is none or it cannot be read. */
 export function readHeartbeat(root: string): Heartbeat | null {
-  try {
-    const hb = JSON.parse(readFileSync(heartbeatPath(root), "utf8")) as Heartbeat;
-    if (typeof hb?.pid !== "number" || typeof hb.startedAt !== "string") return null;
-    return hb;
-  } catch {
-    return null;
-  }
+  const hb = readJson<Heartbeat>(heartbeatPath(root));
+  return typeof hb?.pid === "number" && typeof hb.startedAt === "string" ? hb : null;
 }
 
 /** "20s", "14 min", "3 h", "2 days". */
@@ -94,7 +91,7 @@ export function pidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return (e as { code?: string })?.code === "EPERM";
+    return errorCode(e) === "EPERM";
   }
 }
 
@@ -138,7 +135,7 @@ export function heartbeatState(
 
 /** "Loop: Running — last check 20s ago" plus a newline, for `status`. */
 export async function loopStatusLine(root: string): Promise<string> {
-  const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
+  const poll = await pollSeconds(root);
   return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root), hold: readLoopHold(root) }).text}\n`;
 }
 
@@ -189,7 +186,7 @@ function fromHere(hb: Heartbeat): boolean {
  * place whole and only when no file is there, so only one of them gets it.
  */
 export function loopLockPath(root: string): string {
-  return join(root, ".loopstra", "loop.lock");
+  return join(loopstraDir(root), "loop.lock");
 }
 
 interface LoopLock { pid: number; host?: string; startedAt?: string }
@@ -212,7 +209,7 @@ function createLoopLock(path: string, link: LinkFile): boolean {
     link(tmp, path);
     return true;
   } catch (e) {
-    if ((e as { code?: string })?.code === "EEXIST") return false;
+    if (errorCode(e) === "EEXIST") return false;
   } finally {
     // On Windows a virus scanner or the indexer can hold it a moment; it must not undo a lock that was made.
     try { rmSync(tmp, { force: true }); } catch { /* a leftover temp file is harmless */ }
@@ -221,7 +218,7 @@ function createLoopLock(path: string, link: LinkFile): boolean {
   try {
     fd = openSync(path, "wx");
   } catch (e) {
-    if ((e as { code?: string })?.code === "EEXIST") return false;
+    if (errorCode(e) === "EEXIST") return false;
     throw e;
   }
   try { writeSync(fd, text); } finally { closeSync(fd); }
@@ -278,7 +275,7 @@ export type RemoveFile = (path: string) => void;
 export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync, remove: RemoveFile = (p) => rmSync(p, { force: true })): Promise<string | null> {
   const path = loopLockPath(root);
   try {
-    mkdirSync(join(root, ".loopstra"), { recursive: true });
+    mkdirSync(loopstraDir(root), { recursive: true });
     if (!createLoopLock(path, link)) {
       const seen = lockText(path);
       const lock = parseLock(seen);
@@ -344,18 +341,15 @@ interface PauseCause { slug: string; phase: string; line: string; model?: string
 /** Minutes to wait after the 1st, 2nd, ... unavailable session in a row; the last one repeats. */
 const BACKOFF_MINUTES = [1, 2, 4, 8, 16, 30];
 
-function pausePath(root: string): string {
-  return join(root, ".loopstra", "paused.json");
+/** The outage pause's file, `.loopstra/paused.json`. */
+export function pausePath(root: string): string {
+  return join(loopstraDir(root), "paused.json");
 }
 
 /** The pause on disk (running out or not), or null. */
 export function readPause(root: string): Pause | null {
-  try {
-    const p = JSON.parse(readFileSync(pausePath(root), "utf8")) as Pause;
-    return typeof p?.until === "string" && typeof p.failures === "number" ? p : null;
-  } catch {
-    return null;
-  }
+  const p = readJson<Pause>(pausePath(root));
+  return typeof p?.until === "string" && typeof p.failures === "number" ? p : null;
 }
 
 /** The pause, while it has not run out. */
@@ -385,7 +379,7 @@ export function pauseAfterUnavailable(root: string, now: Date = new Date(), caus
   };
   try {
     // Whole (temp file, then rename): the tick and the dashboard read it while it is written.
-    writeFileAtomic(pausePath(root), JSON.stringify(pause, null, 2));
+    writeJson(pausePath(root), pause);
   } catch { /* without the file the next tick simply tries again */ }
   return pause;
 }
@@ -397,8 +391,9 @@ export function pauseAfterUnavailable(root: string, now: Date = new Date(), caus
  */
 export interface LoopHold { by: string; at: string }
 
-function loopHoldPath(root: string): string {
-  return join(root, ".loopstra", "hold.json");
+/** The loop's hold file, `.loopstra/hold.json`. */
+export function loopHoldPath(root: string): string {
+  return join(loopstraDir(root), "hold.json");
 }
 
 /**
@@ -416,7 +411,7 @@ export function readLoopHold(root: string): LoopHold | null {
     const read = JSON.parse(readFileSync(fd, "utf8")) as unknown;
     if (read && typeof read === "object") h = read;
   } catch (e) {
-    if (fd === undefined && (e as { code?: string })?.code === "ENOENT") return null;
+    if (fd === undefined && errorCode(e) === "ENOENT") return null;
     /* unreadable: it still pauses */
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -427,7 +422,7 @@ export function readLoopHold(root: string): LoopHold | null {
 /** Pauses the loop for `by` (whole file, temp then rename). */
 export function holdLoop(root: string, by: string, now: Date = new Date()): LoopHold {
   const hold: LoopHold = { by, at: now.toISOString() };
-  writeFileAtomic(loopHoldPath(root), JSON.stringify(hold, null, 2));
+  writeJson(loopHoldPath(root), hold);
   return hold;
 }
 
@@ -463,11 +458,11 @@ export function clearPause(root: string, slug?: string, now: Date = new Date(), 
   try {
     if (model && p.model && model !== p.model) {
       // Noted, so that model's own next outage does not start where this one's back-off got to.
-      if (!p.gotThrough?.includes(model)) writeFileAtomic(pausePath(root), JSON.stringify({ ...p, gotThrough: [...(p.gotThrough ?? []), model] }, null, 2));
+      if (!p.gotThrough?.includes(model)) writeJson(pausePath(root), { ...p, gotThrough: [...(p.gotThrough ?? []), model] });
       return;
     }
     if (!slug || !p.slug || p.slug === slug) rmSync(pausePath(root), { force: true });
-    else writeFileAtomic(pausePath(root), JSON.stringify({ ...p, until: now.toISOString(), failures: 0 }, null, 2));
+    else writeJson(pausePath(root), { ...p, until: now.toISOString(), failures: 0 });
   } catch { /* the next pause or success tries again */ }
 }
 

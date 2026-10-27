@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ModelRef } from "./models";
-import { runDir } from "./paths";
-import { errorText } from "./shell";
+import { loopstraDir, runDir } from "./paths";
+import { errorCode, errorText } from "./shell";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
@@ -191,7 +191,7 @@ export function useJournal(db: Database): string | null {
   try {
     got = String((db.query("PRAGMA journal_mode = WAL").get() as { journal_mode?: string } | null)?.journal_mode ?? "");
   } catch (e) {
-    if (/SQLITE_BUSY|locked/i.test(`${(e as { code?: string })?.code ?? ""} ${errorText(e)}`)) throw e;
+    if (/SQLITE_BUSY|locked/i.test(`${errorCode(e) ?? ""} ${errorText(e)}`)) throw e;
     got = errorText(e);
   }
   if (got.toLowerCase() === "wal") return null;
@@ -221,7 +221,7 @@ function connect(path: string): { db: Database; note: string | null } {
 
 /** True for errors that mean the file is not a usable database (as opposed to, say, a lock). */
 function damaged(e: unknown): boolean {
-  const text = `${(e as { code?: string })?.code ?? ""} ${errorText(e)}`;
+  const text = `${errorCode(e) ?? ""} ${errorText(e)}`;
   return /SQLITE_(CORRUPT|NOTADB)|not a database|malformed/i.test(text);
 }
 
@@ -237,7 +237,7 @@ export class Trace {
    * the new one, so the loop and the dashboard keep working. Any other problem (a lock) is thrown.
    */
   static open(root: string, say: (line: string) => void = (l) => console.log(l)): Trace {
-    const dir = join(root, ".loopstra");
+    const dir = loopstraDir(root);
     mkdirSync(dir, { recursive: true });
     const path = join(dir, "trace.db");
     try {

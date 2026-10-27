@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { offers, requestLabel, retryOptions } from "../actions";
 import { attention, type AttentionItem } from "../attention";
 import { CHAT_SLUG, startOfToday, USD_PER_MINUTE } from "../budget";
-import { loadConfig, type Config } from "../config";
+import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { agoText, heartbeatState, readHeartbeat, readLoopHold, readPause, type Heartbeat, type LoopHold, type LoopStatus } from "../heartbeat";
 import { effectivePriority, humanGates, orderQueue, plainStatus, scanRepo, waitNote, type HumanGates, type Intent, type Scan, type Status } from "../intents";
 import { readQuestion } from "../questions";
@@ -44,7 +44,7 @@ export async function buildModel(root: string, trace: Trace, now: Date = new Dat
   let config: Config | { problem: string };
   try { config = await loadConfig(root); } catch (e) { config = { problem: errorText(e) }; }
   const cfg = "problem" in config ? null : config;
-  const pollSeconds = cfg?.poll_seconds ?? 60;
+  const pollSeconds = cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS;
   const problems: string[] = [];
   const safely = async <T>(what: string, fn: () => T | Promise<T>, fallback: T): Promise<T> => {
     try { return await fn(); } catch (e) { problems.push(`${what}: ${errorText(e)}`); return fallback; }

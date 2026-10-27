@@ -1,4 +1,4 @@
-import { loadConfig } from "../config";
+import { pollSeconds } from "../config";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { Trace, type EventRow } from "../trace";
 
@@ -35,11 +35,11 @@ export function tailLines(root: string, trace: Trace, cursor: TailCursor, opts: 
 
 /** Streams events until the process is interrupted. */
 export async function tail(root: string, slug?: string): Promise<never> {
-  const pollSeconds = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
+  const poll = await pollSeconds(root);
   const trace = Trace.open(root);
   const cursor: TailCursor = { lastId: 0, loopKey: null };
   for (;;) {
-    for (const line of tailLines(root, trace, cursor, { slug, pollSeconds })) console.log(line);
+    for (const line of tailLines(root, trace, cursor, { slug, pollSeconds: poll })) console.log(line);
     await Bun.sleep(1000);
   }
 }

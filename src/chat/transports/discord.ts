@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { z } from "zod";
 import type { DiscordTransportConfig } from "../../config";
+import { errorText } from "../../shell";
 import type { OnMessage, Transport } from "../service";
 import { writeJson } from "../../fsutil";
 import { readStateFile, StateFileUnavailable } from "../statefile";
@@ -128,7 +129,7 @@ export class DiscordTransport implements Transport {
     const ws = await openSocket(`${String(gw.url)}/?v=10&encoding=json`);
     if (this.reconnect.cancelled) { ws.close(); return; }
     this.ws = ws;
-    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Discord message failed: ${e instanceof Error ? e.message : String(e)}`)); });
+    ws.addEventListener("message", (ev) => { this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Discord message failed: ${errorText(e)}`)); });
     ws.addEventListener("close", (ev) => {
       if (this.ws !== ws) return;
       this.ws = null;
@@ -229,7 +230,7 @@ export class DiscordTransport implements Transport {
         const t = await this.call("POST", `/channels/${m.channel_id}/messages/${m.id}/threads`, { name, auto_archive_duration: 1440 });
         thread = String(t.id);
       } catch (e) {
-        this.log(e instanceof Error ? e.message : String(e));
+        this.log(errorText(e));
         return;
       }
       this.remember(thread);
@@ -247,7 +248,7 @@ export class DiscordTransport implements Transport {
   async send(thread: string, text: string): Promise<void> {
     try {
       await this.sendOrThrow(thread, text);
-    } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { this.log(errorText(e)); }
   }
 
   async sendOrThrow(thread: string, text: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { errorCode } from "./shell";
 
 /** One file a record changes: its new text, or null when the record removes it. Paths are relative to the repository, with forward slashes. */
 export interface DraftChange { rel: string; text: string | null }
@@ -42,7 +43,7 @@ export class RecordDraft {
     try {
       bytes = readFileSync(join(this.root, rel));
     } catch (e) {
-      if ((e as { code?: string }).code !== "ENOENT") throw e;
+      if (errorCode(e) !== "ENOENT") throw e;
       bytes = null;
     }
     if (!this.onDisk.has(rel)) this.onDisk.set(rel, bytes);

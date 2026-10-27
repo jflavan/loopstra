@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import type { z } from "zod";
 import { issuesText } from "../sessions";
+import { errorText } from "../shell";
 
 /** The files already reported in this process (unreadable, or damaged and kept), so a lasting problem is one line, not one per read. */
 const reported = new Set<string>();
@@ -31,7 +32,7 @@ export function readStateFile<T>(path: string, schema: z.ZodType<T>, log: (line:
     text = readFileSync(path, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    const why = e instanceof Error ? e.message : String(e);
+    const why = errorText(e);
     once(`${path} could not be read (${why}); it is left as it is and tried again next time.`);
     throw new StateFileUnavailable(`${path} could not be read: ${why}`);
   }
@@ -41,7 +42,7 @@ export function readStateFile<T>(path: string, schema: z.ZodType<T>, log: (line:
     if (parsed.success) { reported.delete(path); return parsed.data; }
     problem = issuesText(parsed.error.issues);
   } catch (e) {
-    problem = e instanceof Error ? e.message : String(e);
+    problem = errorText(e);
   }
   const aside = `${path}.bad-${Date.now()}`;
   try {

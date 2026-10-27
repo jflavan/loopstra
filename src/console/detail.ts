@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
-import { loadConfig, type Config } from "../config";
+import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
@@ -18,7 +18,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   if (!i) return null;
   let cfg: Config | null = null;
   try { cfg = await loadConfig(root); } catch { /* the inbox says what is wrong with the config */ }
-  const pollSeconds = cfg?.poll_seconds ?? 60;
+  const pollSeconds = cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS;
   const holds = await sameFileHolds(ordered, root);
   const rows = trace.phases(slug);
   // The board's rule, so the two never disagree.

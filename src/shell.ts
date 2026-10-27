@@ -61,6 +61,11 @@ export function errorText(e: unknown): string {
   return String(e);
 }
 
+/** A thrown system error's code ("ENOENT", "EEXIST", ...), or undefined. */
+export function errorCode(e: unknown): string | undefined {
+  return (e as { code?: string } | null)?.code;
+}
+
 /** The last non-blank line of `s`, trimmed ("" when there is none). Lines matching `skip` do not count. */
 export function lastLine(s: string, skip?: RegExp): string {
   const lines = s.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !skip?.test(l));
@@ -78,7 +83,7 @@ const TERM_GRACE_MS = 1_500;
 
 /** True while any process of the group `pgid` is left (POSIX). */
 function groupAlive(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; }
+  try { process.kill(-pgid, 0); return true; } catch (e) { return errorCode(e) === "EPERM"; }
 }
 
 /**

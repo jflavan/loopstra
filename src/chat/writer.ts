@@ -4,6 +4,7 @@ import { modelFor, type Config } from "../config";
 import { checkConsistency, parseIntentFile, scanRepo, SLUG, type Intent, type Status } from "../intents";
 import { badModelNote, stepModel } from "../models";
 import { templatePath } from "../package";
+import { errorText } from "../shell";
 import { localDate } from "../signals";
 import type { Trace } from "../trace";
 import { chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
@@ -67,7 +68,7 @@ export function draftProblems(drafts: DraftIntent[], rendered: string[], existin
       const problem = checkConsistency(asAccepted);
       if (problem) problems.push(`"${slug}": ${problem.replace(/ Add (it|them) to intent\.md, then set status to accepted\.$/, "")}`);
     } catch (e) {
-      problems.push(`"${slug}" could not be read back: ${e instanceof Error ? e.message : String(e)}`);
+      problems.push(`"${slug}" could not be read back: ${errorText(e)}`);
     }
   });
   return problems;

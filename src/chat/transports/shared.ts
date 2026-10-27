@@ -1,5 +1,6 @@
 import { userInfo } from "node:os";
 import { loadConfig, type Config } from "../../config";
+import { errorText } from "../../shell";
 import type { OnMessage } from "../service";
 import { andList } from "../../text";
 
@@ -189,7 +190,7 @@ export class Reconnector {
       void this.connect().catch((e: unknown) => {
         // Cancelled while it was connecting: what failed no longer matters, and nothing is tried again.
         if (this.stopped) return;
-        this.onError(e instanceof Error ? e.message : String(e));
+        this.onError(errorText(e));
         this.schedule();
       });
     }, wait);

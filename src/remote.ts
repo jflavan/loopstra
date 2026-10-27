@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { Git, GitError, literalPathspecs, pathChunks, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
 import { onCheckout, oneSync } from "./lanes";
+import { loopstraDir } from "./paths";
 import { errorText, lastLine } from "./shell";
 import { StopRequested } from "./stop";
 import type { Trace } from "./trace";
@@ -143,7 +144,7 @@ async function bringIn(git: Git, main: string, upstream: string): Promise<Brough
 async function replayOnto(git: Git, main: string, old: string, upstream: string): Promise<Move> {
   const clash = (error: string): Extract<Brought, { ok: false }> =>
     ({ ok: false, outcome: { result: "fail", text: SYNC_TEXT.clash, detail: { what: "replaying main onto the remote's main hit a conflict; main is not synced", upstream, error } } });
-  return withDetachedWorktree(git, join(git.cwd, ".loopstra", "sync"), old, async (dir) => {
+  return withDetachedWorktree(git, join(loopstraDir(git.cwd), "sync"), old, async (dir) => {
     const wt = new Git(dir);
     const first = await replay(wt, [upstream]);
     if (!first.ok) return clash(first.error);
@@ -206,7 +207,7 @@ async function replay(wt: Git, args: string[]): Promise<{ ok: true; tookRemote: 
 
 /** The marker a move of main leaves while it runs: `from` and `to`, one per line. */
 function movingMarker(root: string): string {
-  return join(root, ".loopstra", "moving-main");
+  return join(loopstraDir(root), "moving-main");
 }
 
 /**

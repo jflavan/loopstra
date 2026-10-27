@@ -1,4 +1,5 @@
 import type { SlackTransportConfig } from "../../config";
+import { errorText } from "../../shell";
 import type { OnMessage, Transport } from "../service";
 import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, Reconnector } from "./shared";
 
@@ -119,7 +120,7 @@ export class SlackTransport implements Transport {
     this.ws = ws;
     ws.addEventListener("message", (ev) => {
       this.touch(ws);
-      this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Slack message failed: ${e instanceof Error ? e.message : String(e)}`));
+      this.onFrame(ws, String(ev.data)).catch((e: unknown) => this.log(`Slack message failed: ${errorText(e)}`));
     });
     // An answer to the watchdog's ping: the connection is alive.
     ws.addEventListener("pong" as keyof WebSocketEventMap, () => this.touch(ws));
@@ -236,7 +237,7 @@ export class SlackTransport implements Transport {
   async send(thread: string, text: string): Promise<void> {
     try {
       await this.sendOrThrow(thread, text);
-    } catch (e) { this.log(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { this.log(errorText(e)); }
   }
 
   async sendOrThrow(thread: string, text: string): Promise<void> {

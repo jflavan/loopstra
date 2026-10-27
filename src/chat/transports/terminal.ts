@@ -1,5 +1,6 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { errorText } from "../../shell";
 import type { OnMessage, Transport } from "../service";
 import { localUser } from "./shared";
 
@@ -39,7 +40,7 @@ export class TerminalTransport implements Transport {
       if (text === "/quit" || text === "/exit") { this.rl?.close(); return; }
       // One message at a time: the next is read once the answer to this one is in.
       this.busy = this.busy.then(() => onMessage({ thread: this.thread, authorId: this.user, authorName: this.user, text, canAccept: true, acceptors: "you" }))
-        .catch((e) => { this.write(`loopstra> Something went wrong: ${e instanceof Error ? e.message : String(e)}\n`); })
+        .catch((e) => { this.write(`loopstra> Something went wrong: ${errorText(e)}\n`); })
         .finally(() => this.prompt());
     });
     this.rl.on("close", () => { void this.busy.finally(() => this.resolveClosed()); });
