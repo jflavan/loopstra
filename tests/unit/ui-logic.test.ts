@@ -1,5 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
+import type { ActivityItem, AgentMessage, AgentsView, AgentStepRow, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { composing, decide, enterPressed, escapePressed, focusOr, keyLabel, keyMatcher, keyName, listKey, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
@@ -17,6 +17,7 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
+import { choicesFor, effective, fromNote, listText, parseList, withChosen } from "../../src/ui/agent-settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
@@ -1173,5 +1174,90 @@ describe("the Settings page", () => {
     expect(pendingText("stopped")).toBe("Saved when the loop next runs.");
     expect(pendingText("not-responding")).toBe("Saved when the loop next runs.");
     expect(pendingText("running")).toBe("Saving…");
+  });
+});
+
+describe("the Agents section of the Settings page", () => {
+  const row = (r: Partial<AgentStepRow> & Pick<AgentStepRow, "key">): AgentStepRow =>
+    ({ what: "", readOnly: false, chat: false, continuesBuild: false, own: {}, fromAll: {}, fromStage: [], ...r });
+  const item = (kind: "agent" | "skill", name: string, from: "repo" | "personal" | "plugin") =>
+    ({ kind, name, description: "", from, usedBy: [], base: "absent", editable: false });
+  const view = (over: Partial<AgentsView> = {}): AgentsView => ({
+    version: "v1", problem: null, sources: "all",
+    steps: [row({ key: "all" }), row({ key: "build" }), row({ key: "fix", continuesBuild: true }), row({ key: "review", readOnly: true })],
+    teams: [{ name: "reviewers", members: ["lead"], way: "parallel", usedBy: [] }],
+    library: [item("agent", "lead", "repo"), item("agent", "helper", "personal"), item("agent", "tools:auditor", "plugin"), item("skill", "tone", "repo"), item("skill", "style", "personal"), item("agent", "lead", "personal")],
+    problems: [], builtins: ["general-purpose", "Explore"], ways: ["parallel", "pick"],
+    ...over,
+  });
+
+  test("effective agent setup: own, then all steps, then stage skills; fix shows the build's agent", () => {
+    const build = row({ key: "build", own: { agent: "lead", skills: ["tone"] }, fromAll: { agent: "base", skills: ["style"] }, fromStage: ["tdd"] });
+    expect(effective(build, "agent")).toEqual({ value: "lead", from: "own" });
+    // A list adds up the way a session gets it: all steps, the stage's skills, then its own, each once.
+    expect(effective(build, "skills")).toEqual({ value: ["style", "tdd", "tone"], from: "own" });
+    const plan = row({ key: "plan", fromAll: { agent: "base", skills: ["style"], tools: ["Read"] }, fromStage: ["tdd", "style"] });
+    expect(effective(plan, "agent")).toEqual({ value: "base", from: "all" });
+    expect(effective(plan, "skills")).toEqual({ value: ["style", "tdd"], from: "all" });
+    expect(effective(plan, "tools")).toEqual({ value: ["Read"], from: "all" });
+    // Stage skills reach only the skills.
+    const verify = row({ key: "verify", fromStage: ["checks"] });
+    expect(effective(verify, "skills")).toEqual({ value: ["checks"], from: "stage" });
+    expect(effective(verify, "subagents")).toEqual({ value: [], from: null });
+    expect(effective(verify, "agent")).toEqual({ value: null, from: null });
+    // Fix, reconcile and revise run as the build's agent, whatever all steps names.
+    const fix = row({ key: "fix", continuesBuild: true, fromAll: { agent: "base" } });
+    expect(effective(fix, "agent", build)).toEqual({ value: "lead", from: "build" });
+    expect(effective(fix, "agent", row({ key: "build", fromAll: { agent: "base" } }))).toEqual({ value: "base", from: "build" });
+    expect(effective(fix, "agent")).toEqual({ value: null, from: "build" });
+  });
+
+  test("the muted note says where a value comes from", () => {
+    expect(fromNote({ value: "base", from: "all" }, row({ key: "plan" }), "agent")).toBe("from all steps");
+    expect(fromNote({ value: "lead", from: "build" }, row({ key: "fix" }), "agent")).toBe("as build");
+    expect(fromNote({ value: null, from: "build" }, row({ key: "fix" }), "agent")).toBe("as build");
+    expect(fromNote({ value: ["checks"], from: "stage" }, row({ key: "verify" }), "skills")).toBe("stage skill");
+    expect(fromNote({ value: ["style", "tdd"], from: "all" }, row({ key: "plan", fromAll: { skills: ["style"] }, fromStage: ["tdd"] }), "skills")).toBe("from all steps and stage skills");
+    // Its own, with more added from elsewhere.
+    expect(fromNote({ value: ["style", "tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] }, fromAll: { skills: ["style"] } }), "skills")).toBe("with all steps");
+    expect(fromNote({ value: ["tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] } }), "skills")).toBe("");
+    expect(fromNote({ value: null, from: null }, row({ key: "build" }), "agent")).toBe("");
+  });
+
+  test("parseList splits, trims, dedupes and keeps order", () => {
+    expect(parseList(" a, b,,a , c ")).toEqual(["a", "b", "c"]);
+    expect(parseList("")).toEqual([]);
+    expect(parseList(" , ")).toEqual([]);
+    expect(parseList("Bash(bun test)")).toEqual(["Bash(bun test)"]);
+  });
+
+  test("listText joins a list, or says none", () => {
+    expect(listText(["a", "b"])).toBe("a, b");
+    expect(listText([])).toBe("none");
+  });
+
+  test("choicesFor leaves built-ins out of a step's own agent", () => {
+    const v = view();
+    expect(choicesFor(v, "agent", "build")).toEqual(["lead", "helper", "tools:auditor"]);
+    expect(choicesFor(v, "subagents", "build")).toEqual(["lead", "helper", "tools:auditor", "general-purpose", "Explore"]);
+    expect(choicesFor(v, "teams", "review")).toEqual(["reviewers"]);
+    expect(choicesFor(v, "skills", "all")).toEqual(["tone", "style"]);
+    // A step that runs as the build's agent has none of its own to pick.
+    expect(choicesFor(v, "agent", "fix")).toEqual([]);
+    // Tools are typed, not picked.
+    expect(choicesFor(v, "tools", "build")).toEqual([]);
+    expect(choicesFor(v, "mcp_tools", "build")).toEqual([]);
+  });
+
+  test("with sources: repo, a step is offered only the repo's agents and skills", () => {
+    const v = view({ sources: "repo" });
+    expect(choicesFor(v, "agent", "build")).toEqual(["lead"]);
+    expect(choicesFor(v, "subagents", "build")).toEqual(["lead", "general-purpose", "Explore"]);
+    expect(choicesFor(v, "skills", "build")).toEqual(["tone"]);
+  });
+
+  test("a picker keeps the names already chosen, even ones it does not offer, so they can be taken off", () => {
+    expect(withChosen(["a", "b"], ["b", "gone"])).toEqual(["a", "b", "gone"]);
+    expect(withChosen(["a"], [])).toEqual(["a"]);
   });
 });

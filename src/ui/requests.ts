@@ -1,5 +1,5 @@
 import { steerable } from "../console/steerable";
-import type { ChangeSummary, Offer } from "../console/types";
+import type { AgentFilesOp, ChangeSummary, Offer, SourceItems } from "../console/types";
 import { dismiss, toast } from "./store";
 
 /*
@@ -200,19 +200,46 @@ export async function setLoopHeld(held: boolean): Promise<void> {
   toast(held ? "The loop is paused: running steps finish, nothing new starts." : "The loop goes on.");
 }
 
-/** The words the console gave a settings request, as a person reads them. */
-interface SettingBody { kind: "settings"; path: string; value: string | null; version: string }
-
 /**
- * Sends one setting change and follows the loop's answer to `onDone`. Gives the request (its id, and the
- * loop's state, which says whether it waits for the loop to run) or why it was not sent, a stale page included.
+ * A settings request: the dotted path, its new value (a word, a list of names for the agents lists, or
+ * null to remove it; an empty list removes it too), and the config version the page read.
  */
-export async function sendSetting(body: SettingBody, onDone: (d: { ok: boolean; text: string }) => void): Promise<{ ok: true; id: string; loop: string } | { ok: false; error: string }> {
-  const sent = await post("/api/requests", body);
+interface SettingBody { kind: "settings"; path: string; value: string | string[] | null; version: string }
+
+/** What sending a request that the loop answers later gives: the request (its id, and the loop's state, which says whether it waits for the loop to run) or why it was not sent, a stale page included. */
+type Sent = { ok: true; id: string; loop: string } | { ok: false; error: string };
+
+/** Posts a request the loop applies, and follows the loop's answer to `onDone`. */
+async function sendFollowed(url: string, body: unknown, onDone: (d: { ok: boolean; text: string }) => void): Promise<Sent> {
+  const sent = await post(url, body);
   if (!sent.ok) return sent;
   const id = String(sent.data.id);
   follow(id, (d) => onDone({ ok: d.ok, text: d.text }));
   return { ok: true, id, loop: typeof sent.data.loop === "string" ? sent.data.loop : "" };
+}
+
+/** Sends one setting change and follows the loop's answer to `onDone` (see sendFollowed). */
+export function sendSetting(body: SettingBody, onDone: (d: { ok: boolean; text: string }) => void): Promise<Sent> {
+  return sendFollowed("/api/requests", body, onDone);
+}
+
+/** Sends an operation on the repository's agents and skills and follows the loop's answer to `onDone`, as sendSetting does. */
+export function sendAgentFiles(op: AgentFilesOp, onDone: (d: { ok: boolean; text: string }) => void): Promise<Sent> {
+  return sendFollowed("/api/agents/files", op, onDone);
+}
+
+/** What a git repository or folder holds, as the server lists it, or why it could not (in words). */
+export async function listSource(url: string): Promise<SourceItems> {
+  try {
+    // It clones, so the server takes it only from this page: a browser too old to say the request is
+    // same-origin is let by a Referer to its own origin (see ownSite), which the page otherwise never sends.
+    const r = await fetch(`/api/agents/source?url=${encodeURIComponent(url)}`, { headers: { accept: "application/json" }, referrerPolicy: "same-origin" });
+    const data = await r.json().catch(() => ({})) as { items?: Extract<SourceItems, { items: unknown }>["items"]; error?: unknown };
+    if (r.ok && Array.isArray(data.items)) return { items: data.items };
+    return { error: typeof data.error === "string" ? data.error : `The console said no (${r.status}).` };
+  } catch {
+    return { error: "The console could not be reached." };
+  }
 }
 
 /** Takes a setting change back while the loop has not claimed it; true when it was (nothing changed). */
