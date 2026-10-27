@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -302,19 +302,22 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
   }
 }
 
-/** The design and plan statuses, and the stage whose step each runs. */
-const THINKING: ReadonlyMap<string, "design" | "plan"> = new Map([
-  ["accepted", "design"], ["designing", "design"], ["spec-review", "design"],
-  ["spec-approved", "plan"], ["planning", "plan"], ["plan-review", "plan"],
-]);
+/** The stage whose step each status runs; a status with none has no step. */
+const STAGE_OF: Readonly<Partial<Record<Status, "design" | "plan" | "build" | "merge" | "verify">>> = {
+  accepted: "design", designing: "design", "spec-review": "design",
+  "spec-approved": "plan", planning: "plan", "plan-review": "plan",
+  "plan-approved": "build", building: "build",
+  reviewing: "merge", "merge-review": "merge", "merge-approved": "merge",
+  merged: "verify", verifying: "verify",
+};
 
 /**
  * The change's step is a design or plan step that runs none of the project's commands: its sessions
  * only read a snapshot of main, and its stage has no `before` or `after` commands.
  */
 export function thinkingStep(i: Intent, cfg: Config): boolean {
-  const stage = THINKING.get(i.file.frontmatter.status);
-  return !!stage && !cfg.stages[stage].before.length && !cfg.stages[stage].after.length;
+  const stage = STAGE_OF[i.file.frontmatter.status];
+  return (stage === "design" || stage === "plan") && !cfg.stages[stage].before.length && !cfg.stages[stage].after.length;
 }
 
 /**
@@ -864,15 +867,11 @@ async function removeClosedWorktree(ctx: StepContext): Promise<void> {
   ctx.trace.event(ctx.slug, "command", { command: "clean up closed change", removed: ctx.worktreeDir, branchKept: ctx.branch });
 }
 
+const STEPS = { design: runDesignStep, plan: runPlanStep, build: runBuildStep, merge: runMergeStep, verify: runVerifyStep };
+
 async function runStep(ctx: StepContext): Promise<StepResult> {
-  switch (ctx.intent.file.frontmatter.status) {
-    case "accepted": case "designing": case "spec-review": return runDesignStep(ctx);
-    case "spec-approved": case "planning": case "plan-review": return runPlanStep(ctx);
-    case "plan-approved": case "building": return runBuildStep(ctx);
-    case "reviewing": case "merge-review": case "merge-approved": return runMergeStep(ctx);
-    case "merged": case "verifying": return runVerifyStep(ctx);
-    default: return { ok: true };
-  }
+  const stage = STAGE_OF[ctx.intent.file.frontmatter.status];
+  return stage ? STEPS[stage](ctx) : { ok: true };
 }
 
 /** A plain message naming a tool `start` needs that is not installed, or null when both are there. */

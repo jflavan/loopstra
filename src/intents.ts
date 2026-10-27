@@ -409,11 +409,14 @@ export function checkConsistency(intent: Intent): string | null {
       return `Status is "${status}" but ${name} is missing. Set status back to an earlier approved state, or to closed.`;
     }
   }
-  const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
-  if (missing.length) {
-    return `This request is missing ${andList(missing.map((s) => `a ${s}`))} section. Add ${missing.length > 1 ? "them" : "it"} to intent.md, then set status to accepted.`;
-  }
-  return null;
+  const missing = missingSections(intent.file);
+  return missing ? `${missing.text} Add ${missing.count > 1 ? "them" : "it"} to intent.md, then set status to accepted.` : null;
+}
+
+/** The required sections intent.md lacks, in words ("This request is missing a Problem section."), or null when it has them all. */
+export function missingSections(file: IntentFile): { text: string; count: number } | null {
+  const missing = REQUIRED_SECTIONS.filter((s) => !file.sections[s]?.trim());
+  return missing.length ? { text: `This request is missing ${andList(missing.map((s) => `a ${s}`))} section.`, count: missing.length } : null;
 }
 
 export type HumanGates = { spec: "status" | "pr" | "none"; plan: "status" | "pr" | "none"; merge: "status" | "pr" | "none"; done: "status" | "pr" | "none" };
