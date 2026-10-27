@@ -89,7 +89,7 @@ const RequestSchema = z.discriminatedUnion("kind", [
    */
   base.extend({
     kind: z.literal("agent-files"),
-    what: z.string().max(200),
+    what: z.string().max(200).refine((t) => !/[\u0000-\u001f\u007f]/.test(t), "what is one line"),
     writes: z.array(z.object({ path: z.string(), content: z.string().nullable() })).min(1).max(200),
     base: z.record(z.string(), z.string()),
   }),

@@ -1,7 +1,7 @@
-import { existsSync, lstatSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { repoPath, type FileWrite } from "../agent-library";
+import { checkedPath, type FileWrite } from "../agent-library";
 import { ConfigError, configPath, NOT_SET_UP, type Config } from "../config";
 import { writeFileAtomic } from "../fsutil";
 import { errorText, within } from "../shell";
@@ -44,24 +44,6 @@ function coveredBy(path: readonly string[], covers: readonly string[]): boolean 
     const n = Math.min(parts.length, path.length);
     return parts.slice(0, n).every((part, i) => part === "*" || part === path[i]);
   });
-}
-
-/**
- * The normalized repo-relative path of a pending file. Throws when it is outside .claude/agents/ and
- * .claude/skills/, or when `.claude`, a folder below it or the file itself is a link already (a write
- * or removal would follow it out of the repo).
- */
-function checkedPath(root: string, file: FileWrite): string {
-  const path = repoPath(file.path);
-  if (!path) throw new Error(`${file.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
-  const parts = path.split("/");
-  for (let i = 1; i <= parts.length; i++) {
-    const shown = parts.slice(0, i).join("/");
-    let link: boolean;
-    try { link = lstatSync(join(root, shown)).isSymbolicLink(); } catch { return path; }
-    if (link) throw new Error(`${file.path} is not written: ${shown} is a link, and setup does not write through links.`);
-  }
-  return path;
 }
 
 /** Throws on the first pending file that setup would refuse to write. */

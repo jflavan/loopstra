@@ -15,7 +15,7 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
-import { repoPath } from "./agent-library";
+import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
@@ -449,6 +449,9 @@ function agentFilesLanded(root: string, main: string, req: AgentFilesRequest): P
   return landed(root, main, req.id, SETTINGS_SLUG, req.at, req.writes.map((w) => w.path));
 }
 
+/** An agent-files request's refusal when its files have changes in the main checkout that are not committed. */
+const UNCOMMITTED_FILES = "Some of those files have changes in the main checkout that are not committed (or are not in git yet). Commit or discard them first, then save again.";
+
 const MAX_FILES_BYTES = 5 * 1024 * 1024;
 
 /**
@@ -459,10 +462,11 @@ const MAX_FILES_BYTES = 5 * 1024 * 1024;
 async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: AgentFilesRequest): Promise<Outcome> {
   const main = cfg.main_branch;
   const done = (result: string, ok: boolean, text: string, more: Record<string, unknown> = {}): Outcome => {
-    traced(trace, "_loop", req, result, { what: req.what, files: req.writes.length, ...more });
+    traced(trace, "_loop", req, result, { what: oneLine(req.what, 200), files: req.writes.length, ...more });
     return { ok, status: null, text };
   };
-  const saved = () => done("applied", true, `Saved: ${req.what}.`);
+  const what = oneLine(req.what, 200);
+  const saved = () => done("applied", true, `Saved: ${what}.`);
   const notSaved = (problem: string) => done("refused", false, `That change was not saved: ${problem}`, { problem });
   const writes: { path: string; content: string | null; given: string }[] = [];
   for (const w of req.writes) {
@@ -474,13 +478,29 @@ async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: Age
   if (writes.reduce((n, w) => n + Buffer.byteLength(w.content ?? ""), 0) > MAX_FILES_BYTES) return notSaved("the files are more than 5 MB together.");
   if (await agentFilesLanded(root, main, req)) return saved();
   let stale = false;
-  await commitRecord(root, main, SETTINGS_SLUG, `${req.what} by ${byWhom(req)}`, async (draft) => {
+  let refusal: string | null = null;
+  const git = new Git(root);
+  await commitRecord(root, main, SETTINGS_SLUG, `${what} by ${byWhom(req)}`, async (draft) => {
+    const paths = writes.map((w) => w.path);
+    for (const p of paths) {
+      try { checkedPath(root, { path: p }); } catch (e) { refusal = e instanceof Error ? e.message : String(e); return false; }
+    }
+    const args = ["diff", "--quiet", "HEAD", "--", ...paths];
+    const diff = await git.run(args, { allowFail: true });
+    // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+    if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+    if (diff.code === 1) { refusal = UNCOMMITTED_FILES; return false; }
+    for (const p of paths) {
+      // A file on disk that the last commit does not have is untracked: the record would commit it whole.
+      if (existsSync(join(root, p)) && (await git.run(["cat-file", "-e", `HEAD:${p}`], { allowFail: true })).code !== 0) { refusal = UNCOMMITTED_FILES; return false; }
+    }
     for (const w of writes) {
       if (fileVersion(draft.read(w.path)) !== (req.base[w.given] ?? req.base[w.path] ?? "")) { stale = true; return false; }
     }
     for (const w of writes) { if (w.content === null) draft.remove(w.path); else draft.write(w.path, w.content); }
     return true;
   }, { request: req.id, trace, paths: writes.map((w) => w.path) });
+  if (refusal) return notSaved(refusal);
   if (stale) return done("stale", false, STALE_SETTINGS);
   return saved();
 }

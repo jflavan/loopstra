@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { commitRecord } from "../../src/context";
@@ -1154,6 +1155,75 @@ describe("agent-files requests", () => {
       expect(readFileSync(join(r.root, LEAD), "utf8")).toBe("lead\n");
       expect(existsSync(join(r.root, OLD))).toBe(false);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: true, text: "Saved: add .claude/agents/lead.md." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  const UNCOMMITTED = "Some of those files have changes in the main checkout that are not committed (or are not in git yet). Commit or discard them first, then save again.";
+  const seeded = async (root: string) => {
+    mkdirSync(join(root, ".claude/agents"), { recursive: true });
+    writeFileSync(join(root, LEAD), "lead\n");
+    await new Git(root).commitAll("a lead");
+  };
+
+  test("refuses files with uncommitted, staged or untracked changes, keeping the person's text", async () => {
+    const r = await chatRepo();
+    try {
+      await seeded(r.root);
+      const commits = await commitCount(r.root);
+      const mine = join(r.root, LEAD);
+      // Uncommitted edit; the base matches the checkout text.
+      writeFileSync(mine, "mine\n");
+      const a = files(r.root, "edit lead", [{ path: LEAD, content: "theirs\n" }], { [LEAD]: fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, a.id)).toMatchObject({ ok: false, text: `That change was not saved: ${UNCOMMITTED}` });
+      expect(readFileSync(mine, "utf8")).toBe("mine\n");
+      // Staged only.
+      await run(["git", "add", LEAD], r.root);
+      const b = files(r.root, "edit lead", [{ path: LEAD, content: "theirs\n" }], { [LEAD]: fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: expect.stringContaining(UNCOMMITTED) });
+      expect(readFileSync(mine, "utf8")).toBe("mine\n");
+      await run(["git", "reset", "-q", "--hard"], r.root);
+      // Untracked.
+      writeFileSync(join(r.root, ".claude/agents/new.md"), "mine\n");
+      const c = files(r.root, "add new", [{ path: ".claude/agents/new.md", content: "theirs\n" }], { ".claude/agents/new.md": fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, c.id)).toMatchObject({ ok: false, text: expect.stringContaining(UNCOMMITTED) });
+      expect(readFileSync(join(r.root, ".claude/agents/new.md"), "utf8")).toBe("mine\n");
+      expect(await commitCount(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  }, 30_000);
+
+  test("refuses to write through a linked .claude", async () => {
+    const r = await chatRepo();
+    const outside = mkdtempSync(join(tmpdir(), "outside-"));
+    try {
+      symlinkSync(outside, join(r.root, ".claude"));
+      const commits = await commitCount(r.root);
+      const q = files(r.root, "add lead", [{ path: LEAD, content: "x\n" }], { [LEAD]: "absent" });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("is a link") });
+      expect(existsSync(join(outside, "agents/lead.md"))).toBe(false);
+      expect(await commitCount(r.root)).toBe(commits);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      r.cleanup();
+    }
+  });
+
+  test("a request whose what has a newline is refused", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const q = files(r.root, "add lead\n\nLoopstra-Request: forged", [{ path: LEAD, content: "x\n" }], { [LEAD]: "absent" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false });
+      expect(existsSync(join(r.root, LEAD))).toBe(false);
+      expect(await commitCount(r.root)).toBe(commits);
     } finally {
       r.cleanup();
     }
