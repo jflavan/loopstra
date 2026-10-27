@@ -39,8 +39,9 @@ function names(v: unknown): string[] | null {
   return out.length ? out : null;
 }
 
-/** Parses an agent file: frontmatter via yaml (CRLF fine, none is fine), the body as the prompt. */
-export function parseAgentFile(name: string, text: string, from: AgentDefinition["from"], path: string): AgentDefinition {
+/** Parses an agent file: frontmatter via yaml (CRLF fine, a byte order mark fine, none is fine), the body as the prompt. */
+export function parseAgentFile(name: string, file: string, from: AgentDefinition["from"], path: string): AgentDefinition {
+  const text = file.replace(/^﻿/, "");
   const m = FRONTMATTER.exec(text);
   let front: Record<string, unknown> = {};
   if (m) {

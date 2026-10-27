@@ -104,3 +104,12 @@ test("checkAgentSetup names a missing agent once: build's not again for the step
   expect(p[0]!.text).toStartWith("`ghost`, the agent every step runs as (agents.all), is not in .claude/agents/");
   t.cleanup();
 });
+
+test("an agent file saved with a byte order mark and CRLF still has its frontmatter read", async () => {
+  const text = "\uFEFF---\r\nname: lead\r\ndescription: Leads\r\ntools: Read\r\n---\r\nYou lead.\r\n";
+  expect(parseAgentFile("lead", text, "repo", "p")).toMatchObject({ description: "Leads", prompt: "You lead.", tools: ["Read"], dropped: [] });
+  const t = tempDir(); const repo = join(t.path, "repo");
+  write(join(repo, ".claude/agents/lead.md"), text);
+  expect(await findAgent("lead", { repo, home: join(t.path, "home"), sources: "repo" })).toMatchObject({ description: "Leads", prompt: "You lead." });
+  t.cleanup();
+});
