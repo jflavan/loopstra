@@ -2,12 +2,19 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAgentFile } from "../../src/agent-files";
-import { cloneSource, copyItem, listLibrary, newAgentFile, repoPath, scanFolder, type FileWrite, type LibraryItem } from "../../src/agent-library";
+import { cloneSource, copyItem, listLibrary, newAgentFile, repoPath, scanFolder, shownUrl, type FileWrite, type LibraryItem } from "../../src/agent-library";
 import { tempDir, write } from "../helpers";
 
 const dirs: Array<{ cleanup: () => void }> = [];
 afterEach(() => { while (dirs.length) dirs.pop()!.cleanup(); });
 function temp(): string { const t = tempDir("loopstra-lib-"); dirs.push(t); return t.path; }
+
+function commitAll(dir: string): void {
+  for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "c"]]) {
+    const r = Bun.spawnSync(["git", ...args], { cwd: dir });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  }
+}
 
 const agentText = (name: string) => `---\nname: ${name}\ndescription: Does ${name}\n---\nYou are ${name}.\n`;
 
@@ -87,13 +94,11 @@ test("scanFolder finds skills and agents in a fetched source", () => {
 });
 
 test("cloneSource refuses option-like and unknown URLs, and clones a file:// repo shallowly", async () => {
-  expect(await cloneSource("--upload-pack=x")).toEqual({ refused: expect.stringContaining("") });
+  expect(await cloneSource("--upload-pack=x")).toEqual({ refused: "A source cannot start with a dash." });
   expect(await cloneSource("ftp://x")).toHaveProperty("refused");
   const src = temp();
   write(join(src, "agents/x.md"), agentText("x"));
-  for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]]) {
-    Bun.spawnSync(["git", ...args], { cwd: src });
-  }
+  commitAll(src);
   const r = await cloneSource(`file://${src}`);
   if ("refused" in r) throw new Error(r.refused);
   expect(existsSync(join(r.dir, "agents/x.md"))).toBe(true);
@@ -118,4 +123,43 @@ test("newAgentFile writes frontmatter that parses back", () => {
   const f = newAgentFile({ name: "lead", description: "Leads reviews: well", prompt: "You lead.", tools: ["Read", "Grep"], model: null });
   expect(f.path).toBe(".claude/agents/lead.md");
   expect(parseAgentFile("lead", f.content!, "repo", "p")).toMatchObject({ description: "Leads reviews: well", prompt: "You lead.", tools: ["Read", "Grep"], model: null, dropped: [] });
+});
+
+test("copyItem refuses a file name with a backslash that would climb out of the skill", () => {
+  if (process.platform === "win32") return;
+  const { repo } = world();
+  const dir = temp();
+  write(join(dir, "SKILL.md"), "x");
+  writeFileSync(join(dir, "x\\..\\..\\..\\agents\\lead.md"), "evil");
+  const item: LibraryItem = { kind: "skill", name: "s2", description: "", from: "source", path: dir };
+  expect(copyItem(item, { root: repo, today: "2026-10-27" })).toEqual({ refused: expect.stringContaining("lead.md") });
+});
+
+test("a cloned source with SKILL.md at its root lists and copies under the URL's name, without .git", async () => {
+  const { repo } = world();
+  const src = temp();
+  const named = join(src, "My_Skill.git");
+  write(join(named, "SKILL.md"), "---\ndescription: Root\n---\nBody\n");
+  write(join(named, "refs/a.md"), "a");
+  commitAll(named);
+  const r = await cloneSource(`file://${named}`);
+  if ("refused" in r) throw new Error(r.refused);
+  expect(r.name).toBe("my-skill");
+  const items = scanFolder(r.dir, r.name);
+  expect(items.map((i) => i.name)).toEqual(["my-skill"]);
+  const w = copyItem(items[0]!, { root: repo, today: "2026-10-27" }) as FileWrite[];
+  expect(w.map((f) => f.path).sort()).toEqual([".claude/skills/my-skill/SKILL.md", ".claude/skills/my-skill/SOURCE.md", ".claude/skills/my-skill/refs/a.md"]);
+  r.cleanup();
+});
+
+test("shownUrl drops credentials, and copyItem and refusals never record them", async () => {
+  expect(shownUrl("https://user:tok@example.com/x.git")).toBe("https://example.com/x.git");
+  expect(shownUrl("git@github.com:o/r.git")).toBe("git@github.com:o/r.git");
+  expect(shownUrl("/some/where")).toBe("/some/where");
+  const { repo, home } = world();
+  const tone = listLibrary(repo, home, "all").find((i) => i.name === "tone")!;
+  const w = copyItem(tone, { root: repo, source: "https://u:secret@example.com/s.git", today: "2026-10-27" }) as FileWrite[];
+  expect(JSON.stringify(w)).not.toContain("secret");
+  const bad = await cloneSource("https://u:secret@127.0.0.1:1/nope.git");
+  expect(JSON.stringify(bad)).not.toContain("secret");
 });

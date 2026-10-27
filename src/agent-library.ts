@@ -60,11 +60,11 @@ function agentItem(file: string, from: LibraryItem["from"], prefix: string, name
   return { kind: "agent", name: prefix + plain, description: str(front.description), from, path: file };
 }
 
-function skillItem(dir: string, from: LibraryItem["from"], prefix: string, nameFromFront: boolean): LibraryItem | null {
+function skillItem(dir: string, from: LibraryItem["from"], prefix: string, nameFromFront: boolean, fallback = basename(dir)): LibraryItem | null {
   const text = readText(join(dir, "SKILL.md"));
   if (text === null) return null;
   const { front } = split(text);
-  return { kind: "skill", name: prefix + ((nameFromFront && str(front.name)) || basename(dir)), description: str(front.description), from, path: dir };
+  return { kind: "skill", name: prefix + ((nameFromFront && str(front.name)) || fallback), description: str(front.description), from, path: dir };
 }
 
 /** The agents and skills under `<base>/agents` and `<base>/skills`, sorted by kind then name. */
@@ -84,11 +84,15 @@ export function listLibrary(root: string, home: string, sources: "all" | "repo")
   return out;
 }
 
-/** Every skill and agent in a folder (a fetched source). Hidden folders other than `.claude`, and `node_modules`, are skipped; links are not followed. */
-export function scanFolder(dir: string): LibraryItem[] {
+/**
+ * Every skill and agent in a folder (a fetched source). Hidden folders other than `.claude`, and
+ * `node_modules`, are skipped; links are not followed. `rootName` names a skill at the folder's root
+ * that has no name of its own (a fetched folder's own name is a temporary one).
+ */
+export function scanFolder(dir: string, rootName?: string): LibraryItem[] {
   const out: LibraryItem[] = [];
   const walk = (d: string) => {
-    const skill = skillItem(d, "source", "", true);
+    const skill = skillItem(d, "source", "", true, d === dir ? rootName : undefined);
     if (skill) { out.push(skill); return; }
     for (const name of entries(d)) {
       const path = join(d, name);
@@ -124,6 +128,8 @@ function folderWrites(dir: string, dest: string): FileWrite[] | { refused: strin
     for (const name of entries(d)) {
       const path = join(d, name);
       const shown = rel ? `${rel}/${name}` : name;
+      if (name === ".git") continue;
+      if (/[\\\u0000-\u001f\u007f]/.test(name)) return `${shown} has a backslash or control character in its name.`;
       const st = lstatSync(path);
       if (st.isSymbolicLink()) return `${shown} is a link, and links are not copied.`;
       if (st.isDirectory()) {
@@ -148,7 +154,7 @@ function folderWrites(dir: string, dest: string): FileWrite[] | { refused: strin
 export function copyItem(item: LibraryItem, o: { root: string; source?: string; today: string }): FileWrite[] | { refused: string } {
   const plain = item.name.slice(item.name.indexOf(":") + 1);
   if (!NAME.test(plain)) return { refused: `\`${plain}\` is not a name Loopstra copies: use lowercase letters, digits and dashes.` };
-  const source = o.source ?? item.path;
+  const source = shownUrl(o.source ?? item.path);
   if (item.kind === "agent") {
     const text = readText(item.path);
     if (text === null) return { refused: `${item.path} cannot be read.` };
@@ -158,35 +164,56 @@ export function copyItem(item: LibraryItem, o: { root: string; source?: string; 
   const files = folderWrites(item.path, `.claude/skills/${plain}`);
   if ("refused" in files) return files;
   const sourceNote = `.claude/skills/${plain}/SOURCE.md`;
-  return [...files.filter((f) => f.path !== sourceNote), { path: sourceNote, content: `Copied from ${source} on ${o.today}.\n` }];
+  const writes = [...files.filter((f) => f.path !== sourceNote), { path: sourceNote, content: `Copied from ${source} on ${o.today}.\n` }];
+  const stray = writes.find((w) => !repoPath(w.path)?.startsWith(`.claude/skills/${plain}/`));
+  return stray ? { refused: `${stray.path} would land outside .claude/skills/${plain}/.` } : writes;
+}
+
+/** A URL without the user name and password in it, safe to show and to record. */
+export function shownUrl(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
+}
+
+/** A name for what a source holds when it has none: the last part of its path, as a skill name. */
+function sourceName(url: string): string {
+  const last = shownUrl(url).replace(/[/\\:]+$/, "").split(/[/\\:]/).pop() ?? "";
+  return last.replace(/\.git$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "skill";
 }
 
 /**
  * Fetches a source: a git URL is cloned shallowly into a new temporary folder (removed by `cleanup`),
- * a local folder is used as it is. Nothing in it runs.
+ * a local folder is used as it is. Nothing in it runs. `name`: what to call a skill at its root.
  */
-export async function cloneSource(url: string): Promise<{ dir: string; cleanup: () => void } | { refused: string }> {
+export async function cloneSource(url: string): Promise<{ dir: string; name: string; cleanup: () => void } | { refused: string }> {
+  const shown = shownUrl(url);
   if (url.startsWith("-")) return { refused: "A source cannot start with a dash." };
   if (!/^(https:\/\/|ssh:\/\/|git@|file:\/\/)/.test(url)) {
-    if (isDir(url)) return { dir: url, cleanup: () => {} };
-    return { refused: `\`${url}\` is neither a folder nor a URL starting with https://, ssh://, git@ or file://.` };
+    if (isDir(url)) return { dir: url, name: sourceName(url), cleanup: () => {} };
+    return { refused: `\`${shown}\` is neither a folder nor a URL starting with https://, ssh://, git@ or file://.` };
   }
   const dir = mkdtempSync(join(tmpdir(), "loopstra-source-"));
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   try {
+    const ssh = `${process.env.GIT_SSH_COMMAND || "ssh"} -o BatchMode=yes`;
     const proc = Bun.spawn(["git", "clone", "--depth", "1", "--quiet", "--", url, dir], {
-      stdout: "ignore", stderr: "pipe", stdin: "ignore", timeout: CLONE_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      stdout: "ignore", stderr: "pipe", stdin: "ignore", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: ssh },
     });
-    const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; proc.kill(); }, CLONE_TIMEOUT_MS);
+    const err = new Response(proc.stderr).text().catch(() => "");
+    const code = await proc.exited;
+    clearTimeout(timer);
     if (code !== 0) {
+      // A child that outlived git may hold the pipe open, so reading stops after a moment.
+      const text = await Promise.race([err, new Promise<string>((r) => setTimeout(() => r(""), 1000))]);
       cleanup();
-      return { refused: `git could not fetch ${url}${proc.signalCode ? " in time" : ""}: ${err.trim() || `exit ${code}`}` };
+      return { refused: `git could not fetch ${shown}${timedOut ? " in time" : ""}: ${shownUrl(text).trim() || `exit ${code}`}` };
     }
   } catch (e) {
     cleanup();
-    return { refused: `git could not fetch ${url}: ${e instanceof Error ? e.message : String(e)}` };
+    return { refused: `git could not fetch ${shown}: ${e instanceof Error ? shownUrl(e.message) : String(e)}` };
   }
-  return { dir, cleanup };
+  return { dir, name: sourceName(url), cleanup };
 }
 
 /** A new agent as a file: frontmatter via yaml (so a description with a colon stays valid), the prompt as the body. */
