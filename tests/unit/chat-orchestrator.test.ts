@@ -552,6 +552,25 @@ describe("a chat step's agent setup", () => {
     } finally { restore(); r.cleanup(); }
   });
 
+  test("with no agents block, or only agents.all, a chat session's argv and prompt are what they always were", async () => {
+    const record = async (config: string) => {
+      const r = await chatRepo({ config });
+      const seen = join(r.root, ".loopstra", "fake-args.json");
+      const restore = setEnv({ LOOPSTRA_FAKE_ARGS: seen });
+      try {
+        await r.answer("orchestrator", 1, turn("ok"));
+        await new Orchestrator(r.root).handle(message("hi"), sink().send);
+        return JSON.parse(readFileSync(seen, "utf8")) as { args: string[]; prompt: string };
+      } finally { restore(); r.cleanup(); }
+    };
+    const none = await record("agents: {}\n");
+    const all = await record("agents:\n  sources: all\n  all:\n    skills: [x]\n    tools: [WebFetch]\n  steps: {}\n");
+    expect(all.args).toEqual(none.args);
+    expect(all.prompt).toBe(none.prompt);
+    for (const flag of ["--agents", "--agent", "--setting-sources", "--add-dir", "--forward-subagent-text"]) expect(none.args).not.toContain(flag);
+    expect(none.args[none.args.indexOf("--allowedTools") + 1]).toBe(["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"].join(","));
+  });
+
   test("a chat agent that cannot be found is answered in words", async () => {
     const r = await chatRepo({ config: "agents:\n  steps:\n    orchestrator:\n      agent: ghost\n" });
     try {
