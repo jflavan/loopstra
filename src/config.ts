@@ -127,6 +127,9 @@ const stepAgents = z.object({
 /** One step's agent setup, or what `agents.all` gives every step. */
 export type StepAgents = z.infer<typeof stepAgents>;
 
+/** A team's name: lowercase words joined by dashes. */
+export const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
 const agents = z.object({
   sources: z.enum(["all", "repo"], { error: "must be all or repo" }).default("all"),
   teams: z.record(z.string(), z.object({
@@ -138,7 +141,7 @@ const agents = z.object({
 }).strict().superRefine((a, ctx) => {
   const bad = (path: (string | number)[], message: string) => ctx.addIssue({ code: "custom", path, message });
   for (const name of Object.keys(a.teams)) {
-    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) bad(["teams", name], "a team name is lowercase words joined by dashes");
+    if (!TEAM_NAME.test(name)) bad(["teams", name], "a team name is lowercase words joined by dashes");
   }
   const tools = (path: string[], set: StepAgents, where: StepKey | "all") => {
     set.tools.forEach((rule, i) => {

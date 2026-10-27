@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ConfigError } from "./config";
+import { ConfigError, TEAM_NAME } from "./config";
 import { MODEL_REFS, STAGE_NAMES, STEP_KEYS, stepsOf, type StepGroup } from "./models";
 import { ConfigDocument } from "./setup/document";
 import { modelName } from "./setup/sections/models";
@@ -30,17 +30,15 @@ export function configVersion(text: string): string {
 /** What a setting is set to: a word, a list of words (the agents lists), or null (removed). */
 export type SettingValue = string | string[] | null;
 
-/** A value as the trace, a commit subject and a toast say it: a list as `[a, b]`; null as the given word. */
+/** A value as the trace, a commit subject and a toast say it: a list as `[a, b]`; null, and an empty list (which removes), as the given word. */
 export function settingText(value: SettingValue, none: string): string {
-  return value === null ? none : typeof value === "string" ? value : `[${value.join(", ")}]`;
+  return value === null || (Array.isArray(value) && !value.length) ? none : typeof value === "string" ? value : `[${value.join(", ")}]`;
 }
 
 /** The fields of an agent setup (agents.all, agents.steps.<step>) and which hold lists. */
 const LIST_FIELDS = ["subagents", "teams", "skills", "tools", "mcp_tools"];
 const STEP_FIELDS = ["agent", ...LIST_FIELDS];
 const TEAM_FIELDS = ["members", "way"];
-/** The rule for a team's name (see src/config.ts). */
-const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /** The steps a group's `steps` map holds: the orchestrator is chat.model itself, not a step of chat's. */
 const stepKeys = (group: StepGroup): string[] => stepsOf(group).filter((s) => s.key !== "orchestrator").map((s) => s.key);
@@ -100,7 +98,8 @@ export function settingProblem(path: string[], value: SettingValue): string | nu
 export function applySetting(file: string, text: string, path: string[], value: SettingValue): { ok: true; text: string } | { ok: false; problem: string } {
   try {
     const doc = ConfigDocument.fromText(file, text);
-    if (value === null) doc.unset(path);
+    // An empty list removes the key, as null does: no `skills: []` is left in the file.
+    if (value === null || (path[0] === "agents" && Array.isArray(value) && !value.length)) doc.unset(path);
     else doc.set(path, value, { flow: Array.isArray(value) });
     if (path[0] === "agents") pruneEmpty(doc, path);
     doc.validate();

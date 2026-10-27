@@ -108,6 +108,13 @@ describe("settings", () => {
     expect(e).toEqual({ ok: false, problem: expect.stringContaining("there is no team nope") });
   });
 
+  test("an empty list removes the key like null and prunes the maps", () => {
+    const base = "version: 1\ncommands:\n  test: bun test\n";
+    const a = applySetting("c.yaml", base, ["agents", "steps", "review", "skills"], ["x"]);
+    const b = applySetting("c.yaml", (a as { text: string }).text, ["agents", "steps", "review", "skills"], []);
+    expect(b.ok && b.text).toBe(base);
+  });
+
   test("removing a team or step removes the maps it leaves empty", () => {
     const base = "version: 1\ncommands:\n  test: bun test\n";
     const a = applySetting("c.yaml", base, ["agents", "teams", "rs", "members"], ["lead"]);
