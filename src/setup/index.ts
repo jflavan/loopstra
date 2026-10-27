@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { repoPath, type FileWrite } from "../agent-library";
@@ -47,17 +47,35 @@ function coveredBy(path: readonly string[], covers: readonly string[]): boolean 
 }
 
 /**
+ * The normalized repo-relative path of a pending file. Throws when it is outside .claude/agents/ and
+ * .claude/skills/, or when `.claude`, a folder below it or the file itself is a link already (a write
+ * or removal would follow it out of the repo).
+ */
+function checkedPath(root: string, file: FileWrite): string {
+  const path = repoPath(file.path);
+  if (!path) throw new Error(`${file.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
+  const parts = path.split("/");
+  for (let i = 1; i <= parts.length; i++) {
+    const shown = parts.slice(0, i).join("/");
+    let link: boolean;
+    try { link = lstatSync(join(root, shown)).isSymbolicLink(); } catch { return path; }
+    if (link) throw new Error(`${file.path} is not written: ${shown} is a link, and setup does not write through links.`);
+  }
+  return path;
+}
+
+/** Throws on the first pending file that setup would refuse to write. */
+function checkFiles(root: string, files: FileWrite[]): void {
+  for (const f of files) checkedPath(root, f);
+}
+
+/**
  * Writes the pending files under `root` (a `null` content removes the file; the last write to a path
- * wins) and returns the paths written. Throws, before writing anything, on a path outside
- * .claude/agents/ and .claude/skills/.
+ * wins) and returns the paths written. Throws, before writing anything, on a path checkedPath refuses.
  */
 export function writeFiles(root: string, files: FileWrite[]): string[] {
   const last = new Map<string, string | null>();
-  for (const f of files) {
-    const path = repoPath(f.path);
-    if (!path) throw new Error(`${f.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
-    last.set(path, f.content);
-  }
+  for (const f of files) last.set(checkedPath(root, f), f.content);
   for (const [path, content] of last) {
     if (content === null) rmSync(join(root, path), { force: true });
     else writeFileAtomic(join(root, path), content);
@@ -144,9 +162,7 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
   let cfg: Config;
   try {
     cfg = doc.validate();
-    for (const f of ctx.files) {
-      if (!repoPath(f.path)) throw new Error(`${f.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
-    }
+    checkFiles(root, ctx.files);
     const saved = doc.save();
     if (saved) out("\nSaved loopstra/config.yaml. Commit it on the main branch so every checkout uses it.");
     if (ctx.files.length) {

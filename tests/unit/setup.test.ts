@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
@@ -123,6 +123,35 @@ describe("loopstra setup", () => {
       expect(existsSync(join(r.root, b))).toBe(false);
       expect(r.text()).toContain("bun test");
     } finally { r.cleanup(); }
+  });
+
+  test("files are never written through a link out of the repo, and the config stays unchanged", async () => {
+    const file = ".claude/skills/a/SKILL.md";
+    const layouts: Record<string, (root: string, outside: string) => void> = {
+      ".claude": (root, outside) => { symlinkSync(outside, join(root, ".claude")); },
+      ".claude/skills": (root, outside) => { mkdirSync(join(root, ".claude")); symlinkSync(outside, join(root, ".claude/skills")); },
+      "the file": (root, outside) => {
+        mkdirSync(join(root, ".claude/skills/a"), { recursive: true });
+        writeFileSync(join(outside, "target"), "keep");
+        symlinkSync(join(outside, "target"), join(root, file));
+      },
+    };
+    for (const [name, make] of Object.entries(layouts)) {
+      const r = configRepo(CONFIG);
+      const out = tempDir();
+      try {
+        make(r.root, out.path);
+        for (const content of ["x", null]) {
+          const o = io();
+          const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content }); } });
+          expect(await setup(r.root, { output: o.output, defaults: true, sections: [adds] })).toBe(1);
+          expect(o.text()).toContain(`${name === "the file" ? file : name} is a link`);
+          expect(r.text()).toBe(CONFIG);
+        }
+        expect(readdirSync(out.path).filter((n) => n !== "target")).toEqual([]);
+        if (name === "the file") expect(readFileSync(join(out.path, "target"), "utf8")).toBe("keep");
+      } finally { r.cleanup(); out.cleanup(); }
+    }
   });
 
   test("a section that throws saves nothing and says why, without a stack", async () => {
