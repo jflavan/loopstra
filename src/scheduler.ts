@@ -5,7 +5,7 @@ import { FAKE_CLAUDE_ENV } from "./claude";
 import { configPath, DEFAULT_POLL_SECONDS, loadConfig, NOT_SET_UP, loopPollSeconds, type Config } from "./config";
 import { writeFileAtomic } from "./fsutil";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, settleRecord, snapshotsDir, type StepResult } from "./context";
-import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
+import { addDetachedWorktree, Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
 import { GitHub } from "./github";
 import { claim, release, runsNoCommands } from "./lanes";
 import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDoneWith, heartbeatWorkingOn, loopAlreadyRunning, loopHoldText, pauseAfterUnavailable, pidAlive, readLoopHold, runningLoopPid, startHeartbeat, takeLoopLock, type LoopBeat } from "./heartbeat";
@@ -32,6 +32,7 @@ import { olderSetupRefusal } from "./stamp";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, recordNotYet, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
 import { wakeStamp } from "./wake";
+import { checkAgentSetup, userHome } from "./agent-files";
 import { chatDir } from "./chat/threads";
 
 export interface TickResult {
@@ -983,12 +984,39 @@ export function log(line: string): void {
 }
 
 /**
+ * What `start` refuses with while a step names an agent main does not have; null when all are there,
+ * when no agents are set, or when the config does not load (the loop's own handling deals with that).
+ * Warnings are printed, not refused. The agents are looked up in a snapshot of main, as a session finds them.
+ */
+async function missingAgents(root: string): Promise<string | null> {
+  let cfg: Config;
+  try { cfg = await loadConfig(root); } catch { return null; }
+  const a = cfg.agents;
+  const sets = (s: Config["agents"]["all"]) => Object.values(s).some((v) => (Array.isArray(v) ? v.length > 0 : v !== undefined));
+  if (!sets(a.all) && !Object.values(a.steps).some(sets) && !Object.keys(a.teams).length && a.sources === "all") return null;
+  const git = new Git(root);
+  const dir = join(snapshotsDir(root), "_start");
+  await addDetachedWorktree(git, dir, cfg.main_branch);
+  let problems;
+  try {
+    problems = await checkAgentSetup(cfg, { repo: dir, home: userHome(), sources: a.sources });
+  } finally {
+    await removeWorktree(git, dir, { cleanup: true });
+  }
+  for (const p of problems) if (p.level === "warn") log(p.text);
+  const fails = problems.filter((p) => p.level === "fail");
+  return fails.length ? "Some steps name agents that are not set up:\n" + fails.map((p) => `- ${p.text}`).join("\n") : null;
+}
+
+/**
  * The loop. It never dies: each tick is guarded, a problem is traced, and the next tick comes.
  * Ctrl-C asks for a stop (the running step is interrupted and resumes on the next start); a
  * second Ctrl-C exits at once. It holds the loop's lock while it runs (see takeLoopLock). Returns
  * the refusal when another loop holds the lock, or null once the loop has run.
  */
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
+  const missing = await missingAgents(root);
+  if (missing) return missing;
   const refused = await takeLoopLock(root, await loopPollSeconds(root));
   if (refused) return refused;
   let beat: LoopBeat | null = null;

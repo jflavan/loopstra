@@ -331,6 +331,15 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   }, 30_000);
 
+  test("start refuses while a step names an agent that main does not have", async () => {
+    const { repo, trace } = await setupRepo("draft", { config: "agents:\n  steps:\n    design:\n      agent: ghost\n" });
+    const refused = await start(repo.path, { once: true, installSignals: false });
+    expect(refused).toStartWith("Some steps name agents that are not set up:\n- `ghost`, the agent design runs as");
+    expect(existsSync(join(repo.path, ".loopstra", "snapshots", "_start"))).toBe(false);
+    expect(existsSync(join(repo.path, ".loopstra", "loop.lock"))).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
   test("a merged change's leftover worktree and branch are cleaned up on a later tick", async () => {
     const { repo, ctx, trace } = await setupRepo("done");
     const git = new Git(repo.path);
