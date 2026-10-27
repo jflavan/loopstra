@@ -51,6 +51,18 @@ export function toolProblem(rule: string, readOnly: boolean): string | null {
   return null;
 }
 
+/**
+ * Why a `tools` rule is refused where it is set (a step, or "all" for agents.all), in the words
+ * config validation uses, or null. A git rule is refused the same way everywhere; the rest depend on
+ * the step being read-only (agents.all reaches read-only steps too).
+ */
+export function toolRuleProblem(rule: string, where: StepKey | "all"): string | null {
+  const problem = toolProblem(rule, where === "all" || READ_ONLY_STEPS.has(where));
+  if (!problem || problem.startsWith("only Loopstra")) return problem;
+  const [who, it] = where === "all" ? ["these reach read-only steps too", "them"] : [`${where} is read-only`, "it"];
+  return `${who}; ${problem.replace(" would let it ", ` would let ${it} `)}`;
+}
+
 /** The agents Claude Code ships with: they keep their own names in a prompt. */
 export const BUILTIN_AGENTS: ReadonlySet<string> = new Set(["general-purpose", "Explore", "Plan", "claude", "statusline-setup"]);
 
