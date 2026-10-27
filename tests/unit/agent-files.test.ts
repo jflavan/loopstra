@@ -113,3 +113,21 @@ test("an agent file saved with a byte order mark and CRLF still has its frontmat
   expect(await findAgent("lead", { repo, home: join(t.path, "home"), sources: "repo" })).toMatchObject({ description: "Leads", prompt: "You lead." });
   t.cleanup();
 });
+
+test("a plugin's agent or skill that is not found says to enable the plugin", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  const plug = join(home, "cache/sp");
+  write(join(plug, "agents/code-reviewer.md"), "---\ndescription: cr\n---\nC");
+  write(join(plug, "skills/tdd/SKILL.md"), "T");
+  write(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ plugins: { "sp@market": [{ installPath: plug }] } }));
+  write(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "sp@market": false } }));
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: { steps: { review: { subagents: ["sp:code-reviewer", "gone"], skills: ["sp:tdd", "pdf"] } } } });
+  const hint = "if it comes from a plugin, enable the plugin in Claude Code";
+  const all = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(all.map((x) => [x.name, x.text.includes(hint)])).toEqual([["sp:code-reviewer", true], ["gone", false], ["sp:tdd", true], ["pdf", false]]);
+  expect(all[0]!.text).toBe(`\`sp:code-reviewer\`, a subagent of review, is not in .claude/agents/ on main or on this machine; ${hint}. Add it with \`loopstra setup agents\`, or commit it.`);
+  // A repo-only setup never loads plugins, so enabling one would not help.
+  const repoOnly = validateConfig({ version: 1, commands: { test: "t" }, agents: { sources: "repo", steps: { review: { subagents: ["sp:code-reviewer"], skills: ["sp:tdd"] } } } });
+  for (const p of await checkAgentSetup(repoOnly, { repo, home, sources: "repo" })) expect(p.text).not.toContain(hint);
+  t.cleanup();
+});

@@ -164,9 +164,14 @@ function placesText(mainBranch: string, where: Where): string {
   return `on ${mainBranch}${where.sources === "all" ? " or on this machine" : ""}`;
 }
 
+/** What follows a plugin's name (`plugin:name`) that is not found, when plugins are looked in: it may be installed but not enabled. */
+function pluginHint(name: string, where: Where): string {
+  return name.includes(":") && where.sources === "all" ? "; if it comes from a plugin, enable the plugin in Claude Code" : "";
+}
+
 /** What a person is told about a named agent that is not found. */
-function missingAgentText(name: string, role: string, places: string): string {
-  return `\`${name}\`, ${role}, is not in .claude/agents/ ${places}. Add it with \`loopstra setup agents\`, or commit it.`;
+function missingAgentText(name: string, role: string, mainBranch: string, where: Where): string {
+  return `\`${name}\`, ${role}, is not in .claude/agents/ ${placesText(mainBranch, where)}${pluginHint(name, where)}. Add it with \`loopstra setup agents\`, or commit it.`;
 }
 
 /**
@@ -177,12 +182,11 @@ function missingAgentText(name: string, role: string, places: string): string {
  */
 export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupProblem[]> {
   const problems: SetupProblem[] = [];
-  const places = placesText(cfg.main_branch, where);
   const checkAgent = async (name: string, role: string, step: SetupProblem["step"]) => {
     if (BUILTIN_AGENTS.has(name)) return;
     const def = await findAgent(name, where);
     if (!def) {
-      problems.push({ level: "fail", step, name, text: missingAgentText(name, role, places) });
+      problems.push({ level: "fail", step, name, text: missingAgentText(name, role, cfg.main_branch, where) });
     } else if (def.from !== "repo") {
       problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
     } else if (def.dropped.length) {
@@ -200,7 +204,7 @@ export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupP
     for (const name of setup.skills) {
       const from = await findSkill(name, where);
       if (from === null) {
-        problems.push({ level: "warn", step, name, text: `The skill \`${name}\` (${step}) is not in .claude/skills/${where.sources === "all" ? " or on this machine" : ""}; it may be built in to Claude Code. If a session does not load it, the step stops and says so.` });
+        problems.push({ level: "warn", step, name, text: `The skill \`${name}\` (${step}) is not in .claude/skills/${where.sources === "all" ? " or on this machine" : ""}${pluginHint(name, where) || "; it may be built in to Claude Code"}. If a session does not load it, the step stops and says so.` });
       } else if (from !== "repo") {
         problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
       }
@@ -220,7 +224,7 @@ async function setupAgents(setup: AgentSetup, step: string, where: Where, mainBr
   for (const { name, role } of setupRoles(setup, step)) {
     if (BUILTIN_AGENTS.has(name)) continue;
     const def = await findAgent(name, where);
-    if (!def) return { missing: missingAgentText(name, role, placesText(mainBranch, where)) };
+    if (!def) return { missing: missingAgentText(name, role, mainBranch, where) };
     if (name === setup.agent) main = def;
     else others.push(def);
   }
