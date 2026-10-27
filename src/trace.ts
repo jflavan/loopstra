@@ -344,6 +344,17 @@ export class Trace {
     return out;
   }
 
+  /** The agent setup each phase of a change ran with, by phase seq (the newest event of a seq wins; phases with none are absent). */
+  agentSetups(slug: string): Map<number, Record<string, unknown>> {
+    const rows = this.db.query<{ phase_seq: number; payload: string }, [string]>(
+      "SELECT phase_seq, payload FROM events WHERE slug = ? AND type = 'agent_setup' AND phase_seq IS NOT NULL ORDER BY id").all(slug);
+    const out = new Map<number, Record<string, unknown>>();
+    for (const r of rows) {
+      try { out.set(r.phase_seq, JSON.parse(r.payload) as Record<string, unknown>); } catch { /* unreadable row */ }
+    }
+    return out;
+  }
+
   gate(slug: string, gate: string, check: string, result: "pass" | "fail" | "waiting", evidence: string): void {
     this.db.run('INSERT INTO gates (slug, gate, "check", result, evidence, ts) VALUES (?, ?, ?, ?, ?, ?)', [slug, gate, check, result, evidence, now()]);
     this.event(slug, "gate_check", { gate, check, result, evidence });

@@ -1,3 +1,4 @@
+import type { AgentSetupView } from "../console/types";
 import { costSoFar } from "./format";
 
 /** What is known of one session: from its stream, from the trace once it is over, and the clock. */
@@ -41,4 +42,18 @@ export function sessionFacts(k: SessionKnown): SessionFacts {
   const elapsedMs = (endedAt ? Date.parse(endedAt) : k.now) - Date.parse(k.started);
   const cost = running ? (k.rate === undefined ? null : costSoFar(k.started, k.now, k.rate)) : k.finished?.costUsd ?? null;
   return { elapsedMs, cost, estimate: running && cost !== null, status };
+}
+
+/** The label and text of each line a session's facts add for the setup it ran as; none without a setup. Empty lists are left out. */
+export function setupFacts(s: AgentSetupView | null): Array<[string, string]> {
+  if (!s) return [];
+  const lines: Array<[string, string]> = [["Agent", s.agent ?? "none"]];
+  const add = (label: string, names: string[]) => { if (names.length) lines.push([label, names.join(", ")]); };
+  add("Subagents", s.subagents.map((n) => (s.models[n] ? `${n} (${s.models[n]})` : n)));
+  add("Teams", s.teams);
+  add("Skills", s.skills);
+  add("Tools", s.tools);
+  add("MCP tools", s.mcpTools);
+  if (s.sources === "repo") lines.push(["Sources", "repo only"]);
+  return lines;
 }

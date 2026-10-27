@@ -9,7 +9,7 @@ import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
 import { runsDir } from "../paths";
 import { changeSummary, loopNow, runningRows, totalsIn } from "./model";
-import type { ChangeDetail, PhaseView, SpendView } from "./types";
+import type { AgentSetupView, ChangeDetail, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
 export async function changeDetail(root: string, trace: Trace, slug: string, now: Date = new Date()): Promise<ChangeDetail | null> {
@@ -24,6 +24,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   // The board's rule, so the two never disagree.
   const busy = new Set(runningRows(trace, loopNow(root, pollSeconds, now)).keys());
   const denied = trace.deniedCommands(slug);
+  const setups = trace.agentSetups(slug);
   const phases: PhaseView[] = rows.map((p) => {
     const end = p.ended ? Date.parse(p.ended) : now.getTime();
     const dir = `${p.seq}-${p.name}`;
@@ -33,7 +34,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     return {
       seq: p.seq, name: p.name, kind: p.kind, status: p.status, started: p.started, ended: p.ended,
       durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0, error: p.error,
-      files, denied: denied.get(p.seq) ?? [],
+      files, denied: denied.get(p.seq) ?? [], agentSetup: setupView(setups.get(p.seq)),
     };
   });
   return {
@@ -42,6 +43,20 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     documents: ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${slug}/${a}` })),
     phases,
     gates: trace.gates(slug),
+  };
+}
+
+/** A recorded `agent_setup` payload as the page shows it; null when there is none. Each field is read defensively. */
+function setupView(e: Record<string, unknown> | undefined): AgentSetupView | null {
+  if (!e) return null;
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const models: Record<string, string> = {};
+  if (e.models && typeof e.models === "object") {
+    for (const [k, v] of Object.entries(e.models)) if (typeof v === "string") models[k] = v;
+  }
+  return {
+    agent: typeof e.agent === "string" ? e.agent : null, subagents: list(e.subagents), teams: list(e.teams), skills: list(e.skills),
+    tools: list(e.tools), mcpTools: list(e.mcp_tools), sources: e.sources === "repo" ? "repo" : "all", models,
   };
 }
 

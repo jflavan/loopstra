@@ -20,7 +20,7 @@ import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
 import { choicesFor, codeParts, effective, fromNote, getsText, listText, parseList, pickSummary, withChosen } from "../../src/ui/agent-settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
-import { sessionFacts } from "../../src/ui/session-facts";
+import { sessionFacts, setupFacts } from "../../src/ui/session-facts";
 import { givesFocusBack, returnTarget } from "../../src/ui/parts/focus";
 
 describe("formatting", () => {
@@ -1300,5 +1300,20 @@ describe("the Agents section of the Settings page", () => {
   test("a picker keeps the names already chosen, even ones it does not offer, so they can be taken off", () => {
     expect(withChosen(["a", "b"], ["b", "gone"])).toEqual(["a", "b", "gone"]);
     expect(withChosen(["a"], [])).toEqual(["a"]);
+  });
+});
+
+describe("the setup lines of a session's facts", () => {
+  const base = { agent: null, subagents: [], teams: [], skills: [], tools: [], mcpTools: [], sources: "all" as const, models: {} };
+  test("nothing for no setup", () => {
+    expect(setupFacts(null)).toEqual([]);
+  });
+  test("an empty setup says only that no agent was set", () => {
+    expect(setupFacts(base)).toEqual([["Agent", "none"]]);
+  });
+  test("subagents carry their model when known; empty lists and the default sources are left out", () => {
+    expect(setupFacts({ ...base, agent: "lead", subagents: ["sec", "doc"], models: { sec: "haiku" }, teams: ["ops"], skills: ["a", "b"], tools: ["Read"], mcpTools: ["mcp__x__y"], sources: "repo" })).toEqual([
+      ["Agent", "lead"], ["Subagents", "sec (haiku), doc"], ["Teams", "ops"], ["Skills", "a, b"], ["Tools", "Read"], ["MCP tools", "mcp__x__y"], ["Sources", "repo only"],
+    ]);
   });
 });

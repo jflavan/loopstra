@@ -5,7 +5,7 @@ import { Link } from "../parts/Link";
 import { Steer } from "../parts/Steer";
 import { Transcript } from "../parts/Transcript";
 import { steerOffer } from "../requests";
-import { sessionFacts } from "../session-facts";
+import { sessionFacts, setupFacts } from "../session-facts";
 import { changes, getJson, meta, now, openDrawer, running } from "../store";
 import { follow, streamGone } from "../stream";
 import { addFrames, EMPTY, lastCost, type Frame, type Shown } from "../transcript";
@@ -152,6 +152,7 @@ function Facts({ phase, live, model, detail, chatCost }: { phase: Phase | null; 
   return (
     <dl>
       {model && <><dt>Model</dt><dd>{shortModel(model)}</dd></>}
+      {setupFacts(detail?.agentSetup ?? null).map(([label, text]) => <><dt>{label}</dt><dd>{text}</dd></>)}
       {phase && <><dt>Started</dt><dd>{clock(phase.started, t)}</dd></>}
       {facts && <><dt>{live ? "Running for" : "Took"}</dt><dd>{duration(facts.elapsedMs)}</dd></>}
       <dt>Cost</dt>

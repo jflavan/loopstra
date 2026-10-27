@@ -109,6 +109,16 @@ export interface PhaseView {
   files: Array<{ name: string; url: string }>;
   /** Commands the session was not allowed to run (allow-rule text). */
   denied: string[];
+  /** What the session ran as, from its `agent_setup` event; null when it ran with no setup. */
+  agentSetup: AgentSetupView | null;
+}
+
+/** The agent setup a step ran with: names only, as the trace recorded them. */
+export interface AgentSetupView {
+  agent: string | null; subagents: string[]; teams: string[]; skills: string[]; tools: string[]; mcpTools: string[];
+  sources: "all" | "repo";
+  /** Each inline subagent's model, by name. */
+  models: Record<string, string>;
 }
 
 export interface ChangeDetail extends ChangeSummary {
