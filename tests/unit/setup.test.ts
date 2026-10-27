@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
 import { DefaultsPrompt, SetupStopped } from "../../src/setup/prompt";
+import { agents } from "../../src/setup/sections/agents";
 import { budgets } from "../../src/setup/sections/budgets";
 import { gates } from "../../src/setup/sections/gates";
 import { github } from "../../src/setup/sections/github";
@@ -306,6 +307,17 @@ describe("loopstra setup", () => {
       expect(await setup(r.root, { output: fail.output, check: true, sections: [fake({ checks: [{ level: "fail", text: "broken" }] })] })).toBe(1);
       expect(fail.text()).toContain("FAIL  broken");
       expect(r.text()).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("--check lists a step's missing agent under the agents section and fails", async () => {
+    const r = configRepo(`${CONFIG}agents:\n  steps:\n    design:\n      agent: ghost\n`);
+    try {
+      const o = io();
+      expect(await setup(r.root, { output: o.output, check: true, sections: [agents] })).toBe(1);
+      expect(o.text()).toContain("FAIL  `ghost`, the agent design runs as");
+      expect(o.text()).toContain("To fix: ");
+      expect(o.text()).toContain("loopstra setup agents");
     } finally { r.cleanup(); }
   });
 

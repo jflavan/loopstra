@@ -166,7 +166,7 @@ export async function init(root: string): Promise<InitReport> {
   if (older) report.next.push("This repository was set up by an older Loopstra: run `loopstra upgrade` to bring it up to date.");
   // Setup, then commit (what it saved goes in with the rest), then start.
   report.next.push(
-    "Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.",
+    "Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models, agents), or edit loopstra/config.yaml.",
     `Commit the files init wrote (loopstra/, .claude/, intent/, REVIEW.md, CLAUDE.md, .gitignore) on ${branch}. The loop works in its own checkouts, which only see what is committed.`,
     "Start the loop with `loopstra start`; watch it with `loopstra status` or `loopstra ui`.",
   );

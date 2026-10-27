@@ -156,7 +156,7 @@ describe("init", () => {
     try {
       const report = await init(repo.path);
       // Setup first, then commit what it saved with the rest, then start.
-      expect(report.next[0]).toBe("Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models), or edit loopstra/config.yaml.");
+      expect(report.next[0]).toBe("Walk through the settings with `loopstra setup` (budgets, commands, gates, GitHub, chat, models, agents), or edit loopstra/config.yaml.");
       expect(report.next.join(" ")).not.toContain("gates.*.human");
     } finally { repo.cleanup(); }
   });

@@ -14,7 +14,7 @@ const HELP = `loopstra <command>
 
   init      set up this repo for Loopstra
   setup     walk through the settings (setup <section> for one: budgets, commands,
-            gates, github, chat, models; --defaults takes every suggestion;
+            gates, github, chat, models, agents; --defaults takes every suggestion;
             --check only checks)
   start     run the loop (--once for a single tick, e.g. from cron);
             Ctrl-C once finishes gracefully, twice exits at once
