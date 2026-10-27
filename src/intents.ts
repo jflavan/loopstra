@@ -554,12 +554,12 @@ export function heldNote(intent: Intent): string {
   return hold ? `Held: ${hold.replace(/[.\s]+$/, "")}.` : "";
 }
 
-/** True while an agent's question waits for a person (`question:` in intent.md; see src/questions.ts). */
 /** True when a person put the change on hold (its hold line says why). */
 export function isHeld(fm: Pick<Frontmatter, "hold">): boolean {
   return fm.hold.trim() !== "";
 }
 
+/** True while an agent's question waits for a person (`question:` in intent.md; see src/questions.ts). */
 export function hasQuestion(intent: Intent): boolean {
   return intent.file.frontmatter.question.trim() !== "";
 }

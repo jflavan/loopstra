@@ -533,10 +533,15 @@ export class Trace {
     return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
   }
 
+  /** What a slug's ended phases cost, in all (a running phase's budget hold is not spending). */
+  endedCost(slug: string): number {
+    return this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
+  }
+
   intentSummary(slug: string): IntentSummary | null {
     const i = this.db.query<{ slug: string; status: string; priority: string; updated: string }, [string]>("SELECT * FROM intents WHERE slug = ?").get(slug);
     if (!i) return null;
-    const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
+    const cost = this.endedCost(slug);
     // The newest phase, passing over work that ran beside one (see besideWork: the one that decides says where the change is).
     const last = this.db.query<PhaseRow, [string]>(`SELECT * FROM phases WHERE slug = ? ORDER BY ${BESIDE_WORK_SQL}, seq DESC LIMIT 1`).get(slug);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);

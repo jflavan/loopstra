@@ -8,7 +8,7 @@ import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
 import { runsDir } from "../paths";
-import { changeSummary, loopNow, runningRows, totalsOf } from "./model";
+import { changeSummary, loopNow, runningRows, totalsIn } from "./model";
 import type { ChangeDetail, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
@@ -71,7 +71,7 @@ export async function spendView(root: string, trace: Trace, cfg: Config | null, 
     if (h >= 0 && h < HOURS) byHour[h]!.costUsd += cost;
   }
   return {
-    totals: totalsOf(all, now),
+    totals: totalsIn(trace, now),
     chatUsd,
     perChange: [...perChange].map(([slug, costUsd]) => ({ slug, title: titles.get(slug) ?? slug, costUsd })).sort((a, b) => b.costUsd - a.costUsd),
     perPhase: [...perPhase].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.costUsd - a.costUsd),

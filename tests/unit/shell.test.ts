@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { errorText, runCommand, spawnBounded, withBunOnPath, within, withoutGitHookEnv, type StdinWriter } from "../../src/shell";
+import { errorText, runCommand, spawnBounded, tailOf, withBunOnPath, within, withoutGitHookEnv, type StdinWriter } from "../../src/shell";
 import { Cancelled } from "../../src/stop";
 import { pidAlive } from "../../src/heartbeat";
 import { until } from "../console-helpers";
@@ -220,6 +220,28 @@ describe("spawnBounded's onLine", () => {
       await expect(spawnBounded({ cmd: [process.execPath, "-e", script], cwd: t.path, timeoutMs: 30_000, onStop: "kill", graceMs: 500, onLine: () => { throw new Error("handler bug"); } })).rejects.toThrow("handler bug");
       expect(Date.now() - started).toBeLessThan(20_000);
     } finally { t.cleanup(); }
+  });
+});
+
+describe("tailOf", () => {
+  test("keeps the whole text until it is twice `keep`, then its last `keep` characters", () => {
+    expect(tailOf("abcdef", undefined)).toBe("abcdef");
+    expect(tailOf("abcdef", 3)).toBe("abcdef");
+    expect(tailOf("abcdefg", 3)).toBe("efg");
+  });
+
+  test("never starts with half of a two-unit character", () => {
+    expect(tailOf(`abcdefg\u{1F600}`, 2)).toBe("\u{1F600}");
+    expect(tailOf(`abcdefgh\u{1F600}x`, 2)).toBe("x");
+  });
+
+  test("a project command's output is kept to its end, not held whole", async () => {
+    const t = tempDir();
+    const r = await runCommand(`${JSON.stringify(process.execPath)} -e "process.stdout.write('a'.repeat(2_500_000) + 'END')"`, t.path);
+    expect(r.code).toBe(0);
+    expect(r.output.length).toBeLessThanOrEqual(2_000_000);
+    expect(r.output.endsWith("END")).toBe(true);
+    t.cleanup();
   });
 });
 

@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readdirSync, statSync } from "node:f
 import { join } from "node:path";
 import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
-import { configPath, DEFAULT_POLL_SECONDS, loadConfig, NOT_SET_UP, pollSeconds, type Config } from "./config";
+import { configPath, DEFAULT_POLL_SECONDS, loadConfig, NOT_SET_UP, loopPollSeconds, type Config } from "./config";
 import { writeFileAtomic } from "./fsutil";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, settleRecord, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
@@ -989,7 +989,7 @@ export function log(line: string): void {
  * the refusal when another loop holds the lock, or null once the loop has run.
  */
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
-  const refused = await takeLoopLock(root, await pollSeconds(root));
+  const refused = await takeLoopLock(root, await loopPollSeconds(root));
   if (refused) return refused;
   let beat: LoopBeat | null = null;
   // A second Ctrl-C exits at once, past every finally: the lock goes and the heartbeat says stopped on the way out.
@@ -1040,7 +1040,7 @@ async function runLoop(root: string, opts: { once: boolean; installSignals?: boo
       }
       beat.tickEnded();
       if (opts.once || stopRequested()) break;
-      const poll = await pollSeconds(root);
+      const poll = await loopPollSeconds(root);
       await sleepBetweenTicks(root, poll * 1000, seen);
       if (stopRequested()) break;
     }

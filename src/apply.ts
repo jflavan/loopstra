@@ -465,11 +465,11 @@ function refuse(trace: Trace, req: StatusRequest | FieldRequest | AnswerRequest,
 }
 
 /** A field or answer request's change while it is open; else the refusal that ends the request. */
-async function openChange(root: string, trace: Trace, req: FieldRequest | AnswerRequest): Promise<Frontmatter | Outcome> {
+async function openChange(root: string, trace: Trace, req: FieldRequest | AnswerRequest): Promise<{ fm: Frontmatter } | { refused: Outcome }> {
   const found = await current(root, req.slug);
-  if ("problem" in found) { traced(trace, req.slug, req, "missing"); return { ok: false, status: null, text: found.problem }; }
+  if ("problem" in found) { traced(trace, req.slug, req, "missing"); return { refused: { ok: false, status: null, text: found.problem } }; }
   const fm = found.intent.file.frontmatter;
-  return isOpen(fm.status) ? fm : refuse(trace, req, fm.status, `${req.slug} is ${fm.status}; nothing changed.`);
+  return isOpen(fm.status) ? { fm } : { refused: refuse(trace, req, fm.status, `${req.slug} is ${fm.status}; nothing changed.`) };
 }
 
 /** Why a status request is not something the change can do from `expect`, or null when it is. */
@@ -578,8 +578,9 @@ function holdLine(req: Extract<Request, { kind: "hold" }>): string {
  * on every few minutes; a hold must still land). Committed like the status requests.
  */
 async function applyField(root: string, cfg: Config, trace: Trace, req: FieldRequest): Promise<Outcome> {
-  const fm = await openChange(root, trace, req);
-  if ("ok" in fm) return fm;
+  const change = await openChange(root, trace, req);
+  if ("refused" in change) return change.refused;
+  const { fm } = change;
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as done already.
   const done = await doneBefore(root, cfg.main_branch, req, req.slug);
   if (!done && req.kind === "hold" && isHeld(fm)) return refuse(trace, req, fm.status, `${req.slug} is held already; nothing changed.`);
@@ -604,8 +605,9 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
  * answerQuestion).
  */
 async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerRequest, lastTry: boolean): Promise<Outcome> {
-  const fm = await openChange(root, trace, req);
-  if ("ok" in fm) return fm;
+  const change = await openChange(root, trace, req);
+  if ("refused" in change) return change.refused;
+  const { fm } = change;
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as answered already.
   const done = await doneBefore(root, cfg.main_branch, req, req.slug);
   if (!done && !fm.question.trim()) return refuse(trace, req, fm.status, `${req.slug} has no question waiting; nothing changed.`);

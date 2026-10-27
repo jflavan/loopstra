@@ -179,7 +179,13 @@ export async function loadConfig(root: string): Promise<Config> {
   if (!existsSync(path)) {
     throw new ConfigError(`No config found at loopstra/config.yaml. Run \`loopstra init\` first.`);
   }
-  return parseConfig(await Bun.file(path).text());
+  let text: string;
+  try {
+    text = await Bun.file(path).text();
+  } catch (e) {
+    throw new ConfigError(`loopstra/config.yaml cannot be read: ${errorText(e)}`);
+  }
+  return parseConfig(text);
 }
 
 /** The config in config.yaml's text. Throws a ConfigError when it is not YAML or not a valid config. */
@@ -194,7 +200,7 @@ export function parseConfig(text: string): Config {
 }
 
 /** The configured poll_seconds, or the default when the config cannot be loaded. */
-export function pollSeconds(root: string): Promise<number> {
+export function loopPollSeconds(root: string): Promise<number> {
   return loadConfig(root).then((c) => c.poll_seconds, () => DEFAULT_POLL_SECONDS);
 }
 

@@ -95,7 +95,7 @@ export function changeSummary(root: string, trace: Trace, i: Intent, all: Intent
   return {
     slug: i.slug, title: i.file.title || i.slug, status: fm.status, plain: plainStatus(fm.status), priority: effectivePriority(fm),
     stage: STAGE[fm.status], since, inStatus: since ? agoText(now.getTime() - Date.parse(since)) : null,
-    costUsd: trace.costIn({ slug: i.slug }, "", { endedOnly: true }), waiting: [pr.wait, waitNote(i, all, heldBy)].filter(Boolean).join(" ") || null, note: fm.note, shownNote: pr.note, running: busy.has(i.slug),
+    costUsd: trace.endedCost(i.slug), waiting: [pr.wait, waitNote(i, all, heldBy)].filter(Boolean).join(" ") || null, note: fm.note, shownNote: pr.note, running: busy.has(i.slug),
     held: fm.hold.trim() || null, statedPriority: fm.priority ?? null,
     offers: offers(fm, human, fm.status === "blocked" ? retryOptions(trace, i.slug, fm.note) : []),
     question: openQuestion(root, i),
@@ -230,23 +230,10 @@ function periodStarts(now: Date): { day: Date; week: Date } {
   return { day, week: new Date(day.getFullYear(), day.getMonth(), day.getDate() - ((day.getDay() + 6) % 7)) };
 }
 
-/** totalsOf over every phase in the trace, summed by the database. */
-function totalsIn(trace: Trace, now: Date): Totals {
+/** What was spent today, this week (from Monday, local time) and in all, chat included. */
+export function totalsIn(trace: Trace, now: Date): Totals {
   const { day, week } = periodStarts(now);
   const t = trace.endedCostTotals(day.toISOString(), week.toISOString());
   return { todayUsd: t.day, weekUsd: t.week, allUsd: t.all };
 }
 
-/** What was spent today, this week (from Monday, local time) and in all, chat included. */
-export function totalsOf(phases: PhaseRow[], now: Date): Totals {
-  const { day, week } = periodStarts(now);
-  let todayUsd = 0, weekUsd = 0, allUsd = 0;
-  for (const p of phases) {
-    const cost = p.status === "running" ? 0 : p.cost_usd ?? 0;
-    const t = Date.parse(p.started);
-    allUsd += cost;
-    if (t >= week.getTime()) weekUsd += cost;
-    if (t >= day.getTime()) todayUsd += cost;
-  }
-  return { todayUsd, weekUsd, allUsd };
-}

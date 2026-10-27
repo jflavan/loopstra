@@ -188,9 +188,14 @@ export interface StdinWriter {
   end(): void;
 }
 
-/** `text`, cut to its last `keep` characters once it has grown to twice that (so the cut is rare). */
-function tailOf(text: string, keep: number | undefined): string {
-  return keep !== undefined && text.length > 2 * keep ? text.slice(-keep) : text;
+/**
+ * `text`, cut to its last `keep` characters once it has grown to twice that (so the cut is rare). A
+ * cut that would split a character made of two UTF-16 units takes neither.
+ */
+export function tailOf(text: string, keep: number | undefined): string {
+  if (keep === undefined || text.length <= 2 * keep) return text;
+  const tail = text.slice(-keep);
+  return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
 }
 
 interface SpawnOptions {
@@ -218,7 +223,7 @@ interface SpawnOptions {
   graceMs?: number;
   /** Reads stdout line by line; returning true ends the call (the process then gets `graceMs` to exit before it is killed). */
   onLine?: (line: string) => boolean | void;
-  /** Keep only about the last this many characters of stdout and of stderr (the whole of each when unset). */
+  /** Keep only the end of stdout and of stderr: at least this many characters of each, never twice as many (the whole of each when unset). */
   keepTail?: number;
   /** Aborting it kills the process tree at once (the result says `cancelled`). Once aborted, nothing starts (Cancelled is thrown). */
   signal?: AbortSignal;

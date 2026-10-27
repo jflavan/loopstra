@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
-import { pollSeconds } from "./config";
+import { DEFAULT_POLL_SECONDS, loopPollSeconds } from "./config";
 import { readJson, writeJson } from "./fsutil";
 import { loopstraDir } from "./paths";
 import { errorCode } from "./shell";
@@ -135,7 +135,7 @@ export function heartbeatState(
 
 /** "Loop: Running — last check 20s ago" plus a newline, for `status`. */
 export async function loopStatusLine(root: string): Promise<string> {
-  const poll = await pollSeconds(root);
+  const poll = await loopPollSeconds(root);
   return `Loop: ${heartbeatState(readHeartbeat(root), poll, new Date(), { pause: readPause(root), hold: readLoopHold(root) }).text}\n`;
 }
 
@@ -272,7 +272,7 @@ export type RemoveFile = (path: string) => void;
  * changed or gone, this start goes on as any second start does. Only a problem making or removing
  * the file that lasts refuses with that problem. `link` and `remove` are for tests.
  */
-export async function takeLoopLock(root: string, pollSeconds = 60, link: LinkFile = linkSync, remove: RemoveFile = (p) => rmSync(p, { force: true })): Promise<string | null> {
+export async function takeLoopLock(root: string, pollSeconds = DEFAULT_POLL_SECONDS, link: LinkFile = linkSync, remove: RemoveFile = (p) => rmSync(p, { force: true })): Promise<string | null> {
   const path = loopLockPath(root);
   try {
     mkdirSync(loopstraDir(root), { recursive: true });

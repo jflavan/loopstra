@@ -1,5 +1,5 @@
 import { localUser } from "../chat/transports/shared";
-import { pollSeconds } from "../config";
+import { loopPollSeconds } from "../config";
 import { changeExists, isHeld, readIntent } from "../intents";
 import { sendToSession, writeChangeStop, type InboxMessage } from "../inbox";
 import { CONSOLE, submitRequest } from "../requests";
@@ -75,7 +75,7 @@ function send(root: string, slug: string, seq: number, kind: InboxMessage["kind"
  * tick of a live loop that says it works on the change.
  */
 async function running(root: string, slug: string): Promise<PhaseRow[]> {
-  const poll = await pollSeconds(root);
+  const poll = await loopPollSeconds(root);
   const trace = Trace.open(root, () => {});
   try {
     return runningRows(trace, loopNow(root, poll, new Date())).get(slug) ?? [];
