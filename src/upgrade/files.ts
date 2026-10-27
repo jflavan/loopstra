@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "../fsutil";
 import { spawnBounded } from "../shell";
 import { isPromptOverride, textSha, type ManagedFile, type StampEntry } from "../stamp";
+import { isCrlf } from "../text";
 
 /**
  * What upgrade did, or would do, to one managed file. "dropped": a prompt override was deleted, so
@@ -28,7 +29,6 @@ type BaseFor = (sha: string) => Promise<string | null>;
 const MERGE_TIMEOUT_MS = 60_000;
 
 const lf = (s: string) => s.replace(/\r\n/g, "\n");
-const isCrlf = (s: string) => (s.match(/\r\n/g)?.length ?? 0) * 2 > (s.match(/\n/g)?.length ?? 0);
 
 /**
  * A 3-way merge with `git merge-file`, all three as `\n` text: the merged text, and whether it has

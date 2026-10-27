@@ -1,5 +1,6 @@
 import { parseDocument, type Document } from "yaml";
 import { ConfigError } from "../config";
+import { isCrlf } from "../text";
 
 /** One step: edits a config document of version `from` into version `from + 1`, keeping its comments. */
 export interface Migration {
@@ -39,7 +40,7 @@ export function migrateConfig(text: string, migrations: readonly Migration[] = M
     doc.set("version", version);
   }
   // Windows line endings only when most lines have them, so one stray CRLF does not convert the file.
-  const crlf = (text.match(/\r\n/g)?.length ?? 0) * 2 > (text.match(/\n/g)?.length ?? 0);
+  const crlf = isCrlf(text);
   const out = version === from ? text : crlf ? doc.toString().replace(/\r?\n/g, "\r\n") : doc.toString();
   validate(out);
   return { text: out, from, to: version };

@@ -225,9 +225,7 @@ function userLine(text: string): string {
  */
 class LiveSession {
   writer: StdinWriter | null = null;
-  /** Messages written to the running process. */
-  written = 0;
-  /** Their texts, in the order written. */
+  /** The messages written to the running process, in the order written. */
   sent: string[] = [];
   /** User messages the running process echoed; the first is its prompt. */
   replays = 0;
@@ -247,7 +245,6 @@ class LiveSession {
   /** A new process starts: nothing written to it yet, and a kill of its own. */
   next(): AbortSignal {
     this.writer = null;
-    this.written = 0;
     this.sent = [];
     this.replays = 0;
     this.finished = false;
@@ -263,7 +260,7 @@ class LiveSession {
 
   /** How many messages written to the running process it has not echoed yet (its first echo is the prompt). */
   unechoed(): number {
-    return this.written - Math.max(0, this.replays - 1);
+    return this.sent.length - Math.max(0, this.replays - 1);
   }
 
   /** A message written but not echoed yet: the session takes it after this result, with a turn and a result of its own. */
@@ -280,7 +277,6 @@ class LiveSession {
   readonly control: SessionControl = {
     message: (text) => {
       if (!this.writer || this.redirectTo !== null || this.stoppedBy !== null || !this.writer.write(userLine(text))) return false;
-      this.written++;
       this.sent.push(text);
       return true;
     },
@@ -444,7 +440,9 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   // what a stop throws: the phase row keeps it, so the transcript can still be found.
   const sessionNow = () => collector.finish().sessionId ?? resume ?? null;
   let r: SpawnResult;
-  for (let resends = 0; ; resends++) {
+  // How many times the session was sent again after it stopped at a notification's result.
+  let resends = 0;
+  for (;;) {
     if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy, sessionNow());
     // spawnBounded checks these too, but what it throws cannot name the session a resend resumes.
     if (stopRequested()) throw new StopRequested(sessionNow());
@@ -511,7 +509,6 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       // Too little is left to resume it: the session ends quietly, as if its sender had stopped it. The change
       // keeps its status, and conversation.md has the redirect for the next session.
       if (sends.budgetArgs() === null) throw new SessionStopped(live.redirectBy ?? "a person", sessionNow());
-      resends--; // a redirect is not a notification resend
       continue;
     }
     if (r.stopped || r.cancelled || !r.started || r.timedOut) break;
@@ -524,7 +521,6 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
       resume = c.sessionId;
       stdin = ENVELOPE_NUDGE;
       collector = new StreamCollector();
-      resends--; // the nudge is not a notification resend
       continue;
     }
     if (r.code !== 0 || c.subtype !== "missing_result" || !c.events.some(answersNotification) || !c.sessionId || resends >= NOTIFICATION_RESENDS) break;
@@ -535,6 +531,7 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     if (sends.budgetArgs() === null) break; // nothing left to send it again with
     resume = c.sessionId;
     collector = new StreamCollector();
+    resends++;
   }
   return classify(sends.total(collector.finish()), r, { started, timeoutMs: input.timeoutMs, resume, nudged });
 }

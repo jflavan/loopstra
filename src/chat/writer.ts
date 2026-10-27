@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { modelFor, type Config } from "../config";
-import { checkConsistency, parseIntentFile, scanRepo, SLUG, type Intent, type Status } from "../intents";
+import { missingSections, parseIntentFile, scanRepo, SLUG, type Status } from "../intents";
 import { badModelNote, stepModel } from "../models";
 import { templatePath } from "../package";
+import { errorText } from "../shell";
 import { localDate } from "../signals";
 import type { Trace } from "../trace";
 import { chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
@@ -62,12 +63,11 @@ export function draftProblems(drafts: DraftIntent[], rendered: string[], existin
       else if (!existing.has(dep) && !drafts.some((o) => o.slug === dep)) problems.push(`"${slug}" depends on "${dep}", which is not an existing intent or one you returned.`);
     }
     try {
-      const file = parseIntentFile(rendered[i]!);
-      const asAccepted: Intent = { slug, dir: "", artifacts: new Set(["intent.md"]), file: { ...file, frontmatter: { ...file.frontmatter, status: "accepted" } } };
-      const problem = checkConsistency(asAccepted);
-      if (problem) problems.push(`"${slug}": ${problem.replace(/ Add (it|them) to intent\.md, then set status to accepted\.$/, "")}`);
+      // What the loop's consistency check asks of an accepted change (it implies no other file).
+      const missing = missingSections(parseIntentFile(rendered[i]!));
+      if (missing) problems.push(`"${slug}": ${missing.text}`);
     } catch (e) {
-      problems.push(`"${slug}" could not be read back: ${e instanceof Error ? e.message : String(e)}`);
+      problems.push(`"${slug}" could not be read back: ${errorText(e)}`);
     }
   });
   return problems;

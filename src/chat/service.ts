@@ -1,7 +1,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import { loadConfig } from "../config";
+import { loopPollSeconds } from "../config";
 import { GitHub } from "../github";
 import { errorText, timerMs } from "../shell";
 import { AnnouncementLog, announce } from "./announcer";
@@ -111,7 +111,7 @@ export class ChatService {
     this.timer = setTimeout(() => {
       this.polling = this.poll().finally(() => {
         this.polling = null;
-        void loadConfig(this.root).then((c) => c.poll_seconds * 1000, () => 60_000).then((d) => this.schedule(this.opts.pollMs ?? d));
+        void loopPollSeconds(this.root).then((s) => this.schedule(this.opts.pollMs ?? s * 1000));
       });
     }, timerMs(ms));
   }

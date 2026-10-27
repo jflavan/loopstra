@@ -119,8 +119,8 @@ export function leaveDelivered(root: string, slug: string, m: InboxMessage, how:
 /** Moves a message to delivered/ with how it ended; false when it was gone already (done by someone else). */
 export function markDone(root: string, slug: string, m: InboxMessage, how: Done): boolean {
   const from = join(inboxDir(root, slug), `${m.id}.json`);
-  const to = join(inboxDir(root, slug), "delivered", `${m.id}.json`);
-  mkdirSync(join(inboxDir(root, slug), "delivered"), { recursive: true });
+  const to = join(deliveredDir(root, slug), `${m.id}.json`);
+  mkdirSync(deliveredDir(root, slug), { recursive: true });
   try {
     renameSync(from, to);
   } catch {

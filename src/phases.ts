@@ -177,12 +177,16 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 /** What heads conversation.md in a work session's prompt (the shipped templates say the same). */
 export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
 
+/** A note a phase's prompt must carry: `text` is added at its end when there is a `note` and the prompt file has no `{{variable}}` to carry it. */
+export type PromptNote = { variable: string; note: string; text: string };
+
 /**
  * The prompt a phase would be sent, or null when neither the repository nor the package has its
  * prompt. A work session (see steerable) gets conversation.md as {{conversation}}; a repository's
  * override that leaves that variable out gets the record at its end instead, when there is one.
+ * `extra` reaches the prompt the same way (see PromptNote): an override may leave its variable out.
  */
-export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promise<string | null> {
+export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?: PromptNote): Promise<string | null> {
   const path = promptPath(ctx.root, spec.name);
   if (path === null) return null;
   const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
@@ -192,24 +196,9 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec): Promi
   let rendered = skillsLine + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
-  return withContract(rendered);
+  const prompt = withContract(rendered);
+  return extra?.note && !template.includes(`{{${extra.variable}}}`) ? `${prompt}\n\n${extra.text}\n` : prompt;
 }
-
-/**
- * The phase's rendered prompt (see phasePrompt), with `text` added at its end when there is a `note`
- * and the prompt file has no `{{variable}}` to carry it: an override may leave the variable out.
- */
-export async function withNote(ctx: StepContext, spec: AgentPhaseSpec, variable: string, note: string, text: string): Promise<string | null> {
-  const prompt = await phasePrompt(ctx, spec);
-  if (prompt === null || !note) return prompt;
-  const path = promptPath(ctx.root, spec.name);
-  let template = "";
-  try { template = path ? await Bun.file(path).text() : ""; } catch { /* gone since: add the note */ }
-  return template.includes(`{{${variable}}}`) ? prompt : `${prompt}\n\n${text}\n`;
-}
-
-/** A phase's prompt as the caller gives it: rendered already (null: its prompt file is missing), or the function that renders it. */
-type PromptSource = string | null | (() => Promise<string | null>);
 
 /**
  * A renderer that gives `first` (a prompt the caller rendered already, to match it against work kept
@@ -226,9 +215,8 @@ export function renderedThen(first: string | null, render: () => Promise<string 
 }
 
 /**
- * Runs an agent phase, retried once on a timeout or crash. `rendered`: its phasePrompt, when the caller
- * already has it, or the function that renders it. A retry renders its prompt again (with the function,
- * else phasePrompt; never a prompt given as text), so it has what people told the crashed attempt.
+ * Runs an agent phase, retried once on a timeout or crash. `render`: the function that renders its
+ * prompt, when not phasePrompt. A retry renders its prompt again, so it has what people told the crashed attempt.
  *
  * An asker (see ASKERS) may ask a person a question: it is recorded and QuestionAsked is thrown, so the step
  * ends quietly and the change waits. Once it is answered, the step's first session of the kind of phase that
@@ -237,9 +225,8 @@ export function renderedThen(first: string | null, render: () => Promise<string 
  * in this stay at the status the prompt says no more may be, and one more fails the phase. Work run alongside never
  * asks: a question fails it, and that work is just not used.
  */
-export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, rendered?: PromptSource): Promise<AgentPhaseResult<N>> {
-  const render = typeof rendered === "function" ? rendered : rendered === undefined ? () => phasePrompt(ctx, spec) : null;
-  const prompt = render ? await render() : (rendered as string | null);
+export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, render: () => Promise<string | null> = () => phasePrompt(ctx, spec)): Promise<AgentPhaseResult<N>> {
+  const prompt = await render();
   if (prompt === null) {
     ctx.trace.event(ctx.slug, "error", { where: spec.traceName ?? spec.name, reason: "missing-prompt", detail: `the prompt ${spec.name}.md is missing from the repository and the package; reinstall Loopstra` });
     return { ok: false, reason: "missing-prompt", note: `${ownerNote("missing-prompt")} An engineer needs to reinstall Loopstra.`, sessionId: null };
@@ -257,7 +244,7 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
     const first = await attempt(ctx, s, limited(p), traceName, ask);
     if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
     ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
-    const again = normal && render ? ((await render()) ?? p) : p;
+    const again = normal ? ((await render()) ?? p) : p;
     return attempt(ctx, s, limited(again), `${traceName}-retry`, ask);
   };
 

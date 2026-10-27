@@ -2,13 +2,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
-import { loadConfig, type Config } from "../config";
+import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
 import { runsDir } from "../paths";
-import { changeSummary, loopNow, runningRows, totalsOf } from "./model";
+import { changeSummary, loopNow, runningRows, totalsIn } from "./model";
 import type { ChangeDetail, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
@@ -18,7 +18,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   if (!i) return null;
   let cfg: Config | null = null;
   try { cfg = await loadConfig(root); } catch { /* the inbox says what is wrong with the config */ }
-  const pollSeconds = cfg?.poll_seconds ?? 60;
+  const pollSeconds = cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS;
   const holds = await sameFileHolds(ordered, root);
   const rows = trace.phases(slug);
   // The board's rule, so the two never disagree.
@@ -71,7 +71,7 @@ export async function spendView(root: string, trace: Trace, cfg: Config | null, 
     if (h >= 0 && h < HOURS) byHour[h]!.costUsd += cost;
   }
   return {
-    totals: totalsOf(all, now),
+    totals: totalsIn(trace, now),
     chatUsd,
     perChange: [...perChange].map(([slug, costUsd]) => ({ slug, title: titles.get(slug) ?? slug, costUsd })).sort((a, b) => b.costUsd - a.costUsd),
     perPhase: [...perPhase].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.costUsd - a.costUsd),

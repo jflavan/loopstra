@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readdirSync, statSync } from "node:f
 import { join } from "node:path";
 import { lanesFor, loopDayNote, roomBeside, roomFor, loopDaySpent, loopDayUsedUp, startOfToday, startOfTomorrow, stepOverDayNote } from "./budget";
 import { FAKE_CLAUDE_ENV } from "./claude";
-import { configPath, loadConfig, NOT_SET_UP, type Config } from "./config";
+import { configPath, DEFAULT_POLL_SECONDS, loadConfig, NOT_SET_UP, loopPollSeconds, type Config } from "./config";
 import { writeFileAtomic } from "./fsutil";
 import { MainCheckoutMoved, OFF_MAIN_NOTE, PersonChangedStatus, StepContext, block, clearMarker, onceMarker, personChangedStatus, settleRecord, snapshotsDir, type StepResult } from "./context";
 import { Git, GIT_TIMEOUT_NOTE, GitTimeout, removeStaleLocks, removeWorktree, STALE_LOCK_MS } from "./git";
@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -142,16 +142,16 @@ export async function tick(root: string): Promise<TickResult> {
     const first = await scanRepo(root);
     // Traced when the problem is new or has changed, not on every tick.
     for (const u of first.unreadable) trace.eventOnChange(u.slug, "error", '"where":"scan"', { where: "scan", problem: u.problem, detail: u.detail }, "problem");
+    let blocked = false;
     for (const i of first.intents) {
       trace.upsertIntent(i.slug, i.file.frontmatter.status, effectivePriority(i.file.frontmatter));
       const problem = checkConsistency(i);
-      if (problem && i.file.frontmatter.status !== "blocked") await blockSafely(new StepContext(root, cfg, trace, i), problem);
+      if (problem && i.file.frontmatter.status !== "blocked") {
+        await blockSafely(new StepContext(root, cfg, trace, i), problem);
+        blocked = true;
+      }
     }
-    const scan = await scanRepo(root);
-    const ordered = orderQueue(scan.intents);
-    // A change that would build into another's files waits (see sameFileHolds).
-    const holds = await sameFileHolds(ordered, root);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
+    const { ordered, holds } = await refreshQueue(root, cfg, trace, blocked ? await scanRepo(root) : first);
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
     await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
@@ -275,7 +275,7 @@ function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
  * intent.md), or an agent's question waits for their answer (`question:`; see src/questions.ts).
  */
 function waiting(i: Intent): boolean {
-  return i.file.frontmatter.hold.trim() !== "" || hasQuestion(i);
+  return isHeld(i.file.frontmatter) || hasQuestion(i);
 }
 
 /**
@@ -302,19 +302,22 @@ async function runClaimed(root: string, cfg: Config, trace: Trace, shared: TickL
   }
 }
 
-/** The design and plan statuses, and the stage whose step each runs. */
-const THINKING: ReadonlyMap<string, "design" | "plan"> = new Map([
-  ["accepted", "design"], ["designing", "design"], ["spec-review", "design"],
-  ["spec-approved", "plan"], ["planning", "plan"], ["plan-review", "plan"],
-]);
+/** The stage whose step each status runs; a status with none has no step. */
+const STAGE_OF: Readonly<Partial<Record<Status, "design" | "plan" | "build" | "merge" | "verify">>> = {
+  accepted: "design", designing: "design", "spec-review": "design",
+  "spec-approved": "plan", planning: "plan", "plan-review": "plan",
+  "plan-approved": "build", building: "build",
+  reviewing: "merge", "merge-review": "merge", "merge-approved": "merge",
+  merged: "verify", verifying: "verify",
+};
 
 /**
  * The change's step is a design or plan step that runs none of the project's commands: its sessions
  * only read a snapshot of main, and its stage has no `before` or `after` commands.
  */
 export function thinkingStep(i: Intent, cfg: Config): boolean {
-  const stage = THINKING.get(i.file.frontmatter.status);
-  return !!stage && !cfg.stages[stage].before.length && !cfg.stages[stage].after.length;
+  const stage = STAGE_OF[i.file.frontmatter.status];
+  return (stage === "design" || stage === "plan") && !cfg.stages[stage].before.length && !cfg.stages[stage].after.length;
 }
 
 /**
@@ -542,6 +545,17 @@ async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
 }
 
 /**
+ * Orders a scan's changes and writes queue.md from them. `holds`: the changes that would build into
+ * another's files, and wait (see sameFileHolds).
+ */
+async function refreshQueue(root: string, cfg: Config, trace: Trace, scan: Scan): Promise<{ ordered: Intent[]; holds: Map<string, string> }> {
+  const ordered = orderQueue(scan.intents);
+  const holds = await sameFileHolds(ordered, root);
+  await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
+  return { ordered, holds };
+}
+
+/**
  * After the step: queue.md is brought up to date (uncommitted; the next runtime commit takes it
  * along), and with a remote, main is shared once for the whole tick. Best effort; not after a stop.
  * `share` is null when the tick stopped before it knew the checkout was on main.
@@ -549,12 +563,7 @@ async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
 async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResult, share: boolean | null): Promise<void> {
   if (share === null || stopRequested()) return;
   try {
-    if (out.steps?.length) {
-      const scan = await scanRepo(root);
-      const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(ordered, root);
-      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
-    }
+    if (out.steps?.length) await refreshQueue(root, cfg, trace, await scanRepo(root));
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {
     if (!(e instanceof StopRequested)) trace.event("_loop", "error", { where: "end of tick", error: errorText(e) });
@@ -858,15 +867,11 @@ async function removeClosedWorktree(ctx: StepContext): Promise<void> {
   ctx.trace.event(ctx.slug, "command", { command: "clean up closed change", removed: ctx.worktreeDir, branchKept: ctx.branch });
 }
 
+const STEPS = { design: runDesignStep, plan: runPlanStep, build: runBuildStep, merge: runMergeStep, verify: runVerifyStep };
+
 async function runStep(ctx: StepContext): Promise<StepResult> {
-  switch (ctx.intent.file.frontmatter.status) {
-    case "accepted": case "designing": case "spec-review": return runDesignStep(ctx);
-    case "spec-approved": case "planning": case "plan-review": return runPlanStep(ctx);
-    case "plan-approved": case "building": return runBuildStep(ctx);
-    case "reviewing": case "merge-review": case "merge-approved": return runMergeStep(ctx);
-    case "merged": case "verifying": return runVerifyStep(ctx);
-    default: return { ok: true };
-  }
+  const stage = STAGE_OF[ctx.intent.file.frontmatter.status];
+  return stage ? STEPS[stage](ctx) : { ok: true };
 }
 
 /** A plain message naming a tool `start` needs that is not installed, or null when both are there. */
@@ -911,7 +916,7 @@ export async function preflight(root: string, env: Record<string, string | undef
   if (older) return older;
   const cfg = await loadConfig(root).catch(() => null);
   // By its heartbeat, which also shows a loop started from another machine sharing the folder (WSL, say).
-  const running = runningLoopPid(root, cfg?.poll_seconds ?? 60);
+  const running = runningLoopPid(root, cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS);
   if (running !== null) return loopAlreadyRunning(running);
   const missing = missingTools(env) ?? claudeOverrideProblem(env);
   if (missing) return missing;
@@ -984,7 +989,7 @@ export function log(line: string): void {
  * the refusal when another loop holds the lock, or null once the loop has run.
  */
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
-  const refused = await takeLoopLock(root, await loadConfig(root).then((c) => c.poll_seconds, () => 60));
+  const refused = await takeLoopLock(root, await loopPollSeconds(root));
   if (refused) return refused;
   let beat: LoopBeat | null = null;
   // A second Ctrl-C exits at once, past every finally: the lock goes and the heartbeat says stopped on the way out.
@@ -1035,7 +1040,7 @@ async function runLoop(root: string, opts: { once: boolean; installSignals?: boo
       }
       beat.tickEnded();
       if (opts.once || stopRequested()) break;
-      const poll = await loadConfig(root).then((c) => c.poll_seconds, () => 60);
+      const poll = await loopPollSeconds(root);
       await sleepBetweenTicks(root, poll * 1000, seen);
       if (stopRequested()) break;
     }

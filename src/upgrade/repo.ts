@@ -1,19 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { configPath, NOT_SET_UP, validateConfig } from "../config";
+import { configPath, DEFAULT_POLL_SECONDS, NOT_SET_UP, parseConfig } from "../config";
 import { writeFileAtomic } from "../fsutil";
-import { Git, GitError } from "../git";
+import { Git, GitError, statusPaths } from "../git";
 import { runningLoopPid } from "../heartbeat";
 import { onCheckout } from "../lanes";
-import { DEV_VERSION, stampVersion } from "../package";
+import { stampVersion } from "../package";
 import { errorText, lastLine } from "../shell";
 import { baseOf, baseText, fetchShipped, loadShippedIndex, type FetchText, type ShippedIndex } from "../shipped";
 import { managedFiles, readStamp, STAMP_FILE, stampUnreadable, unreadableStampText, writeStamp, type Stamp } from "../stamp";
 import { upgradeFile, type FileResult } from "./files";
 import { adoptLegacy, type Adopted } from "./legacy";
 import { migrateConfig, MIGRATIONS, type Migration } from "./migrations";
-import { compareVersions, installHint } from "./tool";
+import { compareVersions, installHint, released } from "./tool";
 
 /** What upgrade says when the loop is running in the repository. */
 export const LOOP_RUNNING = "The loop is running. Stop it (Ctrl-C in its terminal), run loopstra upgrade, then start it again.";
@@ -69,22 +69,6 @@ export interface RepoResult {
   committed: boolean;
 }
 
-/**
- * The paths `git status --porcelain -z` lists: one NUL-ended entry per path ("XY path"), and a rename
- * or copy followed by its original path as a further entry. Both paths of a rename are named.
- */
-export function statusPaths(out: string): string[] {
-  const entries = out.split("\0");
-  const paths: string[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i]!;
-    if (e.length < 4) continue;
-    paths.push(e.slice(3));
-    if (/[RC]/.test(e.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]!);
-  }
-  return [...new Set(paths)];
-}
-
 /** The config's main branch and poll interval, read leniently: a config that only loads after a migration still names them. */
 function loopSettings(text: string): { main: string; poll: number } {
   let raw: unknown = null;
@@ -92,12 +76,9 @@ function loopSettings(text: string): { main: string; poll: number } {
   const cfg = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   return {
     main: typeof cfg.main_branch === "string" && cfg.main_branch ? cfg.main_branch : "main",
-    poll: typeof cfg.poll_seconds === "number" && cfg.poll_seconds > 0 ? cfg.poll_seconds : 60,
+    poll: typeof cfg.poll_seconds === "number" && cfg.poll_seconds > 0 ? cfg.poll_seconds : DEFAULT_POLL_SECONDS,
   };
 }
-
-/** True for a published version, not a development checkout's. */
-const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VERSION);
 
 /**
  * Brings the repository at `root` up to the installed Loopstra (spec: "loopstra upgrade", steps 2-6):
@@ -195,7 +176,7 @@ export async function upgradeRepo(root: string, opts: { check: boolean }, deps: 
   }
   try {
     // Checked only when a migration changed it: a config left as it is is the loop's to report on (its preflight does).
-    migrated = migrateConfig(cfgText, deps.migrations ?? MIGRATIONS, (t) => { if (t !== cfgText) validateConfig(parse(t) ?? {}); });
+    migrated = migrateConfig(cfgText, deps.migrations ?? MIGRATIONS, (t) => { if (t !== cfgText) parseConfig(t); });
   } catch (e) {
     return refuse(`The config could not be brought up to date, so nothing was changed: ${errorText(e)}`);
   }

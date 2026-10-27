@@ -8,14 +8,14 @@ import { addDetachedWorktree, bookkeeping, Git, removeWorktree, WrongBranchError
 import { onCheckout } from "./lanes";
 import { effectivePriority, parseIntentFile, readIntent, writeChangeFile, writeIntent, type Frontmatter, type Intent, type Priority, type Status } from "./intents";
 import { RecordDraft, type DraftChange } from "./record-draft";
-import { errorText } from "./shell";
+import { errorCode, errorText } from "./shell";
 import { withModels } from "./models";
 import { RecordRaced, RecordUnsettled, throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
 /** The folder that holds each change's snapshot of main (see StepContext.snapshot). */
 export function snapshotsDir(root: string): string {
-  return join(root, ".loopstra", "snapshots");
+  return join(loopstraDir(root), "snapshots");
 }
 
 export class StepContext {
@@ -38,7 +38,7 @@ export class StepContext {
   }
   get slug(): string { return this.intent.slug; }
   get runDir(): string { return runDir(this.root, this.slug); }
-  get worktreeDir(): string { return join(this.root, ".loopstra", "worktrees", this.slug); }
+  get worktreeDir(): string { return join(loopstraDir(this.root), "worktrees", this.slug); }
   get branch(): string { return `intent/${this.slug}`; }
   async reload(): Promise<void> { this.intent = await readIntent(this.root, this.slug); }
 
@@ -349,8 +349,7 @@ async function settle(root: string, main: string, trace?: Trace): Promise<boolea
     commit = m.commit;
     const git = new Git(root);
     const o = { allowFail: true, cleanup: true };
-    const branch = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], o);
-    if (branch.code !== 0 || branch.out.trim() !== main) return false;
+    if ((await checkoutBranch(git)) !== main) return false;
     const head = (await git.run(["rev-parse", "--verify", `refs/heads/${main}`], { cleanup: true })).out.trim();
     const landed = head === m.commit || (await git.run(["merge-base", "--is-ancestor", m.commit, head], o)).code === 0;
     if (head !== m.parent && landed) {
@@ -379,11 +378,9 @@ async function settle(root: string, main: string, trace?: Trace): Promise<boolea
   }
 }
 
-const codeOf = (e: unknown) => (e as { code?: string } | null)?.code;
-
 /** What a file holds, or null when it is not there. */
 function readIfThere(abs: string): Buffer | null {
-  try { return readFileSync(abs); } catch (e) { if (codeOf(e) === "ENOENT") return null; throw e; }
+  try { return readFileSync(abs); } catch (e) { if (errorCode(e) === "ENOENT") return null; throw e; }
 }
 
 /**

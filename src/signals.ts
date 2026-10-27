@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Config } from "./config";
 import { commitRecord } from "./context";
 import { Git, withDetachedWorktree } from "./git";
+import { loopstraDir } from "./paths";
 import { projectCommand } from "./phases";
 import { errorText } from "./shell";
 import { StopRequested } from "./stop";
@@ -18,7 +19,7 @@ const SIGNAL = "main_health";
  * mainHealthDue). Holds the changes merged since the last check, one per line, in the order they merged.
  */
 function pendingPath(root: string): string {
-  return join(root, ".loopstra", "health-pending");
+  return join(loopstraDir(root), "health-pending");
 }
 
 /**
@@ -26,7 +27,7 @@ function pendingPath(root: string): string {
  * the trace's times, which come from the same clock; the file's mtime is coarser and can read earlier.
  */
 function askedPath(root: string): string {
-  return join(root, ".loopstra", "health-asked");
+  return join(loopstraDir(root), "health-asked");
 }
 
 /** The changes waiting for a main_health check (empty when none is asked for). */
@@ -40,7 +41,7 @@ function pendingSlugs(root: string): string[] {
 
 /** Asks for a main_health check on the next tick, attributed to every change merged since the last one (each named once). */
 export function markHealthPending(root: string, slug: string): void {
-  mkdirSync(join(root, ".loopstra"), { recursive: true });
+  mkdirSync(loopstraDir(root), { recursive: true });
   const slugs = pendingSlugs(root);
   if (!slugs.includes(slug)) slugs.push(slug);
   writeFileSync(pendingPath(root), slugs.join("\n"));
@@ -73,7 +74,7 @@ export function mainHealthDue(root: string, cfg: Config, trace: Trace): { due: b
  */
 export async function runMainHealth(root: string, cfg: Config, trace: Trace, afterSlugs: string[]): Promise<HealthResult> {
   const git = new Git(root);
-  const dir = join(root, ".loopstra", "health", "main");
+  const dir = join(loopstraDir(root), "health", "main");
   // Traced on the loop; the commands get no change's slug.
   const on = { trace, cfg, slug: "_loop" };
   let result: HealthResult;

@@ -176,6 +176,11 @@ export interface Scan { intents: Intent[]; unreadable: Unreadable[] }
 /** A change's folder name: lowercase letters and digits, words joined by dashes. */
 export const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
+/** True when `slug` is a change name and the change has its intent.md. */
+export function changeExists(root: string, slug: string): boolean {
+  return SLUG.test(slug) && existsSync(join(intentRoot(root), slug, "intent.md"));
+}
+
 /** The Markdown files that belong directly in intent/: the owner guide and the generated queue. */
 const LOOSE_OK = new Set(["readme.md", "queue.md"]);
 
@@ -404,11 +409,14 @@ export function checkConsistency(intent: Intent): string | null {
       return `Status is "${status}" but ${name} is missing. Set status back to an earlier approved state, or to closed.`;
     }
   }
-  const missing = REQUIRED_SECTIONS.filter((s) => !intent.file.sections[s]?.trim());
-  if (missing.length) {
-    return `This request is missing ${andList(missing.map((s) => `a ${s}`))} section. Add ${missing.length > 1 ? "them" : "it"} to intent.md, then set status to accepted.`;
-  }
-  return null;
+  const missing = missingSections(intent.file);
+  return missing ? `${missing.text} Add ${missing.count > 1 ? "them" : "it"} to intent.md, then set status to accepted.` : null;
+}
+
+/** The required sections intent.md lacks, in words ("This request is missing a Problem section."), or null when it has them all. */
+export function missingSections(file: IntentFile): { text: string; count: number } | null {
+  const missing = REQUIRED_SECTIONS.filter((s) => !file.sections[s]?.trim());
+  return missing.length ? { text: `This request is missing ${andList(missing.map((s) => `a ${s}`))} section.`, count: missing.length } : null;
 }
 
 export type HumanGates = { spec: "status" | "pr" | "none"; plan: "status" | "pr" | "none"; merge: "status" | "pr" | "none"; done: "status" | "pr" | "none" };
@@ -546,6 +554,11 @@ export function heldNote(intent: Intent): string {
   return hold ? `Held: ${hold.replace(/[.\s]+$/, "")}.` : "";
 }
 
+/** True when a person put the change on hold (its hold line says why). */
+export function isHeld(fm: Pick<Frontmatter, "hold">): boolean {
+  return fm.hold.trim() !== "";
+}
+
 /** True while an agent's question waits for a person (`question:` in intent.md; see src/questions.ts). */
 export function hasQuestion(intent: Intent): boolean {
   return intent.file.frontmatter.question.trim() !== "";
@@ -598,7 +611,7 @@ export function fileHolds(ordered: Intent[], files: ReadonlyMap<string, string[]
     const holder = ordered.find((h, hat) => {
       if (h === i) return false;
       const s = h.file.frontmatter.status;
-      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !h.file.frontmatter.hold.trim() && !waitingOn(h, ordered).length);
+      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !isHeld(h.file.frontmatter) && !waitingOn(h, ordered).length);
       return holding && (listed(h) ?? []).some((f) => mine.includes(f));
     });
     if (holder) holds.set(i.slug, holder.slug);
@@ -652,7 +665,7 @@ const NOBODY: HumanGates = humanGates(null);
  */
 export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map(), questions: ReadonlyMap<string, string> = new Map()): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || !!i.file.frontmatter.hold.trim() || hasQuestion(i)));
+  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || isHeld(i.file.frontmatter) || hasQuestion(i)));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
   const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug), questions.get(i.slug)))} |`;

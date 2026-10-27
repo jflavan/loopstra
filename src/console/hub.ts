@@ -1,7 +1,9 @@
 import { readdirSync, statSync, watch, type Dirent, type FSWatcher } from "node:fs";
 import { join } from "node:path";
-import { heartbeatPath } from "../heartbeat";
+import { configPath } from "../config";
+import { heartbeatPath, loopHoldPath, pausePath } from "../heartbeat";
 import { intentRoot, scanRepo, type Scan } from "../intents";
+import { loopstraDir } from "../paths";
 import { requestsDir } from "../requests";
 import { errorText } from "../shell";
 import { Trace } from "../trace";
@@ -161,7 +163,7 @@ export class Hub {
     // Watching makes a change show sooner; the timer finds it anyway where watching does not work. The
     // watch on intent/ also spares each look fingerprinting every change folder (see intentsKeyNow).
     this.intentsWatched = this.watchTo(intentRoot(this.root), true, () => { this.intentsChanged = true; }, () => { this.intentsWatched = false; });
-    this.watchTo(join(this.root, ".loopstra"), false);
+    this.watchTo(loopstraDir(this.root), false);
   }
 
   /**
@@ -265,7 +267,7 @@ export class Hub {
    */
   private signatureOf(trace: Trace, key: string): string {
     const parts = [String(trace.lastEventId()), String(Math.floor(Date.now() / 10_000))];
-    for (const p of [heartbeatPath(this.root), join(this.root, ".loopstra", "paused.json"), join(this.root, ".loopstra", "hold.json"), join(this.root, "loopstra", "config.yaml")]) parts.push(stamp(p));
+    for (const p of [heartbeatPath(this.root), pausePath(this.root), loopHoldPath(this.root), configPath(this.root)]) parts.push(stamp(p));
     parts.push(requestsKey(this.root));
     parts.push(key);
     return parts.join("|");

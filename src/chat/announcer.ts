@@ -141,14 +141,14 @@ export async function announce(root: string, log = new AnnouncementLog(root)): P
   const trace = Trace.open(root, () => {});
   const news: Array<{ text: string; slug: string | null }> = [];
   try {
-    const items = await attention(root, config, trace);
+    const scan = await scanRepo(root);
+    const items = await attention(root, config, trace, new Date(), scan);
     const keyOf = (i: AttentionItem) => `${i.kind}|${i.slug ?? ""}|${i.key ?? i.what}`;
     const was = new Set(prev?.active ?? []);
     for (const i of items) {
       if (was.has(keyOf(i))) continue;
       news.push({ text: `${i.label}: ${i.title}. ${i.what}`, slug: i.slug });
     }
-    const scan = await scanRepo(root);
     const statuses: Record<string, Status> = {};
     const merged: string[] = [];
     for (const i of scan.intents) {
@@ -164,7 +164,9 @@ export async function announce(root: string, log = new AnnouncementLog(root)): P
       if (now === "done") news.push({ text: `Done: ${title}. It is finished and checked.`, slug: i.slug });
       else if (IN_MAIN.has(now) && !wasInMain) news.push({ text: `Merged: ${title}. It is in the main code now.`, slug: i.slug });
     }
-    writeJson(statePath, { active: items.map(keyOf), statuses, inMain: merged } satisfies AnnouncerState);
+    const next: AnnouncerState = { active: items.map(keyOf), statuses, inMain: merged };
+    // Written only when it changed: most polls find nothing new.
+    if (JSON.stringify(next) !== JSON.stringify(prev)) writeJson(statePath, next);
   } finally {
     trace.close();
   }

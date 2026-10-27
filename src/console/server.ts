@@ -1,3 +1,4 @@
+import { errorText } from "../shell";
 import page from "../ui/index.html";
 import type { DashboardTransport } from "../chat/transports/dashboard";
 import { loadConfig, type Config } from "../config";
@@ -61,7 +62,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     },
     // A route that fails says so in plain words; the stack stays on this machine's stderr, not on the page.
     error(e) {
-      console.error(`loopstra ui: a request failed: ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ")}`);
+      console.error(`loopstra ui: a request failed: ${errorText(e).replace(/\s+/g, " ")}`);
       return plain("Server error", 500);
     },
   });

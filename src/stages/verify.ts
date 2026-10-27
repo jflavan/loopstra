@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
+import { loopstraDir } from "../paths";
 import { agentPhase, alongside, mayOverlap, projectCommand } from "../phases";
 import { besideWork, EARLY } from "../trace";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
@@ -88,7 +89,7 @@ function line(i: Item): string {
  */
 async function doneCheck(ctx: StepContext, a: { spec: string; review: string }): Promise<{ ok: true; items: Item[]; outcome: string } | Failure> {
   if (!ctx.cfg.gates.done.agent) return { ok: true, items: [], outcome: "" };
-  const dir = join(ctx.root, ".loopstra", "verify", ctx.slug);
+  const dir = join(loopstraDir(ctx.root), "verify", ctx.slug);
   let r: Awaited<ReturnType<typeof agentPhase<"done-check">>>;
   try {
     r = await withDetachedWorktree(ctx.git, dir, ctx.cfg.main_branch, async (cwd) => {

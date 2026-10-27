@@ -1,4 +1,5 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
+import { errorCode } from "../shell";
 import { relativePath, toolTarget } from "../tools";
 import { MEANWHILE_HEADING, MESSAGE_LEAD, MESSAGE_TAIL, REDIRECT_LEAD, REDIRECT_TAIL } from "./steerable";
 import { frameId, parseFrameId, type TranscriptItem } from "./types";
@@ -207,7 +208,7 @@ export class TranscriptReader {
   read(maxBytes = READ_MAX, opts: { final?: boolean } = {}): ReadItem[] {
     // One open file for the size and every read, so they all see the same file.
     let fd: number;
-    try { fd = openSync(this.path, "r"); } catch (e) { if ((e as { code?: string })?.code === "ENOENT") return []; throw e; }
+    try { fd = openSync(this.path, "r"); } catch (e) { if (errorCode(e) === "ENOENT") return []; throw e; }
     let buf: Buffer;
     let size: number;
     try {
