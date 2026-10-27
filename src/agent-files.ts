@@ -116,9 +116,9 @@ function candidates(name: string, where: Where, file: (n: string) => string, dir
  */
 export async function findAgent(name: string, where: Where): Promise<AgentDefinition | null> {
   for (const c of candidates(name, where, (n) => `${n}.md`, "agents")) {
-    const commit = c.inRepo !== undefined ? where.commit : undefined;
-    const path = commit ? `${commit.sha}:${c.inRepo}` : c.path;
-    const text = commit ? await committedText(commit.git, path) : readText(path);
+    const commit = c.inRepo !== undefined && where.commit ? { ...where.commit, object: `${where.commit.sha}:${c.inRepo}` } : null;
+    const path = commit?.object ?? c.path;
+    const text = commit ? await committedText(commit.git, commit.object) : readText(path);
     if (text !== null) return parseAgentFile(name, text, c.from, path);
   }
   return null;
