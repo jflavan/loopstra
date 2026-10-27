@@ -29,7 +29,7 @@ says so and releases nothing, and the ci run of the newer commit releases it, th
 included. Its permissions are the job's own (`contents: write` for the tag and release, `id-token:
 write` for trusted publishing); the workflow grants nothing at the top level. The npm it runs is
 11.21.1, installed with `npm ci` from the lockfile in `.github/npm/`, so its hash is checked;
-Dependabot offers its minor and patch updates.
+Dependabot offers its minor and patch updates. The Bun it runs, like CI's, is the one `.bun-version` names: the oldest Bun Loopstra runs on, which `engines.bun` in `package.json` and the README name too (`tests/unit/bun-version.test.ts` keeps them the same).
 
 1. **Plan** (`bun scripts/release.ts plan [--manual] [patch|minor]`, tested in
    `tests/unit/release.test.ts`):

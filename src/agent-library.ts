@@ -1,8 +1,9 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, posix } from "node:path";
-import { parse, stringify } from "yaml";
-import { enabledPlugins } from "./agent-files";
+import { stringify } from "yaml";
+import { enabledPlugins, splitFrontmatter } from "./agent-files";
+import { readText } from "./fsutil";
 import { errorText } from "./shell";
 import { printable } from "./text";
 
@@ -20,31 +21,13 @@ export interface LibraryItem {
 /** A file to write under the repo root (`path` relative, `/`-separated); null content removes it. */
 export interface FileWrite { path: string; content: string | null }
 
-const NAME = /^[a-z0-9][a-z0-9-]*$/;
+/** A name Loopstra gives an agent or a skill in the repository. */
+export const ITEM_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const MAX_FILES = 200;
 const MAX_BYTES = 5 * 1024 * 1024;
 /** How long a clone may take before it is stopped. */
 export const CLONE_TIMEOUT_MS = 120_000;
-const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
-/**
- * The frontmatter keys of a markdown file, and the rest of it. Frontmatter that is not YAML keys and
- * values counts as none, and `problem` says what it is instead.
- */
-function split(text: string): { front: Record<string, unknown>; body: string | null; problem?: string } {
-  const m = FRONTMATTER.exec(text.replace(/^﻿/, ""));
-  if (!m) return { front: {}, body: null };
-  const body = m[2] ?? "";
-  let v: unknown;
-  try { v = parse(m[1] ?? ""); } catch { return { front: {}, body, problem: "not YAML" }; }
-  if (v === null || v === undefined) return { front: {}, body };
-  if (typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body };
-  return { front: {}, body, problem: "not YAML keys and values" };
-}
-
-function readText(path: string): string | null {
-  try { return readFileSync(path, "utf8"); } catch { return null; }
-}
 
 function entries(dir: string): string[] {
   try { return readdirSync(dir).sort(); } catch { return []; }
@@ -62,7 +45,7 @@ function str(v: unknown): string {
 function agentItem(file: string, from: LibraryItem["from"], prefix: string, nameFromFront: boolean): LibraryItem | null {
   const text = readText(file);
   if (text === null) return null;
-  const { front } = split(text);
+  const { front } = splitFrontmatter(text);
   const plain = (nameFromFront && str(front.name)) || basename(file).replace(/\.md$/, "");
   return { kind: "agent", name: prefix + plain, description: str(front.description), from, path: file };
 }
@@ -70,7 +53,7 @@ function agentItem(file: string, from: LibraryItem["from"], prefix: string, name
 function skillItem(dir: string, from: LibraryItem["from"], prefix: string, nameFromFront: boolean, fallback = basename(dir)): LibraryItem | null {
   const text = readText(join(dir, "SKILL.md"));
   if (text === null) return null;
-  const { front } = split(text);
+  const { front } = splitFrontmatter(text);
   return { kind: "skill", name: prefix + ((nameFromFront && str(front.name)) || fallback), description: str(front.description), from, path: dir };
 }
 
@@ -117,7 +100,7 @@ export function scanFolder(dir: string, rootName?: string): { items: LibraryItem
     }
   };
   walk(dir);
-  return { items: out.filter((i) => NAME.test(i.name)), skipped: out.filter((i) => !NAME.test(i.name)) };
+  return { items: out.filter((i) => ITEM_NAME.test(i.name)), skipped: out.filter((i) => !ITEM_NAME.test(i.name)) };
 }
 
 /** Open flags that never follow a link and never wait on a pipe (each 0 where the system has none, as on Windows). */
@@ -194,12 +177,12 @@ function folderWrites(dir: string, dest: string): FileWrite[] | { refused: strin
 /** The writes that copy an item into the repository, or why not. An agent is one file; a skill is its whole folder plus SOURCE.md. */
 export function copyItem(item: LibraryItem, o: { root: string; source?: string; today: string }): FileWrite[] | { refused: string } {
   const plain = item.name.slice(item.name.indexOf(":") + 1);
-  if (!NAME.test(plain)) return { refused: `\`${plain}\` is not a name Loopstra copies: use lowercase letters, digits and dashes.` };
+  if (!ITEM_NAME.test(plain)) return { refused: `\`${plain}\` is not a name Loopstra copies: use lowercase letters, digits and dashes.` };
   const source = shownUrl(o.source ?? item.path);
   if (item.kind === "agent") {
     let text: string;
     try { text = readFileSync(item.path, "utf8"); } catch (e) { return { refused: `${item.path} cannot be read: ${errorText(e)}` }; }
-    const { front, body, problem } = split(text);
+    const { front, body, problem } = splitFrontmatter(text);
     if (problem) return { refused: `${item.path}'s front matter is ${problem}.` };
     return [{ path: `.claude/agents/${plain}.md`, content: `---\n${stringify({ ...front, source })}---\n${body ?? text}` }];
   }

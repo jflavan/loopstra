@@ -1,12 +1,13 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { checkAgentSetup, userHome } from "../agent-files";
-import { checkedPath, CLONE_TIMEOUT_MS, cloneSource, copyItem, listLibrary, newAgentFile, scanFolder, shownUrl, type FileWrite, type LibraryItem } from "../agent-library";
+import { checkedPath, CLONE_TIMEOUT_MS, cloneSource, ITEM_NAME, copyItem, listLibrary, newAgentFile, scanFolder, shownUrl, type FileWrite, type LibraryItem } from "../agent-library";
 import { BUILTIN_AGENTS, CHAT_STEPS, CONTINUES_BUILD, READ_ONLY_STEPS, TEAM_WAYS } from "../agents";
 import { localUser } from "../chat/transports/shared";
 import type { Config, StepAgents } from "../config";
 import { Git } from "../git";
 import { STAGE_NAMES, STEP_KEYS, STEPS } from "../models";
+import { readText } from "../fsutil";
 import { CONSOLE, submitRequest } from "../requests";
 import { CONFIG_REL, fileVersion, STALE_SETTINGS, UNCOMMITTED_FILES } from "../settings";
 import { modelName } from "../setup/sections/models";
@@ -26,8 +27,6 @@ import { AGENT_FIELDS, type AgentField, type AgentFields, type AgentFilesOp, typ
 
 type Kind = LibraryItem["kind"];
 
-/** A name Loopstra gives an agent or a skill in the repository. */
-const NAME = /^[a-z0-9][a-z0-9-]*$/;
 const MAX_NAME = 64;
 const MAX_FILES = 200;
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -40,10 +39,6 @@ const MAX_VERSION = 100;
 
 /** How long a route that clones may stay silent: longer than a clone may take (see CLONE_TIMEOUT_MS). */
 export const SOURCE_IDLE_SECONDS = Math.ceil(CLONE_TIMEOUT_MS / 1000) + 30;
-
-function readText(path: string): string | null {
-  try { return readFileSync(path, "utf8"); } catch { return null; }
-}
 
 /**
  * Who names an agent, a skill or a team, in the config's words: `agents.all`, `agents.steps.review`,
@@ -79,7 +74,7 @@ function libraryView(cfg: Config, item: LibraryItem): LibraryItemView | null {
   if (from === "source") return null;
   const text = readText(item.kind === "agent" ? item.path : join(item.path, "SKILL.md"));
   // Only an agent the page can name back (see the edit operation) is offered for editing.
-  const editable = item.kind === "agent" && item.from === "repo" && NAME.test(item.name) && item.name.length <= MAX_NAME;
+  const editable = item.kind === "agent" && item.from === "repo" && ITEM_NAME.test(item.name) && item.name.length <= MAX_NAME;
   return {
     kind: item.kind,
     name: item.name,
@@ -148,7 +143,7 @@ const kindOf = (v: unknown): Kind | null => (v === "agent" || v === "skill" ? v 
 
 /** The repo name an agent or skill is written under, or why it cannot be. */
 function nameProblem(name: string | null, kind: Kind): string | null {
-  if (name === null || !NAME.test(name) || name.length > MAX_NAME) return `${kind === "agent" ? "An agent" : "A skill"} name is lowercase letters, digits and dashes (at most ${MAX_NAME}), like lead-reviewer.`;
+  if (name === null || !ITEM_NAME.test(name) || name.length > MAX_NAME) return `${kind === "agent" ? "An agent" : "A skill"} name is lowercase letters, digits and dashes (at most ${MAX_NAME}), like lead-reviewer.`;
   return null;
 }
 

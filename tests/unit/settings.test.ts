@@ -68,6 +68,18 @@ describe("settings", () => {
     expect(configVersion("a")).toBe("ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb");
   });
 
+  test("removing an agents setting leaves no empty map behind, however deep", () => {
+    const base = "version: 1\ncommands:\n  test: t\n";
+    for (const [text, path] of [
+      [`${base}agents:\n  steps:\n    review:\n      skills: [a]\n`, ["agents", "steps", "review", "skills"]],
+      [`${base}agents:\n  steps:\n    review:\n      skills: [a]\n`, ["agents", "steps", "review"]],
+      [`${base}agents:\n  teams:\n    r:\n      members: [a]\n`, ["agents", "teams", "r"]],
+    ] as const) {
+      const r = applySetting("loopstra/config.yaml", text, [...path], null);
+      expect(r.ok && r.text).toBe(base);
+    }
+  });
+
   test("agents paths are writable settings; others are not", () => {
     expect(settingPath("agents.steps.review.teams")).toEqual(["agents", "steps", "review", "teams"]);
     expect(settingPath("agents.all.mcp_tools")).toEqual(["agents", "all", "mcp_tools"]);

@@ -1,3 +1,4 @@
+import { once } from "../agents";
 import type { AgentField, AgentsView, AgentStepRow } from "../console/types";
 
 /*
@@ -12,7 +13,6 @@ type From = "own" | "all" | "stage" | "build" | null;
 
 export interface Effective { value: string | string[] | null; from: From }
 
-const once = (names: readonly string[]): string[] => [...new Set(names)];
 const listOf = (v: string | string[] | undefined): string[] => (Array.isArray(v) ? v : v === undefined ? [] : [v]);
 
 /**

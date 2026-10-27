@@ -138,7 +138,7 @@ async function takePlanAhead(ctx: StepContext, phase: AgentPhaseSpec & { name: "
   let why: string | null;
   let model = "";
   try {
-    model = (await phaseModel(ctx, phase)).name;
+    model = (await phaseModel(ctx, phase, prompt)).name;
     why = await whyNotUsed(ctx, model, prompt, kept);
   } catch (e) {
     if (notTheStepsFault(e)) throw e;

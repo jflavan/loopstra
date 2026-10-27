@@ -18,6 +18,9 @@ export function snapshotsDir(root: string): string {
   return join(loopstraDir(root), "snapshots");
 }
 
+/** How many prompts a step remembers the config of (see StepContext.rememberPrompt): more than run at once. */
+const KEPT_PROMPTS = 8;
+
 export class StepContext {
   readonly git: Git;
   /** The commit this step's read-only sessions read, once asked for (see readCommit). */
@@ -54,6 +57,28 @@ export class StepContext {
       this.trace.eventOnChange("_loop", "error", '"where":"models"', { where: "models", error: errorText(e) }, "error");
       return this.cfg;
     }
+  }
+
+  /** The config each of the step's newest prompts was rendered from (see rememberPrompt). */
+  private readonly promptConfigs = new Map<string, Config>();
+
+  /**
+   * Notes that `prompt` was rendered from `cfg` (a models() read), so the session that sends it runs
+   * on that same read (see renderedWith): the agents its prompt names are the ones it is given, even
+   * when a person saves the settings in between. The newest few are kept.
+   */
+  rememberPrompt(prompt: string, cfg: Config): void {
+    this.promptConfigs.delete(prompt);
+    this.promptConfigs.set(prompt, cfg);
+    for (const old of this.promptConfigs.keys()) {
+      if (this.promptConfigs.size <= KEPT_PROMPTS) break;
+      this.promptConfigs.delete(old);
+    }
+  }
+
+  /** The config `prompt` was rendered from, when this step rendered it lately (see rememberPrompt). */
+  renderedWith(prompt: string): Config | undefined {
+    return this.promptConfigs.get(prompt);
   }
 
   /**

@@ -3,12 +3,13 @@ import { printResult, report, upgradeCommand, type UpgradeIo } from "../../src/c
 import type { RepoResult } from "../../src/upgrade/repo";
 
 /** An io that records what it is asked to do. */
-function io(installed: string, latest: string | null, o: { install?: boolean; stamp?: string } = {}) {
+function io(installed: string, latest: string | null, o: { install?: boolean; stamp?: string; oldBun?: boolean } = {}) {
   const calls: string[] = [];
   const said: string[] = [];
   const pieces: UpgradeIo = {
     say: (l) => said.push(l),
     installed,
+    oldBun: (then) => (o.oldBun ? `Loopstra needs Bun 1.4.4 or later; this is Bun 1.4.2. Run bun upgrade, then ${then}.` : null),
     stamp: o.stamp ?? installed,
     latest: async () => latest,
     notes: async (from, to) => `## ${to}\n- feat: since ${from}`,
@@ -20,6 +21,20 @@ function io(installed: string, latest: string | null, o: { install?: boolean; st
 }
 
 describe("upgradeCommand", () => {
+  test("a Bun too old for this version stops it before anything is installed or written", async () => {
+    for (const args of [[], ["--repo"]]) {
+      const t = io("0.4.0", "0.5.0", { oldBun: true });
+      expect(await upgradeCommand(args, t.pieces)).toBe(1);
+      expect(t.calls).toEqual([]);
+      expect(t.said).toEqual(["Loopstra needs Bun 1.4.4 or later; this is Bun 1.4.2. Run bun upgrade, then run loopstra upgrade again."]);
+    }
+    // --check says so, and still says what an upgrade would do.
+    const t = io("0.4.0", "0.4.0", { oldBun: true });
+    expect(await upgradeCommand(["--check"], t.pieces)).toBe(0);
+    expect(t.said[0]).toStartWith("Loopstra needs Bun 1.4.4");
+    expect(t.calls).toEqual(["check"]);
+  });
+
   test("a development checkout skips the install and runs the repository step", async () => {
     const t = io("0.0.0-dev", "0.5.0");
     expect(await upgradeCommand([], t.pieces)).toBe(0);

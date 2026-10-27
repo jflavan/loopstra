@@ -1,6 +1,12 @@
 import type { Config, StepAgents } from "./config";
 import { STEP_KEYS, type StepKey } from "./models";
 
+/** A team's name: lowercase words joined by dashes. */
+export const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** Each name once, in first-seen order. */
+export const once = (names: readonly string[]): string[] => [...new Set(names)];
+
 /** How a team's members work: all at once and merged, or each tries and the best is kept. */
 export const TEAM_WAYS = ["parallel", "pick"] as const;
 export type TeamWay = (typeof TEAM_WAYS)[number];
@@ -76,15 +82,21 @@ function bareBash(rule: string): boolean {
   return m !== null && /^[\s*]*(:\*)?\s*$/.test(m[1] ?? "");
 }
 
-/** The reason a `tools` rule is refused, or null. A read-only step also refuses file changes and a bare Bash. */
+/** What starts every refusal that holds on every step: git that changes history, or a Bash rule that allows it. */
+const ONLY_LOOPSTRA = "only Loopstra commits, branches, merges and pushes";
+
+/**
+ * The reason a `tools` rule is refused, or null. No step may hold git that changes history, or a
+ * bare Bash rule (it would allow that git too); a read-only step also refuses file changes.
+ */
 export function toolProblem(rule: string, readOnly: boolean): string | null {
   const sub = historyGit(rule);
-  if (sub === "") return "only Loopstra commits, branches, merges and pushes; git is not allowed";
-  if (sub !== null) return `only Loopstra commits, branches, merges and pushes; git ${sub} is not allowed`;
+  if (sub === "") return `${ONLY_LOOPSTRA}; git is not allowed`;
+  if (sub !== null) return `${ONLY_LOOPSTRA}; git ${sub} is not allowed`;
+  if (bareBash(rule)) return `${ONLY_LOOPSTRA}; a bare Bash rule would let it run any git, so name the commands, like Bash(make *)`;
   if (!readOnly) return null;
   const edit = /^(Edit|MultiEdit|Write|NotebookEdit)(\(.*\))?$/.exec(rule);
   if (edit) return `${edit[1] ?? rule} would let it change files`;
-  if (bareBash(rule)) return "a bare Bash rule would let it run anything";
   return null;
 }
 
@@ -95,7 +107,7 @@ export function toolProblem(rule: string, readOnly: boolean): string | null {
  */
 export function toolRuleProblem(rule: string, where: StepKey | "all"): string | null {
   const problem = toolProblem(rule, where === "all" || READ_ONLY_STEPS.has(where));
-  if (!problem || problem.startsWith("only Loopstra")) return problem;
+  if (!problem || problem.startsWith(ONLY_LOOPSTRA)) return problem;
   const [who, it] = where === "all" ? ["these reach read-only steps too", "them"] : [`${where} is read-only`, "it"];
   return `${who}; ${problem.replace(" would let it ", ` would let ${it} `)}`;
 }
@@ -120,7 +132,6 @@ export interface AgentSetup {
   mcpTools: string[];
 }
 
-const once = (names: readonly string[]) => [...new Set(names)];
 
 /**
  * A step's setup: `all`, then the stage's skills, then the step's own, each name once. Chat steps get

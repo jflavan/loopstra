@@ -28,6 +28,7 @@ import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
 import { repositoryTop, uncommittedSetup } from "./init";
 import { loopstraDir, runDir } from "./paths";
+import { oldBun } from "./package";
 import { olderSetupRefusal } from "./stamp";
 import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, QuestionAsked, recordNotYet, resetStop, SessionStopped, stopPromise, stopRequested, StopRequested } from "./stop";
 import { Trace, type EventType } from "./trace";
@@ -902,13 +903,15 @@ export function claudeOverrideProblem(env: Record<string, string | undefined> = 
 }
 
 /**
- * What `start` checks before the loop begins, as a plain message, or null when it may start: the
- * folder is set up (it has loopstra/config.yaml) by a Loopstra with the stamp (an older setup is
+ * What `start` checks before the loop begins, as a plain message, or null when it may start: Bun is
+ * one this package runs on (see oldBun), the folder is set up (it has loopstra/config.yaml) by a Loopstra with the stamp (an older setup is
  * upgraded first), no loop is running in it already, the tools are installed, the checkout is on
  * main_branch, Loopstra's own files are committed there, and a repository with a remote has gh,
  * signed in. A config that is there but cannot be loaded is left to the loop, which reports it and retries.
  */
 export async function preflight(root: string, env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const bun = oldBun("start Loopstra again");
+  if (bun) return bun;
   const top = await repositoryTop(root);
   if (top) return `This folder is inside the git repository at ${top}. Loopstra works on a whole repository: run it in ${top}.`;
   if (!existsSync(configPath(root))) return NOT_SET_UP;

@@ -292,8 +292,8 @@ interface Comparison {
 async function comparison(ctx: StepContext, phase: AgentPhaseSpec & { name: JudgeName }, prompt: string | null): Promise<Comparison | null> {
   if (ctx.cfg.speed.cheap_judges === "off") return null;
   // The models as the sessions will read them (see phaseModel). A judge on anything but strong (max too) is not compared.
-  const strong = await phaseModel(ctx, phase);
-  const cheap = (await phaseModel(ctx, { ...phase, model: "default" })).name;
+  const strong = await phaseModel(ctx, phase, prompt);
+  const cheap = (await phaseModel(ctx, { ...phase, model: "default" }, prompt)).name;
   if (strong.ref !== "strong" || cheap === strong.name) return null;
   const template = templateSha(ctx.root, phase.name);
   if (template === null || prompt === null) return null;

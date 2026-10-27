@@ -1,5 +1,6 @@
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
+import { TEAM_NAME } from "../../agents";
 import type { AgentFilesOp, AgentsView, AgentStepRow, LibraryItemView, SourceItems } from "../../console/types";
 import { choicesFor, codeParts, effective, getsText, listText, parseList, pickSummary, withChosen, type Field } from "../agent-settings";
 import { listSource, sendAgentFiles, sendSetting } from "../requests";
@@ -34,7 +35,6 @@ interface Writes { view: AgentsView; rev: number; locked: boolean; wait: Props["
 const FIELD_LABELS: Record<Field, string> = { agent: "agent", subagents: "subagents", teams: "teams", skills: "skills", tools: "tools", mcp_tools: "MCP tools" };
 const LIST_FIELDS: Field[] = ["subagents", "teams", "skills"];
 const CHAT_WARNING = "Anyone allowed to chat can steer these tools.";
-const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const FROM_TITLES: Record<LibraryItemView["from"], string> = { repo: "In the repo", personal: "On this machine", plugin: "From plugins" };
 
 const asList = (v: string | string[] | undefined): string[] => (Array.isArray(v) ? v : v === undefined ? [] : [v]);

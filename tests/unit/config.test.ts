@@ -212,7 +212,9 @@ test("agents settings are refused in plain words", () => {
   expect(problems({ steps: { design: { agent: "Explore" } } })).toEqual(["agents.steps.design.agent: Explore is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
   expect(problems({ all: { agent: "general-purpose" } })).toEqual(["agents.all.agent: general-purpose is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
   expect(problems({ all: { subagents: ["Explore"] }, steps: { review: { subagents: ["Plan"] } } })).toEqual([]);
-  expect(problems({ steps: { review: { tools: ["Bash"] } } })).toEqual(["agents.steps.review.tools.0: review is read-only; a bare Bash rule would let it run anything"]);
+  expect(problems({ steps: { review: { tools: ["Bash"] } } })).toEqual([`agents.steps.review.tools.0: ${BARE_BASH}`]);
+  // A writing step may not have one either: it would allow git commit and git push.
+  expect(problems({ steps: { build: { tools: ["Bash(*)"] } } })).toEqual([`agents.steps.build.tools.0: ${BARE_BASH}`]);
   expect(problems({ steps: { build: { tools: ["Bash(git push *)"] } } })).toEqual(["agents.steps.build.tools.0: only Loopstra commits, branches, merges and pushes; git push is not allowed"]);
   expect(problems({ all: { tools: ["Write"] } })).toEqual(["agents.all.tools.0: these reach read-only steps too; Write would let them change files"]);
   expect(problems({ all: { mcp_tools: ["mcp__x,Bash"] } })).toEqual(["agents.all.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
@@ -223,8 +225,17 @@ test("agents settings are refused in plain words", () => {
   expect(problems({ all: { teams: ["constructor"] } })).toEqual(["agents.all.teams.0: there is no team constructor under agents.teams"]);
   expect(problems({ sources: "mine" })).toEqual(["agents.sources: must be all or repo"]);
   expect(problems({ steps: { review: { mcp_tools: ["mcp__x,Bash"] } } })).toEqual(["agents.steps.review.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
-  // Editing and a bare Bash are fine on a step that changes files.
-  expect(problems({ steps: { build: { tools: ["Edit", "Write", "Bash"] } } })).toEqual([]);
+  // Editing is fine on a step that changes files.
+  expect(problems({ steps: { build: { tools: ["Edit", "Write", "Bash(make *)"] } } })).toEqual([]);
   // Narrow commands and read-only git are fine anywhere; Bash(git diff *) is not history-changing.
   expect(problems({ steps: { review: { tools: ["Bash(npm run e2e *)", "Bash(git diff *)", "WebFetch"] } } })).toEqual([]);
+});
+
+const BARE_BASH = "only Loopstra commits, branches, merges and pushes; a bare Bash rule would let it run any git, so name the commands, like Bash(make *)";
+
+test("claude.allowed_tools is held to what a writing step's own tools are", () => {
+  const problems = (allowed_tools: string[]) => { try { validateConfig({ version: 1, commands: { test: "bun test" }, claude: { allowed_tools } }); return []; } catch (e) { return (e as ConfigError).problems.map((p) => p.text); } };
+  expect(problems(["Read", "Edit", "Bash(make *)", "Bash(git diff *)"])).toEqual([]);
+  expect(problems(["Read", "Bash"])).toEqual([`claude.allowed_tools.1: ${BARE_BASH}`]);
+  expect(problems(["Bash(git push *)"])).toEqual(["claude.allowed_tools.0: only Loopstra commits, branches, merges and pushes; git push is not allowed"]);
 });

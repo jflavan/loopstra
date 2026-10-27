@@ -1,8 +1,8 @@
 import { lstatSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { checkAgentSetup, userHome } from "../../agent-files";
-import { cloneSource, copyItem, listLibrary, newAgentFile, scanFolder, shownUrl, type FileWrite, type LibraryItem } from "../../agent-library";
-import { BUILTIN_AGENTS, CHAT_STEPS, CONTINUES_BUILD, TEAM_WAYS, toolRuleProblem, type TeamWay } from "../../agents";
+import { cloneSource, copyItem, ITEM_NAME, listLibrary, newAgentFile, scanFolder, shownUrl, type FileWrite, type LibraryItem } from "../../agent-library";
+import { BUILTIN_AGENTS, CHAT_STEPS, CONTINUES_BUILD, once, TEAM_NAME, TEAM_WAYS, toolRuleProblem, type TeamWay } from "../../agents";
 import { MCP_RULE, MCP_RULE_TEXT, type Config, type StepAgents } from "../../config";
 import { STEP_KEYS, STEPS, type StepKey } from "../../models";
 import { localDate } from "../../signals";
@@ -17,8 +17,6 @@ type Path = readonly string[];
 /** The keys of a step's settings, in the order they are asked. */
 const KEYS = ["agent", "subagents", "teams", "skills", "tools", "mcp_tools"] as const;
 
-const NAME = /^[a-z0-9][a-z0-9-]*$/;
-const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 const MACHINE = "from this machine";
 const SOURCE = "from a git repository or folder";
@@ -31,7 +29,6 @@ interface Run {
   added: Record<Kind, string[]>;
 }
 
-const once = (names: readonly string[]) => [...new Set(names)];
 const record = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {});
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : []);
 /** A comma-separated answer as a list. */
@@ -59,14 +56,6 @@ function firstProblem(rules: string[], problem: (rule: string) => string | null)
     if (p) return `${p}.`;
   }
   return null;
-}
-
-/** Removes an empty map at each path, so no `{}` is left in the file. */
-function tidy(doc: ConfigDocument, paths: Path[]): void {
-  for (const p of paths) {
-    const v = doc.get(p);
-    if (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length) doc.clear(p);
-  }
 }
 
 /**
@@ -116,7 +105,7 @@ async function fromMachine(run: Run, kind: Kind): Promise<string[]> {
   const { ask, root } = run.ctx;
   const found = listLibrary(root, userHome(), "all").filter((i) => i.kind === kind && i.from !== "repo");
   // A name that is not copied as it is (copyItem refuses it) is not offered.
-  const items = found.filter((i) => NAME.test(plainName(i.name)) && plainText(i.name));
+  const items = found.filter((i) => ITEM_NAME.test(plainName(i.name)) && plainText(i.name));
   saySkipped(run, kind, found.length - items.length);
   if (!items.length) { ask.say(`There are no ${kind}s on this machine outside the repository.`); return []; }
   for (const i of items) ask.say(itemLine(i));
@@ -158,7 +147,7 @@ async function newAgent(run: Run): Promise<string[]> {
   const taken = new Set([...repo, ...run.added.agent, ...BUILTIN_AGENTS]);
   const name = await ask.text("Name of the new agent (lowercase letters, digits and dashes; - to go back)", {
     optional: true,
-    check: (n) => (!NAME.test(n) ? "A name is lowercase letters, digits and dashes, like lead-reviewer." : taken.has(n) ? `There is already an agent called ${n}.` : null),
+    check: (n) => (!ITEM_NAME.test(n) ? "A name is lowercase letters, digits and dashes, like lead-reviewer." : taken.has(n) ? `There is already an agent called ${n}.` : null),
   });
   if (!name) return [];
   const description = await ask.text(`What ${name} is for, in one line (a session reads it to choose a subagent)`);
@@ -209,7 +198,7 @@ function writeStep(doc: ConfigDocument, path: Path, next: Partial<Record<(typeof
     if (has(v)) doc.set([...path, k], v, { flow: Array.isArray(v) });
   }
   for (const k of KEYS) if (!has(next[k])) doc.clear([...path, k]);
-  tidy(doc, [path, ["agents", "steps"], ["agents", "all"], ["agents"]]);
+  doc.dropEmptyMaps([path, ["agents", "steps"], ["agents", "all"], ["agents"]]);
 }
 
 /** One step's settings (or all steps' with null). */
