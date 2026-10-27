@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { basename, join, posix } from "node:path";
 import { parse, stringify } from "yaml";
 import { enabledPlugins } from "./agent-files";
+import { errorText } from "./shell";
+import { printable } from "./text";
 
 /** A skill or an agent that can be put in the repository's `.claude/`. */
 export interface LibraryItem {
@@ -24,15 +26,19 @@ const MAX_BYTES = 5 * 1024 * 1024;
 const CLONE_TIMEOUT_MS = 120_000;
 const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
-/** The frontmatter keys of a markdown file, and the rest of it. */
-function split(text: string): { front: Record<string, unknown>; body: string | null } {
+/**
+ * The frontmatter keys of a markdown file, and the rest of it. Frontmatter that is not YAML keys and
+ * values counts as none, and `problem` says what it is instead.
+ */
+function split(text: string): { front: Record<string, unknown>; body: string | null; problem?: string } {
   const m = FRONTMATTER.exec(text.replace(/^﻿/, ""));
   if (!m) return { front: {}, body: null };
-  try {
-    const v: unknown = parse(m[1] ?? "");
-    if (v && typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body: m[2] ?? "" };
-  } catch { /* unreadable frontmatter counts as none */ }
-  return { front: {}, body: m[2] ?? "" };
+  const body = m[2] ?? "";
+  let v: unknown;
+  try { v = parse(m[1] ?? ""); } catch { return { front: {}, body, problem: "not YAML" }; }
+  if (v === null || v === undefined) return { front: {}, body };
+  if (typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body };
+  return { front: {}, body, problem: "not YAML keys and values" };
 }
 
 function readText(path: string): string | null {
@@ -87,9 +93,11 @@ export function listLibrary(root: string, home: string, sources: "all" | "repo")
 /**
  * Every skill and agent in a folder (a fetched source). Hidden folders other than `.claude`, and
  * `node_modules`, are skipped; links are not followed. `rootName` names a skill at the folder's root
- * that has no name of its own (a fetched folder's own name is a temporary one).
+ * that has no name of its own (a fetched folder's own name is a temporary one). An item whose name
+ * Loopstra would not copy (not lowercase letters, digits and dashes) is in `skipped`, not `items`:
+ * its name came from the source, so it is not shown or offered.
  */
-export function scanFolder(dir: string, rootName?: string): LibraryItem[] {
+export function scanFolder(dir: string, rootName?: string): { items: LibraryItem[]; skipped: LibraryItem[] } {
   const out: LibraryItem[] = [];
   const walk = (d: string) => {
     const skill = skillItem(d, "source", "", true, d === dir ? rootName : undefined);
@@ -108,7 +116,7 @@ export function scanFolder(dir: string, rootName?: string): LibraryItem[] {
     }
   };
   walk(dir);
-  return out;
+  return { items: out.filter((i) => NAME.test(i.name)), skipped: out.filter((i) => !NAME.test(i.name)) };
 }
 
 /** True when a file's first 8000 bytes hold a NUL. */
@@ -124,13 +132,17 @@ function looksBinary(path: string): boolean {
 function folderWrites(dir: string, dest: string): FileWrite[] | { refused: string } {
   const out: FileWrite[] = [];
   let bytes = 0;
+  const unreadable = (shown: string, e: unknown) => `${shown} cannot be read: ${errorText(e)}`;
   const walk = (d: string, rel: string): string | null => {
-    for (const name of entries(d)) {
+    let names: string[];
+    try { names = readdirSync(d).sort(); } catch (e) { return unreadable(rel || d, e); }
+    for (const name of names) {
       const path = join(d, name);
       const shown = rel ? `${rel}/${name}` : name;
       if (name === ".git") continue;
-      if (/[\\\u0000-\u001f\u007f]/.test(name)) return `${shown} has a backslash or control character in its name.`;
-      const st = lstatSync(path);
+      if (/[\\\u0000-\u001f\u007f-\u009f]/.test(name)) return `${printable(shown)} has a backslash or control character in its name.`;
+      let st;
+      try { st = lstatSync(path); } catch (e) { return unreadable(shown, e); }
       if (st.isSymbolicLink()) return `${shown} is a link, and links are not copied.`;
       if (st.isDirectory()) {
         const bad = walk(path, shown);
@@ -141,8 +153,10 @@ function folderWrites(dir: string, dest: string): FileWrite[] | { refused: strin
       if (out.length >= MAX_FILES) return `A skill is copied with at most ${MAX_FILES} files.`;
       bytes += st.size;
       if (bytes > MAX_BYTES) return "A skill is copied with at most 5 MB of files.";
-      if (looksBinary(path)) return `${shown} is a binary file, and binary files are not copied yet.`;
-      out.push({ path: `${dest}/${shown}`, content: readFileSync(path, "utf8") });
+      try {
+        if (looksBinary(path)) return `${shown} is a binary file, and binary files are not copied yet.`;
+        out.push({ path: `${dest}/${shown}`, content: readFileSync(path, "utf8") });
+      } catch (e) { return unreadable(shown, e); }
     }
     return null;
   };
@@ -156,9 +170,10 @@ export function copyItem(item: LibraryItem, o: { root: string; source?: string; 
   if (!NAME.test(plain)) return { refused: `\`${plain}\` is not a name Loopstra copies: use lowercase letters, digits and dashes.` };
   const source = shownUrl(o.source ?? item.path);
   if (item.kind === "agent") {
-    const text = readText(item.path);
-    if (text === null) return { refused: `${item.path} cannot be read.` };
-    const { front, body } = split(text);
+    let text: string;
+    try { text = readFileSync(item.path, "utf8"); } catch (e) { return { refused: `${item.path} cannot be read: ${errorText(e)}` }; }
+    const { front, body, problem } = split(text);
+    if (problem) return { refused: `${item.path}'s front matter is ${problem}.` };
     return [{ path: `.claude/agents/${plain}.md`, content: `---\n${stringify({ ...front, source })}---\n${body ?? text}` }];
   }
   const files = folderWrites(item.path, `.claude/skills/${plain}`);
@@ -181,6 +196,33 @@ function sourceName(url: string): string {
 }
 
 /**
+ * The environment a clone runs in, so that it never prompts: GIT_TERMINAL_PROMPT=0, and ssh in batch
+ * mode (`-o BatchMode=yes` added to the user's own GIT_SSH_COMMAND). When the user names another ssh
+ * through GIT_SSH or core.sshCommand (`sshCommand`, "" when unset), GIT_SSH_COMMAND stays unset so
+ * theirs runs (it may not take `-o`).
+ */
+export function cloneEnv(env: Record<string, string | undefined>, sshCommand: string): Record<string, string | undefined> {
+  const { GIT_SSH_COMMAND: own, ...rest } = env;
+  const out: Record<string, string | undefined> = { ...rest, GIT_TERMINAL_PROMPT: "0" };
+  if (own) out.GIT_SSH_COMMAND = `${own} -o BatchMode=yes`;
+  else if (!env.GIT_SSH && !sshCommand.trim()) out.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
+  return out;
+}
+
+/** git's core.sshCommand as git in the current folder sees it, or "" (unset, or git could not say). */
+function configuredSshCommand(): string {
+  try {
+    const r = Bun.spawnSync(["git", "config", "--get", "core.sshCommand"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 10_000 });
+    return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  } catch { return ""; }
+}
+
+/** Removes a folder, leaving it when it cannot be (a handle still open): a leftover temporary folder is not worth failing over. */
+function removeQuietly(dir: string): void {
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* left in the temporary folder */ }
+}
+
+/**
  * Fetches a source: a git URL is cloned shallowly into a new temporary folder (removed by `cleanup`),
  * a local folder is used as it is. Nothing in it runs. `name`: what to call a skill at its root.
  */
@@ -191,12 +233,12 @@ export async function cloneSource(url: string): Promise<{ dir: string; name: str
     if (isDir(url)) return { dir: url, name: sourceName(url), cleanup: () => {} };
     return { refused: `\`${shown}\` is neither a folder nor a URL starting with https://, ssh://, git@ or file://.` };
   }
-  const dir = mkdtempSync(join(tmpdir(), "loopstra-source-"));
-  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  let dir: string;
+  try { dir = mkdtempSync(join(tmpdir(), "loopstra-source-")); } catch (e) { return { refused: `A temporary folder for ${shown} could not be made: ${errorText(e)}` }; }
+  const cleanup = () => removeQuietly(dir);
   try {
-    const ssh = `${process.env.GIT_SSH_COMMAND || "ssh"} -o BatchMode=yes`;
     const proc = Bun.spawn(["git", "clone", "--depth", "1", "--quiet", "--", url, dir], {
-      stdout: "ignore", stderr: "pipe", stdin: "ignore", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: ssh },
+      stdout: "ignore", stderr: "pipe", stdin: "ignore", env: cloneEnv(process.env, configuredSshCommand()),
     });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; proc.kill(); }, CLONE_TIMEOUT_MS);

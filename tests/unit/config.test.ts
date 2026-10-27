@@ -219,6 +219,8 @@ test("agents settings are refused in plain words", () => {
   expect(problems({ teams: { Reviewers: { members: ["a"] } } })).toEqual(["agents.teams.Reviewers: a team name is lowercase words joined by dashes"]);
   expect(problems({ teams: { r: { members: [] } } })).toEqual(["agents.teams.r.members: a team needs at least one member"]);
   expect(problems({ steps: { review: { teams: ["nope"] } } })).toEqual(["agents.steps.review.teams.0: there is no team nope under agents.teams"]);
+  // A name an object has from its prototype is not a team.
+  expect(problems({ all: { teams: ["constructor"] } })).toEqual(["agents.all.teams.0: there is no team constructor under agents.teams"]);
   expect(problems({ sources: "mine" })).toEqual(["agents.sources: must be all or repo"]);
   expect(problems({ steps: { review: { mcp_tools: ["mcp__x,Bash"] } } })).toEqual(["agents.steps.review.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
   // Editing and a bare Bash are fine on a step that changes files.

@@ -16,3 +16,6 @@ export const lineText = (line: string): string => line.replace(/\r?\n$/, "");
 
 /** True when most of a text's line endings are "\r\n". */
 export const isCrlf = (s: string): boolean => (s.match(/\r\n/g)?.length ?? 0) * 2 > (s.match(/\n/g)?.length ?? 0);
+
+/** Text from outside (a file, a fetched source, git's output) safe to print: control characters become spaces. */
+export const printable = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();

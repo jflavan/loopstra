@@ -116,6 +116,36 @@ describe("the agents section", () => {
     expect(parse(text).agents).toEqual({ steps: { build: { agent: "builder" } } });
   });
 
+  test("- at the new agent's name goes back without adding anything", async () => {
+    const w = world();
+    const { text, files } = await asked(w, ["", "build", "add one", "a new agent", "-", "none", "n", "", "n", "", "-", "-", "done"]);
+    expect(files).toEqual([]);
+    expect(text).toBe(BASE);
+  });
+
+  test("names and refusals from a fetched source reach the terminal without control characters", async () => {
+    if (process.platform === "win32") return;
+    const src = tempDir("loopstra-src-");
+    dirs.push(src);
+    write(join(src.path, "skills/good/SKILL.md"), "---\ndescription: Good\n---\nBody\n");
+    write(join(src.path, "skills/evil/SKILL.md"), "---\nname: \"ev\\e[2Jil\"\ndescription: Evil\n---\nBody\n");
+    write(join(src.path, "skills/good/a\u001b[2Jb.md"), "x");
+    const w = world();
+    const { text, shown, files } = await asked(w, ["", "build", "", "n", "", "y", "from a git repository or folder", src.path, "good", "", "-", "-", "done"]);
+    expect(shown).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f]/);
+    expect(shown).toContain("Skipped 1 skill whose name is not lowercase letters, digits and dashes.");
+    expect(shown).toContain("a [2Jb.md has a backslash or control character in its name.");
+    expect(shown).toContain("Which skills to copy (any of good, separated");
+    expect(files).toEqual([]);
+    expect(text).toBe(BASE);
+  });
+
+  test("a team can be called constructor", async () => {
+    const w = world(BASE, { ".claude/agents/sec.md": agentText("sec") });
+    const { text } = await asked(w, ["", "teams", "new team", "constructor", "n", "sec", "", "done", "done"]);
+    expect(parse(text).agents).toEqual({ teams: { constructor: { members: ["sec"] } } });
+  });
+
   test("a skill from a folder replaces the repo's own when confirmed, removing its old files, and records where it came from", async () => {
     const src = tempDir("loopstra-src-");
     dirs.push(src);

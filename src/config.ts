@@ -146,7 +146,7 @@ const agents = z.object({
       if (problem) bad([...path, "tools", i], problem);
     });
     set.teams.forEach((t, i) => {
-      if (!(t in a.teams)) bad([...path, "teams", i], `there is no team ${t} under agents.teams`);
+      if (!Object.hasOwn(a.teams, t)) bad([...path, "teams", i], `there is no team ${t} under agents.teams`);
     });
     // A built-in's fixed tool list has no StructuredOutput, so a step running as one could not report.
     if (set.agent !== undefined && BUILTIN_AGENTS.has(set.agent)) {

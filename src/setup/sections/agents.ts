@@ -6,7 +6,7 @@ import { BUILTIN_AGENTS, CHAT_STEPS, CONTINUES_BUILD, TEAM_WAYS, toolRuleProblem
 import { MCP_RULE, MCP_RULE_TEXT, type Config, type StepAgents } from "../../config";
 import { STEP_KEYS, STEPS, type StepKey } from "../../models";
 import { localDate } from "../../signals";
-import { andList } from "../../text";
+import { andList, printable } from "../../text";
 import type { ConfigDocument } from "../document";
 import type { Section, SetupContext } from "../types";
 import { modelName } from "./models";
@@ -36,15 +36,20 @@ const record = (v: unknown): Record<string, unknown> => (v && typeof v === "obje
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : []);
 /** A comma-separated answer as a list. */
 const list = (answer: string) => answer.split(",").map((s) => s.trim()).filter(Boolean);
-/** Text from a file, safe to print: no control characters (a copied description is data). */
-const printable = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
 /** The name an item gets in the repo: a plugin's `plugin:name` becomes `name`. */
 const plainName = (name: string) => name.slice(name.indexOf(":") + 1);
+/** True when a name has no control characters, so it can be offered as a choice as it is. */
+const plainText = (s: string) => !/[\u0000-\u001f\u007f-\u009f]/.test(s);
 const itemLine = (i: LibraryItem) => `  ${i.kind} ${printable(i.name)} (${i.from})${i.description ? `: ${printable(i.description)}` : ""}`;
 
 /** The names of that kind the steps can use in this run: what the sources hold, then what was added. */
 function names(run: Run, kind: Kind): string[] {
-  return once([...run.library.filter((i) => i.kind === kind).map((i) => i.name), ...run.added[kind]]);
+  return once([...run.library.filter((i) => i.kind === kind && plainText(i.name)).map((i) => i.name), ...run.added[kind]]);
+}
+
+/** Says how many items of a kind were left out because Loopstra would not copy them under their names. */
+function saySkipped(run: Run, kind: Kind, count: number): void {
+  if (count) run.ctx.ask.say(`  Skipped ${count} ${kind}${count === 1 ? " whose name is" : "s whose names are"} not lowercase letters, digits and dashes.`);
 }
 
 /** The first rule's problem, or null. */
@@ -94,8 +99,8 @@ function existingFiles(ctx: SetupContext, target: string): string[] {
  */
 async function stage(run: Run, kind: Kind, name: string, writes: FileWrite[] | { refused: string }): Promise<boolean> {
   const { ask, files } = run.ctx;
-  if ("refused" in writes) { ask.say(`  ${writes.refused}`); return false; }
-  ask.say(`Files to write when the config saves:\n${writes.map((w) => `  ${w.path}`).join("\n")}`);
+  if ("refused" in writes) { ask.say(`  ${printable(writes.refused)}`); return false; }
+  ask.say(`Files to write when the config saves:\n${writes.map((w) => `  ${printable(w.path)}`).join("\n")}`);
   const old = existingFiles(run.ctx, kind === "agent" ? `.claude/agents/${name}.md` : `.claude/skills/${name}`);
   const removed = old.filter((p) => !writes.some((w) => w.path === p));
   if (old.length) {
@@ -109,7 +114,10 @@ async function stage(run: Run, kind: Kind, name: string, writes: FileWrite[] | {
 
 async function fromMachine(run: Run, kind: Kind): Promise<string[]> {
   const { ask, root } = run.ctx;
-  const items = listLibrary(root, userHome(), "all").filter((i) => i.kind === kind && i.from !== "repo");
+  const found = listLibrary(root, userHome(), "all").filter((i) => i.kind === kind && i.from !== "repo");
+  // A name that is not copied as it is (copyItem refuses it) is not offered.
+  const items = found.filter((i) => NAME.test(plainName(i.name)) && plainText(i.name));
+  saySkipped(run, kind, found.length - items.length);
   if (!items.length) { ask.say(`There are no ${kind}s on this machine outside the repository.`); return []; }
   for (const i of items) ask.say(itemLine(i));
   const name = await ask.pick(`Which ${kind} to copy`, ["none", ...once(items.map((i) => i.name))], "none");
@@ -123,9 +131,11 @@ async function fromSource(run: Run, kind: Kind): Promise<string[]> {
   const url = await ask.text("A git repository (https://, ssh://, git@ or file://) or a folder; - to go back", { optional: true });
   if (!url) return [];
   const fetched = await cloneSource(url);
-  if ("refused" in fetched) { ask.say(`  ${fetched.refused}`); return []; }
+  if ("refused" in fetched) { ask.say(`  ${printable(fetched.refused)}`); return []; }
   try {
-    const items = scanFolder(fetched.dir, fetched.name).filter((i) => i.kind === kind);
+    const scanned = scanFolder(fetched.dir, fetched.name);
+    saySkipped(run, kind, scanned.skipped.filter((i) => i.kind === kind).length);
+    const items = scanned.items.filter((i) => i.kind === kind);
     if (!items.length) { ask.say(`There are no ${kind}s in ${shownUrl(url)}.`); return []; }
     for (const i of items) ask.say(itemLine(i));
     const picked = await ask.pickMany(`Which ${kind}s to copy`, once(items.map((i) => i.name)), []);
@@ -146,9 +156,11 @@ async function newAgent(run: Run): Promise<string[]> {
   const { ask } = run.ctx;
   const repo = run.library.filter((i) => i.kind === "agent" && i.from === "repo").map((i) => i.name);
   const taken = new Set([...repo, ...run.added.agent, ...BUILTIN_AGENTS]);
-  const name = await ask.text("Name of the new agent (lowercase letters, digits and dashes)", {
+  const name = await ask.text("Name of the new agent (lowercase letters, digits and dashes; - to go back)", {
+    optional: true,
     check: (n) => (!NAME.test(n) ? "A name is lowercase letters, digits and dashes, like lead-reviewer." : taken.has(n) ? `There is already an agent called ${n}.` : null),
   });
+  if (!name) return [];
   const description = await ask.text(`What ${name} is for, in one line (a session reads it to choose a subagent)`);
   const prompt = await ask.text(`The role of ${name}, in one line (the start of its prompt, like "You review code for security problems.")`);
   const tools = list(await ask.text(`Tools ${name} may use, comma-separated (- for the session's)`, { optional: true }));
@@ -260,7 +272,7 @@ async function askTeams(run: Run): Promise<void> {
     if (choice === "done") return;
     if (choice === "new team") {
       const name = await ask.text("Name of the new team (lowercase words joined by dashes)", {
-        check: (n) => (!TEAM_NAME.test(n) ? "A team name is lowercase words joined by dashes, like reviewers." : n === "done" ? "A team cannot be called done." : n in teams ? `There is already a team ${n}.` : null),
+        check: (n) => (!TEAM_NAME.test(n) ? "A team name is lowercase words joined by dashes, like reviewers." : n === "done" ? "A team cannot be called done." : Object.hasOwn(teams, n) ? `There is already a team ${n}.` : null),
       });
       await askTeam(run, name, {});
       continue;
