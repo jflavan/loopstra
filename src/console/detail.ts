@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { inlineName } from "../agents";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
@@ -50,12 +51,16 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
 function setupView(e: Record<string, unknown> | undefined): AgentSetupView | null {
   if (!e) return null;
   const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  // The event keys models by inline name (loopstra-<name>); the page's view is keyed by the plain name.
+  const recorded = e.models && typeof e.models === "object" ? (e.models as Record<string, unknown>) : {};
+  const subagents = list(e.subagents);
   const models: Record<string, string> = {};
-  if (e.models && typeof e.models === "object") {
-    for (const [k, v] of Object.entries(e.models)) if (typeof v === "string") models[k] = v;
+  for (const n of subagents) {
+    const m = recorded[inlineName(n)];
+    if (typeof m === "string") models[n] = m;
   }
   return {
-    agent: typeof e.agent === "string" ? e.agent : null, subagents: list(e.subagents), teams: list(e.teams), skills: list(e.skills),
+    agent: typeof e.agent === "string" ? e.agent : null, subagents, teams: list(e.teams), skills: list(e.skills),
     tools: list(e.tools), mcpTools: list(e.mcp_tools), sources: e.sources === "repo" ? "repo" : "all", models,
   };
 }
