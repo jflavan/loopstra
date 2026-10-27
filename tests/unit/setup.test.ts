@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
-import { DefaultsPrompt } from "../../src/setup/prompt";
+import { DefaultsPrompt, SetupStopped } from "../../src/setup/prompt";
 import { budgets } from "../../src/setup/sections/budgets";
 import { gates } from "../../src/setup/sections/gates";
 import { github } from "../../src/setup/sections/github";
@@ -83,6 +85,43 @@ describe("loopstra setup", () => {
       expect(o.text()).toContain("Not saved: ");
       expect(o.text()).toContain("claude.timeout_minutes");
       expect(r.text()).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("files a section adds are written after the config saves, and not at all when setup stops or a path is refused", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const file = ".claude/skills/a/SKILL.md";
+      const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content: "x" }); } });
+      const ok = io();
+      expect(await setup(r.root, { output: ok.output, defaults: true, sections: [adds] })).toBe(0);
+      expect(readFileSync(join(r.root, file), "utf8")).toBe("x");
+      expect(ok.text()).toContain(`Wrote 1 file under .claude/: ${file}. Commit them with loopstra/config.yaml on the main branch.`);
+
+      const same = io();
+      const later = fake({ ask: async (ctx) => { ctx.files.push({ path: file, content: "y" }, { path: file, content: "z" }); } });
+      expect(await setup(r.root, { output: same.output, defaults: true, sections: [later] })).toBe(0);
+      expect(readFileSync(join(r.root, file), "utf8")).toBe("z");
+      expect(same.text()).toContain("Wrote 1 file under .claude/");
+      expect(same.text()).not.toContain("No changes.");
+
+      const gone = io();
+      const removes = fake({ ask: async (ctx) => { ctx.files.push({ path: file, content: null }); } });
+      expect(await setup(r.root, { output: gone.output, defaults: true, sections: [removes] })).toBe(0);
+      expect(existsSync(join(r.root, file))).toBe(false);
+
+      const b = ".claude/skills/b/SKILL.md";
+      const stopped = io();
+      const quits = fake({ ask: async (ctx) => { ctx.files.push({ path: b, content: "x" }); throw new SetupStopped("Stopped."); } });
+      expect(await setup(r.root, { output: stopped.output, defaults: true, sections: [quits] })).toBe(1);
+      expect(existsSync(join(r.root, b))).toBe(false);
+
+      const refused = io();
+      const bad = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "other"); ctx.files.push({ path: b, content: "x" }, { path: ".claude/../x", content: "x" }); } });
+      expect(await setup(r.root, { output: refused.output, defaults: true, sections: [bad] })).toBe(1);
+      expect(refused.text()).toContain(".claude/../x");
+      expect(existsSync(join(r.root, b))).toBe(false);
+      expect(r.text()).toContain("bun test");
     } finally { r.cleanup(); }
   });
 

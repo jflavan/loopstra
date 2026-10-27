@@ -1,6 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { repoPath, type FileWrite } from "../agent-library";
 import { ConfigError, configPath, NOT_SET_UP, type Config } from "../config";
+import { writeFileAtomic } from "../fsutil";
 import { errorText, within } from "../shell";
 import { ConfigDocument } from "./document";
 import { DefaultsPrompt, SetupStopped, StreamPrompt, type Prompt } from "./prompt";
@@ -41,6 +44,25 @@ function coveredBy(path: readonly string[], covers: readonly string[]): boolean 
     const n = Math.min(parts.length, path.length);
     return parts.slice(0, n).every((part, i) => part === "*" || part === path[i]);
   });
+}
+
+/**
+ * Writes the pending files under `root` (a `null` content removes the file; the last write to a path
+ * wins) and returns the paths written. Throws, before writing anything, on a path outside
+ * .claude/agents/ and .claude/skills/.
+ */
+export function writeFiles(root: string, files: FileWrite[]): string[] {
+  const last = new Map<string, string | null>();
+  for (const f of files) {
+    const path = repoPath(f.path);
+    if (!path) throw new Error(`${f.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
+    last.set(path, f.content);
+  }
+  for (const [path, content] of last) {
+    if (content === null) rmSync(join(root, path), { force: true });
+    else writeFileAtomic(join(root, path), content);
+  }
+  return [...last.keys()];
 }
 
 /** `loopstra setup --help`:the usage line, then each section's name and title. */
@@ -106,7 +128,7 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
     out(`Note: loopstra/config.yaml has problems now; the questions below can fix them:\n${problems.map((p) => `- ${p.text}`).join("\n")}`);
   }
   const ask: Prompt = o.defaults ? new DefaultsPrompt(out) : o.prompt ?? new StreamPrompt(o.input ?? process.stdin, output);
-  const ctx: SetupContext = { root, doc, ask, env };
+  const ctx: SetupContext = { root, doc, ask, env, files: [], only: !!o.section };
   try {
     for (const s of sections) {
       out(`\n${s.title}`);
@@ -122,7 +144,15 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
   let cfg: Config;
   try {
     cfg = doc.validate();
-    out(doc.save() ? "\nSaved loopstra/config.yaml. Commit it on the main branch so every checkout uses it." : "\nNo changes.");
+    for (const f of ctx.files) {
+      if (!repoPath(f.path)) throw new Error(`${f.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
+    }
+    const saved = doc.save();
+    if (saved) out("\nSaved loopstra/config.yaml. Commit it on the main branch so every checkout uses it.");
+    if (ctx.files.length) {
+      const written = writeFiles(root, ctx.files);
+      out(`${saved ? "" : "\n"}Wrote ${written.length} file${written.length === 1 ? "" : "s"} under .claude/: ${written.join(", ")}. Commit them with loopstra/config.yaml on the main branch.`);
+    } else if (!saved) out("\nNo changes.");
   } catch (e) {
     out(`\nNot saved: ${errorText(e)}`);
     return 1;
@@ -139,7 +169,7 @@ async function checkOnly(root: string, sections: Section[], env: SetupContext["e
     cfg = doc.validate();
   } catch (e) { out(errorText(e)); return 1; }
   out("loopstra/config.yaml loads.");
-  const checks = await runChecks(sections, { root, doc, ask: new DefaultsPrompt(() => {}), env }, cfg, checkMs);
+  const checks = await runChecks(sections, { root, doc, ask: new DefaultsPrompt(() => {}), env, files: [], only: false }, cfg, checkMs);
   report(checks, out);
   return checks.some((c) => c.level === "fail") ? 1 : 0;
 }

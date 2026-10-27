@@ -112,7 +112,7 @@ describe("the budgets section", () => {
     try {
       const doc = ConfigDocument.load(r.root);
       const s = scripted("y", "0.1", "$2", "none", "none", "none");
-      const ctx = { root: r.root, doc, ask: s.prompt, env: {} };
+      const ctx = { root: r.root, doc, ask: s.prompt, env: {}, files: [], only: false };
       try { await budgets.ask(ctx); } finally { s.prompt.close(); }
       doc.save();
       const [c] = await budgets.check(ctx, await loadConfig(r.root));
