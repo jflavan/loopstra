@@ -273,7 +273,6 @@ export class Git {
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
-  async worktreePrune(): Promise<void> { await worktreeAdmin(this, () => this.run(["worktree", "prune"])); }
 
   /**
    * Always prunes first, unlocking the path before, so a worktree whose directory was deleted by hand,

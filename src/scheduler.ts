@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -142,16 +142,16 @@ export async function tick(root: string): Promise<TickResult> {
     const first = await scanRepo(root);
     // Traced when the problem is new or has changed, not on every tick.
     for (const u of first.unreadable) trace.eventOnChange(u.slug, "error", '"where":"scan"', { where: "scan", problem: u.problem, detail: u.detail }, "problem");
+    let blocked = false;
     for (const i of first.intents) {
       trace.upsertIntent(i.slug, i.file.frontmatter.status, effectivePriority(i.file.frontmatter));
       const problem = checkConsistency(i);
-      if (problem && i.file.frontmatter.status !== "blocked") await blockSafely(new StepContext(root, cfg, trace, i), problem);
+      if (problem && i.file.frontmatter.status !== "blocked") {
+        await blockSafely(new StepContext(root, cfg, trace, i), problem);
+        blocked = true;
+      }
     }
-    const scan = await scanRepo(root);
-    const ordered = orderQueue(scan.intents);
-    // A change that would build into another's files waits (see sameFileHolds).
-    const holds = await sameFileHolds(ordered, root);
-    await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
+    const { ordered, holds } = await refreshQueue(root, cfg, trace, blocked ? await scanRepo(root) : first);
     await cleanupLeftovers(root, cfg, trace, ordered);
     // Between the applier's passes too: no request commits while git packs.
     await betweenPasses(root, () => packWhileNoLaneRuns(root, trace));
@@ -542,6 +542,17 @@ async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
 }
 
 /**
+ * Orders a scan's changes and writes queue.md from them. `holds`: the changes that would build into
+ * another's files, and wait (see sameFileHolds).
+ */
+async function refreshQueue(root: string, cfg: Config, trace: Trace, scan: Scan): Promise<{ ordered: Intent[]; holds: Map<string, string> }> {
+  const ordered = orderQueue(scan.intents);
+  const holds = await sameFileHolds(ordered, root);
+  await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
+  return { ordered, holds };
+}
+
+/**
  * After the step: queue.md is brought up to date (uncommitted; the next runtime commit takes it
  * along), and with a remote, main is shared once for the whole tick. Best effort; not after a stop.
  * `share` is null when the tick stopped before it knew the checkout was on main.
@@ -549,12 +560,7 @@ async function packWhileNoLaneRuns(root: string, trace: Trace): Promise<void> {
 async function endOfTick(root: string, cfg: Config, trace: Trace, out: TickResult, share: boolean | null): Promise<void> {
   if (share === null || stopRequested()) return;
   try {
-    if (out.steps?.length) {
-      const scan = await scanRepo(root);
-      const ordered = orderQueue(scan.intents);
-      const holds = await sameFileHolds(ordered, root);
-      await writeQueue(root, trace, renderQueue(ordered, scan.unreadable, humanGates(cfg), holds, openQuestions(root, ordered)));
-    }
+    if (out.steps?.length) await refreshQueue(root, cfg, trace, await scanRepo(root));
     if (share) await shareMain(root, cfg, trace);
   } catch (e) {
     if (!(e instanceof StopRequested)) trace.event("_loop", "error", { where: "end of tick", error: errorText(e) });

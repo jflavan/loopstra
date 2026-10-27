@@ -1,7 +1,7 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
 import { block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
-import { agentPhase, alongside, codePhase, mayOverlap, projectCommand, withNote, type AgentPhaseSpec } from "../phases";
+import { agentPhase, alongside, codePhase, mayOverlap, phasePrompt, projectCommand, type AgentPhaseSpec } from "../phases";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
@@ -45,7 +45,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback }, skills: stage.skills,
   };
   // The note reaches the session even through an older build.md without {{feedback}}.
-  const build = await agentPhase(ctx, phase, () => withNote(ctx, phase, "feedback", feedback, `A person's notes on an earlier build of this change; address each one:\n\n${feedback}`));
+  const build = await agentPhase(ctx, phase, () => phasePrompt(ctx, phase, { variable: "feedback", note: feedback, text: `A person's notes on an earlier build of this change; address each one:\n\n${feedback}` }));
   if (!build.ok) return block(ctx, build.note);
   // The build session is what fix, reconcile, and revise resume.
   if (build.sessionId) saveSession(ctx, "build", build.sessionId);

@@ -280,9 +280,10 @@ export class Trace {
     appendFileSync(join(dir, "events.jsonl"), JSON.stringify({ ts, slug, phase_seq: phaseSeq, type, payload: payload ?? {} }) + "\n");
   }
 
+  /** Records a change's status and priority; a row that already has them is left alone (no write), so `updated` is when they last changed. */
   upsertIntent(slug: string, status: string, priority: string): void {
     this.db.run(
-      "INSERT INTO intents (slug, status, priority, updated) VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET status = excluded.status, priority = excluded.priority, updated = excluded.updated",
+      "INSERT INTO intents (slug, status, priority, updated) VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET status = excluded.status, priority = excluded.priority, updated = excluded.updated WHERE status != excluded.status OR priority != excluded.priority",
       [slug, status, priority, now()],
     );
   }
@@ -534,10 +535,5 @@ export class Trace {
       slug: i.slug, status: i.status, priority: i.priority, updated: i.updated,
       costUsd: cost, lastPhase: last?.name ?? null, lastPhaseStatus: last?.status ?? null, lastActivity: act?.ts ?? null,
     };
-  }
-
-  allIntents(): IntentSummary[] {
-    const rows = this.db.query<{ slug: string }, []>("SELECT slug FROM intents ORDER BY updated DESC").all();
-    return rows.map((r) => this.intentSummary(r.slug)!).filter(Boolean);
   }
 }
