@@ -1179,12 +1179,13 @@ describe("agent-files requests", () => {
       expect(await apply(r.root)).toBe(1);
       expect(requestState(r.root, a.id)).toMatchObject({ ok: false, text: `That change was not saved: ${UNCOMMITTED}` });
       expect(readFileSync(mine, "utf8")).toBe("mine\n");
-      // Staged only.
+      // Staged only: the working tree is back at HEAD's text.
       await run(["git", "add", LEAD], r.root);
+      writeFileSync(mine, "lead\n");
       const b = files(r.root, "edit lead", [{ path: LEAD, content: "theirs\n" }], { [LEAD]: fileVersion("mine\n") });
       expect(await apply(r.root)).toBe(1);
       expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: expect.stringContaining(UNCOMMITTED) });
-      expect(readFileSync(mine, "utf8")).toBe("mine\n");
+      expect((await run(["git", "show", `:${LEAD}`], r.root)).out).toBe("mine\n");
       await run(["git", "reset", "-q", "--hard"], r.root);
       // Untracked.
       writeFileSync(join(r.root, ".claude/agents/new.md"), "mine\n");

@@ -485,11 +485,14 @@ async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: Age
     for (const p of paths) {
       try { checkedPath(root, { path: p }); } catch (e) { refusal = e instanceof Error ? e.message : String(e); return false; }
     }
-    const args = ["diff", "--quiet", "HEAD", "--", ...paths];
-    const diff = await git.run(args, { allowFail: true });
-    // 1 is "it differs"; anything else is git failing, which must not read as either answer.
-    if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
-    if (diff.code === 1) { refusal = UNCOMMITTED_FILES; return false; }
+    // The working tree against HEAD, then the index against HEAD (a change only staged).
+    for (const extra of [[], ["--cached"]]) {
+      const args = ["diff", "--quiet", ...extra, "HEAD", "--", ...paths];
+      const diff = await git.run(args, { allowFail: true });
+      // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+      if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+      if (diff.code === 1) { refusal = UNCOMMITTED_FILES; return false; }
+    }
     for (const p of paths) {
       // A file on disk that the last commit does not have is untracked: the record would commit it whole.
       if (existsSync(join(root, p)) && (await git.run(["cat-file", "-e", `HEAD:${p}`], { allowFail: true })).code !== 0) { refusal = UNCOMMITTED_FILES; return false; }

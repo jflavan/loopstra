@@ -279,13 +279,13 @@ export function repoPath(p: string): string | null {
  */
 export function checkedPath(root: string, file: { path: string }): string {
   const path = repoPath(file.path);
-  if (!path) throw new Error(`${file.path} is not a place setup writes: only under .claude/agents/ and .claude/skills/.`);
+  if (!path) throw new Error(`${file.path} is not a place Loopstra writes: only under .claude/agents/ and .claude/skills/.`);
   const parts = path.split("/");
   for (let i = 1; i <= parts.length; i++) {
     const shown = parts.slice(0, i).join("/");
     let link: boolean;
     try { link = lstatSync(join(root, shown)).isSymbolicLink(); } catch { return path; }
-    if (link) throw new Error(`${file.path} is not written: ${shown} is a link, and setup does not write through links.`);
+    if (link) throw new Error(`${file.path} is not written: ${shown} is a link, and Loopstra does not write through links.`);
   }
   return path;
 }
