@@ -1,3 +1,4 @@
+import type { Config, StepAgents } from "./config";
 import { STEP_KEYS, type StepKey } from "./models";
 
 /** How a team's members work: all at once and merged, or each tries and the best is kept. */
@@ -48,4 +49,87 @@ export function toolProblem(rule: string, readOnly: boolean): string | null {
   if (edit) return `${edit[1] ?? rule} would let it change files`;
   if (/^Bash(\(\*?\))?$/.test(rule)) return "a bare Bash rule would let it run anything";
   return null;
+}
+
+/** The agents Claude Code ships with: they keep their own names in a prompt. */
+export const BUILTIN_AGENTS: ReadonlySet<string> = new Set(["general-purpose", "Explore", "Plan", "claude", "statusline-setup"]);
+
+export interface Team {
+  name: string;
+  members: string[];
+  way: TeamWay;
+}
+
+/** Everything one step's session is set up with. */
+export interface AgentSetup {
+  sources: "all" | "repo";
+  agent: string | null;
+  subagents: string[];
+  teams: Team[];
+  skills: string[];
+  tools: string[];
+  mcpTools: string[];
+}
+
+const once = (names: readonly string[]) => [...new Set(names)];
+
+/**
+ * A step's setup: `all`, then the stage's skills, then the step's own, each name once. Chat steps get
+ * nothing from `all`. Fix, reconcile and revise run as the build step's agent.
+ */
+export function resolveSetup(agents: Config["agents"], step: StepKey, stageSkills: readonly string[]): AgentSetup {
+  const chat = CHAT_STEPS.has(step);
+  const empty: StepAgents = { subagents: [], teams: [], skills: [], tools: [], mcp_tools: [] };
+  const all = chat ? empty : agents.all;
+  const own = agents.steps[step] ?? empty;
+  const agent = CONTINUES_BUILD.has(step)
+    ? (agents.steps["build"]?.agent ?? all.agent ?? null)
+    : (own.agent ?? all.agent ?? null);
+  return {
+    sources: agents.sources,
+    agent,
+    subagents: once([...all.subagents, ...own.subagents]),
+    teams: once([...all.teams, ...own.teams]).flatMap((name) => {
+      const t = agents.teams[name];
+      return t ? [{ name, members: [...t.members], way: t.way }] : [];
+    }),
+    skills: once([...all.skills, ...stageSkills, ...own.skills]),
+    tools: once([...all.tools, ...own.tools]),
+    mcpTools: once([...all.mcp_tools, ...own.mcp_tools]),
+  };
+}
+
+/** True when the setup changes nothing about how a session runs. */
+export function isEmptySetup(s: AgentSetup): boolean {
+  return s.sources === "all" && s.agent === null && !s.subagents.length && !s.teams.length && !s.skills.length && !s.tools.length && !s.mcpTools.length;
+}
+
+/** The name an agent file written for Loopstra is given inline: `loopstra-` and the name, colons as dashes. */
+export function inlineName(name: string): string {
+  return `loopstra-${name.replaceAll(":", "-")}`;
+}
+
+/** The text put before the prompt template: skills, subagents and teams. "" when there are none. */
+export function setupLines(s: AgentSetup, describe: (name: string) => string | null): string {
+  const name = (n: string) => (BUILTIN_AGENTS.has(n) ? n : inlineName(n));
+  const quoted = (n: string) => `\`${name(n)}\``;
+  const parts: string[] = [];
+  if (s.skills.length) parts.push(`Use these skills: ${s.skills.map((k) => `\`${k}\``).join(", ")}.`);
+  if (s.subagents.length) {
+    const list = s.subagents.map((n) => {
+      const d = describe(n);
+      return d ? `${quoted(n)} (${d})` : quoted(n);
+    });
+    parts.push(`You can hand work to these subagents: ${list.join(", ")}.`);
+  }
+  for (const t of s.teams) {
+    const members = t.members.map(quoted).join(", ");
+    const how = t.way === "parallel"
+      ? "Give every member the same task at the same time, then weigh their answers."
+      : "Give each piece of work to the member that fits it best.";
+    parts.push(`Team \`${t.name}\`: ${members}. ${how}`);
+  }
+  if (!parts.length) return "";
+  if (s.subagents.length || s.teams.length) parts.push("You still return your own structured output; subagents help, they do not replace it.");
+  return parts.join("\n\n") + "\n\n";
 }

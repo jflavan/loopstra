@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { CHAT_STEPS, CONTINUES_BUILD, READ_ONLY_STEPS, toolProblem, type TeamWay } from "../../src/agents";
-import { validateConfig, type StepAgents } from "../../src/config";
+import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, type Team, type TeamWay, CHAT_STEPS, READ_ONLY_STEPS, isEmptySetup, resolveSetup, setupLines, toolProblem, type AgentSetup } from "../../src/agents";
+import { validateConfig } from "../../src/config";
 
 test("the step sets", () => {
   expect([...READ_ONLY_STEPS].some((k) => ["build", "reconcile", "fix", "revise"].includes(k))).toBe(false);
@@ -18,14 +18,6 @@ test("toolProblem names why a rule is refused", () => {
   expect(toolProblem("Edit", false)).toBeNull();
 });
 
-test("a team keeps its way", () => {
-  const way: TeamWay = "pick";
-  const cfg = validateConfig({ version: 1, commands: { test: "bun test" }, agents: { teams: { r: { members: ["a"], way } } } });
-  const all: StepAgents = cfg.agents.all;
-  expect(cfg.agents.teams.r).toEqual({ members: ["a"], way: "pick" });
-  expect(all.tools).toEqual([]);
-});
-
 test("toolProblem sees through git spellings, and leaves other tools alone", () => {
   const why = (r: string) => toolProblem(r, false);
   for (const r of ["Bash(git push:*)", "Bash(git push*)", "Bash(git commit*)", "Bash(git reset:*)", "Bash(git -C . push *)", "Bash(git -c k=v commit *)", "Bash( git push *)", "Bash(git --git-dir=x push)", "Bash(git --no-pager stash *)"]) {
@@ -38,4 +30,58 @@ test("toolProblem sees through git spellings, and leaves other tools alone", () 
   for (const r of ["Bash(gitk *)", "Bash(gitleaks detect)", "Bash(git diff *)", "Bash(git -C . log *)", "Bash(git status:*)"]) {
     expect(why(r)).toBeNull();
   }
+});
+
+const agents = (over: object = {}) => validateConfig({ version: 1, commands: { test: "t" }, agents: over }).agents;
+
+test("all, then stage skills, then the step's own; each name once", () => {
+  const a = agents({ all: { skills: ["house"], mcp_tools: ["mcp__docs"] }, steps: { review: { skills: ["threat", "house"], subagents: ["Explore"], agent: "lead" } } });
+  expect(resolveSetup(a, "review", ["stage-skill"])).toEqual({ sources: "all", agent: "lead", subagents: ["Explore"], teams: [], skills: ["house", "stage-skill", "threat"], tools: [], mcpTools: ["mcp__docs"] });
+});
+
+test("fix, reconcile and revise run as the build's agent; chat steps never get all", () => {
+  const a = agents({ all: { skills: ["house"], tools: ["WebFetch"] }, steps: { build: { agent: "senior" }, orchestrator: { skills: ["chat-tone"] } } });
+  expect(resolveSetup(a, "fix", []).agent).toBe("senior");
+  expect(resolveSetup(a, "revise", []).skills).toEqual(["house"]);
+  expect(resolveSetup(a, "orchestrator", [])).toMatchObject({ agent: null, skills: ["chat-tone"], tools: [] });
+});
+
+test("the step's own agent wins over all's; build's agent falls back to all's; chat steps ignore all's", () => {
+  const a = agents({ all: { agent: "general" }, steps: { review: { agent: "lead" } } });
+  expect(resolveSetup(a, "review", []).agent).toBe("lead");
+  expect(resolveSetup(a, "plan", []).agent).toBe("general");
+  expect(resolveSetup(a, "fix", []).agent).toBe("general");
+  expect(resolveSetup(a, "orchestrator", []).agent).toBeNull();
+});
+
+test("teams resolve to their members; an empty setup is empty", () => {
+  const a = agents({ teams: { reviewers: { members: ["sec", "perf"], way: "parallel" } }, steps: { review: { teams: ["reviewers"] } } });
+  expect(resolveSetup(a, "review", []).teams).toEqual([{ name: "reviewers", members: ["sec", "perf"], way: "parallel" }]);
+  expect(isEmptySetup(resolveSetup(agents(), "build", []))).toBe(true);
+  expect(isEmptySetup(resolveSetup(agents({ sources: "repo" }), "build", []))).toBe(false);
+});
+
+test("prompt lines: skills as today, then subagents and teams by their inline names", () => {
+  const s = { sources: "all", agent: null, subagents: ["Explore", "test-writer"], teams: [{ name: "reviewers", members: ["sec", "perf"], way: "parallel" }], skills: ["a", "b"], tools: [], mcpTools: [] } as AgentSetup;
+  const lines = setupLines(s, (n) => (n === "test-writer" ? "Writes tests" : null));
+  expect(lines).toStartWith("Use these skills: `a`, `b`.\n\n");
+  expect(lines).toContain("`Explore`");
+  expect(lines).toContain("`loopstra-test-writer` (Writes tests)");
+  expect(lines).toContain("`loopstra-sec`, `loopstra-perf`");
+  expect(lines).toContain("same task");
+  expect(lines).toContain("structured output");
+  expect(lines).toEndWith("\n\n");
+  expect(setupLines({ ...s, subagents: [], teams: [] }, () => null)).toBe("Use these skills: `a`, `b`.\n\n");
+  expect(setupLines({ ...s, skills: [], subagents: [], teams: [] }, () => null)).toBe("");
+  const pick = setupLines({ ...s, subagents: [], teams: [{ name: "t", members: ["x"], way: "pick" }] }, () => null);
+  expect(pick).toContain("fits");
+});
+
+test("inline names: built-ins keep theirs, others get the loopstra prefix", () => {
+  const way: TeamWay = "pick";
+  const team: Team = { name: "t", members: ["x"], way };
+  expect(team.way).toBe("pick");
+  expect(inlineName("a:b")).toBe("loopstra-a-b");
+  expect(BUILTIN_AGENTS.has("Explore")).toBe(true);
+  expect(BUILTIN_AGENTS.has("test-writer")).toBe(false);
 });
