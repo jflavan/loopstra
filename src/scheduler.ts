@@ -986,7 +986,9 @@ export function log(line: string): void {
 /**
  * What `start` refuses with while a step names an agent main does not have; null when all are there,
  * when no agents are set, or when the config does not load (the loop's own handling deals with that).
- * Warnings are printed, not refused. The agents are looked up in a snapshot of main, as a session finds them.
+ * Warnings are printed, not refused. The agents are looked up in a snapshot of main, as a session finds
+ * them; when that snapshot cannot be made or read (main_branch names no branch), that is the refusal.
+ * Only called under the loop's lock: the snapshot is a folder under the loop's own.
  */
 async function missingAgents(root: string): Promise<string | null> {
   let cfg: Config;
@@ -996,12 +998,17 @@ async function missingAgents(root: string): Promise<string | null> {
   if (!sets(a.all) && !Object.values(a.steps).some(sets) && !Object.keys(a.teams).length && a.sources === "all") return null;
   const git = new Git(root);
   const dir = join(snapshotsDir(root), "_start");
-  await addDetachedWorktree(git, dir, cfg.main_branch);
   let problems;
   try {
-    problems = await checkAgentSetup(cfg, { repo: dir, home: userHome(), sources: a.sources });
-  } finally {
-    await removeWorktree(git, dir, { cleanup: true });
+    try {
+      await addDetachedWorktree(git, dir, cfg.main_branch);
+      problems = await checkAgentSetup(cfg, { repo: dir, home: userHome(), sources: a.sources });
+    } finally {
+      await removeWorktree(git, dir, { cleanup: true });
+    }
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    return `Could not check the agents the steps name on ${cfg.main_branch}: ${errorText(e).split("\n")[0] ?? ""}. Check main_branch in loopstra/config.yaml, then start again.`;
   }
   for (const p of problems) if (p.level === "warn") log(p.text);
   const fails = problems.filter((p) => p.level === "fail");
@@ -1012,13 +1019,18 @@ async function missingAgents(root: string): Promise<string | null> {
  * The loop. It never dies: each tick is guarded, a problem is traced, and the next tick comes.
  * Ctrl-C asks for a stop (the running step is interrupted and resumes on the next start); a
  * second Ctrl-C exits at once. It holds the loop's lock while it runs (see takeLoopLock). Returns
- * the refusal when another loop holds the lock, or null once the loop has run.
+ * the refusal when another loop holds the lock or a step names an agent that is not set up (see
+ * missingAgents), or null once the loop has run.
  */
 export async function start(root: string, opts: { once: boolean; installSignals?: boolean }): Promise<string | null> {
-  const missing = await missingAgents(root);
-  if (missing) return missing;
   const refused = await takeLoopLock(root, await loopPollSeconds(root));
   if (refused) return refused;
+  // Checked under the lock, so a second start never touches the running loop's snapshots.
+  const missing = await missingAgents(root).catch((e: unknown) => { dropLoopLock(root); throw e; });
+  if (missing) {
+    dropLoopLock(root);
+    return missing;
+  }
   let beat: LoopBeat | null = null;
   // A second Ctrl-C exits at once, past every finally: the lock goes and the heartbeat says stopped on the way out.
   const onExit = () => { beat?.stopped(); dropLoopLock(root); };

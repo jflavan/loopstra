@@ -340,6 +340,32 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("start refuses, without a throw or a lock left, when it cannot make main's snapshot to check the agents", async () => {
+    const { repo, trace } = await setupRepo("draft", { config: "main_branch: nope\nagents:\n  steps:\n    design:\n      agent: lead\n" });
+    try {
+      const refused = await start(repo.path, { once: true, installSignals: false });
+      expect(refused).toStartWith("Could not check the agents the steps name on nope:");
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "_start"))).toBe(false);
+      expect(existsSync(join(repo.path, ".loopstra", "loop.lock"))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a second start refuses before it checks the agents, so it never touches the running loop's snapshots", async () => {
+    const { repo, trace } = await setupRepo("draft", { config: "agents:\n  steps:\n    design:\n      agent: ghost\n" });
+    try {
+      // The running loop: this process holds the lock, and a snapshot folder is there.
+      const lock = join(repo.path, ".loopstra", "loop.lock");
+      writeFileSync(lock, JSON.stringify({ pid: process.pid, host: thisHost(), startedAt: new Date().toISOString() }));
+      const kept = join(repo.path, ".loopstra", "snapshots", "_start", "kept.txt");
+      mkdirSync(join(kept, ".."), { recursive: true });
+      writeFileSync(kept, "the running loop's");
+      const refused = await start(repo.path, { once: true, installSignals: false });
+      expect(refused).toBe(loopAlreadyRunning(process.pid));
+      expect(existsSync(kept)).toBe(true);
+      expect(existsSync(lock)).toBe(true);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
   test("a merged change's leftover worktree and branch are cleaned up on a later tick", async () => {
     const { repo, ctx, trace } = await setupRepo("done");
     const git = new Git(repo.path);
