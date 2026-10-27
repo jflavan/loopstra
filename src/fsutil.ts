@@ -37,6 +37,11 @@ export function writeJson(path: string, value: unknown): void {
   writeFileAtomic(path, JSON.stringify(value, null, 2));
 }
 
+/** A text file's contents, or null when it cannot be read. */
+export function readText(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
+}
+
 /** A JSON file's value as the caller expects it, or null when it is missing or not JSON. The shape is the caller's to check. */
 export function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return null; }

@@ -678,3 +678,35 @@ export async function withDetachedWorktree<T>(git: Git, dir: string, ref: string
     await removeWorktree(git, dir).catch((e) => { try { teardownFailed?.(e); } catch { /* the result stands */ } });
   }
 }
+
+/** How long reading blobs may take before git is stopped (see readBlobs). */
+const BLOBS_TIMEOUT_MS = 60_000;
+
+/** The contents of these blobs (or `<commit>:<path>` objects), read in one `git cat-file --batch`; one git does not have is left out. */
+export async function readBlobs(repo: string, blobs: string[]): Promise<Map<string, Uint8Array>> {
+  const out = new Map<string, Uint8Array>();
+  if (!blobs.length) return out;
+  // Bun.spawn, not spawnBounded: the batch output is parsed by byte counts, and spawnBounded gives text.
+  const proc = Bun.spawn({ cmd: ["git", "cat-file", "--batch"], cwd: repo, env: withoutGitHookEnv(process.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, BLOBS_TIMEOUT_MS);
+  void proc.stdin.write(`${blobs.join("\n")}\n`);
+  void proc.stdin.end();
+  const [bytes, err, code] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]).finally(() => clearTimeout(timer));
+  if (timedOut) throw new Error(`git cat-file --batch did not finish within ${BLOBS_TIMEOUT_MS / 1000}s`);
+  if (code !== 0) throw new Error(`git cat-file --batch failed (${code}): ${err.trim()}`);
+  const dec = new TextDecoder();
+  // Each answer is `<sha> <type> <size>\n<contents>\n`, or `<name> missing\n`, in the order asked.
+  let at = 0;
+  for (const blob of blobs) {
+    const nl = bytes.indexOf(10, at);
+    if (nl < 0) break;
+    const [, kind, size] = dec.decode(bytes.subarray(at, nl)).split(" ");
+    at = nl + 1;
+    if (kind === "missing" || size === undefined) continue;
+    const end = at + Number(size);
+    out.set(blob, bytes.subarray(at, end));
+    at = end + 1;
+  }
+  return out;
+}

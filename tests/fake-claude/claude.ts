@@ -40,16 +40,28 @@
 // result's total_cost_usd is the fixture's times the turn number (a running total, as the CLI reports). Once
 // stdin closes the fake ends, after its turn and one for each message already queued. "hang" never ends, but
 // still echoes and logs what it is sent; a session that answers only notifications ends after its turn.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
-// --agents and --settings name a file, as the CLI takes them: the file's text is put in their place, so what a
-// session was given can be read back from args, and `files` keeps each path with its permission bits.
+// --agents, --settings and --mcp-config name a file, as the CLI takes them: the file's text is put in their
+// place, so what a session was given can be read back from args, and `files` keeps each path with its
+// permission bits. `folders` keeps what a --plugin-dir and each --add-dir held (but .git), path by path:
+// they may be gone once the session has ended.
 const rawArgs = Bun.argv.slice(2);
 const files: Record<string, { path: string; mode: number }> = {};
+const folders: Record<string, Record<string, string>> = {};
+const contents = (dir: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const rel of readdirSync(dir, { recursive: true, encoding: "utf8" })) {
+    const path = join(dir, rel);
+    if (!rel.split(/[\\/]/).includes(".git") && statSync(path).isFile()) out[rel.replaceAll("\\", "/")] = readFileSync(path, "utf8");
+  }
+  return out;
+};
 const args = rawArgs.map((a, i) => {
   const flag = rawArgs[i - 1];
-  if ((flag !== "--agents" && flag !== "--settings") || !isAbsolute(a) || !existsSync(a)) return a;
+  if ((flag === "--plugin-dir" || flag === "--add-dir") && existsSync(a)) folders[a] = contents(a);
+  if ((flag !== "--agents" && flag !== "--settings" && flag !== "--mcp-config") || !isAbsolute(a) || !existsSync(a)) return a;
   files[flag] = { path: a, mode: statSync(a).mode & 0o777 };
   return readFileSync(a, "utf8");
 });
@@ -113,13 +125,14 @@ if (streaming) {
 }
 
 if (process.env.LOOPSTRA_FAKE_ARGS) {
-  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, files, prompt, cwd: process.cwd(), env: {
+  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, files, folders, prompt, cwd: process.cwd(), env: {
     LOOPSTRA_PHASE: phase || null,
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
     LOOPSTRA_BASE: process.env.LOOPSTRA_BASE ?? null,
     LOOPSTRA_SLOT: process.env.LOOPSTRA_SLOT ?? null,
     LOOPSTRA_PROTECTED_LOG: process.env.LOOPSTRA_PROTECTED_LOG ?? null,
     GIT_OPTIONAL_LOCKS: process.env.GIT_OPTIONAL_LOCKS ?? null,
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD ?? null,
   } }));
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");

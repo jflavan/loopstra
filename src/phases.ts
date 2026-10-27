@@ -20,6 +20,7 @@ import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, Qu
 import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
 import { hookSettings } from "./package";
+import { fromMain, mainProjectAt } from "./main-project";
 import { steerable } from "./console/steerable";
 import { deliverInbox } from "./steering";
 import { changeStoppedBy } from "./inbox";
@@ -191,7 +192,7 @@ const isStepKey = (name: string): name is StepKey => (STEP_KEYS as readonly stri
  * A phase that is not a step gets the spec's skills alone.
  */
 export async function stepSetup(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<AgentSetup> {
-  return (await setupOf(ctx, spec)).setup;
+  return setupOf(await ctx.models(), spec).setup;
 }
 
 /**
@@ -199,10 +200,10 @@ export async function stepSetup(ctx: StepContext, spec: Pick<AgentPhaseSpec, "na
  * do not: they are the prompt's first line, as they always were. Once the step's agent settings give it
  * anything, the stage's skills are checked and loaded with the rest (see setupRun).
  */
-async function setupOf(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<{ setup: AgentSetup; applies: boolean }> {
+function setupOf(cfg: Config, spec: Pick<AgentPhaseSpec, "name" | "skills">): { setup: AgentSetup; applies: boolean } {
   const skills = spec.skills ?? [];
   if (!isStepKey(spec.name)) return { setup: { sources: "all", agent: null, subagents: [], teams: [], skills: [...skills], tools: [], mcpTools: [] }, applies: false };
-  const agents = (await ctx.models()).agents;
+  const agents = cfg.agents;
   return { setup: resolveSetup(agents, spec.name, skills), applies: !isEmptySetup(resolveSetup(agents, spec.name, [])) };
 }
 
@@ -245,7 +246,8 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?
   const path = promptPath(ctx.root, spec.name);
   if (path === null) return null;
   // With only skills, or none, this is the skills line prompts always had.
-  const setup = await stepSetup(ctx, spec);
+  const cfg = await ctx.models();
+  const { setup } = setupOf(cfg, spec);
   const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
   const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup), ...record, ...spec.vars };
@@ -253,8 +255,10 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?
   let rendered = setupText + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
-  const prompt = withContract(rendered);
-  return extra?.note && !template.includes(`{{${extra.variable}}}`) ? `${prompt}\n\n${extra.text}\n` : prompt;
+  const contracted = withContract(rendered);
+  const prompt = extra?.note && !template.includes(`{{${extra.variable}}}`) ? `${contracted}\n\n${extra.text}\n` : contracted;
+  ctx.rememberPrompt(prompt, cfg);
+  return prompt;
 }
 
 /**
@@ -298,11 +302,11 @@ export async function agentPhase<N extends PhaseName>(ctx: StepContext, spec: Ag
   // prompt, rendered here; the retry renders it again, so it has what people told the crashed attempt.
   const tries = async (p: string, resume: string | undefined, normal: boolean): Promise<Attempted<N>> => {
     const s = { ...spec, resume };
-    const first = await attempt(ctx, s, limited(p), traceName, ask);
+    const first = await attempt(ctx, s, limited(p), traceName, ask, ctx.renderedWith(p));
     if (first.ok || spec.retry === false || !RETRIED.has(first.reason)) return first;
     ctx.trace.event(ctx.slug, "error", { where: traceName, retry: true, reason: first.reason });
     const again = normal ? ((await render()) ?? p) : p;
-    return attempt(ctx, s, limited(again), `${traceName}-retry`, ask);
+    return attempt(ctx, s, limited(again), `${traceName}-retry`, ask, ctx.renderedWith(again));
   };
 
   let r: Attempted<N>;
@@ -477,10 +481,15 @@ function startPhase(ctx: StepContext, traceName: string): { seq: number; capUsd:
 /**
  * The named model a phase's session runs on, and the CLI model it names: the spec's own, else its
  * step's (see stepModel), from the model settings as loopstra/config.yaml has them now (see
- * StepContext.models).
+ * StepContext.models), or, given the phase's `prompt`, as they were when it was rendered: the
+ * settings its session runs on (see StepContext.renderedWith).
  */
-export async function phaseModel(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "model">): Promise<{ ref: ModelRef; name: string }> {
-  const cfg = await ctx.models();
+export async function phaseModel(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "model">, prompt?: string | null): Promise<{ ref: ModelRef; name: string }> {
+  return modelOf((prompt ? ctx.renderedWith(prompt) : undefined) ?? await ctx.models(), spec);
+}
+
+/** phaseModel's answer from a config already read. */
+function modelOf(cfg: Config, spec: Pick<AgentPhaseSpec, "name" | "model">): { ref: ModelRef; name: string } {
   const ref = spec.model ?? stepModel(cfg, spec.name);
   return { ref, name: modelFor(cfg, ref) };
 }
@@ -494,101 +503,113 @@ export const STOPPED_NOTE = "stopped by request; the step resumes on the next st
  * minutes, and every record, sync and merge would wait for it (under the merge lock is fine: the
  * merge checks run fix sessions).
  */
-async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string, ask: AskRule | null): Promise<Attempted<N>> {
+async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSpec & { name: N }, prompt: string, traceName: string, ask: AskRule | null, rendered: Config | undefined): Promise<Attempted<N>> {
   assertNoCheckoutLock(`The ${traceName} session`);
   throwIfStopping();
   const signal = cancelSignal();
   throwIfCancelled(signal);
   throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
-  // Read as the session starts: a model or agent setting a person changed since the step began applies from here.
-  const model = await phaseModel(ctx, spec);
-  const { setup, applies } = await setupOf(ctx, spec);
+  // Read once, as the prompt was rendered (`rendered`), else now: a model or agent setting a person
+  // changed since the step began applies from here, and the prompt and the session agree on it.
+  const cfg = rendered ?? await ctx.models();
+  const model = modelOf(cfg, spec);
+  const { setup, applies } = setupOf(cfg, spec);
   const extra = applies ? await setupRun(ctx, spec, setup, cwd) : null;
   if (extra && "missing" in extra) {
     ctx.trace.event(ctx.slug, "error", { where: traceName, reason: "setup", detail: extra.missing });
     return { ok: false, reason: "setup", note: `${ownerNote("setup")} ${extra.missing}`, sessionId: null };
   }
-  const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
-  if (extra) {
-    ctx.trace.event(ctx.slug, "agent_setup", {
-      agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name),
-      team_members: Object.fromEntries(setup.teams.map((t) => [t.name, t.members])), skills: setup.skills,
-      tools: setup.tools, mcp_tools: setup.mcpTools, sources: setup.sources, models: extra.models,
-    }, seq);
-  }
-  const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
-  // The protect-tests hook writes here the test files it refused to let a fix session edit.
-  const protectedLog = join(dir, "protected-tests.txt");
-  // The session's question, when it asked one (see agentPhase); `refused`: the note when it may not ask.
-  let asked: Question | null = null;
-  let refused: string | null = null;
-  const out = await tracedSession({
-    trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE, ref: model.ref,
-    run: {
-      cwd,
-      prompt,
-      schema: jsonSchemaFor(spec.name),
-      model: model.name,
-      permissionMode: spec.permissionMode,
-      allowedTools: toolsFor(ctx, spec.tools, setup),
-      // With the setup's: no edits in main's snapshot when the session may read it as an added dir.
-      disallowedTools: [...disallowedFor(spec.tools), ...(extra?.deny ?? [])],
-      // The test-protection hook, from the installed package; it acts only in a fix session.
-      settings: hookSettings(),
-      // The step's agent setup (see setupRun), which may also replace the settings.
-      ...extra?.run,
-      timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
-      maxBudgetUsd: capUsd,
-      resume: spec.resume,
-      // A session that may run the project's commands gets the change's slot, as its commands do.
-      env: {
-        LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog,
-        ...(RUNS_COMMANDS.has(spec.tools) ? slotEnv(ctx.slug) : {}), ...(spec.env ?? {}),
+  // A session in a branch's files takes Claude Code's project setup from main's commit (see fromMain),
+  // in a folder of its own that goes when the session does.
+  const made = spec.cwd !== undefined ? await mainProjectAt(ctx.git, ctx.root, await ctx.readCommit()) : null;
+  try {
+    const main = spec.cwd !== undefined ? fromMain(made?.project ?? null, setup.sources, extra?.run.settings ?? hookSettings()) : null;
+    const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+    if (extra) {
+      ctx.trace.event(ctx.slug, "agent_setup", {
+        agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name),
+        team_members: Object.fromEntries(setup.teams.map((t) => [t.name, t.members])), skills: setup.skills,
+        tools: setup.tools, mcp_tools: setup.mcpTools, sources: setup.sources, models: extra.models,
+      }, seq);
+    }
+    const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
+    // The protect-tests hook writes here the test files it refused to let a fix session edit.
+    const protectedLog = join(dir, "protected-tests.txt");
+    // The session's question, when it asked one (see agentPhase); `refused`: the note when it may not ask.
+    let asked: Question | null = null;
+    let refused: string | null = null;
+    const out = await tracedSession({
+      trace: ctx.trace, slug: ctx.slug, seq, dir, capUsd, stoppedNote: STOPPED_NOTE, ref: model.ref,
+      run: {
+        cwd,
+        prompt,
+        schema: jsonSchemaFor(spec.name),
+        model: model.name,
+        permissionMode: spec.permissionMode,
+        allowedTools: toolsFor(ctx, spec.tools, setup),
+        // With the setup's and main's: no edits in main's snapshot when the session may read it as an added dir.
+        disallowedTools: [...new Set([...disallowedFor(spec.tools), ...(extra?.deny ?? []), ...(main?.deny ?? [])])],
+        // The test-protection hook, from the installed package; it acts only in a fix session.
+        settings: hookSettings(),
+        // The step's agent setup (see setupRun), which may also replace the settings.
+        ...extra?.run,
+        // Main's project setup, its settings with the setup's (see fromMain); main's snapshot is the setup's added dir too.
+        ...main?.run,
+        timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
+        maxBudgetUsd: capUsd,
+        resume: spec.resume,
+        // A session that may run the project's commands gets the change's slot, as its commands do.
+        env: {
+          LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog,
+          ...(RUNS_COMMANDS.has(spec.tools) ? slotEnv(ctx.slug) : {}), ...main?.env, ...(spec.env ?? {}),
+        },
+        signal,
+        // Live: what people send this session while it runs reaches it (see src/steering.ts).
+        live: { attach: (ctl) => deliverInbox(ctx, seq, spec.name, ctl) },
       },
-      signal,
-      // Live: what people send this session while it runs reaches it (see src/steering.ts).
-      live: { attach: (ctl) => deliverInbox(ctx, seq, spec.name, ctl) },
-    },
-    onEvent: (e) => { if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e, cwd), seq); },
-    read: (output) => {
-      const parsed = Envelopes[spec.name].safeParse(output);
-      if (!parsed.success) return { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
-      const envelope = parsed.data as Envelope<N>;
-      if (envelope.status === "fail") return { ok: false, reason: "agent-fail", detail: envelope.summary };
-      const q = ask ? questionIn(envelope) : null;
-      if (!q) return { ok: true, value: envelope };
-      if (ask?.refuse) {
-        refused = ask.refuse;
-        return { ok: false, reason: "agent-fail", detail: `${ask.refuse}: ${q.text}` };
-      }
-      asked = q;
-      return { ok: true, value: envelope, endAs: "asked", note: q.text };
-    },
-    // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
-    // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
-    interrupt: (r) => unavailable(r.reason)
-      ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model: model.name }), note: `${r.reason}: ${r.detail}` }
-      : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
-  });
-  // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
-  // its row already ended asked (see tracedSession).
-  const question = out.ok ? (asked as Question | null) : null;
-  if (question) await recordQuestion(ctx, { phase: spec.name, traceName, seq, sessionId: out.sessionId, ...question });
-  // A person stopped the change while this session ran: the step ends here, whatever the session did.
-  throwIfChangeStopped(ctx);
-  if (!out.ok) {
-    if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
-    const reason = out.reason as BlockingReason;
-    // The step's own words: which named model, which CLI name, which step.
-    if (reason === "model") return { ok: false, reason, note: badModelNote(model.ref, model.name, spec.name), sessionId: out.sessionId };
-    // What the session did not load, in the init check's words (see initProblem).
-    if (reason === "setup") return { ok: false, reason, note: `${ownerNote(reason)} ${out.detail}`, sessionId: out.sessionId };
-    const tests = protectedTests(protectedLog);
-    return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
+      onEvent: (e) => { if (e.type !== "system" || e.subtype === "init") ctx.trace.event(ctx.slug, "claude_event", summarize(e, cwd), seq); },
+      read: (output) => {
+        const parsed = Envelopes[spec.name].safeParse(output);
+        if (!parsed.success) return { ok: false, reason: "invalid-envelope", detail: issuesText(parsed.error.issues) };
+        const envelope = parsed.data as Envelope<N>;
+        if (envelope.status === "fail") return { ok: false, reason: "agent-fail", detail: envelope.summary };
+        const q = ask ? questionIn(envelope) : null;
+        if (!q) return { ok: true, value: envelope };
+        if (ask?.refuse) {
+          refused = ask.refuse;
+          return { ok: false, reason: "agent-fail", detail: `${ask.refuse}: ${q.text}` };
+        }
+        asked = q;
+        return { ok: true, value: envelope, endAs: "asked", note: q.text };
+      },
+      // Not this phase's failure: it is interrupted, and the scheduler pauses the loop (an unavailable
+      // assistant), or the step resumes once there is budget again (the loop's day, not its own limit).
+      interrupt: (r) => unavailable(r.reason)
+        ? { error: new AssistantUnavailable(r.detail, { phase: spec.name, line: r.matched ?? r.detail, model: model.name }), note: `${r.reason}: ${r.detail}` }
+        : r.reason === "budget" && fromDay ? { error: new LoopBudgetReached(), note: "budget: the loop's daily budget ran out during this session" } : null,
+    });
+    // A question the session asked is recorded first, so a stop of the change meanwhile never loses it:
+    // its row already ended asked (see tracedSession).
+    const question = out.ok ? (asked as Question | null) : null;
+    if (question) await recordQuestion(ctx, { phase: spec.name, traceName, seq, sessionId: out.sessionId, ...question });
+    // A person stopped the change while this session ran: the step ends here, whatever the session did.
+    throwIfChangeStopped(ctx);
+    if (!out.ok) {
+      if (refused !== null && out.reason === "agent-fail") return { ok: false, reason: "agent-fail", note: refused, sessionId: out.sessionId };
+      const reason = out.reason as BlockingReason;
+      // The step's own words: which named model, which CLI name, which step.
+      if (reason === "model") return { ok: false, reason, note: badModelNote(model.ref, model.name, spec.name), sessionId: out.sessionId };
+      // What the session did not load, in the init check's words (see initProblem).
+      if (reason === "setup") return { ok: false, reason, note: `${ownerNote(reason)} ${out.detail}`, sessionId: out.sessionId };
+      const tests = protectedTests(protectedLog);
+      return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
+    }
+    if (spec.endsPause !== false) assistantReached(ctx, model.name);
+    return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, model: model.name, seq, ...(question ? { asked: question } : {}) };
+  } finally {
+    made?.remove();
   }
-  if (spec.endsPause !== false) assistantReached(ctx, model.name);
-  return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, model: model.name, seq, ...(question ? { asked: question } : {}) };
 }
 
 /**

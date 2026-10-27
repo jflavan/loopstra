@@ -215,6 +215,14 @@ export class ConfigDocument {
     this.dirty = true;
   }
 
+  /** Removes each map at `paths` that is empty, in order, and any map that leaves empty above it (see clear), so no `{}` stays. */
+  dropEmptyMaps(paths: Path[]): void {
+    for (const p of paths) {
+      const v = this.get(p);
+      if (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length) this.clear(p);
+    }
+  }
+
   /**
    * Removes a key if it is there, and the `steps` map above it when that leaves it empty. Unlike
    * clear, other maps stay, so `stages.verify` is kept with its model.

@@ -181,7 +181,11 @@ export interface RunPhaseInput {
   agents?: Record<string, object>;
   /** The agent the session itself runs as (`claude --agent`). */
   agent?: string;
-  /** Which settings Claude Code loads (`claude --setting-sources`, e.g. "user,project"). */
+  /** MCP servers for this session, as JSON (`claude --mcp-config`), added to those its settings load. */
+  mcpConfig?: string;
+  /** A plugin's folder (`claude --plugin-dir`): how a session in a branch's files gets main's skills, as `project:<name>` (see fromMain). */
+  pluginDir?: string;
+  /** Which settings Claude Code loads (`claude --setting-sources`, e.g. "user,project"; "" for none). */
   settingSources?: string;
   /** More directories the session's tools may reach (`claude --add-dir`, once per directory). */
   addDirs?: string[];
@@ -415,8 +419,8 @@ class Sends {
   }
 }
 
-/** Where a session's `--agents` and `--settings` are written (see sessionFiles). */
-interface SessionFiles { agents?: string; settings?: string }
+/** Where a session's `--agents`, `--settings` and `--mcp-config` are written (see sessionFiles). */
+interface SessionFiles { agents?: string; settings?: string; mcpConfig?: string }
 
 /**
  * Writes a session's inline agents and settings to files only its user can read, in a folder of its own,
@@ -426,7 +430,7 @@ interface SessionFiles { agents?: string; settings?: string }
  */
 function sessionFiles(input: RunPhaseInput): { paths: SessionFiles; remove: () => void } | null {
   const agents = input.agents && Object.keys(input.agents).length ? JSON.stringify(input.agents) : null;
-  if (agents === null && !input.settings) return null;
+  if (agents === null && !input.settings && !input.mcpConfig) return null;
   const dir = mkdtempSync(join(tmpdir(), "loopstra-session-"));
   const remove = () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a leftover temp folder is harmless */ } };
   try {
@@ -439,6 +443,7 @@ function sessionFiles(input: RunPhaseInput): { paths: SessionFiles; remove: () =
       paths: {
         ...(agents !== null ? { agents: put("agents.json", agents) } : {}),
         ...(input.settings ? { settings: put("settings.json", input.settings) } : {}),
+        ...(input.mcpConfig ? { mcpConfig: put("mcp.json", input.mcpConfig) } : {}),
       },
       remove,
     };
@@ -464,6 +469,8 @@ function claudeCommand(exe: string, input: RunPhaseInput, files: SessionFiles): 
   for (const dir of input.addDirs ?? []) args.push("--add-dir", dir);
   if (input.forwardSubagentText) args.push("--forward-subagent-text");
   if (files.settings) args.push("--settings", files.settings);
+  if (files.mcpConfig) args.push("--mcp-config", files.mcpConfig);
+  if (input.pluginDir) args.push("--plugin-dir", input.pluginDir);
   // Every user message the session takes is echoed, so the runner knows which result answers it.
   if (input.live) args.push("--input-format", "stream-json", ...(input.live.replay === false ? [] : ["--replay-user-messages"]));
   // A .ts fake must be run through bun; the real CLI is a native executable.

@@ -1,10 +1,10 @@
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, type AgentSetup } from "./agents";
 import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
+import { readText } from "./fsutil";
 import type { Git } from "./git";
 import { STAGE_NAMES, STEP_KEYS, type StageName, type StepKey } from "./models";
 
@@ -39,18 +39,27 @@ function names(v: unknown): string[] | null {
   return out.length ? out : null;
 }
 
-/** Parses an agent file: frontmatter via yaml (CRLF fine, a byte order mark fine, none is fine), the body as the prompt. */
+/**
+ * The frontmatter keys of a markdown file (CRLF fine, a byte order mark fine), and the rest of it: null
+ * when it has no frontmatter. Frontmatter that is not YAML keys and values counts as none, and
+ * `problem` says what it is instead.
+ */
+export function splitFrontmatter(text: string): { front: Record<string, unknown>; body: string | null; problem?: string } {
+  const m = FRONTMATTER.exec(text.replace(/^\uFEFF/, ""));
+  if (!m) return { front: {}, body: null };
+  const body = m[2] ?? "";
+  let v: unknown;
+  try { v = parse(m[1] ?? ""); } catch { return { front: {}, body, problem: "not YAML" }; }
+  if (v === null || v === undefined) return { front: {}, body };
+  if (typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body };
+  return { front: {}, body, problem: "not YAML keys and values" };
+}
+
+/** Parses an agent file: frontmatter via yaml (none is fine, and unreadable counts as none), the body as the prompt. */
 export function parseAgentFile(name: string, file: string, from: AgentDefinition["from"], path: string): AgentDefinition {
-  const text = file.replace(/^\uFEFF/, "");
-  const m = FRONTMATTER.exec(text);
-  let front: Record<string, unknown> = {};
-  if (m) {
-    try {
-      const v: unknown = parse(m[1] ?? "");
-      if (v && typeof v === "object" && !Array.isArray(v)) front = v as Record<string, unknown>;
-    } catch { /* unreadable frontmatter counts as none */ }
-  }
-  const body = m ? (m[2] ?? "") : text;
+  const split = splitFrontmatter(file);
+  const front = split.front;
+  const body = split.body ?? file.replace(/^\uFEFF/, "");
   return {
     name,
     description: typeof front.description === "string" ? front.description.trim() : "",
@@ -62,10 +71,6 @@ export function parseAgentFile(name: string, file: string, from: AgentDefinition
     from,
     path,
   };
-}
-
-function readText(path: string): string | null {
-  try { return readFileSync(path, "utf8"); } catch { return null; }
 }
 
 function readJson(path: string): Record<string, unknown> | null {
@@ -333,7 +338,7 @@ export function inlineAgents(main: AgentDefinition | null, others: AgentDefiniti
 export type SetupRunOptions = Partial<Pick<RunPhaseInput, "agents" | "agent" | "settingSources" | "settings" | "addDirs" | "forwardSubagentText" | "checkInit">>;
 
 /** Deny rules that keep a session from editing anything under `dir` (an added dir it may only read). */
-function noEditsUnder(dir: string): string[] {
+export function noEditsUnder(dir: string): string[] {
   const under = `${pathRule(dir)}/**`;
   return ["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(${under})`);
 }

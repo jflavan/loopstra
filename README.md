@@ -401,12 +401,23 @@ flowchart TB
   snap -->|read| ro["read-only steps<br/>intake, design, spec-check,<br/>plan, plan-challenge, lessons"]
   wr["writing steps<br/>build, fix, reconcile, revise"] -->|edit| wt
   wt -->|read, run checks| chk["review, verify"]
+  main -.->|"main's CLAUDE.md, settings,<br/>skills, MCP servers, from its commit"| wr
+  main -.-> chk
   ro -->|return spec, plan| rt["Loopstra runtime<br/>code, not an agent"]
   rt -->|commits| wt
   rt -->|merges, records| main
 ```
 
 **Design and plan** sessions are read-only and return content; the runtime writes `spec.md`, `plan.md`, `review.md`, `outcome.md`. They (and intake, the spec and plan judges, and lessons) read a snapshot of `main`'s last commit taken once per step (`.loopstra/snapshots/<slug>`, removed when the step ends), never the main checkout: a person's uncommitted edits there are not part of a spec or plan, and `main` moving meanwhile (another change merging) does not change what one step reads. Only the build session edits code, in a worktree on its own branch `intent/<slug>`, and the runtime makes every commit and merge. The build session may run the configured commands (test, lint, build, run, install) on top of `claude.allowed_tools`. Sessions run with background tasks turned off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), so a long command runs in the foreground and no task is left pending for the next session that resumes it. A chained command (`a && b`, `||`, `;`) is allowed whole and part by part, since Claude Code checks each part on its own.
+
+**Claude Code's own setup comes from `main`.** Sessions that run in a change's branch (build, fix, reconcile, revise, verify, review) never load the branch's `.claude/settings.json`, `CLAUDE.md`, `.claude/rules`, `.claude/skills`, `.claude/agents`, `.claude/commands` or `.mcp.json`: a build could otherwise change what the sessions after it are told and allowed, its judges included. They load your user settings (none with `sources: repo`) and get `main`'s project setup instead, read from the step's commit of `main` into a temporary folder of the session's own (never from a checkout a session could have written):
+
+- its `.claude/settings.json` in `--settings`, next to Loopstra's hook (both sets of hooks run);
+- its top-level `CLAUDE.md`, `.claude/CLAUDE.md` and `.claude/rules` through `--add-dir` (read, never edited);
+- its skills, agents and commands as a plugin called `project`, so a skill shows as `project:<name>`;
+- its `.mcp.json` servers in `--mcp-config`, except those its settings disable.
+
+A change that edits those files takes effect once it is merged. The limits: a `CLAUDE.md` in a subfolder is not loaded in these sessions, nor is a file a `CLAUDE.md` imports from elsewhere in the repository (`@docs/style.md`), and a hook or MCP server in `main`'s settings that runs a script from the project folder runs the branch's copy of it.
 
 ### Around the stages
 
@@ -424,7 +435,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 
 - `main_branch`, `poll_seconds`
 - `commands`: test (required), install, lint, build, run
-- `claude`: models (`cheap`, `default`, `strong`, `max`: by default the aliases `haiku`, `sonnet`, `opus` and `fable`, which Claude Code resolves to the newest model of each family; a full name such as `claude-opus-5-5` pins one), `timeout_minutes`, optional spending limits (`max_budget_usd` per session, `max_budget_usd_per_day` for the loop's sessions together; unset means no limit), and `allowed_tools` for build sessions (the configured commands are always added; anything else a build needs, like `"Bash(make *)"`, goes here). Sessions load the MCP servers, skills and CLAUDE.md files of the machine and repository they run in, but without an allow rule an MCP call is refused (a session cannot ask). A server can still be connecting when a session starts, so its tools may only appear after the first turn
+- `claude`: models (`cheap`, `default`, `strong`, `max`: by default the aliases `haiku`, `sonnet`, `opus` and `fable`, which Claude Code resolves to the newest model of each family; a full name such as `claude-opus-5-5` pins one), `timeout_minutes`, optional spending limits (`max_budget_usd` per session, `max_budget_usd_per_day` for the loop's sessions together; unset means no limit), and `allowed_tools` for build sessions (the configured commands are always added; anything else a build needs, like `"Bash(make *)"`, goes here). Sessions load the MCP servers, skills and CLAUDE.md files of the machine and repository they run in (in a change's branch, `main`'s: see Where sessions read and write), but without an allow rule an MCP call is refused (a session cannot ask). A server can still be connecting when a session starts, so its tools may only appear after the first turn
 - `agents`: which agents, subagents, teams, skills, tools and MCP tools each step's session gets (see Agents for each step)
 - `gates`: spec, plan, merge, done, each with `human` (`status` or `none`; merge also `pr`) and `agent` (independent reviewer); merge also `method` (`squash` or `merge`)
 - `stages`: per-stage model, `steps` (a model for single steps; see Models for each step), skills, `before`/`after` commands, and loop limits
@@ -487,12 +498,12 @@ flowchart LR
 | `subagents`, `teams` | their files inline in `--agents`; a line in the prompt naming them, and how each team works; and `--forward-subagent-text`, so their work shows on the session page |
 | `skills` | a line in the prompt naming them. A session that works outside the main checkout also gets the snapshot of `main` with `--add-dir`, so it finds the repository's skills as `main` has them, and may not edit them there. |
 | `tools`, `mcp_tools` | added to `--allowedTools`, on top of the step's own tools |
-| `sources: repo` | `--setting-sources project`, with Loopstra's hook and your `apiKeyHelper` and `env` passed back in `--settings` |
+| `sources: repo` | `--setting-sources project` (none in a change's branch, which gets `main`'s settings instead), with Loopstra's hook and your `apiKeyHelper` and `env` passed back in `--settings` |
 | a read-only step | `--disallowedTools` removes `Edit`, `Write` and `NotebookEdit`, for the step's agent and every subagent |
 
-`--agents` and `--settings` are passed as files rather than as text on the command line: each session gets a temporary folder of its own, with files only you can read, removed when the session ends. So other users of the machine cannot read your settings' `env` or `apiKeyHelper` in the process list, and a large agent setup does not run into the system's limit on the length of a command.
+`--agents`, `--settings` and `--mcp-config` are passed as files rather than as text on the command line: each session gets a temporary folder of its own, with files only you can read, removed when the session ends. So other users of the machine cannot read your settings' `env` or `apiKeyHelper` in the process list, and a large agent setup does not run into the system's limit on the length of a command.
 
-**Rules that do not move.** Read-only steps never get `Edit`, `MultiEdit`, `Write`, `NotebookEdit` or a Bash rule that matches any command (`Bash`, `Bash(*)`, `Bash(:*)` and the like), and no step's `tools` may hold git that changes history or a remote (`commit`, `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`, `tag`, `stash`, bare `git`). A wildcard counts when it could match one of those (`Bash(git c*)` could be `git commit`), and so does git after `env`, `command` or a `VAR=value` (`Bash(env git push *)`). `agent` cannot be set on `fix`, `reconcile` or `revise`, which continue the build's session and run as the build's agent, and a built-in agent such as `Explore` can be a subagent but not a step's agent. Chat's two steps (`orchestrator`, `write-intent`) take only their own entries under `steps` (never `all`, and not the old shared MCP rule), and anyone allowed to chat can steer the tools given there.
+**Rules that do not move.** Read-only steps never get `Edit`, `MultiEdit`, `Write` or `NotebookEdit`. No step's `tools`, and no rule in `claude.allowed_tools`, may hold git that changes history or a remote (`commit`, `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`, `tag`, `stash`, bare `git`), or a Bash rule that matches any command (`Bash`, `Bash(*)`, `Bash(:*)` and the like), since that would allow the same git: name the commands instead, like `Bash(make *)`. A wildcard counts when it could match one of those (`Bash(git c*)` could be `git commit`), and so does git after `env`, `command` or a `VAR=value` (`Bash(env git push *)`). `agent` cannot be set on `fix`, `reconcile` or `revise`, which continue the build's session and run as the build's agent, and a built-in agent such as `Explore` can be a subagent but not a step's agent. Chat's two steps (`orchestrator`, `write-intent`) take only their own entries under `steps` (never `all`, and not the old shared MCP rule), and anyone allowed to chat can steer the tools given there.
 
 **Subagents and teams.**
 

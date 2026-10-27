@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { ConfigError, TEAM_NAME } from "./config";
+import { TEAM_NAME } from "./agents";
+import { ConfigError } from "./config";
 import { MODEL_REFS, STAGE_NAMES, STEP_KEYS, stepsOf, type StepGroup } from "./models";
 import { ConfigDocument } from "./setup/document";
 import { modelName } from "./setup/sections/models";
@@ -113,7 +114,8 @@ export function applySetting(file: string, text: string, path: string[], value: 
     // An empty list removes the key, as null does: no `skills: []` is left in the file.
     if (value === null || (path[0] === "agents" && Array.isArray(value) && !value.length)) doc.unset(path);
     else doc.set(path, value, { flow: Array.isArray(value) });
-    if (path[0] === "agents") pruneEmpty(doc, path);
+    // No `{}` is left on the way up from the setting (agents.steps.review, agents.steps, agents).
+    if (path[0] === "agents") doc.dropEmptyMaps(path.slice(1).map((_, i) => path.slice(0, path.length - 1 - i)));
     doc.validate();
     return { ok: true, text: doc.text() };
   } catch (e) {
@@ -122,10 +124,3 @@ export function applySetting(file: string, text: string, path: string[], value: 
   }
 }
 
-/** Removes each map left empty on the way up from the setting (agents.steps.review, agents.steps, agents), so no `{}` stays. */
-function pruneEmpty(doc: ConfigDocument, path: string[]): void {
-  for (let n = path.length - 1; n >= 1; n--) {
-    const v = doc.get(path.slice(0, n));
-    if (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length) doc.clear(path.slice(0, n));
-  }
-}

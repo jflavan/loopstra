@@ -7,7 +7,7 @@ import { StepContext } from "../../src/context";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { badModelNote, stepModel } from "../../src/models";
-import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, probeAssistant, projectCommand, stepSetup, toolsFor, withContract, type AgentPhaseSpec } from "../../src/phases";
+import { agentPhase, alongside, alongsideFirst, codePhase, commandsFor, CONTRACT_LINES, CONVERSATION_HEADING, disallowedFor, ownerNote, phaseModel, phasePrompt, probeAssistant, projectCommand, stepSetup, toolsFor, withContract, type AgentPhaseSpec } from "../../src/phases";
 import { activePause, pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { hookSettings } from "../../src/package";
 import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lanes";
@@ -891,9 +891,13 @@ describe("a step's agent setup", () => {
       expect(runs[2]).toEqual(runs[0]);
       for (const { args } of runs[0]!) {
         expect(args).not.toBeNull();
-        for (const flag of NEW_FLAGS) expect(args).not.toContain(flag);
         expect(args![args!.indexOf("--settings") + 1]).toBe(hookSettings());
       }
+      // The build, in the branch's files, loads only the user's settings (see fromMain); main has no project setup to add.
+      const intakeArgs = runs[0]![0]!.args!, buildArgs = runs[0]![1]!.args!;
+      for (const flag of NEW_FLAGS) expect(intakeArgs).not.toContain(flag);
+      for (const flag of NEW_FLAGS.filter((f) => f !== "--setting-sources")) expect(buildArgs).not.toContain(flag);
+      expect(buildArgs[buildArgs.indexOf("--setting-sources") + 1]).toBe("user");
       // A stage's skills alone (spec.skills) change the prompt's first line only, as they always did.
       await writeAgents(repo.path);
       const skilled = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["house"] });
@@ -910,7 +914,7 @@ describe("a step's agent setup", () => {
       await worktree(ctx);
       const { r, args } = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["house"] });
       expect(r.ok).toBe(true);
-      for (const flag of NEW_FLAGS) expect(args).not.toContain(flag);
+      for (const flag of NEW_FLAGS.filter((f) => f !== "--setting-sources")) expect(args).not.toContain(flag);
       expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
   });
@@ -988,9 +992,87 @@ describe("a step's agent setup", () => {
       expect(r.ok).toBe(true);
       const inline = JSON.parse(args![args!.indexOf("--agents") + 1]!) as Record<string, { prompt: string }>;
       expect(inline["loopstra-lead"]!.prompt).toBe("MAIN");
-      // The agent is read from the commit, so a worktree step that names no skill makes no snapshot.
+      // The agent is read from the commit, and so is main's project setup (see fromMain): a worktree step that names no skill makes no snapshot.
       expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a session runs on the settings its prompt was rendered from, even when a person saves others in between", async () => {
+    const { repo, ctx, trace } = await setup();
+    const file = join(repo.path, "..", `args-${Date.now()}-read.json`);
+    try {
+      await commitAgents(repo.path, { sec: "---\ndescription: Security\n---\nS\n", perf: "---\ndescription: Speed\n---\nP\n" });
+      await writeAgents(repo.path, { steps: { intake: { subagents: ["sec"] } } });
+      const spec = { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: file } } as const;
+      const prompt = await phasePrompt(ctx, spec);
+      expect(prompt).toContain("`loopstra-sec`");
+      await writeAgents(repo.path, { steps: { intake: { subagents: ["perf"] } } });
+      const agentsOf = async (render: () => Promise<string | null>) => {
+        expect((await agentPhase(ctx, spec, render)).ok).toBe(true);
+        const { args } = (await Bun.file(file).json()) as { args: string[] };
+        return Object.keys(JSON.parse(args[args.indexOf("--agents") + 1]!) as object);
+      };
+      expect(await agentsOf(async () => prompt)).toEqual(["loopstra-sec"]);
+      // A prompt rendered now has the saved settings, and so does its session.
+      expect(await agentsOf(() => phasePrompt(ctx, spec))).toEqual(["loopstra-perf"]);
+    } finally {
+      rmSync(file, { force: true });
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a session in the branch's files gets main's Claude Code setup, never the branch's", async () => {
+    const { repo, ctx, trace } = await setup();
+    const file = join(repo.path, "..", `args-${Date.now()}-main.json`);
+    try {
+      const put = (root: string, files: Record<string, string>) => Promise.all(Object.entries(files).map(([path, text]) => Bun.write(join(root, path), text)));
+      const project = (who: string) => ({
+        "CLAUDE.md": `${who} instructions\n`,
+        ".claude/rules/style.md": `${who} rule\n`,
+        ".claude/settings.json": JSON.stringify({ env: { WHO: who }, disabledMcpjsonServers: ["off"], hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `echo ${who}` }] }] } }),
+        ".claude/skills/house/SKILL.md": `---\ndescription: ${who}\n---\n${who}\n`,
+        ".mcp.json": JSON.stringify({ mcpServers: { [`${who}-srv`]: { command: "true" }, off: { command: "true" } } }),
+      });
+      await put(repo.path, project("main"));
+      await new Git(repo.path).commitAll("main's Claude Code setup");
+      await worktree(ctx);
+      await put(ctx.worktreeDir, project("branch"));
+      await new Git(ctx.worktreeDir).commitAll("the branch rewrites it");
+      const r = await agentPhase(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, vars: {}, env: { LOOPSTRA_FAKE_ARGS: file } });
+      expect(r.ok).toBe(true);
+      const got = (await Bun.file(file).json()) as { args: string[]; folders: Record<string, Record<string, string>>; env: Record<string, string | null> };
+      const flag = (name: string) => got.args[got.args.indexOf(name) + 1]!;
+      // No project or local settings: none of the branch's settings, CLAUDE.md, skills or servers.
+      expect(flag("--setting-sources")).toBe("user");
+      // Main's settings, with Loopstra's hook beside main's.
+      const settings = JSON.parse(flag("--settings")) as { env: Record<string, string>; hooks: { PreToolUse: { hooks: { command: string }[] }[] } };
+      expect(settings.env.WHO).toBe("main");
+      const hooks = settings.hooks.PreToolUse.flatMap((h) => h.hooks.map((x) => x.command));
+      expect(hooks).toContain("echo main");
+      expect(hooks.some((c) => c.includes("loopstra-protect-tests"))).toBe(true);
+      expect(hooks).not.toContain("echo branch");
+      // Main's CLAUDE.md and rules, from its commit, in a folder the session may read but not edit.
+      expect(got.folders[flag("--add-dir")]).toEqual({ "CLAUDE.md": "main instructions\n", ".claude/rules/style.md": "main rule\n" });
+      expect(got.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD).toBe("1");
+      expect(flag("--disallowedTools").split(",")).toContain(`Edit(${pathRule(flag("--add-dir"))}/**)`);
+      // Main's skills, as the plugin `project`.
+      expect(got.folders[flag("--plugin-dir")]).toEqual({ ".claude-plugin/plugin.json": JSON.stringify({ name: "project" }), "skills/house/SKILL.md": "---\ndescription: main\n---\nmain\n" });
+      // Main's servers but the one its settings disable.
+      expect(Object.keys((JSON.parse(flag("--mcp-config")) as { mcpServers: object }).mcpServers)).toEqual(["main-srv"]);
+      // The folders go with the session, and nothing was checked out for them.
+      expect(existsSync(flag("--plugin-dir"))).toBe(false);
+      expect(existsSync(flag("--add-dir"))).toBe(false);
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
+
+      // With `sources: repo`, not even the user's settings.
+      await writeAgents(repo.path, { sources: "repo" });
+      await agentPhase(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, vars: {}, env: { LOOPSTRA_FAKE_ARGS: file } });
+      const repoOnly = (await Bun.file(file).json()) as { args: string[] };
+      expect(repoOnly.args[repoOnly.args.indexOf("--setting-sources") + 1]).toBe("");
+    } finally {
+      rmSync(file, { force: true });
+      trace.close(); repo.cleanup();
+    }
   });
 
   test("an agent file edited in the step's snapshot is not what a later session of the step runs as", async () => {
@@ -1088,7 +1170,7 @@ describe("a step's agent setup", () => {
     } finally { trace.close(); repo.cleanup(); }
   });
 
-  test("a writing session given main's snapshot as an added dir may not edit it", async () => {
+  test("a writing session may not edit the folders it is given to read", async () => {
     const { repo, ctx, trace } = await setup();
     try {
       await commitAgents(repo.path, { lead: "---\ndescription: Builds\n---\nB\n" });
@@ -1096,11 +1178,13 @@ describe("a step's agent setup", () => {
       await worktree(ctx);
       const { r, args } = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["house"] });
       expect(r.ok).toBe(true);
+      // Its skills are looked for in main's snapshot, and main's own setup is read to a folder of the session's (see fromMain).
       const snapshot = await ctx.snapshot();
-      expect(args![args!.indexOf("--add-dir") + 1]).toBe(snapshot);
-      const under = `${pathRule(snapshot)}/**`;
+      const added = args![args!.indexOf("--add-dir") + 1]!;
+      expect(added).not.toBe(snapshot);
+      const rules = (dir: string) => ["Edit", "Write", "NotebookEdit"].map((t) => `${t}(${pathRule(dir)}/**)`);
       const denied = args![args!.indexOf("--disallowedTools") + 1]!.split(",");
-      expect(denied).toEqual([...disallowedFor("build"), `Edit(${under})`, `Write(${under})`, `NotebookEdit(${under})`]);
+      expect(denied).toEqual([...disallowedFor("build"), ...rules(snapshot), ...rules(added)]);
       await ctx.dropSnapshot();
     } finally { trace.close(); repo.cleanup(); }
   });

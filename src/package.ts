@@ -18,6 +18,21 @@ export function packageVersion(): string {
   return (JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string }).version;
 }
 
+/** The Bun versions this package runs on: `engines.bun` in its package.json, like `>=1.4.4`. */
+export function bunRange(): string {
+  return (JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { engines: { bun: string } }).engines.bun;
+}
+
+/**
+ * A plain message when the Bun running this is not one bunRange allows, or null. A canary or other
+ * pre-release counts as its release (semver would leave every pre-release out of `>=`, a newer one
+ * too). `then`: what to do after upgrading Bun, like "start Loopstra again".
+ */
+export function oldBun(then: string, running: string = Bun.version, range: string = bunRange()): string | null {
+  if (Bun.semver.satisfies(running.replace(/[-+].*$/s, ""), range)) return null;
+  return `Loopstra needs Bun ${range.replace(/^>=\s*/, "")} or later; this is Bun ${running}. Run bun upgrade, then ${then}.`;
+}
+
 /** True for a development checkout (run through `bun link` or `bun src/cli.ts`), which is never upgraded from npm. */
 export function isDev(): boolean {
   return packageVersion() === DEV_VERSION;

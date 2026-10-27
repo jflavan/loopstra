@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { BUILTIN_AGENTS, CONTINUES_BUILD, TEAM_WAYS, toolRuleProblem } from "./agents";
+import { BUILTIN_AGENTS, CONTINUES_BUILD, TEAM_NAME, TEAM_WAYS, toolProblem, toolRuleProblem } from "./agents";
 import { MODEL_REFS, STEP_KEYS, stepsOf, type ModelRef, type StepKey, type StageName, type StepGroup } from "./models";
 import { errorText } from "./shell";
 
@@ -127,9 +127,6 @@ const stepAgents = z.object({
 /** One step's agent setup, or what `agents.all` gives every step. */
 export type StepAgents = z.infer<typeof stepAgents>;
 
-/** A team's name: lowercase words joined by dashes. */
-export const TEAM_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-
 const agents = z.object({
   sources: z.enum(["all", "repo"], { error: "must be all or repo" }).default("all"),
   teams: z.record(z.string(), z.object({
@@ -196,7 +193,13 @@ export const ConfigSchema = z.object({
     max_budget_usd_per_day: z.number().positive().optional(),
     // Git that only reads: the runtime makes every commit, branch, and merge itself.
     allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
-  }).strict().prefault({}),
+  }).strict().superRefine((c, ctx) => {
+    // The build's sessions get these, so they are held to what a writing step's own tools are.
+    c.allowed_tools.forEach((rule, i) => {
+      const problem = toolProblem(rule, false);
+      if (problem) ctx.addIssue({ code: "custom", path: ["allowed_tools", i], message: problem });
+    });
+  }).prefault({}),
   agents: agents.prefault({}),
   // There is no intent gate to set: a person always accepts a change by setting its status to accepted.
   gates: z.object({

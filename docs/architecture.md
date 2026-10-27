@@ -34,6 +34,7 @@ About 165 modules under `src/`, in eight layers. A module imports only from its 
    - `judges.ts` holds the cheaper first-pass judges.
    - `agent-files.ts` finds the agents and skills a setup names, reading the repository's agents from main's last commit so a change cannot rewrite the agent that judges it, and turns a setup into session options (`setupSession`) and a check of the session's start.
    - `agent-library.ts` lists, copies and fetches agents and skills, for `loopstra setup agents` and the console.
+   - `main-project.ts` reads Claude Code's project setup (settings, CLAUDE.md, rules, skills, MCP servers) from the step's commit of main into a folder of the session's own, and gives it to sessions that run in a change's branch in place of the branch's own.
 6. **Stages**: `stages/*`. Design, plan, build, review, merge and verify, one step per tick, each a short sequence of phases and gates.
 7. **The loop.**
    - `scheduler.ts` runs `tick`, with up to `speed.max_parallel_changes` lanes, a thinker for design and plan, and a pull-request watcher beside them.

@@ -70,7 +70,7 @@ export async function takeEarlyReview(ctx: StepContext, phase: AgentPhaseSpec & 
   const notUsed = (why: string) => { ctx.trace.event(ctx.slug, "command", { command: "early review", note: `not used: ${why}` }); return null; };
   if (kept === null) return notUsed("it could not be read");
   const wt = new Git(ctx.worktreeDir);
-  const model = (await phaseModel(ctx, phase)).name;
+  const model = (await phaseModel(ctx, phase, prompt)).name;
   const same = prompt !== null && !ctx.cfg.stages.review.before.length && !(await wt.isDirty())
     && kept.key === reviewKey(await wt.headSha(), model, prompt);
   if (!same) return notUsed("the change, its plan, the review prompt or its commands moved on since it ran");

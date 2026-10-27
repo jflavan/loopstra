@@ -14,7 +14,7 @@ test("toolProblem names why a rule is refused", () => {
   expect(toolProblem("Bash(git *)", false)).toBe("only Loopstra commits, branches, merges and pushes; git is not allowed");
   expect(toolProblem("Bash(git status *)", true)).toBeNull();
   expect(toolProblem("Write(src/*)", true)).toBe("Write would let it change files");
-  expect(toolProblem("Bash(*)", true)).toBe("a bare Bash rule would let it run anything");
+  expect(toolProblem("Bash(*)", true)).toBe("only Loopstra commits, branches, merges and pushes; a bare Bash rule would let it run any git, so name the commands, like Bash(make *)");
   expect(toolProblem("Edit", false)).toBeNull();
 });
 
@@ -46,12 +46,13 @@ test("toolProblem sees a wildcard in git's or its subcommand's place, and the wo
   for (const r of ["Bash(git d*)", "Bash(git l*)", "Bash(env FOO=1 bun test *)"]) expect(why(r)).toBeNull();
 });
 
-test("toolProblem: a read-only step refuses every Bash rule that matches anything, and MultiEdit", () => {
+test("toolProblem: every step refuses a Bash rule that matches anything; a read-only step also MultiEdit", () => {
   for (const r of ["Bash", "Bash()", "Bash(*)", "Bash(:*)", "Bash(**)", "Bash( * )"]) {
-    expect(toolProblem(r, true)).toBe("a bare Bash rule would let it run anything");
-    // A writing step may run anything, as before; only git is held back.
-    expect(toolProblem(r, false)).toBeNull();
+    // It would allow git commit and git push, on a writing step too.
+    expect(toolProblem(r, true)).toMatch(/^only Loopstra commits, branches, merges and pushes; a bare Bash rule/);
+    expect(toolProblem(r, false)).toBe(toolProblem(r, true));
   }
+  expect(toolProblem("Bash(make *)", false)).toBeNull();
   expect(toolProblem("MultiEdit", true)).toBe("MultiEdit would let it change files");
   expect(toolProblem("Bash(gh issue view *)", true)).toBeNull();
 });

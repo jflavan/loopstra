@@ -1,4 +1,4 @@
-import { DEV_VERSION, packageVersion } from "../package";
+import { DEV_VERSION, oldBun, packageVersion } from "../package";
 import { errorText, withoutGitHookEnv } from "../shell";
 import type { FileOutcome } from "../upgrade/files";
 import { readStamp } from "../stamp";
@@ -10,6 +10,8 @@ export interface UpgradeIo {
   say: (line: string) => void;
   /** The running version. */
   installed: string;
+  /** Why the running Bun is too old for this version (see oldBun), `then` being what to run after upgrading it; null when it is not. */
+  oldBun: (then: string) => string | null;
   /** The version the repository's stamp names; null when it has none (or it cannot be read). */
   stamp: string | null;
   /** The newest published version; null when the registry cannot be reached. */
@@ -41,6 +43,7 @@ export function realIo(root: string): UpgradeIo {
   return {
     say,
     installed: packageVersion(),
+    oldBun: (then) => oldBun(then),
     stamp: readStamp(root)?.loopstra ?? null,
     latest: () => latestVersion(),
     notes: (from, to) => releaseNotes(from, to),
@@ -69,7 +72,10 @@ export function realIo(root: string): UpgradeIo {
  */
 export async function upgradeCommand(args: string[], io: UpgradeIo): Promise<number> {
   const dev = io.installed.startsWith(DEV_VERSION);
+  // A newer release checks its own minimum in its --repo step, after the install.
+  const bun = io.oldBun("run loopstra upgrade again");
   if (args.includes("--check")) {
+    if (bun) io.say(bun);
     if (dev) {
       io.say(`Installed: a development checkout of Loopstra (${io.installed}); update it with git pull.`);
       return io.repoStep(true);
@@ -91,6 +97,10 @@ export async function upgradeCommand(args: string[], io: UpgradeIo): Promise<num
       io.say(`What the installed ${io.installed} would do to this repository (${latest} may do more):`);
     }
     return io.repoStep(true);
+  }
+  if (bun) {
+    io.say(bun);
+    return 1;
   }
   if (args.includes("--repo")) return io.repoStep(false);
   if (dev) {
