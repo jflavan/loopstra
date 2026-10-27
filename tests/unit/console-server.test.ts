@@ -374,6 +374,21 @@ describe("writes", () => {
     });
   }, 30_000);
 
+  test("the console refuses a malformed agents value before writing a request", async () => {
+    await withRepoConsole(async (base, root) => {
+      const view = await (await fetch(`${base}/api/settings`)).json() as { version: string };
+      const set = { kind: "settings", path: "agents.steps.review.skills", value: "house", version: view.version };
+      const a = await post(base, "/api/requests", set);
+      expect(a.status).toBe(400);
+      expect((await a.json() as { error: string }).error).toBe("agents.steps.review.skills takes a list of names.");
+      expect((await post(base, "/api/requests", { ...set, value: ["a", 1] })).status).toBe(400);
+      expect((await post(base, "/api/requests", { ...set, path: "agents.steps.review.agent", value: ["a"] })).status).toBe(400);
+      expect(pendingRequests(root)).toEqual([]);
+      expect((await post(base, "/api/requests", { ...set, value: ["house"] })).status).toBe(202);
+      expect(pendingRequests(root).map((q) => q.kind)).toEqual(["settings"]);
+    });
+  }, 30_000);
+
   test("an undo is taken only for the step that really happened last", async () => {
     await withRepoConsole(async (base, root) => {
       // Never approved: there is nothing to take back.

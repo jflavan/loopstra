@@ -15,7 +15,7 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
-import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG, STALE_SETTINGS } from "./settings";
+import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
@@ -407,7 +407,7 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
     traced(trace, "_loop", req, result, { path: req.path, value: req.value, ...more });
     return { ok, status: null, text };
   };
-  const saved = () => done("applied", true, `Saved: ${req.path} is now ${req.value ?? "its default"}. Sessions that start from now on use it.`);
+  const saved = () => done("applied", true, `Saved: ${req.path} is now ${settingText(req.value, "its default")}. Sessions that start from now on use it.`);
   const notSaved = (problem: string) => done("refused", false, `That setting was not saved: ${problem}`, { problem });
   if (await settingsLanded(root, main, req)) return saved();
   const path = settingPath(req.path);
@@ -418,7 +418,7 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
   const refused: { outcome?: () => Outcome } = {};
   const refuse = (outcome: () => Outcome) => { refused.outcome = outcome; return false; };
   const git = new Git(root);
-  await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${req.value ?? "default"} by ${byWhom(req)}`, async (draft) => {
+  await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${settingText(req.value, "default")} by ${byWhom(req)}`, async (draft) => {
     const args = ["diff", "--quiet", "HEAD", "--", CONFIG_REL];
     const diff = await git.run(args, { allowFail: true });
     // 1 is "it differs"; anything else is git failing, which must not read as either answer.

@@ -67,4 +67,55 @@ describe("settings", () => {
   test("the version is the file's sha256", () => {
     expect(configVersion("a")).toBe("ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb");
   });
+
+  test("agents paths are writable settings; others are not", () => {
+    expect(settingPath("agents.steps.review.teams")).toEqual(["agents", "steps", "review", "teams"]);
+    expect(settingPath("agents.all.mcp_tools")).toEqual(["agents", "all", "mcp_tools"]);
+    expect(settingPath("agents.teams.reviewers.way")).toEqual(["agents", "teams", "reviewers", "way"]);
+    expect(settingPath("agents.teams.reviewers")).toEqual(["agents", "teams", "reviewers"]);
+    expect(settingPath("agents.sources")).toEqual(["agents", "sources"]);
+    expect(settingPath("agents.steps.review")).toEqual(["agents", "steps", "review"]);
+    for (const p of ["agents.steps.nope.agent", "agents.steps.review.model", "agents.teams.Bad.way", "agents.teams.reviewers.skills", "agents.all", "agents", "agents.sources.x", "agents.all.agent.x"]) {
+      expect(settingPath(p)).toBeNull();
+    }
+  });
+
+  test("list fields take lists, scalars take strings", () => {
+    expect(settingProblem(["agents", "steps", "review", "skills"], "house")).toBe("agents.steps.review.skills takes a list of names.");
+    expect(settingProblem(["agents", "steps", "review", "agent"], ["a"])).toBe("agents.steps.review.agent takes one name.");
+    expect(settingProblem(["agents", "steps", "review", "skills"], ["a"])).toBeNull();
+    expect(settingProblem(["agents", "teams", "r", "members"], ["a"])).toBeNull();
+    expect(settingProblem(["agents", "teams", "r", "way"], "pick")).toBeNull();
+    expect(settingProblem(["agents", "steps", "review"], null)).toBeNull();
+    expect(settingProblem(["agents", "steps", "review"], "x")).toBe("agents.steps.review can only be removed.");
+    expect(settingProblem(["stages", "verify", "steps", "done-check"], ["max"])).not.toBeNull();
+  });
+
+  test("applySetting writes flow lists and prunes empty maps", () => {
+    const base = "version: 1\ncommands:\n  test: bun test\n";
+    const a = applySetting("c.yaml", base, ["agents", "steps", "review", "skills"], ["a", "b"]);
+    expect(a.ok).toBe(true);
+    const text = (a as { text: string }).text;
+    expect(parse(text).agents.steps.review.skills).toEqual(["a", "b"]);
+    expect(text).toMatch(/skills: \[.*a.*b.*\]/);
+    const b = applySetting("c.yaml", text, ["agents", "steps", "review", "skills"], null);
+    expect(b.ok && b.text).toBe(base);
+    const c = applySetting("c.yaml", base, ["agents", "steps", "review", "tools"], ["Edit"]);
+    expect(c).toEqual({ ok: false, problem: expect.stringContaining("review is read-only") });
+    const d = applySetting("c.yaml", base, ["agents", "steps", "review", "agent"], "general-purpose");
+    expect(d).toEqual({ ok: false, problem: expect.stringContaining("built-in agent") });
+    const e = applySetting("c.yaml", base, ["agents", "steps", "review", "teams"], ["nope"]);
+    expect(e).toEqual({ ok: false, problem: expect.stringContaining("there is no team nope") });
+  });
+
+  test("removing a team or step removes the maps it leaves empty", () => {
+    const base = "version: 1\ncommands:\n  test: bun test\n";
+    const a = applySetting("c.yaml", base, ["agents", "teams", "rs", "members"], ["lead"]);
+    expect(a.ok).toBe(true);
+    const b = applySetting("c.yaml", (a as { text: string }).text, ["agents", "teams", "rs"], null);
+    expect(b.ok && b.text).toBe(base);
+    const c = applySetting("c.yaml", base, ["agents", "sources"], "repo");
+    const d = applySetting("c.yaml", (c as { text: string }).text, ["agents", "sources"], null);
+    expect(d.ok && d.text).toBe(base);
+  });
 });

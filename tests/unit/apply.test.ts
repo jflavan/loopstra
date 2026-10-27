@@ -10,7 +10,7 @@ import { stepModel } from "../../src/models";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
 import { settingsView } from "../../src/console/settings";
-import { configVersion } from "../../src/settings";
+import { configVersion, type SettingValue } from "../../src/settings";
 import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -973,7 +973,7 @@ describe("settings requests", () => {
   const STALE = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
   const DIRTY = "loopstra/config.yaml has changes in the main checkout that are not committed. Commit or undo them first, then change the setting again.";
   const config = (root: string) => readFileSync(join(root, CONFIG), "utf8");
-  const setting = (root: string, path: string, value: string | null, version = configVersion(config(root))) =>
+  const setting = (root: string, path: string, value: SettingValue, version = configVersion(config(root))) =>
     submitRequest(root, { ...by, kind: "settings", path, value, version });
   const lastSettingsEvent = (root: string) => {
     const trace = Trace.open(root, () => {});
@@ -1022,6 +1022,31 @@ describe("settings requests", () => {
       r.cleanup();
     }
   });
+
+  test("the loop commits an agents setting under _settings", async () => {
+    const r = await chatRepo();
+    try {
+      const team = setting(r.root, "agents.teams.reviewers.members", ["lead"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, team.id)).toMatchObject({ ok: true, text: "Saved: agents.teams.reviewers.members is now [lead]. Sessions that start from now on use it." });
+      const q = setting(r.root, "agents.steps.review.teams", ["reviewers"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): agents.steps.review.teams → [reviewers] by John from the dashboard");
+      expect((await loadConfig(r.root)).agents.steps.review!.teams).toEqual(["reviewers"]);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, path: "agents.steps.review.teams", value: ["reviewers"], result: "applied" });
+      // A team a step uses cannot be removed: the config would not load.
+      const bad = setting(r.root, "agents.teams.reviewers", null);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, bad.id)).toMatchObject({ ok: false, text: expect.stringContaining("there is no team reviewers") });
+      // Edits in the checkout are refused, as for the models.
+      writeFileSync(join(r.root, CONFIG), `${config(r.root)}# a hand edit\n`);
+      const dirty = setting(r.root, "agents.steps.review.skills", ["house"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, dirty.id)).toMatchObject({ ok: false, text: DIRTY });
+    } finally {
+      r.cleanup();
+    }
+  }, 30_000);
 
   test("a settings request with an old version is refused", async () => {
     const r = await chatRepo();

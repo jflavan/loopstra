@@ -10,7 +10,7 @@ import { Trace } from "../trace";
 import { touchWake } from "../wake";
 import type { Hub } from "./hub";
 import { loopNow } from "./model";
-import { CONFIG_REL, configVersion, settingPath, settingProblem, STALE_SETTINGS } from "../settings";
+import { CONFIG_REL, configVersion, settingPath, settingProblem, STALE_SETTINGS, type SettingValue } from "../settings";
 import { decode, fromPage, json, jsonWrite, ownSite, plain, refuse } from "./routes";
 
 /** The longest note a send back takes, and the longest hold reason. */
@@ -72,8 +72,9 @@ function parse(body: Record<string, unknown>): RequestBody | string {
     const path = str(body.path);
     const p = path === null ? null : settingPath(path);
     if (!p) return "That is not a setting the console can change.";
-    const value = body.value === null ? null : str(body.value);
-    if (value === null && body.value !== null) return "Say what to set it to, or null to remove it.";
+    const list = Array.isArray(body.value) && body.value.length <= 64 && body.value.every((v) => typeof v === "string");
+    const value: SettingValue | undefined = body.value === null ? null : list ? (body.value as string[]) : (str(body.value) ?? undefined);
+    if (value === undefined) return "Say what to set it to (a word, or a list of words), or null to remove it.";
     const problem = settingProblem(p, value);
     if (problem) return problem;
     const version = str(body.version);
