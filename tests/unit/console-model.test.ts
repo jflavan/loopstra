@@ -240,7 +240,7 @@ describe("the loop and running steps", () => {
       await intent(t.path, "one", "status: accepted");
       const broken = new Proxy(trace, {
         get(target, key) {
-          if (key === "allPhases") return () => { throw new Error("disk on fire"); };
+          if (key === "endedCostTotals") return () => { throw new Error("disk on fire"); };
           const v = Reflect.get(target, key) as unknown;
           return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
         },

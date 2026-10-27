@@ -465,6 +465,14 @@ export class Trace {
     return this.db.query<PhaseRow, []>("SELECT * FROM phases ORDER BY started, rowid").all();
   }
 
+  /** What the ended phases of every slug cost: those started at or after `day`, at or after `week` (ISO times), and in all. */
+  endedCostTotals(day: string, week: string): { day: number; week: number; all: number } {
+    const r = this.db.query<{ d: number | null; w: number | null; a: number | null }, [string, string]>(
+      "SELECT SUM(CASE WHEN started >= ?1 THEN cost_usd END) AS d, SUM(CASE WHEN started >= ?2 THEN cost_usd END) AS w, SUM(cost_usd) AS a FROM phases WHERE status != 'running'",
+    ).get(day, week);
+    return { day: r?.d ?? 0, week: r?.w ?? 0, all: r?.a ?? 0 };
+  }
+
   /** The newest `limit` ended phases of any slug, newest first. */
   recentPhases(limit: number): PhaseRow[] {
     return this.db.query<PhaseRow, [number]>("SELECT * FROM phases WHERE ended IS NOT NULL ORDER BY ended DESC, rowid DESC LIMIT ?").all(limit);
