@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { lineText, linesOf } from "../text";
+import { isCrlf, linesOf, lineText } from "../text";
 
 /**
  * Copies the bullets under "## Proposed CLAUDE.md additions" in a change's lessons.md (written for
@@ -18,7 +18,7 @@ export async function applyLessons(root: string, slug: string): Promise<{ added:
   const existing = existsSync(claudePath) ? await Bun.file(claudePath).text() : "# Project\n";
   // The added lines take the ending most lines have, so one stray CRLF does not convert the file;
   // every line already there keeps its own.
-  const eol = (existing.match(/\r\n/g)?.length ?? 0) * 2 > (existing.match(/\n/g)?.length ?? 0) ? "\r\n" : "\n";
+  const eol = isCrlf(existing) ? "\r\n" : "\n";
   const there = new Set(existing.split(/\r?\n/).flatMap((l) => { const m = BULLET.exec(l); return m ? [m[1]!.trim()] : []; }));
   const added = bullets.filter((b, n) => !there.has(b.slice(2)) && bullets.indexOf(b) === n);
   if (!added.length) return { added };

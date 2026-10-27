@@ -13,3 +13,6 @@ export const linesOf = (text: string): string[] => text.split(/(?<=\n)/);
 
 /** A line's text without its line ending. */
 export const lineText = (line: string): string => line.replace(/\r?\n$/, "");
+
+/** True when most of a text's line endings are "\r\n". */
+export const isCrlf = (s: string): boolean => (s.match(/\r\n/g)?.length ?? 0) * 2 > (s.match(/\n/g)?.length ?? 0);

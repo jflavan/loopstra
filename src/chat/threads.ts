@@ -4,13 +4,14 @@ import { join } from "node:path";
 import { z } from "zod";
 import { writeJson } from "../fsutil";
 import type { RequestShape } from "../actions";
+import { loopstraDir } from "../paths";
 import type { RequestBody } from "../requests";
 import type { Handoff } from "./schemas";
 import { readStateFile, StateFileUnavailable } from "./statefile";
 
 /** Everything chat keeps lives under `.loopstra/chat/` (gitignored, like the rest of the runtime's state). */
 export function chatDir(root: string): string {
-  return join(root, ".loopstra", "chat");
+  return join(loopstraDir(root), "chat");
 }
 
 /** A proposal waiting for a person's yes. */

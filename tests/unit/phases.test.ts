@@ -292,7 +292,7 @@ describe("conversation.md in the prompt", () => {
 describe("agentPhase failures", () => {
   test("a prompt missing from the repository and the package fails the phase and says to reinstall", async () => {
     const { repo, ctx, trace } = await setup();
-    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} }, null);
+    const r = await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {} }, async () => null);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe("missing-prompt");

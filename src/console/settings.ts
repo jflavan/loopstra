@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
-import { parse } from "yaml";
-import { ConfigError, configPath, modelFor, validateConfig } from "../config";
+import { ConfigError, configPath, modelFor, parseConfig } from "../config";
 import { groupModel, MODEL_REFS, ownStepModel, STAGE_NAMES, stepModel, stepsOf, type StepGroup } from "../models";
 import { configVersion } from "../settings";
 import type { Trace } from "../trace";
@@ -25,9 +24,7 @@ export async function settingsView(root: string, trace: Trace): Promise<Settings
   const version = configVersion(text);
   let cfg;
   try {
-    let raw: unknown;
-    try { raw = parse(text) ?? {}; } catch (e) { throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${e instanceof Error ? e.message : String(e)}`); }
-    cfg = validateConfig(raw);
+    cfg = parseConfig(text);
   } catch (e) {
     if (e instanceof ConfigError) return none(version, e.message);
     throw e;

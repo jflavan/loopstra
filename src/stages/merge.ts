@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, settleRecord, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
-import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
+import { Git, NO_AUTO_MAINTENANCE, passOn, statusPaths } from "../git";
 import { GitHub, recordGitHub, type PrInfo } from "../github";
 import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
 import type { Status } from "../intents";
@@ -831,8 +831,8 @@ async function rootReady(ctx: StepContext): Promise<{ ok: true } | { ok: false; 
   if (branch !== ctx.cfg.main_branch) return { ok: false, detail: `root checkout is on ${branch || "(unknown)"}, not ${ctx.cfg.main_branch}` };
   const staged = (await ctx.git.run(["diff", "--cached", "--name-only"])).out.trim();
   if (staged) return { ok: false, detail: `root checkout has staged changes: ${staged.split(/\r?\n/).join(", ")}` };
-  const unsaved = (await ctx.git.run(["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)intent"])).out.trim();
-  if (unsaved) return { ok: false, detail: `root checkout has unsaved changes to tracked files outside intent/: ${unsaved.split(/\r?\n/).map((l) => l.slice(3)).join(", ")}` };
+  const unsaved = statusPaths((await ctx.git.run(["status", "--porcelain", "-z", "--untracked-files=no", "--", ".", ":(exclude)intent"])).out);
+  if (unsaved.length) return { ok: false, detail: `root checkout has unsaved changes to tracked files outside intent/: ${unsaved.join(", ")}` };
   return { ok: true };
 }
 

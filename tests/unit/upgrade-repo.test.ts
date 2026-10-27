@@ -6,7 +6,8 @@ import { thisHost, writeHeartbeat, type Heartbeat } from "../../src/heartbeat";
 import { readStamp, textSha, writeStamp } from "../../src/stamp";
 import { templatePath } from "../../src/package";
 import type { Migration } from "../../src/upgrade/migrations";
-import { LOOP_RUNNING, statusPaths, upgradeRepo, type RepoDeps } from "../../src/upgrade/repo";
+import { statusPaths } from "../../src/git";
+import { LOOP_RUNNING, upgradeRepo, type RepoDeps } from "../../src/upgrade/repo";
 import type { ShippedIndex } from "../../src/shipped";
 import { NEVER_A_PID, run, tempGitRepo } from "../helpers";
 

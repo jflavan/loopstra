@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { intentRoot, SLUG } from "../intents";
 
 /**
  * What every route of the console shares: its answers, the checks a write goes through, and the
@@ -27,11 +24,6 @@ export function plain(text: string, status: number): Response {
 /** A path part as text; one that cannot be decoded is "", which names no change, request or file. */
 export function decode(part: string): string {
   try { return decodeURIComponent(part); } catch { return ""; }
-}
-
-/** True when `slug` is a change name and the change has its intent.md. */
-export function changeExists(root: string, slug: string): boolean {
-  return SLUG.test(slug) && existsSync(join(intentRoot(root), slug, "intent.md"));
 }
 
 /** True when a write comes from the page itself: its Origin is the console's own. */

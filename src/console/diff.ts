@@ -24,7 +24,7 @@ export async function changeDiff(root: string, mainBranch: string, slug: string,
     const main = `refs/heads/${mainBranch}`;
     const branch = `refs/heads/intent/${slug}`;
     for (const ref of [main, branch]) {
-      if ((await git.run(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], true)).code !== 0) return none;
+      if ((await git.commitOf(ref)) === null) return none;
     }
     found = true;
     // The prefixes are named because the page reads files from `diff --git a/x b/x`, and a repository

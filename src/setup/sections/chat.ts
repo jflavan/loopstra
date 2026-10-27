@@ -1,5 +1,5 @@
-import { DISCORD_API_ENV } from "../../chat/transports/discord";
-import { SLACK_API_ENV } from "../../chat/transports/slack";
+import { discordApi, DISCORD_USER_AGENT } from "../../chat/transports/discord";
+import { slackApi, TOKEN_REFUSED } from "../../chat/transports/slack";
 import { ENV_NAME } from "../../config";
 import { errorText } from "../../shell";
 import { DEFAULTS } from "../defaults";
@@ -34,8 +34,6 @@ function idProblem(bot: Bot, kind: "channel" | "user", id: string): string | nul
 /** The first problem with any id in a comma-separated answer. */
 const idList = (bot: Bot) => (answer: string) => answer.split(",").map((s) => s.trim()).filter(Boolean).map((id) => idProblem(bot, "user", id)).find(Boolean) ?? null;
 
-/** Slack errors that mean the token itself was refused; any other is Slack having trouble. */
-const SLACK_REFUSED = new Set(["invalid_auth", "not_authed", "account_inactive", "token_revoked"]);
 const LATER = "try loopstra setup --check again later.";
 
 /** Asks one bot's settings. Ids are kept as strings, so long numeric ones (Discord's) stay exact. */
@@ -114,10 +112,10 @@ export const chat: Section = {
 /** Slack's auth.test: whether Slack accepts the bot token, and as whom. */
 async function slackSignIn(env: SetupContext["env"], token: string): Promise<Check> {
   try {
-    const res = await fetch(`${env[SLACK_API_ENV] ?? "https://slack.com/api"}/auth.test`, { method: "POST", headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(`${slackApi(env)}/auth.test`, { method: "POST", headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
     const j = await res.json().catch(() => ({})) as { ok?: boolean; user?: string; team?: string; error?: string };
     if (j.ok) return { level: "ok", text: `Slack: signed in as ${j.user ?? "the bot"}${j.team ? ` in ${j.team}` : ""}.` };
-    if (j.error && SLACK_REFUSED.has(j.error)) return { level: "fail", text: `Slack: the bot token was refused (${j.error}).` };
+    if (j.error && TOKEN_REFUSED.has(j.error)) return { level: "fail", text: `Slack: the bot token was refused (${j.error}).` };
     return { level: "warn", text: `Slack answered ${j.error ?? `HTTP ${res.status}`}; ${LATER}` };
   } catch (e) {
     return { level: "fail", text: `Slack could not be reached: ${errorText(e)}` };
@@ -127,8 +125,8 @@ async function slackSignIn(env: SetupContext["env"], token: string): Promise<Che
 /** Discord's GET /users/@me: whether Discord accepts the bot token, and as whom. */
 async function discordSignIn(env: SetupContext["env"], token: string): Promise<Check> {
   try {
-    const res = await fetch(`${env[DISCORD_API_ENV] ?? "https://discord.com/api/v10"}/users/@me`, {
-      headers: { authorization: `Bot ${token}`, "user-agent": "DiscordBot (loopstra, 1)" }, signal: AbortSignal.timeout(10_000),
+    const res = await fetch(`${discordApi(env)}/users/@me`, {
+      headers: { authorization: `Bot ${token}`, "user-agent": DISCORD_USER_AGENT }, signal: AbortSignal.timeout(10_000),
     });
     if (res.status === 401 || res.status === 403) return { level: "fail", text: `Discord: the bot token was refused (HTTP ${res.status}).` };
     if (!res.ok) return { level: "warn", text: `Discord answered HTTP ${res.status}; ${LATER}` };

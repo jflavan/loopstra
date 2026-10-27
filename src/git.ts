@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
+import { checkoutKey, inTurn, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded, withoutGitHookEnv } from "./shell";
 import { endsStepQuietly, notTheStepsFault, StopRequested } from "./stop";
 
@@ -273,7 +273,6 @@ export class Git {
   async branchExists(name: string): Promise<boolean> { return (await this.run(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], true)).code === 0; }
   async createBranch(name: string, from: string): Promise<void> { await this.run(["branch", name, from]); }
   async deleteBranch(name: string): Promise<void> { await this.run(["branch", "-D", name]); }
-  async worktreePrune(): Promise<void> { await worktreeAdmin(this, () => this.run(["worktree", "prune"])); }
 
   /**
    * Always prunes first, unlocking the path before, so a worktree whose directory was deleted by hand,
@@ -635,6 +634,22 @@ export async function addDetachedWorktree(git: Git, dir: string, ref: string): P
   await worktreeAdmin(git, () => git.run(["worktree", "add", "--detach", dir, ref]));
 }
 
+/**
+ * The paths `git status --porcelain -z` lists: one NUL-ended entry per path ("XY path"), and a rename
+ * or copy followed by its original path as a further entry. Both paths of a rename are named.
+ */
+export function statusPaths(out: string): string[] {
+  const entries = out.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    if (e.length < 4) continue;
+    paths.push(e.slice(3));
+    if (/[RC]/.test(e.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]!);
+  }
+  return [...new Set(paths)];
+}
+
 /** The worktree administration in flight, by repository (see worktreeAdmin). */
 const admin = new Map<string, Promise<unknown>>();
 
@@ -646,12 +661,7 @@ const admin = new Map<string, Promise<unknown>>();
  * nothing runs inside it but those git commands, so it never waits for another lock.
  */
 function worktreeAdmin<T>(git: Git, fn: () => Promise<T>): Promise<T> {
-  const key = realPathKey(git.cwd);
-  const next = (admin.get(key) ?? Promise.resolve()).then(fn, fn);
-  const tail = next.catch(() => {});
-  admin.set(key, tail);
-  void tail.then(() => { if (admin.get(key) === tail) admin.delete(key); });
-  return next;
+  return inTurn(admin, realPathKey(git.cwd), fn);
 }
 
 /**

@@ -5,7 +5,7 @@ import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
 import type { Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
-import { agentPhase, alongsideFirst, renderedThen, withNote,type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
+import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
@@ -113,7 +113,7 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent;
   // a retry renders it again (see renderedThen). The note reaches the session even through an older
   // prompt file without {{findings}}.
-  const render = () => withNote(ctx, phase, NOTE_VAR[s.stage], sentBack, sentBack);
+  const render = () => phasePrompt(ctx, phase, { variable: NOTE_VAR[s.stage], note: sentBack, text: sentBack });
   const prompt = await render();
   const r = (await s.take?.(ctx, phase, prompt)) ?? await agentPhase(ctx, phase, renderedThen(prompt, render));
   if (!r.ok) return block(ctx, r.note);

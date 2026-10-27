@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { writeFileAtomic } from "../fsutil";
 import { DEV_VERSION } from "../package";
+import { loopstraDir } from "../paths";
 
 /** Where versions are read: npm, unless LOOPSTRA_REGISTRY_URL (for tests only) says otherwise. */
 function registryUrl(): string {
@@ -60,7 +61,7 @@ export async function releaseNotes(from: string, to: string, api = githubApi()):
 const DAY_MS = 24 * 60 * 60_000;
 
 /** True for a published version, not a development checkout's. */
-const released = (v: string): boolean => !v.startsWith(DEV_VERSION);
+export const released = (v: string | null): v is string => !!v && !v.startsWith(DEV_VERSION);
 
 /**
  * One line for `start` and `status` when the repository was set up before the stamp (`stamp` is ""),
@@ -78,7 +79,7 @@ export async function updateNotice(root: string, o: { installed: string; registr
       : `This repository is on Loopstra ${o.stamp} and ${o.installed} is installed: run loopstra upgrade.`;
   }
   const now = o.now ?? Date.now();
-  const cache = join(root, ".loopstra", "update-check.json");
+  const cache = join(loopstraDir(root), "update-check.json");
   let latest: string | null;
   try {
     const c = JSON.parse(readFileSync(cache, "utf8")) as { checkedAt: number; latest: string | null };

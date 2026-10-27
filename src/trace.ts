@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ModelRef } from "./models";
-import { runDir } from "./paths";
-import { errorText } from "./shell";
+import { loopstraDir, runDir } from "./paths";
+import { errorCode, errorText } from "./shell";
 
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
@@ -191,7 +191,7 @@ export function useJournal(db: Database): string | null {
   try {
     got = String((db.query("PRAGMA journal_mode = WAL").get() as { journal_mode?: string } | null)?.journal_mode ?? "");
   } catch (e) {
-    if (/SQLITE_BUSY|locked/i.test(`${(e as { code?: string })?.code ?? ""} ${errorText(e)}`)) throw e;
+    if (/SQLITE_BUSY|locked/i.test(`${errorCode(e) ?? ""} ${errorText(e)}`)) throw e;
     got = errorText(e);
   }
   if (got.toLowerCase() === "wal") return null;
@@ -221,7 +221,7 @@ function connect(path: string): { db: Database; note: string | null } {
 
 /** True for errors that mean the file is not a usable database (as opposed to, say, a lock). */
 function damaged(e: unknown): boolean {
-  const text = `${(e as { code?: string })?.code ?? ""} ${errorText(e)}`;
+  const text = `${errorCode(e) ?? ""} ${errorText(e)}`;
   return /SQLITE_(CORRUPT|NOTADB)|not a database|malformed/i.test(text);
 }
 
@@ -237,7 +237,7 @@ export class Trace {
    * the new one, so the loop and the dashboard keep working. Any other problem (a lock) is thrown.
    */
   static open(root: string, say: (line: string) => void = (l) => console.log(l)): Trace {
-    const dir = join(root, ".loopstra");
+    const dir = loopstraDir(root);
     mkdirSync(dir, { recursive: true });
     const path = join(dir, "trace.db");
     try {
@@ -277,12 +277,14 @@ export class Trace {
     this.db.run("INSERT INTO events (slug, phase_seq, type, ts, payload) VALUES (?, ?, ?, ?, ?)", [slug, phaseSeq, type, ts, json]);
     const dir = runDir(this.root, slug);
     mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, "events.jsonl"), JSON.stringify({ ts, slug, phase_seq: phaseSeq, type, payload: payload ?? {} }) + "\n");
+    // The row as JSON with the payload stringified once: `{"ts":…,"type":…,"payload":…}`.
+    appendFileSync(join(dir, "events.jsonl"), `${JSON.stringify({ ts, slug, phase_seq: phaseSeq, type }).slice(0, -1)},"payload":${json}}\n`);
   }
 
+  /** Records a change's status and priority; a row that already has them is left alone (no write), so `updated` is when they last changed. */
   upsertIntent(slug: string, status: string, priority: string): void {
     this.db.run(
-      "INSERT INTO intents (slug, status, priority, updated) VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET status = excluded.status, priority = excluded.priority, updated = excluded.updated",
+      "INSERT INTO intents (slug, status, priority, updated) VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET status = excluded.status, priority = excluded.priority, updated = excluded.updated WHERE status != excluded.status OR priority != excluded.priority",
       [slug, status, priority, now()],
     );
   }
@@ -464,6 +466,14 @@ export class Trace {
     return this.db.query<PhaseRow, []>("SELECT * FROM phases ORDER BY started, rowid").all();
   }
 
+  /** What the ended phases of every slug cost: those started at or after `day`, at or after `week` (ISO times), and in all. */
+  endedCostTotals(day: string, week: string): { day: number; week: number; all: number } {
+    const r = this.db.query<{ d: number | null; w: number | null; a: number | null }, [string, string]>(
+      "SELECT SUM(CASE WHEN started >= ?1 THEN cost_usd END) AS d, SUM(CASE WHEN started >= ?2 THEN cost_usd END) AS w, SUM(cost_usd) AS a FROM phases WHERE status != 'running'",
+    ).get(day, week);
+    return { day: r?.d ?? 0, week: r?.w ?? 0, all: r?.a ?? 0 };
+  }
+
   /** The newest `limit` ended phases of any slug, newest first. */
   recentPhases(limit: number): PhaseRow[] {
     return this.db.query<PhaseRow, [number]>("SELECT * FROM phases WHERE ended IS NOT NULL ORDER BY ended DESC, rowid DESC LIMIT ?").all(limit);
@@ -523,10 +533,15 @@ export class Trace {
     return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
   }
 
+  /** What a slug's ended phases cost, in all (a running phase's budget hold is not spending). */
+  endedCost(slug: string): number {
+    return this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
+  }
+
   intentSummary(slug: string): IntentSummary | null {
     const i = this.db.query<{ slug: string; status: string; priority: string; updated: string }, [string]>("SELECT * FROM intents WHERE slug = ?").get(slug);
     if (!i) return null;
-    const cost = this.db.query<{ c: number | null }, [string]>("SELECT SUM(cost_usd) AS c FROM phases WHERE slug = ? AND status != 'running'").get(slug)?.c ?? 0;
+    const cost = this.endedCost(slug);
     // The newest phase, passing over work that ran beside one (see besideWork: the one that decides says where the change is).
     const last = this.db.query<PhaseRow, [string]>(`SELECT * FROM phases WHERE slug = ? ORDER BY ${BESIDE_WORK_SQL}, seq DESC LIMIT 1`).get(slug);
     const act = this.db.query<{ ts: string }, [string]>("SELECT ts FROM events WHERE slug = ? ORDER BY id DESC LIMIT 1").get(slug);
@@ -534,10 +549,5 @@ export class Trace {
       slug: i.slug, status: i.status, priority: i.priority, updated: i.updated,
       costUsd: cost, lastPhase: last?.name ?? null, lastPhaseStatus: last?.status ?? null, lastActivity: act?.ts ?? null,
     };
-  }
-
-  allIntents(): IntentSummary[] {
-    const rows = this.db.query<{ slug: string }, []>("SELECT slug FROM intents ORDER BY updated DESC").all();
-    return rows.map((r) => this.intentSummary(r.slug)!).filter(Boolean);
   }
 }

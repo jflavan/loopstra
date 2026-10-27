@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { writeMarker, type StepContext } from "../context";
 import { Git, withDetachedWorktree } from "../git";
 import { cheapMayDecide, runJudge, type JudgeResult } from "../judges";
+import { loopstraDir } from "../paths";
 import { phaseModel, phasePrompt, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { EARLY } from "../trace";
@@ -45,7 +46,7 @@ export async function reviewAhead(ctx: StepContext, spec: string, plan: string):
   const prompt = await phasePrompt(ctx, phase);
   if (prompt === null) return null;
   const sha = await new Git(ctx.worktreeDir).headSha();
-  const dir = join(ctx.root, ".loopstra", "review", ctx.slug);
+  const dir = join(loopstraDir(ctx.root), "review", ctx.slug);
   const r = await withDetachedWorktree(ctx.git, dir, sha, (cwd) => runJudge(ctx, { ...phase, cwd }, { alongside: 1, prompt }),
     (e) => ctx.trace.event(ctx.slug, "error", { where: "early review", what: "removing the copy of the branch", error: errorText(e) }));
   // The model the judge ran on: one a person changed while it ran is not the one it reviewed with.

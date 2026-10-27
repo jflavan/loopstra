@@ -138,13 +138,17 @@ export function describeEvent(e: EventRow, phaseName: (slug: string, seq: number
   }
 }
 
-/** The event as one technical line: its type and its payload's fields, like `loopstra tail`. */
-export function technicalText(e: EventRow): string {
-  const fields = Object.entries(parsePayload(e.payload))
-    .filter(([k]) => k !== "stack")
+/** A payload's fields as `key=value` on one line, without the stack and the `omit` keys. */
+export function payloadFields(p: Payload, omit: string[] = []): string {
+  return Object.entries(p)
+    .filter(([k]) => k !== "stack" && !omit.includes(k))
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ").replace(/\s*\r?\n\s*/g, " ");
-  const line = `${e.type} ${fields}`.trim();
+}
+
+/** The event as one technical line: its type and its payload's fields, like `loopstra tail`. */
+export function technicalText(e: EventRow): string {
+  const line = `${e.type} ${payloadFields(parsePayload(e.payload))}`.trim();
   return line.length > 300 ? `${line.slice(0, 299)}…` : line;
 }
 

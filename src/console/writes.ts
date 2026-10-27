@@ -1,9 +1,9 @@
 import { join } from "node:path";
 import { isStatus, offers, questionChangedText, REQUEST_KINDS, retryOptions, sameQuestion, undoMatches, type RequestKind } from "../actions";
 import { localUser } from "../chat/transports/shared";
-import { loadConfig, type Config } from "../config";
+import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { holdLoop, readLoopHold, releaseLoop } from "../heartbeat";
-import { humanGates, PRIORITIES, readIntent, SLUG, type Frontmatter, type Priority } from "../intents";
+import { changeExists, humanGates, PRIORITIES, readIntent, SLUG, type Frontmatter, type Priority } from "../intents";
 import { readQuestion } from "../questions";
 import { cancelRequest, CONSOLE, requestState, submitRequest, type RequestBody } from "../requests";
 import { Trace } from "../trace";
@@ -11,7 +11,7 @@ import { touchWake } from "../wake";
 import type { Hub } from "./hub";
 import { loopNow } from "./model";
 import { CONFIG_REL, configVersion, settingPath, settingProblem, STALE_SETTINGS } from "../settings";
-import { changeExists, decode, fromPage, json, jsonWrite, ownSite, plain, refuse } from "./routes";
+import { decode, fromPage, json, jsonWrite, ownSite, plain, refuse } from "./routes";
 
 /** The longest note a send back takes, and the longest hold reason. */
 const MAX_NOTE = 4_000;
@@ -156,7 +156,7 @@ async function action(root: string, body: Record<string, unknown>): Promise<Resp
   if (r.kind === "answer" && !sameQuestion(r.question, readQuestion(root, r.slug)?.open?.at)) return refuse(questionChangedText(r.slug));
   const user = localUser();
   const sent = submitRequest(root, { ...r, by: user, byName: user, via: "the dashboard", transport: CONSOLE, thread: "" });
-  return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? 60, new Date()).state.state }, 202);
+  return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS, new Date()).state.state }, 202);
 }
 
 /**
@@ -171,5 +171,5 @@ async function settingsAction(root: string, r: Extract<RequestBody, { kind: "set
   try { cfg = await loadConfig(root); } catch { /* the loop says why it cannot apply it */ }
   const user = localUser();
   const sent = submitRequest(root, { ...r, by: user, byName: user, via: "the dashboard", transport: CONSOLE, thread: "" });
-  return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? 60, new Date()).state.state }, 202);
+  return json({ id: sent.id, loop: loopNow(root, cfg?.poll_seconds ?? DEFAULT_POLL_SECONDS, new Date()).state.state }, 202);
 }

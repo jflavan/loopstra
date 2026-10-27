@@ -1,12 +1,12 @@
 import { localUser } from "../chat/transports/shared";
-import { loadConfig } from "../config";
-import { readIntent } from "../intents";
+import { loopPollSeconds } from "../config";
+import { changeExists, isHeld, readIntent } from "../intents";
 import { sendToSession, writeChangeStop, type InboxMessage } from "../inbox";
 import { CONSOLE, submitRequest } from "../requests";
 import { Trace, type PhaseRow } from "../trace";
 import type { Hub } from "./hub";
 import { loopNow, runningRows } from "./model";
-import { changeExists, decode, json, jsonWrite, refuse } from "./routes";
+import { decode, json, jsonWrite, refuse } from "./routes";
 import { steerable } from "./steerable";
 
 /** The longest message or redirect a person may send a session. */
@@ -75,11 +75,10 @@ function send(root: string, slug: string, seq: number, kind: InboxMessage["kind"
  * tick of a live loop that says it works on the change.
  */
 async function running(root: string, slug: string): Promise<PhaseRow[]> {
-  let pollSeconds = 60;
-  try { pollSeconds = (await loadConfig(root)).poll_seconds; } catch { /* the default, as the model reads it */ }
+  const poll = await loopPollSeconds(root);
   const trace = Trace.open(root, () => {});
   try {
-    return runningRows(trace, loopNow(root, pollSeconds, new Date())).get(slug) ?? [];
+    return runningRows(trace, loopNow(root, poll, new Date())).get(slug) ?? [];
   } finally {
     trace.close();
   }
@@ -93,7 +92,7 @@ async function running(root: string, slug: string): Promise<PhaseRow[]> {
 async function hold(root: string, slug: string): Promise<void> {
   let fm;
   try { fm = (await readIntent(root, slug)).file.frontmatter; } catch { return; }
-  if (fm.hold.trim()) return;
+  if (isHeld(fm)) return;
   const user = localUser();
   submitRequest(root, { kind: "hold", slug, expect: fm.status, reason: STOP_REASON, by: user, byName: user, via: VIA, transport: CONSOLE, thread: "" });
 }

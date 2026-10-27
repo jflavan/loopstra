@@ -6,7 +6,7 @@ import type { FailureReason } from "../claude";
 import { modelFor, type Config } from "../config";
 import { jsonSchemaOf } from "../envelopes";
 import { stepModel, type StepKey } from "../models";
-import { promptPath } from "../prompts";
+import { promptPath, renderPrompt } from "../prompts";
 import { issuesText, tracedSession } from "../sessions";
 import type { Trace } from "../trace";
 
@@ -26,11 +26,7 @@ export async function chatTemplate(root: string, name: ChatPhase): Promise<strin
 }
 
 export function renderChatPrompt(template: string, vars: ChatPromptVars): string {
-  return template.replace(/\{\{([a-z_]+)\}\}/g, (match, name: string) => {
-    if (!(CHAT_PROMPT_VARS as readonly string[]).includes(name)) return match;
-    const v = (vars as Record<string, string | undefined>)[name];
-    return v === undefined || v === "" ? "(none)" : v;
-  });
+  return renderPrompt(template, vars, CHAT_PROMPT_VARS);
 }
 
 /**

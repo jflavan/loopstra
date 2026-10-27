@@ -99,10 +99,13 @@ const command = z.preprocess((v) => (v === "" ? undefined : v), z.string().refin
 /** The CLI name of a model, like sonnet. Spaces around it are not part of it. */
 const modelName = (fallback: string) => z.string().trim().min(1, "must be a model name").default(fallback);
 
+/** How long the loop waits between ticks when the config does not say (or cannot be loaded). */
+export const DEFAULT_POLL_SECONDS = 60;
+
 export const ConfigSchema = z.object({
   version: z.literal(1, { error: "must be 1" }),
   main_branch: z.string().trim().min(1, "must be a branch name, like main").default("main"),
-  poll_seconds: z.number().int().positive().default(60),
+  poll_seconds: z.number().int().positive().default(DEFAULT_POLL_SECONDS),
   // Empty prefault is deliberate: a missing `commands` block should still report `commands.test`, not `commands`.
   commands: z.object({
     test: z.string({ error: TEST_REQUIRED }).refine(filled, TEST_REQUIRED),
@@ -176,13 +179,29 @@ export async function loadConfig(root: string): Promise<Config> {
   if (!existsSync(path)) {
     throw new ConfigError(`No config found at loopstra/config.yaml. Run \`loopstra init\` first.`);
   }
+  let text: string;
+  try {
+    text = await Bun.file(path).text();
+  } catch (e) {
+    throw new ConfigError(`loopstra/config.yaml cannot be read: ${errorText(e)}`);
+  }
+  return parseConfig(text);
+}
+
+/** The config in config.yaml's text. Throws a ConfigError when it is not YAML or not a valid config. */
+export function parseConfig(text: string): Config {
   let raw: unknown;
   try {
-    raw = parse(await Bun.file(path).text()) ?? {};
+    raw = parse(text) ?? {};
   } catch (e) {
     throw new ConfigError(`loopstra/config.yaml is not valid YAML: ${errorText(e)}`);
   }
   return validateConfig(raw);
+}
+
+/** The configured poll_seconds, or the default when the config cannot be loaded. */
+export function loopPollSeconds(root: string): Promise<number> {
+  return loadConfig(root).then((c) => c.poll_seconds, () => DEFAULT_POLL_SECONDS);
 }
 
 /** Checks a parsed config against the schema. Throws a ConfigError listing every problem in plain words. */

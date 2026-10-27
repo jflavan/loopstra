@@ -4,7 +4,7 @@ import { runsDir } from "../paths";
 import { TranscriptReader } from "../console/transcript";
 import type { TranscriptItem } from "../console/types";
 import { readConversation } from "../conversation";
-import { readIntent, SLUG } from "../intents";
+import { changeExists, readIntent } from "../intents";
 import { prWait } from "../stages/shared";
 import { besideWork, Trace, type PhaseRow } from "../trace";
 
@@ -84,7 +84,7 @@ function lastSteps(root: string, slug: string, phase: PhaseRow): string[] {
  * (`early-…`, `…-cheap`; see besideWork), as summaries do.
  */
 export async function aboutContext(root: string, about: About): Promise<string> {
-  if (!SLUG.test(about.slug) || !existsSync(join(root, "intent", about.slug, "intent.md"))) return "";
+  if (!changeExists(root, about.slug)) return "";
   const parts: string[] = [];
   const intentText = safely(() => readFileSync(join(root, "intent", about.slug, "intent.md"), "utf8"));
   if (intentText?.trim()) parts.push(quoted("Intent", head(intentText.trim())));
