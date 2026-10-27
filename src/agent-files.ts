@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { inlineName } from "./agents";
+import { BUILTIN_AGENTS, inlineName, resolveSetup } from "./agents";
+import type { Config } from "./config";
+import { STEP_KEYS, STEPS, type StepKey } from "./models";
 
 /** An agent definition read from a Claude Code agent file. */
 export interface AgentDefinition {
@@ -111,6 +113,50 @@ export async function findSkill(name: string, where: Where): Promise<AgentDefini
     if (readText(c.path) !== null) return c.from;
   }
   return null;
+}
+
+/** Something wrong, or doubtful, about a name a config uses. */
+export interface SetupProblem { level: "fail" | "warn"; step: StepKey | "all"; name: string; text: string }
+
+/**
+ * Every agent, subagent, team member and skill each step would use, checked against `where`.
+ * One problem per name per step: missing, else only on this machine, else keys Loopstra leaves out.
+ */
+export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupProblem[]> {
+  const problems: SetupProblem[] = [];
+  const places = `on ${cfg.main_branch}${where.sources === "all" ? " or on this machine" : ""}`;
+  for (const step of STEP_KEYS) {
+    const group = STEPS.find((s) => s.key === step)!.group;
+    const stageSkills = group === "chat" ? [] : cfg.stages[group].skills;
+    const setup = resolveSetup(cfg.agents, step, stageSkills);
+    const roles: { name: string; role: string }[] = [
+      ...(setup.agent ? [{ name: setup.agent, role: `the agent ${step} runs as` }] : []),
+      ...setup.subagents.map((name) => ({ name, role: `a subagent of ${step}` })),
+      ...setup.teams.flatMap((t) => t.members.map((name) => ({ name, role: `in the team ${t.name} of ${step}` }))),
+    ];
+    const seen = new Set<string>();
+    for (const { name, role } of roles) {
+      if (BUILTIN_AGENTS.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      const def = await findAgent(name, where);
+      if (!def) {
+        problems.push({ level: "fail", step, name, text: `\`${name}\`, ${role}, is not in .claude/agents/ ${places}. Add it with \`loopstra setup agents\`, or commit it.` });
+      } else if (def.from !== "repo") {
+        problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
+      } else if (def.dropped.length) {
+        problems.push({ level: "warn", step, name, text: `${def.path}: Loopstra leaves out ${def.dropped.join(", ")} when it runs this agent.` });
+      }
+    }
+    for (const name of setup.skills) {
+      const from = await findSkill(name, where);
+      if (from === null) {
+        problems.push({ level: "warn", step, name, text: `The skill \`${name}\` (${step}) is not in .claude/skills/${where.sources === "all" ? " or on this machine" : ""}; it may be built in to Claude Code. If a session does not load it, the step stops and says so.` });
+      } else if (from !== "repo") {
+        problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
+      }
+    }
+  }
+  return problems;
 }
 
 /** One entry of the `--agents` JSON. */

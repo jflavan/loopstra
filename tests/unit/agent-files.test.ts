@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { findAgent, findSkill, inlineAgents, parseAgentFile } from "../../src/agent-files";
+import { checkAgentSetup, findAgent, findSkill, inlineAgents, parseAgentFile } from "../../src/agent-files";
+import { validateConfig } from "../../src/config";
 import { tempDir, write } from "../helpers";
 
 test("an agent file parses with CRLF, a tools string, and unknown keys dropped", () => {
@@ -69,5 +70,18 @@ test("findAgent finds nothing for names that climb out of the agent folders", as
   write(join(repo, "secret.md"), "---\ndescription: s\n---\nS");
   const all = { repo, home, sources: "all" as const };
   for (const n of ["../../secret", "a/b", "a\\b", "..", "sp:../x"]) expect(await findAgent(n, all)).toBeNull();
+  t.cleanup();
+});
+
+test("checkAgentSetup: missing agents fail, machine-only ones and unknown skills warn", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, ".claude/agents/lead.md"), "---\ndescription: L\nhooks: {}\n---\nP");
+  write(join(home, ".claude/agents/mine.md"), "M");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: { steps: { review: { agent: "lead", subagents: ["mine", "Explore", "gone"], skills: ["pdf"] } } } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["warn", "review", "lead"], ["warn", "review", "mine"], ["fail", "review", "gone"], ["warn", "review", "pdf"],
+  ]);
+  expect(p[2]!.text).toContain("Add it with `loopstra setup agents`");
   t.cleanup();
 });
