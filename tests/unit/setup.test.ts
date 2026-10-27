@@ -126,6 +126,22 @@ describe("loopstra setup", () => {
     } finally { r.cleanup(); }
   });
 
+  test("a file that cannot be written after the config saved says the config was saved", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      // A file where the skill's folder would go: the config saves, then the write fails.
+      mkdirSync(join(r.root, ".claude/skills"), { recursive: true });
+      writeFileSync(join(r.root, ".claude/skills/a"), "not a folder");
+      const file = ".claude/skills/a/SKILL.md";
+      const o = io();
+      const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content: "x" }); } });
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [adds] })).toBe(1);
+      expect(o.text()).toContain(`Saved loopstra/config.yaml, but could not write ${file}: `);
+      expect(o.text()).not.toContain("Not saved");
+      expect(r.text()).toContain("bun test");
+    } finally { r.cleanup(); }
+  });
+
   test("files are never written through a link out of the repo, and the config stays unchanged", async () => {
     const file = ".claude/skills/a/SKILL.md";
     const layouts: Record<string, (root: string, outside: string) => void> = {

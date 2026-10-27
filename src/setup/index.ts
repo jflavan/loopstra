@@ -71,14 +71,19 @@ function checkFiles(root: string, files: FileWrite[]): void {
 
 /**
  * Writes the pending files under `root` (a `null` content removes the file; the last write to a path
- * wins) and returns the paths written. Throws, before writing anything, on a path checkedPath refuses.
+ * wins) and returns the paths written. Throws, before writing anything, on a path checkedPath refuses;
+ * a write or removal that fails throws "could not write <path>: <reason>" (or "could not remove").
  */
 export function writeFiles(root: string, files: FileWrite[]): string[] {
   const last = new Map<string, string | null>();
   for (const f of files) last.set(checkedPath(root, f), f.content);
   for (const [path, content] of last) {
-    if (content === null) rmSync(join(root, path), { force: true });
-    else writeFileAtomic(join(root, path), content);
+    try {
+      if (content === null) rmSync(join(root, path), { force: true });
+      else writeFileAtomic(join(root, path), content);
+    } catch (e) {
+      throw new Error(`could not ${content === null ? "remove" : "write"} ${path}: ${errorText(e)}`);
+    }
   }
   return [...last.keys()];
 }
@@ -108,7 +113,8 @@ export function parseSetupArgs(args: readonly string[]): (Pick<SetupOptions, "se
  * `loopstra setup`: each section asks its questions, the config is checked and saved once (with its
  * comments), then the checks run. Quitting, a section that fails, or a config that would not load
  * saves nothing. Returns the exit code: 0 once saved (a failed check is listed, not an error), 1 when
- * nothing could be saved; with --check, 1 when the config does not load or any check fails.
+ * nothing could be saved or a file could not be written after the save; with --check, 1 when the
+ * config does not load or any check fails.
  * A prompt it is given is closed whichever way it ends.
  */
 export async function setup(root: string, o: SetupOptions = {}): Promise<number> {
@@ -160,17 +166,18 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
   }
 
   let cfg: Config;
+  let saved = false;
   try {
     cfg = doc.validate();
     checkFiles(root, ctx.files);
-    const saved = doc.save();
+    saved = doc.save();
+    const written = ctx.files.length ? writeFiles(root, ctx.files) : [];
     if (saved) out("\nSaved loopstra/config.yaml. Commit it on the main branch so every checkout uses it.");
-    if (ctx.files.length) {
-      const written = writeFiles(root, ctx.files);
-      out(`${saved ? "" : "\n"}Wrote ${written.length} file${written.length === 1 ? "" : "s"} under .claude/: ${written.join(", ")}. Commit them with loopstra/config.yaml on the main branch.`);
-    } else if (!saved) out("\nNo changes.");
+    if (written.length) out(`${saved ? "" : "\n"}Wrote ${written.length} file${written.length === 1 ? "" : "s"} under .claude/: ${written.join(", ")}. Commit them with loopstra/config.yaml on the main branch.`);
+    else if (!saved) out("\nNo changes.");
   } catch (e) {
-    out(`\nNot saved: ${errorText(e)}`);
+    // The files are written after the save, so a failure there leaves the config saved.
+    out(saved ? `\nSaved loopstra/config.yaml, but ${errorText(e)}` : `\nNot saved: ${errorText(e)}`);
     return 1;
   }
   report(await runChecks(sections, ctx, cfg, o.checkMs), out);
