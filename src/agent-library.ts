@@ -1,4 +1,4 @@
-import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, posix } from "node:path";
 import { parse, stringify } from "yaml";
@@ -120,12 +120,31 @@ export function scanFolder(dir: string, rootName?: string): { items: LibraryItem
   return { items: out.filter((i) => NAME.test(i.name)), skipped: out.filter((i) => !NAME.test(i.name)) };
 }
 
-/** True when a file's first 8000 bytes hold a NUL. */
-function looksBinary(path: string): boolean {
-  const fd = openSync(path, "r");
+/** Open flags that never follow a link and never wait on a pipe (each 0 where the system has none, as on Windows). */
+const OPEN_PLAIN = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+/**
+ * A file's bytes, through one open: whether it is a plain file and how big it is are asked of that
+ * open, so the file that was checked is the file that is read, even if the path is swapped meanwhile.
+ * `limit` is the most bytes it may hold.
+ */
+function readPlain(path: string, limit: number): { data: Buffer } | { refused: "link" | "not-file" | "too-big" | "changed" } {
+  let fd: number;
   try {
-    const buf = Buffer.alloc(8000);
-    return buf.subarray(0, readSync(fd, buf, 0, 8000, 0)).includes(0);
+    fd = openSync(path, OPEN_PLAIN);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ELOOP") return { refused: "link" };
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { refused: "not-file" };
+    if (st.size > limit) return { refused: "too-big" };
+    // One byte more than it said it held, to notice a file that grew while it was read.
+    const buf = Buffer.alloc(st.size + 1);
+    let n = 0;
+    for (let r = 1; r > 0 && n < buf.length; n += r) r = readSync(fd, buf, n, buf.length - n, null);
+    return n > st.size ? { refused: "changed" } : { data: buf.subarray(0, n) };
   } finally { closeSync(fd); }
 }
 
@@ -135,29 +154,36 @@ function folderWrites(dir: string, dest: string): FileWrite[] | { refused: strin
   let bytes = 0;
   const unreadable = (shown: string, e: unknown) => `${shown} cannot be read: ${errorText(e)}`;
   const walk = (d: string, rel: string): string | null => {
-    let names: string[];
-    try { names = readdirSync(d).sort(); } catch (e) { return unreadable(rel || d, e); }
-    for (const name of names) {
+    let found;
+    try { found = readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)); } catch (e) { return unreadable(rel || d, e); }
+    for (const entry of found) {
+      const name = entry.name;
       const path = join(d, name);
       const shown = rel ? `${rel}/${name}` : name;
       if (name === ".git") continue;
       if (/[\\\u0000-\u001f\u007f-\u009f]/.test(name)) return `${printable(shown)} has a backslash or control character in its name.`;
-      let st;
-      try { st = lstatSync(path); } catch (e) { return unreadable(shown, e); }
-      if (st.isSymbolicLink()) return `${shown} is a link, and links are not copied.`;
-      if (st.isDirectory()) {
+      const link = `${shown} is a link, and links are not copied.`;
+      if (entry.isSymbolicLink()) return link;
+      if (entry.isDirectory()) {
         const bad = walk(path, shown);
         if (bad) return bad;
         continue;
       }
-      if (!st.isFile()) return `${shown} is not a plain file.`;
+      if (!entry.isFile()) return `${shown} is not a plain file.`;
       if (out.length >= MAX_FILES) return `A skill is copied with at most ${MAX_FILES} files.`;
-      bytes += st.size;
-      if (bytes > MAX_BYTES) return "A skill is copied with at most 5 MB of files.";
-      try {
-        if (looksBinary(path)) return `${shown} is a binary file, and binary files are not copied yet.`;
-        out.push({ path: `${dest}/${shown}`, content: readFileSync(path, "utf8") });
-      } catch (e) { return unreadable(shown, e); }
+      let read;
+      try { read = readPlain(path, MAX_BYTES - bytes); } catch (e) { return unreadable(shown, e); }
+      if ("refused" in read) {
+        switch (read.refused) {
+          case "link": return link;
+          case "not-file": return `${shown} is not a plain file.`;
+          case "too-big": return "A skill is copied with at most 5 MB of files.";
+          case "changed": return `${shown} changed while it was being copied. Try again.`;
+        }
+      }
+      bytes += read.data.length;
+      if (read.data.subarray(0, 8000).includes(0)) return `${shown} is a binary file, and binary files are not copied yet.`;
+      out.push({ path: `${dest}/${shown}`, content: read.data.toString("utf8") });
     }
     return null;
   };

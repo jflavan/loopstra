@@ -74,6 +74,16 @@ test("copyItem refuses a binary file, big folders and bad names", () => {
   expect(copyItem({ ...item, path: huge }, { root: repo, today: "2026-10-27" })).toEqual({ refused: expect.stringContaining("5 MB") });
 });
 
+test.skipIf(process.platform === "win32")("copyItem refuses a named pipe without waiting on it", () => {
+  const { repo } = world();
+  const dir = temp();
+  write(join(dir, "SKILL.md"), "x");
+  const made = Bun.spawnSync(["mkfifo", join(dir, "pipe")]);
+  if (made.exitCode !== 0) throw new Error(made.stderr.toString());
+  const item: LibraryItem = { kind: "skill", name: "pipe", description: "", from: "source", path: dir };
+  expect(copyItem(item, { root: repo, today: "2026-10-27" })).toEqual({ refused: "pipe is not a plain file." });
+});
+
 test("copyItem gives a plugin agent its plain name and a source key", () => {
   const { repo, home } = world();
   const cr = listLibrary(repo, home, "all").find((i) => i.name === "sp:cr")!;
