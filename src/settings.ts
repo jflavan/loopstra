@@ -27,6 +27,11 @@ export function configVersion(text: string): string {
   return createHash("sha256").update(text.startsWith("\uFEFF") ? text.slice(1) : text).digest("hex");
 }
 
+/** A file's version for an `agent-files` request: "absent" when it is not there, else the same hash as configVersion. */
+export function fileVersion(text: string | null): string {
+  return text === null ? "absent" : configVersion(text);
+}
+
 /** What a setting is set to: a word, a list of words (the agents lists), or null (removed). */
 export type SettingValue = string | string[] | null;
 

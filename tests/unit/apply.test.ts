@@ -10,7 +10,7 @@ import { stepModel } from "../../src/models";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
 import { settingsView } from "../../src/console/settings";
-import { configVersion, type SettingValue } from "../../src/settings";
+import { configVersion, fileVersion, STALE_SETTINGS, type SettingValue } from "../../src/settings";
 import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -1129,6 +1129,52 @@ describe("settings requests", () => {
       expect(requestState(r.root, req.id)).toMatchObject({ state: "done", ok: true, status: null, text: "Saved: chat.model is now strong. Sessions that start from now on use it." });
       expect(await commitCount(r.root)).toBe(commits);
       expect(lastSettingsEvent(r.root)).toMatchObject({ id: req.id, result: "applied" });
+    } finally {
+      r.cleanup();
+    }
+  });
+});
+
+describe("agent-files requests", () => {
+  const OLD = ".claude/skills/old/SKILL.md";
+  const LEAD = ".claude/agents/lead.md";
+  const files = (root: string, what: string, writes: { path: string; content: string | null }[], base: Record<string, string>) =>
+    submitRequest(root, { ...by, kind: "agent-files", what, writes, base });
+
+  test("writes and removes files under .claude and commits them", async () => {
+    const r = await chatRepo();
+    try {
+      mkdirSync(join(r.root, ".claude/skills/old"), { recursive: true });
+      writeFileSync(join(r.root, OLD), "old skill\n");
+      await new Git(r.root).commitAll("a skill");
+      const q = files(r.root, "add .claude/agents/lead.md", [{ path: LEAD, content: "lead\n" }, { path: OLD, content: null }], { [LEAD]: "absent", [OLD]: fileVersion("old skill\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): add .claude/agents/lead.md by John from the dashboard");
+      expect((await run(["git", "show", "--name-status", "--format=", "HEAD"], r.root)).out.trim().split("\n").sort()).toEqual([`A\t${LEAD}`, `D\t${OLD}`]);
+      expect(readFileSync(join(r.root, LEAD), "utf8")).toBe("lead\n");
+      expect(existsSync(join(r.root, OLD))).toBe(false);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, text: "Saved: add .claude/agents/lead.md." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("refuses paths outside .claude/agents and .claude/skills, and stale bases", async () => {
+    const r = await chatRepo();
+    try {
+      mkdirSync(join(r.root, ".claude/agents"), { recursive: true });
+      writeFileSync(join(r.root, LEAD), "lead\n");
+      await new Git(r.root).commitAll("a lead");
+      const commits = await commitCount(r.root);
+      const a = files(r.root, "edit settings", [{ path: ".claude/settings.json", content: "{}" }], { ".claude/settings.json": "absent" });
+      const b = files(r.root, "edit config", [{ path: "loopstra/config.yaml", content: "x" }], {});
+      const c = files(r.root, "add lead", [{ path: LEAD, content: "new\n" }], { [LEAD]: "absent" });
+      expect(await apply(r.root)).toBe(3);
+      expect(requestState(r.root, a.id)).toMatchObject({ ok: false, text: expect.stringContaining("That change was not saved:") });
+      expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: expect.stringContaining("That change was not saved:") });
+      expect(requestState(r.root, c.id)).toMatchObject({ ok: false, text: STALE_SETTINGS });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(readFileSync(join(r.root, LEAD), "utf8")).toBe("lead\n");
     } finally {
       r.cleanup();
     }

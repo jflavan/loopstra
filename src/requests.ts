@@ -83,6 +83,16 @@ const RequestSchema = z.discriminatedUnion("kind", [
    * file's version (see configVersion) as the page last read it, which must still be the file's.
    */
   base.extend({ kind: z.literal("settings"), path: z.string(), value: z.union([z.string(), z.array(z.string()).max(64), z.null()]), version: z.string() }),
+  /**
+   * Writes or removes agent and skill files under .claude/agents/ and .claude/skills/ (see applyAgentFiles): `what` is the commit's
+   * words; `content` null removes the file; `base` maps each path to the version of its text the page read (see fileVersion).
+   */
+  base.extend({
+    kind: z.literal("agent-files"),
+    what: z.string().max(200),
+    writes: z.array(z.object({ path: z.string(), content: z.string().nullable() })).min(1).max(200),
+    base: z.record(z.string(), z.string()),
+  }),
 ]);
 
 export type Request = z.infer<typeof RequestSchema>;
