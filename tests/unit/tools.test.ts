@@ -11,6 +11,8 @@ describe("tool calls in a few words", () => {
     expect(toolTarget("Read", { file_path: "/elsewhere/a.md" }, "/home/x/wt")).toBe("/elsewhere/a.md");
     expect(toolTarget("Grep", { pattern: "TODO" })).toBe("TODO");
     expect(toolTarget("WebFetch", { url: "https://example.com" })).toBe("https://example.com");
+    expect(toolTarget("Agent", { subagent_type: "sec", description: "Security review of a.txt", prompt: "…" })).toBe("sec: Security review of a.txt");
+    expect(toolTarget("Task", { description: "Find the parser" })).toBe("Find the parser");
     expect(toolTarget("Mystery", { x: 1 })).toBe("");
     expect(toolTarget("Bash", null)).toBe("");
     expect(toolTarget("Bash", { command: "x".repeat(200) })).toHaveLength(120);

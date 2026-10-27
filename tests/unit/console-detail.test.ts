@@ -29,6 +29,23 @@ async function seeded() {
 }
 
 describe("a change's page", () => {
+  test("a phase carries the setup it ran as (the latest event for its seq), and null without one", async () => {
+    const t = await seeded();
+    const trace = Trace.open(t.path);
+    try {
+      const payload = { agent: "lead", subagents: ["sec", "ops:sec", "plain"], teams: ["ops"], team_members: { ops: ["fixer", "plain"] }, skills: ["s"], tools: ["Read"], mcp_tools: ["mcp__a__b"], sources: "repo", models: { "loopstra-sec": "haiku", "loopstra-ops-sec": "opus", "loopstra-fixer": "sonnet" } };
+      trace.event("one", "agent_setup", { ...payload, agent: "old" }, 1);
+      trace.event("one", "agent_setup", payload, 1);
+      const fix = trace.phaseStart("one", "fix-1", "agent");
+      trace.phaseEnd("one", fix, { status: "success" });
+      const d = await changeDetail(t.path, trace, "one");
+      expect(d!.phases[0]!.agentSetup).toEqual({ agent: "lead", subagents: ["sec", "ops:sec", "plain"], teams: ["ops"], teamMembers: { ops: ["fixer", "plain"] }, skills: ["s"], tools: ["Read"], mcpTools: ["mcp__a__b"], sources: "repo", models: { sec: "haiku", "ops:sec": "opus", fixer: "sonnet" } });
+      expect(d!.phases[1]!.agentSetup).toBeNull();
+    } finally {
+      trace.close();
+    }
+  });
+
   test("its phases with the files they left and the commands they were refused, its gates and its documents", async () => {
     const t = await seeded();
     const trace = Trace.open(t.path);

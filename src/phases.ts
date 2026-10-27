@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
 import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
-import { badModelNote, stepModel } from "./models";
+import { badModelNote, STEP_KEYS, stepModel, type StepKey } from "./models";
+import { BUILTIN_AGENTS, isEmptySetup, resolveSetup, setupLines, type AgentSetup } from "./agents";
+import { findAgent, setupSession, userHome, type AgentDefinition, type Where } from "./agent-files";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -96,8 +98,16 @@ function commandParts(cmd: string): string[] {
   return parts.map((p) => p.trim()).filter((p) => p);
 }
 
-/** Tools a session may use without asking. Always a fresh array. */
-export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
+/**
+ * Tools a session may use without asking: the set's own, then the step's setup's `tools`, then its
+ * `mcp_tools` (see stepSetup), each once. Always a fresh array.
+ */
+export function toolsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string[] {
+  return [...new Set([...setTools(ctx, set), ...(setup?.tools ?? []), ...(setup?.mcpTools ?? [])])];
+}
+
+/** The tool set's own tools, before the setup's. */
+function setTools(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
   const { test, lint, build, run, install } = ctx.cfg.commands;
@@ -106,17 +116,18 @@ export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   const rules = (cmds: Array<string | undefined>) =>
     cmds.filter((c): c is string => !!c).flatMap((c) => [...new Set([c, ...commandParts(c)])]).map((c) => `Bash(${c} *)`);
   // A build session runs the project's own commands (tests, install) whatever the allow list says.
-  if (set === "build") return [...new Set([...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])])];
+  if (set === "build") return [...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])];
   // The install command is not for judges.
-  return [...new Set([...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ])];
+  return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
 }
 
 /**
- * The shell commands a tool set lets a session run, for the prompt's `{{commands}}`: "`bun test`,
- * `git diff`" (each with any arguments), "any command" for a bare Bash rule, "none" without Bash.
+ * The shell commands a tool set, and the step's setup (see toolsFor), let a session run, for the
+ * prompt's `{{commands}}`: "`bun test`, `git diff`" (each with any arguments), "any command" for a
+ * bare Bash rule, "none" without Bash.
  */
-export function commandsFor(ctx: StepContext, set: ToolSet): string {
-  const tools = toolsFor(ctx, set);
+export function commandsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string {
+  const tools = toolsFor(ctx, set, setup);
   if (tools.includes("Bash")) return "any command";
   const cmds = tools.map((t) => /^Bash\((.+?)(?: \*|:\*)?\)$/.exec(t)?.[1]).filter((c): c is string => !!c);
   return cmds.length ? [...new Set(cmds)].map((c) => `\`${c}\``).join(", ") : "none";
@@ -160,6 +171,7 @@ export function ownerNote(reason: BlockingReason): string {
     case "model": return "Claude Code did not accept this step's model. Change it in Settings or `loopstra setup models`, then retry.";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
+    case "setup": return "This step's agent setup is not complete on this machine.";
     // The agent's own summary is not written for the owner; it goes to the trace.
     case "agent-fail": return "The assistant reported it could not finish this step.";
   }
@@ -170,6 +182,55 @@ const RETRIED: ReadonlySet<FailureReason> = new Set(["timeout", "crash"]);
 
 /** What heads conversation.md in a work session's prompt (the shipped templates say the same). */
 export const CONVERSATION_HEADING = "What people told earlier sessions of this change (conversation.md); take it into account:";
+
+const isStepKey = (name: string): name is StepKey => (STEP_KEYS as readonly string[]).includes(name);
+
+/**
+ * The agent setup a phase's session gets (see resolveSetup): its step's, from the agent settings as
+ * loopstra/config.yaml has them now (see StepContext.models), with the stage's skills the spec names.
+ * A phase that is not a step gets the spec's skills alone.
+ */
+export async function stepSetup(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<AgentSetup> {
+  return (await setupOf(ctx, spec)).setup;
+}
+
+/**
+ * A phase's setup (see stepSetup), and whether it changes how the session runs. A stage's skills alone
+ * do not: they are the prompt's first line, as they always were. Once the step's agent settings give it
+ * anything, the stage's skills are checked and loaded with the rest (see setupRun).
+ */
+async function setupOf(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<{ setup: AgentSetup; applies: boolean }> {
+  const skills = spec.skills ?? [];
+  if (!isStepKey(spec.name)) return { setup: { sources: "all", agent: null, subagents: [], teams: [], skills: [...skills], tools: [], mcpTools: [] }, applies: false };
+  const agents = (await ctx.models()).agents;
+  return { setup: resolveSetup(agents, spec.name, skills), applies: !isEmptySetup(resolveSetup(agents, spec.name, [])) };
+}
+
+/**
+ * Where a step's named agents and skills are looked for: main as the step reads it, then (with
+ * `sources: all`) this machine. The repository's agent files are read from the step's commit of main
+ * (see StepContext.readCommit), never a checkout: a session that may write the snapshot (an added dir)
+ * could otherwise rewrite the agent a later session of the step runs as. Its skills are the snapshot's.
+ */
+async function setupWhere(ctx: StepContext, setup: AgentSetup): Promise<Where> {
+  // Agents come from the commit, so only skills need the snapshot on disk: a writing step that names no
+  // skill makes none (its session runs in the change's worktree, and `repo` is then never read).
+  const repo = setup.skills.length ? await ctx.snapshot() : ctx.root;
+  return { repo, home: userHome(), sources: setup.sources, commit: { git: ctx.git, sha: await ctx.readCommit() } };
+}
+
+/** Each subagent's and team member's description, from its file (see setupWhere), for the prompt's lines; null when it has none. */
+async function describer(ctx: StepContext, setup: AgentSetup): Promise<(name: string) => string | null> {
+  const names = new Set([...setup.subagents, ...setup.teams.flatMap((t) => t.members)].filter((n) => !BUILTIN_AGENTS.has(n)));
+  if (!names.size) return () => null;
+  const where = await setupWhere(ctx, setup);
+  const found = new Map<string, AgentDefinition>();
+  for (const name of names) {
+    const def = await findAgent(name, where);
+    if (def) found.set(name, def);
+  }
+  return (name) => found.get(name)?.description || null;
+}
 
 /** A note a phase's prompt must carry: `text` is added at its end when there is a `note` and the prompt file has no `{{variable}}` to carry it. */
 export type PromptNote = { variable: string; note: string; text: string };
@@ -183,11 +244,13 @@ export type PromptNote = { variable: string; note: string; text: string };
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?: PromptNote): Promise<string | null> {
   const path = promptPath(ctx.root, spec.name);
   if (path === null) return null;
-  const skillsLine = (spec.skills ?? []).length ? `Use these skills: ${(spec.skills ?? []).map((s) => `\`${s}\``).join(", ")}.\n\n` : "";
+  // With only skills, or none, this is the skills line prompts always had.
+  const setup = await stepSetup(ctx, spec);
+  const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
-  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
+  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup), ...record, ...spec.vars };
   const template = await Bun.file(path).text();
-  let rendered = skillsLine + renderPrompt(template, vars);
+  let rendered = setupText + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
   const prompt = withContract(rendered);
@@ -438,9 +501,22 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   throwIfCancelled(signal);
   throwIfChangeStopped(ctx);
   const cwd = spec.cwd ?? (await ctx.snapshot());
-  // Read as the session starts: a model a person changed since the step began applies from here.
+  // Read as the session starts: a model or agent setting a person changed since the step began applies from here.
   const model = await phaseModel(ctx, spec);
+  const { setup, applies } = await setupOf(ctx, spec);
+  const extra = applies ? await setupRun(ctx, spec, setup, cwd) : null;
+  if (extra && "missing" in extra) {
+    ctx.trace.event(ctx.slug, "error", { where: traceName, reason: "setup", detail: extra.missing });
+    return { ok: false, reason: "setup", note: `${ownerNote("setup")} ${extra.missing}`, sessionId: null };
+  }
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
+  if (extra) {
+    ctx.trace.event(ctx.slug, "agent_setup", {
+      agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name),
+      team_members: Object.fromEntries(setup.teams.map((t) => [t.name, t.members])), skills: setup.skills,
+      tools: setup.tools, mcp_tools: setup.mcpTools, sources: setup.sources, models: extra.models,
+    }, seq);
+  }
   const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
   // The protect-tests hook writes here the test files it refused to let a fix session edit.
   const protectedLog = join(dir, "protected-tests.txt");
@@ -455,10 +531,13 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       schema: jsonSchemaFor(spec.name),
       model: model.name,
       permissionMode: spec.permissionMode,
-      allowedTools: toolsFor(ctx, spec.tools),
-      disallowedTools: disallowedFor(spec.tools),
+      allowedTools: toolsFor(ctx, spec.tools, setup),
+      // With the setup's: no edits in main's snapshot when the session may read it as an added dir.
+      disallowedTools: [...disallowedFor(spec.tools), ...(extra?.deny ?? [])],
       // The test-protection hook, from the installed package; it acts only in a fix session.
       settings: hookSettings(),
+      // The step's agent setup (see setupRun), which may also replace the settings.
+      ...extra?.run,
       timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: capUsd,
       resume: spec.resume,
@@ -503,11 +582,25 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
     const reason = out.reason as BlockingReason;
     // The step's own words: which named model, which CLI name, which step.
     if (reason === "model") return { ok: false, reason, note: badModelNote(model.ref, model.name, spec.name), sessionId: out.sessionId };
+    // What the session did not load, in the init check's words (see initProblem).
+    if (reason === "setup") return { ok: false, reason, note: `${ownerNote(reason)} ${out.detail}`, sessionId: out.sessionId };
     const tests = protectedTests(protectedLog);
     return { ok: false, reason, note: tests.length ? `${ownerNote(reason)} ${protectedNote(ctx, tests)}` : ownerNote(reason), sessionId: out.sessionId };
   }
   if (spec.endsPause !== false) assistantReached(ctx, model.name);
   return { ok: true, envelope: out.value, sessionId: out.sessionId, costUsd: out.costUsd, model: model.name, seq, ...(question ? { asked: question } : {}) };
+}
+
+/**
+ * What a session's run gets from its step's setup when that is not empty, and the models of its
+ * inline agents for the trace; `missing`, instead, when an agent it names is not found.
+ * - `tools` and `mcp_tools` go on the allow list (see toolsFor).
+ * - Every agent it names is read from main (see setupWhere), never the change's branch; the rest is
+ *   setupSession's: inline agents, `--agent`, settings sources, `--add-dir` (and the rules that keep the
+ *   session from editing it), subagent text, the init check.
+ */
+async function setupRun(ctx: StepContext, spec: AgentPhaseSpec, setup: AgentSetup, cwd: string): ReturnType<typeof setupSession> {
+  return setupSession(setup, spec.name, ctx.cfg.main_branch, cwd, JSON.parse(hookSettings()) as Record<string, unknown>, () => setupWhere(ctx, setup));
 }
 
 /**

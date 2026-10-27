@@ -132,6 +132,7 @@ export async function writeIntents(o: {
       const ref = stepModel(o.cfg, "write-intent");
       return { ok: false, costUsd: cost, problem: badModelNote(ref, modelFor(o.cfg, ref), "write-intent"), badModel: true };
     }
+    if (!r.ok && r.reason === "setup") return { ok: false, costUsd: cost, problem: `The writer's setup is not complete: ${r.detail}` };
     if (!r.ok) return { ok: false, costUsd: cost, problem: "The writer could not finish." };
     if (r.value.status === "fail") return { ok: false, costUsd: cost, problem: r.value.summary || "The writer said the brief is too thin to write up." };
     const rendered = r.value.intents.map((d) => {

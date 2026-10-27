@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { inlineName } from "../agents";
 import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
@@ -9,7 +10,7 @@ import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
 import { runsDir } from "../paths";
 import { changeSummary, loopNow, runningRows, totalsIn } from "./model";
-import type { ChangeDetail, PhaseView, SpendView } from "./types";
+import type { AgentSetupView, ChangeDetail, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
 export async function changeDetail(root: string, trace: Trace, slug: string, now: Date = new Date()): Promise<ChangeDetail | null> {
@@ -24,6 +25,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
   // The board's rule, so the two never disagree.
   const busy = new Set(runningRows(trace, loopNow(root, pollSeconds, now)).keys());
   const denied = trace.deniedCommands(slug);
+  const setups = trace.agentSetups(slug);
   const phases: PhaseView[] = rows.map((p) => {
     const end = p.ended ? Date.parse(p.ended) : now.getTime();
     const dir = `${p.seq}-${p.name}`;
@@ -33,7 +35,7 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     return {
       seq: p.seq, name: p.name, kind: p.kind, status: p.status, started: p.started, ended: p.ended,
       durationMs: Math.max(0, end - Date.parse(p.started)), costUsd: p.status === "running" ? 0 : p.cost_usd ?? 0, error: p.error,
-      files, denied: denied.get(p.seq) ?? [],
+      files, denied: denied.get(p.seq) ?? [], agentSetup: setupView(setups.get(p.seq)),
     };
   });
   return {
@@ -42,6 +44,26 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     documents: ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${slug}/${a}` })),
     phases,
     gates: trace.gates(slug),
+  };
+}
+
+/** A recorded `agent_setup` payload as the page shows it; null when there is none. Each field is read defensively. */
+function setupView(e: Record<string, unknown> | undefined): AgentSetupView | null {
+  if (!e) return null;
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  // The event keys models by inline name (loopstra-<name>); the page's view is keyed by the plain name.
+  const recorded = e.models && typeof e.models === "object" ? (e.models as Record<string, unknown>) : {};
+  const subagents = list(e.subagents);
+  const recordedMembers = e.team_members && typeof e.team_members === "object" ? (e.team_members as Record<string, unknown>) : {};
+  const teamMembers = Object.fromEntries(Object.entries(recordedMembers).map(([team, m]) => [team, list(m)]));
+  const models: Record<string, string> = {};
+  for (const n of [...subagents, ...Object.values(teamMembers).flat()]) {
+    const m = recorded[inlineName(n)];
+    if (typeof m === "string") models[n] = m;
+  }
+  return {
+    agent: typeof e.agent === "string" ? e.agent : null, subagents, teams: list(e.teams), teamMembers, skills: list(e.skills),
+    tools: list(e.tools), mcpTools: list(e.mcp_tools), sources: e.sources === "repo" ? "repo" : "all", models,
   };
 }
 

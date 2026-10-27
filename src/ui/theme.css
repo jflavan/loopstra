@@ -376,7 +376,8 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .session { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; align-items: start; }
 @media (max-width: 1080px) { .session { grid-template-columns: minmax(0, 1fr); } }
 .transcript-wrap { position: relative; }
-.transcript { display: grid; gap: 8px; max-height: calc(100vh - 190px); overflow: auto; padding: 2px 4px 24px 0; }
+/* One column as wide as the box: a row with a long line that does not wrap (a call's target, a prompt) ellipsizes instead of widening every row. */
+.transcript { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; max-height: calc(100vh - 190px); overflow: auto; padding: 2px 4px 24px 0; }
 /* The browser skips laying out and painting rows that are off screen, so a session of thousands of rows stays smooth. */
 .transcript > * { content-visibility: auto; contain-intrinsic-size: auto 40px; }
 .t-tool, .t-edit { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-raised); box-shadow: var(--shadow-sm); }
@@ -396,6 +397,14 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 /* A person's message or redirect, as the session took it up: a bubble, as in the drawer. */
 .t-msg { justify-self: end; background: var(--accent-bg); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: var(--radius-bubble); border-bottom-right-radius: 6px; white-space: pre-wrap; }
 .t-msg-label { display: block; font-size: var(--text-xs); font-weight: 600; color: var(--accent); }
+/* A subagent's work, inside the call that handed it off: indented under a rule, so whose it is shows at a glance. */
+.t-sub { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; padding-left: 12px; border-left: 2px solid var(--line); }
+.t-sub > * { content-visibility: auto; contain-intrinsic-size: auto 40px; }
+.t-prompt { box-shadow: none; background: var(--bg-sunk); }
+.t-handoff > .t-head .t-name { flex: none; white-space: nowrap; }
+/* A subagent's row whose call is not shown. */
+.t-orphan { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.t-from { font-size: var(--text-xs); color: var(--fg-3); }
 .t-live { display: flex; align-items: center; gap: 8px; color: var(--fg-3); padding: 6px 2px; }
 /* The box that steers a running session (see parts/Steer.tsx): it wraps, never scrolls, down to a phone's width. */
 .steer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 18px; }
@@ -492,3 +501,27 @@ a.tl-row:active { transform: scale(var(--press-lg)); }
 .set-head > label { font-weight: 600; text-transform: capitalize; }
 .set-step { padding-left: 16px; }
 .set-wait { display: inline-flex; align-items: center; gap: 8px; }
+/* The Agents section of Settings: a step's six fields wrap into as many columns as fit. */
+.set-row > .set-label { flex: 0 0 18rem; min-width: 0; }
+.agent-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); gap: 12px 18px; padding-left: 16px; }
+.agent-field { display: grid; gap: 4px; align-content: start; min-width: 0; overflow-wrap: anywhere; }
+.agent-field-name { font-size: var(--text-xs); font-weight: 600; color: var(--fg-3); }
+.agent-field select, .agent-field input[type="text"] { width: 100%; min-width: 0; box-sizing: border-box; }
+.agent-pick > summary { cursor: pointer; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-sunk); overflow-wrap: anywhere; }
+.set-row > .agent-pick { flex: 1 1 14rem; max-width: 22rem; min-width: 0; }
+.agent-pick-box { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-raised); min-width: 0; }
+.agent-pick-list { display: grid; gap: 6px; max-height: 14rem; overflow: auto; min-width: 0; }
+.agent-pick[open] > .agent-pick-box { margin-top: 6px; }
+.agent-check { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.agent-check > input { flex: none; margin: 0; }
+.agent-source-item { flex-wrap: wrap; }
+.agent-warn { color: var(--warn); font-size: var(--text-xs); }
+.agent-problems { margin: 0; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.agent-indent { padding-left: 16px; margin: 0; }
+.agent-item { display: grid; gap: 2px; }
+.agent-name { overflow-wrap: anywhere; min-width: 0; }
+.agent-desc { margin: 0; overflow-wrap: anywhere; }
+.agent-form { display: grid; gap: 8px; max-width: 40rem; min-width: 0; }
+.agent-form > label { display: grid; gap: 4px; }
+.agent-form textarea { min-height: 8rem; resize: vertical; font-family: var(--mono); font-size: var(--text-code); }
+.agent-form input[type="text"], .agent-form textarea { width: 100%; box-sizing: border-box; min-width: 0; }

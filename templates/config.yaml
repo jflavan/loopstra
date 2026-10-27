@@ -42,6 +42,25 @@ stages:
   review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 
+# Agents, subagents, skills and MCP tools for each step. Every line is optional; with none set,
+# sessions run exactly as before. Agents and skills are Claude Code's own files, committed under
+# .claude/agents/<name>.md and .claude/skills/<name>/; this block only names which step uses which.
+# sources: all (default) also loads the personal setup of whoever runs `loopstra start`; repo loads
+# only what the repository declares (.claude/, .mcp.json, CLAUDE.md), the same on every machine.
+# teams are named groups of subagents (way: parallel gives each member the same task; pick hands each
+# piece of work to the member that fits). all applies to every step except chat's; steps.<step> adds
+# to it. mcp_tools are MCP tools every session may use, read-only judges included (none by default;
+# an MCP call without a rule is refused). mcp__<server> allows all of a server's tools.
+# agent is one agent a step's session plays (not on fix, reconcile or revise, which continue the build's).
+# agents:
+#   sources: all
+#   teams:
+#     reviewers: { members: [security-reviewer, correctness-reviewer], way: parallel }
+#   all:
+#     mcp_tools: [mcp__github, "mcp__claude_ai_Claude_Docs__guide"]
+#   steps:
+#     review: { agent: lead-reviewer, teams: [reviewers], subagents: [Explore], skills: [threat-modeling] }
+
 # Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides:
 # once earned, a cheaper judge's pass stands.
 # parallel_checks: test, lint and build start together (leave off if they write the same folder).

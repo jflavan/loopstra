@@ -532,6 +532,56 @@ describe("the orchestrator's guards (review fixes)", () => {
   });
 });
 
+describe("a chat step's agent setup", () => {
+  test("a chat step gets only its own tools; agents.all never reaches it", async () => {
+    const r = await chatRepo({ config: "agents:\n  all:\n    tools: [WebFetch]\n    mcp_tools: [mcp__x]\n  steps:\n    orchestrator:\n      skills: [tone]\n      mcp_tools: [mcp__docs]\n" });
+    const seen = join(r.root, ".loopstra", "fake-args.json");
+    const restore = setEnv({ LOOPSTRA_FAKE_ARGS: seen });
+    try {
+      mkdirSync(join(r.root, ".claude", "skills", "tone"), { recursive: true });
+      writeFileSync(join(r.root, ".claude", "skills", "tone", "SKILL.md"), "---\nname: tone\ndescription: how to sound\n---\nBe kind.\n");
+      await r.answer("orchestrator", 1, turn("ok"));
+      await new Orchestrator(r.root).handle(message("hi"), sink().send);
+      const call = JSON.parse(readFileSync(seen, "utf8")) as { args: string[]; prompt: string };
+      const flag = (name: string) => call.args[call.args.indexOf(name) + 1]!.split(",");
+      expect(flag("--allowedTools")).toEqual(expect.arrayContaining(["Read", "mcp__docs"]));
+      expect(flag("--allowedTools")).not.toContain("WebFetch");
+      expect(flag("--allowedTools")).not.toContain("mcp__x");
+      expect(flag("--disallowedTools")).toEqual(CHAT_DENIED);
+      expect(call.prompt.startsWith("Use these skills: `tone`.")).toBe(true);
+    } finally { restore(); r.cleanup(); }
+  });
+
+  test("with no agents block, or only agents.all, a chat session's argv and prompt are what they always were", async () => {
+    const record = async (config: string) => {
+      const r = await chatRepo({ config });
+      const seen = join(r.root, ".loopstra", "fake-args.json");
+      const restore = setEnv({ LOOPSTRA_FAKE_ARGS: seen });
+      try {
+        await r.answer("orchestrator", 1, turn("ok"));
+        await new Orchestrator(r.root).handle(message("hi"), sink().send);
+        return JSON.parse(readFileSync(seen, "utf8")) as { args: string[]; prompt: string };
+      } finally { restore(); r.cleanup(); }
+    };
+    const none = await record("agents: {}\n");
+    const all = await record("agents:\n  sources: all\n  all:\n    skills: [x]\n    tools: [WebFetch]\n  steps: {}\n");
+    expect(all.args).toEqual(none.args);
+    expect(all.prompt).toBe(none.prompt);
+    for (const flag of ["--agents", "--agent", "--setting-sources", "--add-dir", "--forward-subagent-text"]) expect(none.args).not.toContain(flag);
+    expect(none.args[none.args.indexOf("--allowedTools") + 1]).toBe(["Read", "Glob", "Grep", "Bash(loopstra status)", "Bash(loopstra status *)"].join(","));
+  });
+
+  test("a chat agent that cannot be found is answered in words", async () => {
+    const r = await chatRepo({ config: "agents:\n  steps:\n    orchestrator:\n      agent: ghost\n" });
+    try {
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent[0]).toStartWith("My setup is not complete:");
+      expect(out.sent[0]).toContain("ghost");
+    } finally { r.cleanup(); }
+  });
+});
+
 describe("the daily budget is held, not just checked (Copilot review)", () => {
   test("running sessions count at what they hold; a phase that would go past the day's budget does not start", async () => {
     const r = await chatRepo({ config: "claude:\n  max_budget_usd: 2\nchat:\n  max_budget_usd_per_day: 3\n" });
@@ -654,7 +704,9 @@ describe("the change a person opened chat from", () => {
       const raw = [
         { type: "system", subtype: "init", cwd: r.root, session_id: "s" },
         ...Array.from({ length: 60 }, (_, i) => ({ type: "assistant", message: { content: [{ type: "text", text: `step ${i}` }] } })),
-        { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] } },
+        // A subagent's prompt (see toItems): its own line, never a person's message.
+        { type: "user", message: { content: [{ type: "text", text: "Check the parser." }] }, parent_tool_use_id: "a1" },
+        { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "bun test" } }] }, parent_tool_use_id: "a1" },
         { type: "result", subtype: "success", is_error: false, total_cost_usd: 0.1, structured_output: { summary: "Fixed it." } },
       ];
       const dir = join(r.root, ".loopstra", "runs", "a", "phases", `${fix}-fix-1`);
@@ -677,11 +729,12 @@ describe("the change a person opened chat from", () => {
       expect(text).toContain("  Newest failure:\n    build: agent-fail: the tests would not pass");
       expect(text).toContain("  The session's last steps:\n");
       expect(text).toContain("    text: step 59\n");
-      expect(text).toContain("    tool Bash: bun test\n");
+      expect(text).toContain("    subagent's prompt: Check the parser.\n");
+      expect(text).toContain("    subagent tool Bash: bun test\n");
       expect(text).toContain("    result: success");
-      // The last 50 items: 48 of the 60 texts, the tool and the result.
-      expect(text).toContain("    text: step 12\n");
-      expect(text).not.toContain("text: step 11\n");
+      // The last 50 items: 47 of the 60 texts, the subagent's prompt, the tool and the result.
+      expect(text).toContain("    text: step 13\n");
+      expect(text).not.toContain("text: step 12\n");
       // Each part at most 4000 characters before its indent (the record is longer).
       const record = text.slice(text.indexOf("  conversation.md:\n") + "  conversation.md:\n".length, text.indexOf("\n\n  Note:"));
       expect(record.replace(/^ {4}/gm, "").length).toBeLessThanOrEqual(4000);

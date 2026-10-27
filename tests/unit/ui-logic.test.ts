@@ -1,5 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { ActivityItem, AgentMessage, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
+import type { ActivityItem, AgentMessage, AgentsView, AgentStepRow, ChangeSummary, RunningPhase, Sections, StreamMessage } from "../../src/console/types";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { ago, clock, costSoFar, duration, pillText, shortModel, stepWord, usd } from "../../src/ui/format";
 import { composing, decide, enterPressed, escapePressed, focusOr, keyLabel, keyMatcher, keyName, listKey, sendsMessage, sendsOnEnter, typingIn } from "../../src/ui/keys";
@@ -7,7 +7,10 @@ import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore, stepAt } from "../../src/ui/palette";
 import { changesAddress, parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
-import { addFrames, addItems, EMPTY, lastCost, type Frame } from "../../src/ui/transcript";
+import { addFrames, addItems, EMPTY, lastCost, nest, type Frame, type Nested } from "../../src/ui/transcript";
+import { toItems } from "../../src/console/transcript";
+import type { TranscriptItem } from "../../src/console/types";
+import { readFileSync } from "node:fs";
 import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { parseIntentFile } from "../../src/intents";
@@ -17,9 +20,10 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
+import { choicesFor, codeParts, effective, fromNote, getsText, listText, parseList, pickSummary, withChosen } from "../../src/ui/agent-settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
-import { sessionFacts } from "../../src/ui/session-facts";
+import { sessionFacts, setupFacts } from "../../src/ui/session-facts";
 import { givesFocusBack, returnTarget } from "../../src/ui/parts/focus";
 
 describe("formatting", () => {
@@ -349,6 +353,12 @@ describe("a transcript on the page", () => {
     expect(s.results.size).toBe(0);
   });
 
+  test("a subagent's todo list does not replace the session's", () => {
+    const own = [{ text: "mine", state: "pending" }];
+    const s = addItems(EMPTY, [{ kind: "todos", items: own }, { kind: "todos", items: [{ text: "theirs", state: "pending" }], parent: "a1" }]);
+    expect(s.todos).toEqual(own);
+  });
+
   test("a call whose id is a name every object has (constructor, toString) has no result until one comes", () => {
     const s = addItems(EMPTY, [{ kind: "tool", id: "constructor", tool: "Bash", target: "x", input: {} }]);
     expect(s.results.get("constructor")).toBeUndefined();
@@ -419,6 +429,77 @@ describe("a transcript on the page", () => {
     expect(texts(addFrames(s, [text("old", "50.0"), tool("t9", "100"), text("x", "100.0"), text("z", "200")]))).toEqual(["ok", "x", "y", "z"]);
     // The old state is left alone.
     expect(texts(s)).toEqual(["ok", "x", "y", "z"]);
+  });
+});
+
+describe("a subagent's work on the page", () => {
+  /** A session that hands work to one subagent (see tests/fixtures/subagent.jsonl). */
+  const ITEMS = readFileSync(new URL("../fixtures/subagent.jsonl", import.meta.url), "utf8").split("\n").filter((l) => l.trim())
+    .flatMap((l) => toItems(JSON.parse(l) as Record<string, unknown>));
+  /** Each row by its id, its text or its kind, with the rows under it and whether it lost its call. */
+  type Shape = { row: string; children?: Shape[]; orphan?: true };
+  const shape = (rows: Array<Nested<TranscriptItem>>): Shape[] => rows.map((i) => ({
+    row: "id" in i ? i.id : i.kind === "text" ? i.text.slice(0, 12) : i.kind,
+    ...(i.children ? { children: shape(i.children) } : {}),
+    ...(i.orphan ? { orphan: true as const } : {}),
+  }));
+  const shown = (items: TranscriptItem[]) => addItems(EMPTY, items);
+
+  test("the subagent's prompt, words and calls go under the call that started it; the call's result is its own", () => {
+    const s = shown(ITEMS);
+    expect(shape(nest(s.items))).toEqual([
+      { row: "toolu_agent", children: [{ row: "delegated" }, { row: "Reading the " }, { row: "toolu_read" }, { row: "SECURITY-OK:" }] },
+      { row: "**Verdict: S" },
+      { row: "result" },
+    ]);
+    expect(s.results.get("toolu_read")).toEqual({ ok: true, output: "1\thi\n2\t" });
+    expect(s.results.get("toolu_agent")?.output).toStartWith("SECURITY-OK");
+  });
+
+  test("two subagents at once each get their own work; a subagent's own subagent nests under its call", () => {
+    const call = (id: string, parent?: string): TranscriptItem => ({ kind: "tool", id, tool: "Agent", target: id, input: {}, ...(parent ? { parent } : {}) });
+    const said = (text: string, parent: string): TranscriptItem => ({ kind: "text", text, parent });
+    const items: TranscriptItem[] = [
+      call("A"), call("B"),
+      { kind: "delegated", parent: "A", text: "do a" }, { kind: "delegated", parent: "B", text: "do b" },
+      said("a1", "A"), said("b1", "B"), { kind: "tool", id: "ra", tool: "Read", target: "x", input: {}, parent: "A" },
+      call("C", "B"), said("c1", "C"), said("b2", "B"),
+      { kind: "text", text: "main" },
+    ];
+    expect(shape(nest(items))).toEqual([
+      { row: "A", children: [{ row: "delegated" }, { row: "a1" }, { row: "ra" }] },
+      { row: "B", children: [{ row: "delegated" }, { row: "b1" }, { row: "C", children: [{ row: "c1" }] }, { row: "b2" }] },
+      { row: "main" },
+    ]);
+  });
+
+  test("a page that reconnects in the middle of a subagent's work still nests the rows it gets after", () => {
+    // Each item on a line of its own, 100 bytes long.
+    const frames: Frame[] = ITEMS.map((item, k) => ({ item, id: String((k + 1) * 100) }));
+    const read = ITEMS.findIndex((i) => "id" in i && i.id === "toolu_read");
+    let s = addFrames(EMPTY, frames.slice(0, read));
+    // The stream came back a line earlier and sent the rest.
+    s = addFrames(s, frames.slice(read - 1));
+    expect(shape(nest(s.items))).toEqual(shape(nest(shown(ITEMS).items)));
+  });
+
+  test("rows whose call is not on the page (a transcript read from part way) stay where they are, marked as a subagent's", () => {
+    const read = ITEMS.findIndex((i) => "id" in i && i.id === "toolu_read");
+    expect(shape(nest(shown(ITEMS.slice(read)).items))).toEqual([
+      { row: "toolu_read", orphan: true },
+      { row: "SECURITY-OK:", orphan: true },
+      { row: "**Verdict: S" },
+      { row: "result" },
+    ]);
+    // A call that names itself as its parent cannot hold itself.
+    expect(shape(nest([{ kind: "tool", id: "X", tool: "Agent", target: "", input: {}, parent: "X" }]))).toEqual([{ row: "X", orphan: true }]);
+  });
+
+  test("a transcript with no subagent comes back as it was, the same rows", () => {
+    const items = shown([{ kind: "text", text: "a" }, { kind: "tool", id: "t1", tool: "Task", target: "x", input: {} }, { kind: "result", ok: true, summary: "", costUsd: null }]).items;
+    const nested = nest(items);
+    expect(nested).toHaveLength(3);
+    nested.forEach((row, k) => expect(row).toBe(items[k]!));
   });
 });
 
@@ -1173,5 +1254,151 @@ describe("the Settings page", () => {
     expect(pendingText("stopped")).toBe("Saved when the loop next runs.");
     expect(pendingText("not-responding")).toBe("Saved when the loop next runs.");
     expect(pendingText("running")).toBe("Saving…");
+  });
+});
+
+describe("the Agents section of the Settings page", () => {
+  const row = (r: Partial<AgentStepRow> & Pick<AgentStepRow, "key">): AgentStepRow =>
+    ({ what: "", readOnly: false, chat: false, continuesBuild: false, own: {}, fromAll: {}, fromStage: [], ...r });
+  const item = (kind: "agent" | "skill", name: string, from: "repo" | "personal" | "plugin") =>
+    ({ kind, name, description: "", from, usedBy: [], base: "absent", editable: false });
+  const view = (over: Partial<AgentsView> = {}): AgentsView => ({
+    version: "v1", problem: null, sources: "all",
+    steps: [row({ key: "all" }), row({ key: "build" }), row({ key: "fix", continuesBuild: true }), row({ key: "review", readOnly: true })],
+    teams: [{ name: "reviewers", members: ["lead"], way: "parallel", usedBy: [] }],
+    library: [item("agent", "lead", "repo"), item("agent", "helper", "personal"), item("agent", "tools:auditor", "plugin"), item("skill", "tone", "repo"), item("skill", "style", "personal"), item("agent", "lead", "personal")],
+    problems: [], builtins: ["general-purpose", "Explore"], ways: ["parallel", "pick"],
+    ...over,
+  });
+
+  test("effective agent setup: own, then all steps, then stage skills; fix shows the build's agent", () => {
+    const build = row({ key: "build", own: { agent: "lead", skills: ["tone"] }, fromAll: { agent: "base", skills: ["style"] }, fromStage: ["tdd"] });
+    expect(effective(build, "agent")).toEqual({ value: "lead", from: "own" });
+    // A list adds up the way a session gets it: all steps, the stage's skills, then its own, each once.
+    expect(effective(build, "skills")).toEqual({ value: ["style", "tdd", "tone"], from: "own" });
+    const plan = row({ key: "plan", fromAll: { agent: "base", skills: ["style"], tools: ["Read"] }, fromStage: ["tdd", "style"] });
+    expect(effective(plan, "agent")).toEqual({ value: "base", from: "all" });
+    expect(effective(plan, "skills")).toEqual({ value: ["style", "tdd"], from: "all" });
+    expect(effective(plan, "tools")).toEqual({ value: ["Read"], from: "all" });
+    // Stage skills reach only the skills.
+    const verify = row({ key: "verify", fromStage: ["checks"] });
+    expect(effective(verify, "skills")).toEqual({ value: ["checks"], from: "stage" });
+    expect(effective(verify, "subagents")).toEqual({ value: [], from: null });
+    expect(effective(verify, "agent")).toEqual({ value: null, from: null });
+    // Fix, reconcile and revise run as the build's agent, whatever all steps names.
+    const fix = row({ key: "fix", continuesBuild: true, fromAll: { agent: "base" } });
+    expect(effective(fix, "agent", build)).toEqual({ value: "lead", from: "build" });
+    expect(effective(fix, "agent", row({ key: "build", fromAll: { agent: "base" } }))).toEqual({ value: "base", from: "build" });
+    expect(effective(fix, "agent")).toEqual({ value: null, from: "build" });
+  });
+
+  test("the muted note says where a value comes from", () => {
+    expect(fromNote({ value: "base", from: "all" }, row({ key: "plan" }), "agent")).toBe("from all steps");
+    expect(fromNote({ value: "lead", from: "build" }, row({ key: "fix" }), "agent")).toBe("as build");
+    expect(fromNote({ value: null, from: "build" }, row({ key: "fix" }), "agent")).toBe("as build");
+    expect(fromNote({ value: ["checks"], from: "stage" }, row({ key: "verify" }), "skills")).toBe("stage skill");
+    expect(fromNote({ value: ["style", "tdd"], from: "all" }, row({ key: "plan", fromAll: { skills: ["style"] }, fromStage: ["tdd"] }), "skills")).toBe("from all steps and stage skills");
+    // Its own, with more added from elsewhere.
+    expect(fromNote({ value: ["style", "tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] }, fromAll: { skills: ["style"] } }), "skills")).toBe("with all steps");
+    expect(fromNote({ value: ["tone"], from: "own" }, row({ key: "build", own: { skills: ["tone"] } }), "skills")).toBe("");
+    expect(fromNote({ value: null, from: null }, row({ key: "build" }), "agent")).toBe("");
+  });
+
+  test("what a step gets, beside its control: inherited with where from, none when nothing, nothing more when only its own", () => {
+    const plan = row({ key: "plan", fromAll: { tools: ["Read"] } });
+    expect(getsText(effective(plan, "tools"), plan, "tools")).toBe("Read (from all steps)");
+    const bare = row({ key: "verify" });
+    expect(getsText(effective(bare, "tools"), bare, "tools")).toBe("none");
+    expect(getsText(effective(bare, "mcp_tools"), bare, "mcp_tools")).toBe("none");
+    expect(getsText(effective(bare, "agent"), bare, "agent")).toBe("none");
+    // Its own alone: the control shows it already.
+    const own = row({ key: "build", own: { tools: ["Edit"] } });
+    expect(getsText(effective(own, "tools"), own, "tools")).toBe("");
+    const mixed = row({ key: "build", own: { tools: ["Edit"] }, fromAll: { tools: ["Read"] } });
+    expect(getsText(effective(mixed, "tools"), mixed, "tools")).toBe("Read, Edit (with all steps)");
+    const fix = row({ key: "fix", continuesBuild: true });
+    expect(getsText(effective(fix, "agent", row({ key: "build", own: { agent: "lead" } })), fix, "agent")).toBe("lead (as build)");
+    expect(getsText(effective(fix, "agent"), fix, "agent")).toBe("none (as build)");
+  });
+
+  test("a list picker's summary is what the step gets, the inherited names marked", () => {
+    expect(pickSummary(row({ key: "plan", fromAll: { skills: ["tone"] } }), "skills")).toBe("tone (from all steps)");
+    expect(pickSummary(row({ key: "review", own: { skills: ["house"] }, fromAll: { skills: ["tone"] } }), "skills")).toBe("tone, house (tone from all steps)");
+    expect(pickSummary(row({ key: "verify", fromStage: ["checks", "tdd"] }), "skills")).toBe("checks, tdd (from the stage)");
+    expect(pickSummary(row({ key: "build", own: { skills: ["mine"] }, fromAll: { skills: ["tone"] }, fromStage: ["tdd"] }), "skills"))
+      .toBe("tone, tdd, mine (tone from all steps; tdd from the stage)");
+    expect(pickSummary(row({ key: "plan", fromAll: { skills: ["tone"] }, fromStage: ["tdd"] }), "skills")).toBe("tone, tdd (tone from all steps; tdd from the stage)");
+    // A name the step also sets itself still comes from all steps: taking it off the step leaves it.
+    expect(pickSummary(row({ key: "plan", own: { subagents: ["lead"] }, fromAll: { subagents: ["lead"] } }), "subagents")).toBe("lead (from all steps)");
+    // Its own alone, or nothing.
+    expect(pickSummary(row({ key: "plan", own: { teams: ["crew"] } }), "teams")).toBe("crew");
+    expect(pickSummary(row({ key: "plan" }), "teams")).toBe("none");
+    // Stage skills reach only the skills; chat steps get nothing from all steps (their row says so).
+    expect(pickSummary(row({ key: "verify", fromStage: ["checks"] }), "subagents")).toBe("none");
+  });
+
+  test("codeParts reads backticked names as code, and a lone backtick as text", () => {
+    expect(codeParts("`ghost`, a subagent of review, needs `loopstra setup agents`.")).toEqual([
+      { text: "ghost", code: true }, { text: ", a subagent of review, needs ", code: false }, { text: "loopstra setup agents", code: true }, { text: ".", code: false },
+    ]);
+    expect(codeParts("no names")).toEqual([{ text: "no names", code: false }]);
+    expect(codeParts("a `b` c `d")).toEqual([{ text: "a ", code: false }, { text: "b", code: true }, { text: " c `d", code: false }]);
+  });
+
+  test("parseList splits, trims, dedupes and keeps order", () => {
+    expect(parseList(" a, b,,a , c ")).toEqual(["a", "b", "c"]);
+    expect(parseList("")).toEqual([]);
+    expect(parseList(" , ")).toEqual([]);
+    expect(parseList("Bash(bun test)")).toEqual(["Bash(bun test)"]);
+  });
+
+  test("listText joins a list, or says none", () => {
+    expect(listText(["a", "b"])).toBe("a, b");
+    expect(listText([])).toBe("none");
+  });
+
+  test("choicesFor leaves built-ins out of a step's own agent", () => {
+    const v = view();
+    expect(choicesFor(v, "agent", "build")).toEqual(["lead", "helper", "tools:auditor"]);
+    expect(choicesFor(v, "subagents", "build")).toEqual(["lead", "helper", "tools:auditor", "general-purpose", "Explore"]);
+    expect(choicesFor(v, "teams", "review")).toEqual(["reviewers"]);
+    expect(choicesFor(v, "skills", "all")).toEqual(["tone", "style"]);
+    // A step that runs as the build's agent has none of its own to pick.
+    expect(choicesFor(v, "agent", "fix")).toEqual([]);
+    // Tools are typed, not picked.
+    expect(choicesFor(v, "tools", "build")).toEqual([]);
+    expect(choicesFor(v, "mcp_tools", "build")).toEqual([]);
+  });
+
+  test("with sources: repo, a step is offered only the repo's agents and skills", () => {
+    const v = view({ sources: "repo" });
+    expect(choicesFor(v, "agent", "build")).toEqual(["lead"]);
+    expect(choicesFor(v, "subagents", "build")).toEqual(["lead", "general-purpose", "Explore"]);
+    expect(choicesFor(v, "skills", "build")).toEqual(["tone"]);
+  });
+
+  test("a picker keeps the names already chosen, even ones it does not offer, so they can be taken off", () => {
+    expect(withChosen(["a", "b"], ["b", "gone"])).toEqual(["a", "b", "gone"]);
+    expect(withChosen(["a"], [])).toEqual(["a"]);
+  });
+});
+
+describe("the setup lines of a session's facts", () => {
+  const base = { agent: null, subagents: [], teams: [], teamMembers: {}, skills: [], tools: [], mcpTools: [], sources: "all" as const, models: {} };
+  test("nothing for no setup", () => {
+    expect(setupFacts(null)).toEqual([]);
+  });
+  test("an empty setup says only that no agent was set", () => {
+    expect(setupFacts(base)).toEqual([["Agent", "none"]]);
+  });
+  test("subagents carry their model when known; empty lists and the default sources are left out", () => {
+    expect(setupFacts({ ...base, agent: "lead", subagents: ["sec", "doc"], models: { sec: "haiku" }, teams: ["ops"], skills: ["a", "b"], tools: ["Read"], mcpTools: ["mcp__x__y"], sources: "repo" })).toEqual([
+      ["Agent", "lead"], ["Subagents", "sec (haiku), doc"], ["Teams", "ops"], ["Skills", "a, b"], ["Tools", "Read"], ["MCP tools", "mcp__x__y"], ["Sources", "repo only"],
+    ]);
+  });
+  test("a team lists its members, each with its model when known", () => {
+    expect(setupFacts({ ...base, teams: ["ops", "docs"], teamMembers: { ops: ["sec", "perf"], docs: [] }, models: { sec: "opus" } })).toEqual([
+      ["Agent", "none"], ["Teams", "ops: sec (opus), perf; docs"],
+    ]);
   });
 });

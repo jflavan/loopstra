@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
 import { NEEDS_TERMINAL, parseSetupArgs, setup, SETUP_USAGE, setupHelp } from "../../src/setup";
-import { DefaultsPrompt } from "../../src/setup/prompt";
+import { DefaultsPrompt, SetupStopped } from "../../src/setup/prompt";
+import { agents } from "../../src/setup/sections/agents";
 import { budgets } from "../../src/setup/sections/budgets";
 import { gates } from "../../src/setup/sections/gates";
 import { github } from "../../src/setup/sections/github";
@@ -84,6 +87,88 @@ describe("loopstra setup", () => {
       expect(o.text()).toContain("claude.timeout_minutes");
       expect(r.text()).toBe(CONFIG);
     } finally { r.cleanup(); }
+  });
+
+  test("files a section adds are written after the config saves, and not at all when setup stops or a path is refused", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const file = ".claude/skills/a/SKILL.md";
+      const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content: "x" }); } });
+      const ok = io();
+      expect(await setup(r.root, { output: ok.output, defaults: true, sections: [adds] })).toBe(0);
+      expect(readFileSync(join(r.root, file), "utf8")).toBe("x");
+      expect(ok.text()).toContain(`Wrote 1 file under .claude/: ${file}. Commit them with loopstra/config.yaml on the main branch.`);
+
+      const same = io();
+      const later = fake({ ask: async (ctx) => { ctx.files.push({ path: file, content: "y" }, { path: file, content: "z" }); } });
+      expect(await setup(r.root, { output: same.output, defaults: true, sections: [later] })).toBe(0);
+      expect(readFileSync(join(r.root, file), "utf8")).toBe("z");
+      expect(same.text()).toContain("Wrote 1 file under .claude/");
+      expect(same.text()).not.toContain("No changes.");
+
+      const gone = io();
+      const removes = fake({ ask: async (ctx) => { ctx.files.push({ path: file, content: null }); } });
+      expect(await setup(r.root, { output: gone.output, defaults: true, sections: [removes] })).toBe(0);
+      expect(existsSync(join(r.root, file))).toBe(false);
+
+      const b = ".claude/skills/b/SKILL.md";
+      const stopped = io();
+      const quits = fake({ ask: async (ctx) => { ctx.files.push({ path: b, content: "x" }); throw new SetupStopped("Stopped."); } });
+      expect(await setup(r.root, { output: stopped.output, defaults: true, sections: [quits] })).toBe(1);
+      expect(existsSync(join(r.root, b))).toBe(false);
+
+      const refused = io();
+      const bad = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "other"); ctx.files.push({ path: b, content: "x" }, { path: ".claude/../x", content: "x" }); } });
+      expect(await setup(r.root, { output: refused.output, defaults: true, sections: [bad] })).toBe(1);
+      expect(refused.text()).toContain(".claude/../x");
+      expect(existsSync(join(r.root, b))).toBe(false);
+      expect(r.text()).toContain("bun test");
+    } finally { r.cleanup(); }
+  });
+
+  test("a file that cannot be written after the config saved says the config was saved", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      // A file where the skill's folder would go: the config saves, then the write fails.
+      mkdirSync(join(r.root, ".claude/skills"), { recursive: true });
+      writeFileSync(join(r.root, ".claude/skills/a"), "not a folder");
+      const file = ".claude/skills/a/SKILL.md";
+      const o = io();
+      const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content: "x" }); } });
+      expect(await setup(r.root, { output: o.output, defaults: true, sections: [adds] })).toBe(1);
+      expect(o.text()).toContain(`Saved loopstra/config.yaml, but could not write ${file}: `);
+      expect(o.text()).not.toContain("Not saved");
+      expect(r.text()).toContain("bun test");
+    } finally { r.cleanup(); }
+  });
+
+  test("files are never written through a link out of the repo, and the config stays unchanged", async () => {
+    const file = ".claude/skills/a/SKILL.md";
+    const layouts: Record<string, (root: string, outside: string) => void> = {
+      ".claude": (root, outside) => { symlinkSync(outside, join(root, ".claude")); },
+      ".claude/skills": (root, outside) => { mkdirSync(join(root, ".claude")); symlinkSync(outside, join(root, ".claude/skills")); },
+      "the file": (root, outside) => {
+        mkdirSync(join(root, ".claude/skills/a"), { recursive: true });
+        writeFileSync(join(outside, "target"), "keep");
+        symlinkSync(join(outside, "target"), join(root, file));
+      },
+    };
+    for (const [name, make] of Object.entries(layouts)) {
+      const r = configRepo(CONFIG);
+      const out = tempDir();
+      try {
+        make(r.root, out.path);
+        for (const content of ["x", null]) {
+          const o = io();
+          const adds = fake({ ask: async (ctx) => { ctx.doc.set(["commands", "test"], "bun test"); ctx.files.push({ path: file, content }); } });
+          expect(await setup(r.root, { output: o.output, defaults: true, sections: [adds] })).toBe(1);
+          expect(o.text()).toContain(`${name === "the file" ? file : name} is a link`);
+          expect(r.text()).toBe(CONFIG);
+        }
+        expect(readdirSync(out.path).filter((n) => n !== "target")).toEqual([]);
+        if (name === "the file") expect(readFileSync(join(out.path, "target"), "utf8")).toBe("keep");
+      } finally { r.cleanup(); out.cleanup(); }
+    }
   });
 
   test("a section that throws saves nothing and says why, without a stack", async () => {
@@ -238,6 +323,17 @@ describe("loopstra setup", () => {
       expect(await setup(r.root, { output: fail.output, check: true, sections: [fake({ checks: [{ level: "fail", text: "broken" }] })] })).toBe(1);
       expect(fail.text()).toContain("FAIL  broken");
       expect(r.text()).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("--check lists a step's missing agent under the agents section and fails", async () => {
+    const r = configRepo(`${CONFIG}agents:\n  steps:\n    design:\n      agent: ghost\n`);
+    try {
+      const o = io();
+      expect(await setup(r.root, { output: o.output, check: true, sections: [agents] })).toBe(1);
+      expect(o.text()).toContain("FAIL  `ghost`, the agent design runs as");
+      expect(o.text()).toContain("To fix: ");
+      expect(o.text()).toContain("loopstra setup agents");
     } finally { r.cleanup(); }
   });
 

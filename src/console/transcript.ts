@@ -109,19 +109,33 @@ function ownWords(text: string): string {
 /**
  * One raw `stream-json` event as transcript items. `cwd`, the session's folder from its init event,
  * shortens paths. Events the console does not show (thinking, hooks, rate limits, progress) give none.
+ * An event of a subagent's work names the call that started it (`parent_tool_use_id`), and so does
+ * every item it gives (`parent`); the first, a user event holding the subagent's prompt, gives a
+ * `delegated` item, never a person's message.
  */
 export function toItems(e: Raw, cwd?: string): TranscriptItem[] {
+  const parent = typeof e.parent_tool_use_id === "string" && e.parent_tool_use_id ? e.parent_tool_use_id : undefined;
+  if (!parent) return eventItems(e, cwd);
+  return eventItems(e, cwd, parent).map((item) => ({ ...item, parent }));
+}
+
+/** toItems without the `parent` mark; `parent`, the call a subagent's event belongs to, turns its prompt into a `delegated` item. */
+function eventItems(e: Raw, cwd?: string, parent?: string): TranscriptItem[] {
   if (e.type === "user" && e.isReplay === true) return replayed((e.message as { content?: unknown } | undefined)?.content);
   if (e.type === "assistant" || e.type === "user") {
     const content = (e.message as { content?: unknown } | undefined)?.content;
+    if (parent && e.type === "user" && typeof content === "string") return content.trim() ? [{ kind: "delegated", parent, text: cut(content) }] : [];
     if (!Array.isArray(content)) return [];
     const out: TranscriptItem[] = [];
     for (const b of (content as unknown[]).filter(isObject) as Block[]) {
-      if (e.type === "assistant" && b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+      if (parent && e.type === "user" && b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+        out.push({ kind: "delegated", parent, text: cut(b.text) });
+      } else if (e.type === "assistant" && b.type === "text" && typeof b.text === "string" && b.text.trim()) {
         out.push({ kind: "text", text: b.text });
       } else if (e.type === "assistant" && b.type === "tool_use" && typeof b.name === "string" && b.name && typeof b.id === "string" && b.id && !HIDDEN.has(b.name)) {
         const input = isObject(b.input) ? b.input : {};
-        if (b.name === "TodoWrite" && Array.isArray(input.todos)) {
+        // A subagent's todo list is a row in its block, not the session's list.
+        if (b.name === "TodoWrite" && Array.isArray(input.todos) && !parent) {
           out.push({ kind: "todos", items: (input.todos as unknown[]).filter(isObject).map((t) => ({ text: text(t.content), state: text(t.status) })) });
         } else if (EDITS.has(b.name)) {
           const path = relativePath(text(input.file_path), cwd);

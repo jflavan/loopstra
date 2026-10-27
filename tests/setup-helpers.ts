@@ -1,8 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
+import type { FileWrite } from "../src/agent-library";
 import { configPath, loadConfig } from "../src/config";
 import { ConfigDocument } from "../src/setup/document";
+import { writeFiles } from "../src/setup";
 import { DefaultsPrompt, StreamPrompt } from "../src/setup/prompt";
 import type { Check, Section } from "../src/setup/types";
 import { tempDir } from "./helpers";
@@ -24,17 +26,19 @@ export function configRepo(yaml: string): { root: string; cleanup: () => void; t
 }
 
 /** Runs one section's questions with these answers (or --defaults), saves, and returns the file and what was shown. */
-export async function askSection(section: Section, root: string, answers: string[] | "defaults", env: Record<string, string | undefined> = {}): Promise<{ text: string; shown: string }> {
+export async function askSection(section: Section, root: string, answers: string[] | "defaults", env: Record<string, string | undefined> = {}, o: { only?: boolean } = {}): Promise<{ text: string; shown: string; files: string[] }> {
   const doc = ConfigDocument.load(root);
   const lines: string[] = [];
+  const files: FileWrite[] = [];
   const s = answers === "defaults" ? null : scripted(...answers);
   const ask = s ? s.prompt : new DefaultsPrompt((l) => lines.push(l));
-  try { await section.ask({ root, doc, ask, env }); } finally { ask.close(); }
+  try { await section.ask({ root, doc, ask, env, files, only: o.only ?? false }); } finally { ask.close(); }
   doc.save();
-  return { text: readFileSync(configPath(root), "utf8"), shown: s ? s.shown() : lines.join("\n") };
+  const written = writeFiles(root, files);
+  return { text: readFileSync(configPath(root), "utf8"), shown: s ? s.shown() : lines.join("\n"), files: written };
 }
 
 /** One section's checks against the config on disk. */
 export async function checkSection(section: Section, root: string, env: Record<string, string | undefined> = {}): Promise<Check[]> {
-  return section.check({ root, doc: ConfigDocument.load(root), ask: new DefaultsPrompt(() => {}), env }, await loadConfig(root));
+  return section.check({ root, doc: ConfigDocument.load(root), ask: new DefaultsPrompt(() => {}), env, files: [], only: false }, await loadConfig(root));
 }

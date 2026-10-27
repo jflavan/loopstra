@@ -1,3 +1,4 @@
+import type { FileWrite } from "../agent-library";
 import type { Config } from "../config";
 import type { ConfigDocument } from "./document";
 import type { Prompt } from "./prompt";
@@ -11,6 +12,10 @@ export interface SetupContext {
   env: Record<string, string | undefined>;
   /** Dollars a minute the person gave in this run (the budgets section sets it); the checks use it. */
   ratePerMinute?: number;
+  /** Files to write under .claude/ once the config has saved; a later write to the same path replaces an earlier one. */
+  files: FileWrite[];
+  /** True when one section was named (a section may skip a question it asks only in a full setup). */
+  only: boolean;
 }
 
 /** One line of a check's report. A failed check never undoes a save. */

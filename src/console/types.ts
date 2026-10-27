@@ -109,6 +109,18 @@ export interface PhaseView {
   files: Array<{ name: string; url: string }>;
   /** Commands the session was not allowed to run (allow-rule text). */
   denied: string[];
+  /** What the session ran as, from its `agent_setup` event; null when it ran with no setup. */
+  agentSetup: AgentSetupView | null;
+}
+
+/** The agent setup a step ran with: names only, as the trace recorded them. */
+export interface AgentSetupView {
+  agent: string | null; subagents: string[]; teams: string[]; skills: string[]; tools: string[]; mcpTools: string[];
+  /** Each team's members, by team name; empty for a step traced before members were recorded. */
+  teamMembers: Record<string, string[]>;
+  sources: "all" | "repo";
+  /** Each inline subagent's and team member's model, by name. */
+  models: Record<string, string>;
 }
 
 export interface ChangeDetail extends ChangeSummary {
@@ -119,7 +131,7 @@ export interface ChangeDetail extends ChangeSummary {
   gates: Array<{ gate: string; check: string; result: string; evidence: string; ts: string }>;
 }
 
-export type TranscriptItem =
+export type TranscriptItem = (
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; tool: string; target: string; input: unknown }
   | { kind: "tool-result"; id: string; ok: boolean; output: string }
@@ -127,7 +139,16 @@ export type TranscriptItem =
   | { kind: "todos"; items: Array<{ text: string; state: string }> }
   | { kind: "result"; ok: boolean; summary: string; costUsd: number | null }
   /** A person's message or redirect, as the session took it up (its echo). */
-  | { kind: "message"; text: string; redirect: boolean };
+  | { kind: "message"; text: string; redirect: boolean }
+  /** The prompt a subagent was handed: the first event of its work, not a person's message. */
+  | { kind: "delegated"; text: string; parent: string }
+) & {
+  /**
+   * The id of the subagent call (an `Agent` or `Task` tool row) whose work this row is, from the
+   * event's `parent_tool_use_id`; absent on the session's own rows.
+   */
+  parent?: string;
+};
 
 /**
  * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame names that row (see
@@ -225,3 +246,89 @@ export interface SettingsView {
     }>;
   }>;
 }
+
+/** The fields of a step's agent setup (agents.all, agents.steps.<step>), as the config names them. */
+export const AGENT_FIELDS = ["agent", "subagents", "teams", "skills", "tools", "mcp_tools"] as const;
+export type AgentField = (typeof AGENT_FIELDS)[number];
+
+/** What a field holds: `agent` one name, the others a list. Only fields that are set are given. */
+export type AgentFields = Partial<Record<AgentField, string | string[]>>;
+
+/** One row of the Agents table: "all" (agents.all), then each step in STEPS order. */
+export interface AgentStepRow {
+  key: StepKey | "all";
+  what: string;
+  /** It may not change files (agents.all reaches read-only steps, so it is read-only too). */
+  readOnly: boolean;
+  /** A chat turn: it takes nothing from all steps, and anyone allowed to chat can steer its tools. */
+  chat: boolean;
+  /** Fix, reconcile and revise continue the build's session, so they run as the build's agent. */
+  continuesBuild: boolean;
+  /** What the row sets itself. */
+  own: AgentFields;
+  /** What agents.all gives it ({} for the "all" row and chat steps). */
+  fromAll: AgentFields;
+  /** Its stage's skills (stages.<stage>.skills). */
+  fromStage: string[];
+}
+
+/** An agent or skill the steps can name, or that can be copied into the repository. */
+export interface LibraryItemView {
+  kind: "agent" | "skill";
+  /** `plugin:name` for a plugin's. */
+  name: string;
+  description: string;
+  from: "repo" | "personal" | "plugin";
+  /** Who names it: `agents.all`, `agents.steps.review`, `team reviewers`, `stages.review` (a stage's skills). */
+  usedBy: string[];
+  /** fileVersion of the agent file, or of the skill's SKILL.md. */
+  base: string;
+  /** A repo agent named as Loopstra names one (lowercase letters, digits and dashes), which the page may edit. */
+  editable: boolean;
+  /** A repo agent's file, for the edit form. */
+  text?: string;
+}
+
+/**
+ * The Agents section of the Settings page, read from one text of loopstra/config.yaml. The library
+ * lists this machine's and the plugins' items whatever `sources` says, so they can be copied into the
+ * repository; the steps use them only with `sources: all`.
+ */
+export interface AgentsView {
+  /** configVersion of the file; null when it cannot be read. A settings request names it. */
+  version: string | null;
+  /** Why the config does not load; the page shows this instead of the section. */
+  problem: string | null;
+  sources: "all" | "repo";
+  steps: AgentStepRow[];
+  teams: Array<{ name: string; members: string[]; way: string; usedBy: string[] }>;
+  library: LibraryItemView[];
+  /** What checking every name the steps use found: missing (fail), only on this machine or with keys left out (warn). */
+  problems: Array<{ level: "fail" | "warn"; step: string; name: string; text: string }>;
+  /** The agents Claude Code ships with: subagents or team members, never a step's own agent. */
+  builtins: string[];
+  /** How a team may work. */
+  ways: string[];
+}
+
+/**
+ * What the page asks of `/api/agents/files`: the server turns it into an `agent-files` request.
+ * `copy` takes an item from this machine or a plugin (`from`); `fetch` clones `url` again and copies
+ * the named items. Copy and fetch refuse a target the repository has unless `replace` is true; new
+ * always refuses one (pick another name, or edit the agent).
+ * `base` is the version the page read of the agent file or SKILL.md it changes (LibraryItemView.base,
+ * or "absent" when the repository has none): an edit and a remove always name it, a replacement does
+ * too (a fetch by item name). It is refused as stale when the file is no longer that version.
+ */
+export type AgentFilesOp =
+  | ({ op: "copy"; kind: "agent" | "skill"; name: string; from: "personal" | "plugin" } & Replacing<string>)
+  | ({ op: "fetch"; url: string; names: string[]; kind: "agent" | "skill" } & Replacing<Record<string, string>>)
+  | { op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null }
+  | { op: "edit"; name: string; text: string; base: string }
+  | { op: "remove"; kind: "agent" | "skill"; name: string; base: string };
+
+/** An add that replaces what the repository has names the version it read; one that does not, none. */
+type Replacing<B> = { replace?: false; base?: undefined } | { replace: true; base: B };
+
+/** What `/api/agents/source` lists: the items a git repository or folder holds. */
+export type SourceItems = { items: Array<{ kind: "agent" | "skill"; name: string; description: string }> } | { error: string };

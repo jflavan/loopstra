@@ -8,7 +8,7 @@ import { errorCode, errorText } from "./shell";
 export type EventType =
   | "tick" | "phase_start" | "claude_event" | "command" | "gate_check"
   | "status_change" | "phase_end" | "error" | "signal" | "stop" | "person-changed-status" | "pause" | "stale-lock-removed"
-  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge" | "steer" | "question";
+  | "chat-message" | "chat-request" | "chat-pr" | "request" | "judge" | "steer" | "question" | "agent_setup";
 
 export interface EventRow {
   id: number; slug: string; phase_seq: number | null; type: EventType; ts: string; payload: string;
@@ -340,6 +340,17 @@ export class Trace {
     const out = new Map<number, string[]>();
     for (const r of rows) {
       try { out.set(r.phase_seq, (JSON.parse(r.payload) as { denied: string[] }).denied); } catch { /* unreadable row */ }
+    }
+    return out;
+  }
+
+  /** The agent setup each phase of a change ran with, by phase seq (the newest event of a seq wins; phases with none are absent). */
+  agentSetups(slug: string): Map<number, Record<string, unknown>> {
+    const rows = this.db.query<{ phase_seq: number; payload: string }, [string]>(
+      "SELECT phase_seq, payload FROM events WHERE slug = ? AND type = 'agent_setup' AND phase_seq IS NOT NULL ORDER BY id").all(slug);
+    const out = new Map<number, Record<string, unknown>>();
+    for (const r of rows) {
+      try { out.set(r.phase_seq, JSON.parse(r.payload) as Record<string, unknown>); } catch { /* unreadable row */ }
     }
     return out;
   }

@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { SettingsView } from "../../console/types";
+import type { AgentsView, SettingsView } from "../../console/types";
 import { cancelSetting, sendSetting } from "../requests";
 import { lastRanText, pendingText, pickerChoices, nameProblem } from "../settings";
 import { getJson, now, toast } from "../store";
+import { AgentSettings, type Submit } from "./AgentSettings";
 
-/** The change waiting for the loop: where, and what the loop's state says about it. */
-interface Pending { id: string; path: string; loop: string }
+/** The change waiting for the loop: where its note shows (a setting's path, or an agents file key), and what the loop's state says about it. */
+interface Pending { id: string; key: string; loop: string }
 
 export function Settings() {
   const [v, setV] = useState<SettingsView | null>(null);
   const [failed, setFailed] = useState(false);
+  const [agents, setAgents] = useState<AgentsView | null>(null);
+  const [agentsFailed, setAgentsFailed] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   // Counts the reads; a picker or input keyed by it is drawn again, so a refused change shows what the file holds.
   const [rev, setRev] = useState(0);
@@ -17,16 +20,18 @@ export function Settings() {
   // Set at once on a send: a second one (Enter, then the blur it causes) must not follow before the page redraws.
   const busy = useRef(false);
 
+  /** Reads the models and the agents again, together: after any change both carry the file's new version. */
   const load = async (): Promise<void> => {
-    try {
-      const x = await getJson<SettingsView>("/api/settings");
-      if (!alive.current) return;
-      setV(x);
-      setFailed(false);
-      setRev((n) => n + 1);
-    } catch {
-      if (alive.current) setFailed(true);
-    }
+    const [x, a] = await Promise.all([
+      getJson<SettingsView>("/api/settings").catch(() => null),
+      getJson<AgentsView>("/api/agents").catch(() => null),
+    ]);
+    if (!alive.current) return;
+    if (x) setV(x);
+    setFailed(!x);
+    if (a) setAgents(a);
+    setAgentsFailed(!a);
+    setRev((n) => n + 1);
   };
   useEffect(() => {
     alive.current = true;
@@ -34,14 +39,19 @@ export function Settings() {
     return () => { alive.current = false; };
   }, []);
 
-  /** Sends one change; the result is toasted, then the settings are read again so the next change carries the new version. */
-  const change = async (path: string, value: string | null): Promise<void> => {
-    // A pick while one is saving or read back is not sent; its picker goes back to what the file holds.
-    if (busy.current || !v?.version) { setRev((n) => n + 1); return; }
+  /**
+   * Sends one change, the only one on the page until the loop answers (`key`: where its note shows);
+   * the result is toasted and given to `after`, then everything is read again so the next change
+   * carries the new version.
+   */
+  const submit: Submit = async (key, send, after) => {
+    // A change while one is saving or read back is not sent; its control goes back to what the file holds.
+    if (busy.current) { setRev((n) => n + 1); return; }
     busy.current = true;
-    const r = await sendSetting({ kind: "settings", path, value, version: v.version }, (d) => {
+    const r = await send((d) => {
       toast(d.text, d.ok ? "info" : "bad");
-      // Everything stays locked until the re-read has settled, so the next pick carries the new version.
+      after?.(d.ok);
+      // Everything stays locked until the re-read has settled, so the next change carries the new version.
       void load().then(() => {
         busy.current = false;
         if (alive.current) setPending(null);
@@ -49,11 +59,16 @@ export function Settings() {
     });
     if (!r.ok) {
       toast(r.error, "bad");
-      // A stale page is read again; a refused picker goes back either way.
+      // A stale page is read again; a refused control goes back either way.
       void load().then(() => { busy.current = false; });
       return;
     }
-    if (alive.current) setPending({ id: r.id, path, loop: r.loop });
+    if (alive.current) setPending({ id: r.id, key, loop: r.loop });
+  };
+  const change = (path: string, value: string | null): void => {
+    const version = v?.version;
+    if (!version) { setRev((n) => n + 1); return; }
+    void submit(path, (done) => sendSetting({ kind: "settings", path, value, version }, done));
   };
   const cancel = async (p: Pending): Promise<void> => {
     if (await cancelSetting(p.id)) {
@@ -69,7 +84,7 @@ export function Settings() {
 
   if (!v) return <section class="view"><p class="muted">{failed ? "Settings could not be read." : "Loading…"}</p></section>;
   const locked = pending !== null;
-  const wait = (path: string | null) => path !== null && pending?.path === path && (
+  const wait = (key: string | null) => key !== null && pending?.key === key && (
     <span class="set-wait">
       <span class="muted">{pendingText(pending.loop)}</span>
       <button type="button" class="btn" onClick={() => void cancel(pending)}>Cancel</button>
@@ -93,7 +108,7 @@ export function Settings() {
                 if (text === m.name) return;
                 const problem = nameProblem(text);
                 if (problem) { toast(problem, "bad"); el.value = m.name; return; }
-                void change(path, text);
+                change(path, text);
               };
               return (
                 <div key={m.ref} class="set-row">
@@ -112,20 +127,21 @@ export function Settings() {
             <div key={g.group} class="set-group">
               <div class="set-row set-head">
                 <label for={`g-${g.group}`}>{g.group}</label>
-                <Picker id={`g-${g.group}`} rev={rev} row={{ path: g.path }} value={g.model} disabled={locked} onPick={(x) => void change(g.path, x)} />
+                <Picker id={`g-${g.group}`} rev={rev} row={{ path: g.path }} value={g.model} disabled={locked} onPick={(x) => change(g.path, x)} />
                 {g.group === "chat" && <span class="muted">orchestrator</span>}
                 {wait(g.path)}
               </div>
               {g.steps.filter((s) => s.path !== null).map((s) => (
                 <div key={s.key} class="set-row set-step">
                   <label for={`s-${s.key}`}><code>{s.key}</code> <span class="muted">{s.what}</span></label>
-                  <Picker id={`s-${s.key}`} rev={rev} row={{ path: s.path, byDefault: s.byDefault }} value={s.own} disabled={locked} onPick={(x) => void change(s.path!, x)} />
+                  <Picker id={`s-${s.key}`} rev={rev} row={{ path: s.path, byDefault: s.byDefault }} value={s.own} disabled={locked} onPick={(x) => change(s.path!, x)} />
                   {s.own === null && <span class="muted">{s.byDefault}</span>}
                   {wait(s.path)}
                 </div>
               ))}
             </div>
           ))}
+          <AgentSettings view={agents} failed={agentsFailed} rev={rev} locked={locked} wait={wait} submit={submit} />
         </>
       )}
     </section>

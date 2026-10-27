@@ -15,12 +15,14 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
-import { applySetting, CONFIG_REL, configVersion, settingPath, settingProblem, SETTINGS_SLUG, STALE_SETTINGS } from "./settings";
+import { checkedPath, repoPath } from "./agent-library";
+import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
 type AnswerRequest = Extract<Request, { kind: "answer" }>;
 type SettingsRequest = Extract<Request, { kind: "settings" }>;
+type AgentFilesRequest = Extract<Request, { kind: "agent-files" }>;
 
 /**
  * The passes of each root (by its resolved path): the last one queued (`tail`), and the one waiting
@@ -225,6 +227,7 @@ async function applyPass(root: string, cfg: Config, trace: Trace): Promise<numbe
  */
 async function anyLanded(root: string, main: string, req: Request): Promise<boolean> {
   const asks = req.kind === "settings" ? [() => settingsLanded(root, main, req)]
+    : req.kind === "agent-files" ? [() => agentFilesLanded(root, main, req)]
     : (req.kind === "new" ? req.intents.map((i) => i.slug) : [req.slug]).filter((x) => SLUG.test(x)).map((slug) => () => doneBefore(root, main, req, slug));
   for (const ask of asks) {
     try {
@@ -288,6 +291,7 @@ function applyOne(root: string, cfg: Config, trace: Trace, req: Request, lastTry
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
     case "answer": return applyAnswer(root, cfg, trace, req, lastTry);
     case "settings": return applySettings(root, cfg, trace, req);
+    case "agent-files": return applyAgentFiles(root, cfg, trace, req);
     default: return applyStatus(root, cfg, trace, req, lastTry);
   }
 }
@@ -396,7 +400,7 @@ const UNCOMMITTED_CONFIG = `${CONFIG_REL} has changes in the main checkout that 
  * tagged with the request's id like every request's record, so a pass killed after it landed
  * finishes it as saved. Refused with nothing committed: a path that is not a model setting, a value it
  * cannot take or a config that would not load with it (the reason is the result), a file that
- * changed since the page read it (`version`), and a file with edits in the main checkout that are
+ * changed since the page read it (`version`), and a file with edits in the main checkout (staged or not) that are
  * not committed (or one the last commit does not have), which the record would otherwise commit with it. The last two are checked inside the
  * record, under the checkout lock and after a record a kill cut short is finished (which may bring the
  * file up itself). There is no change, so the result has no status, and it is traced under _loop.
@@ -407,7 +411,7 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
     traced(trace, "_loop", req, result, { path: req.path, value: req.value, ...more });
     return { ok, status: null, text };
   };
-  const saved = () => done("applied", true, `Saved: ${req.path} is now ${req.value ?? "its default"}. Sessions that start from now on use it.`);
+  const saved = () => done("applied", true, `Saved: ${req.path} is now ${settingText(req.value, "its default")}. Sessions that start from now on use it.`);
   const notSaved = (problem: string) => done("refused", false, `That setting was not saved: ${problem}`, { problem });
   if (await settingsLanded(root, main, req)) return saved();
   const path = settingPath(req.path);
@@ -418,12 +422,15 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
   const refused: { outcome?: () => Outcome } = {};
   const refuse = (outcome: () => Outcome) => { refused.outcome = outcome; return false; };
   const git = new Git(root);
-  await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${req.value ?? "default"} by ${byWhom(req)}`, async (draft) => {
-    const args = ["diff", "--quiet", "HEAD", "--", CONFIG_REL];
-    const diff = await git.run(args, { allowFail: true });
-    // 1 is "it differs"; anything else is git failing, which must not read as either answer.
-    if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
-    if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+  await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${settingText(req.value, "default")} by ${byWhom(req)}`, async (draft) => {
+    // The working tree against HEAD, then the index against HEAD (a change only staged).
+    for (const extra of [[], ["--cached"]]) {
+      const args = ["diff", "--quiet", ...extra, "HEAD", "--", CONFIG_REL];
+      const diff = await git.run(args, { allowFail: true });
+      // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+      if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+      if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    }
     // diff says nothing of a file the last commit does not have (never committed, or removed from git):
     // the record would commit it whole, with whatever is in it. Any failure here refuses, which commits nothing.
     if ((await git.run(["cat-file", "-e", `HEAD:${CONFIG_REL}`], { allowFail: true })).code !== 0) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
@@ -437,6 +444,67 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
   }, { request: req.id, trace, paths: [CONFIG_REL] });
   if (refused.outcome) return refused.outcome();
   // Committed, or nothing to commit: the file already says it.
+  return saved();
+}
+
+/** True when the agent-files request's record landed (see landed): it has the request's files. */
+function agentFilesLanded(root: string, main: string, req: AgentFilesRequest): Promise<boolean> {
+  return landed(root, main, req.id, SETTINGS_SLUG, req.at, req.writes.map((w) => w.path));
+}
+
+const MAX_FILES_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Writes or removes agent and skill files (see the `agent-files` request) as one record under _settings, tagged with the
+ * request's id like every request's record. Refused with nothing committed: a path outside .claude/agents and .claude/skills (or
+ * loopstra/config.yaml), more than 5 MB of text, and a file whose version is not the `base` the page read (stale).
+ */
+async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: AgentFilesRequest): Promise<Outcome> {
+  const main = cfg.main_branch;
+  const done = (result: string, ok: boolean, text: string, more: Record<string, unknown> = {}): Outcome => {
+    traced(trace, "_loop", req, result, { what: oneLine(req.what, 200), files: req.writes.length, ...more });
+    return { ok, status: null, text };
+  };
+  const what = oneLine(req.what, 200);
+  const saved = () => done("applied", true, `Saved: ${what}.`);
+  const notSaved = (problem: string) => done("refused", false, `That change was not saved: ${problem}`, { problem });
+  const writes: { path: string; content: string | null; given: string }[] = [];
+  for (const w of req.writes) {
+    const path = repoPath(w.path);
+    if (!path || path === CONFIG_REL) return notSaved(`${oneLine(w.path, 80)} is not a file the page can write (only under .claude/agents/ and .claude/skills/).`);
+    if (writes.some((x) => x.path === path)) return notSaved(`${path} is written twice.`);
+    writes.push({ path, content: w.content, given: w.path });
+  }
+  if (writes.reduce((n, w) => n + Buffer.byteLength(w.content ?? ""), 0) > MAX_FILES_BYTES) return notSaved("the files are more than 5 MB together.");
+  if (await agentFilesLanded(root, main, req)) return saved();
+  let stale = false;
+  let refusal: string | null = null;
+  const git = new Git(root);
+  await commitRecord(root, main, SETTINGS_SLUG, `${what} by ${byWhom(req)}`, async (draft) => {
+    const paths = writes.map((w) => w.path);
+    for (const p of paths) {
+      try { checkedPath(root, { path: p }); } catch (e) { refusal = e instanceof Error ? e.message : String(e); return false; }
+    }
+    // The working tree against HEAD, then the index against HEAD (a change only staged).
+    for (const extra of [[], ["--cached"]]) {
+      const args = ["diff", "--quiet", ...extra, "HEAD", "--", ...paths];
+      const diff = await git.run(args, { allowFail: true });
+      // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+      if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+      if (diff.code === 1) { refusal = UNCOMMITTED_FILES; return false; }
+    }
+    for (const p of paths) {
+      // A file on disk that the last commit does not have is untracked: the record would commit it whole.
+      if (existsSync(join(root, p)) && (await git.run(["cat-file", "-e", `HEAD:${p}`], { allowFail: true })).code !== 0) { refusal = UNCOMMITTED_FILES; return false; }
+    }
+    for (const w of writes) {
+      if (fileVersion(draft.read(w.path)) !== (req.base[w.given] ?? req.base[w.path] ?? "")) { stale = true; return false; }
+    }
+    for (const w of writes) { if (w.content === null) draft.remove(w.path); else draft.write(w.path, w.content); }
+    return true;
+  }, { request: req.id, trace, paths: writes.map((w) => w.path) });
+  if (refusal) return notSaved(refusal);
+  if (stale) return done("stale", false, STALE_SETTINGS);
   return saved();
 }
 

@@ -20,6 +20,8 @@ describe("loadConfig", () => {
     expect(cfg.gates.spec.agent).toBe(true);
     // Build sessions may read git history but not change it: the runtime owns commits and branches.
     expect(cfg.claude.allowed_tools).toEqual(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]);
+    expect("mcp_tools" in cfg.claude).toBe(false);
+    expect(cfg.agents.all.mcp_tools).toEqual([]);
     expect(cfg.stages.build.max_fix_loops).toBe(3);
     expect(cfg.claude.models.cheap).toBe("haiku");
     // The cheap model often ends a verify session without calling the structured-output tool (#7).
@@ -142,6 +144,12 @@ describe("loadConfig", () => {
       "commands.run: must be a command, or the line removed", "commands.install: must be a command, or the line removed",
     ]);
     expect(problems({ commands: { test: "bun test" } })).toEqual(["version: must be 1"]);
+    expect(problems({ ...ok, agents: { all: { mcp_tools: ["mcp__github", "mcp__docs__*", "Bash(rm *)", "mcp__", "mcp__x,Bash"] } } })).toEqual([
+      "agents.all.mcp_tools.2: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+      "agents.all.mcp_tools.3: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+      // The list reaches the CLI joined with commas: this one would allow Bash.
+      "agents.all.mcp_tools.4: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+    ]);
     expect(problems({ ...ok, version: 2 })).toEqual(["version: must be 1"]);
     const id = "must be a user or channel id; put long numeric ids in quotes";
     expect(problems({ ...ok, chat: { transports: { slack: {} } } })).toEqual([`chat.transports.slack.channel: ${id}`]);
@@ -186,4 +194,37 @@ describe("per-step models", () => {
   test("the orchestrator is chat.model, not a chat step", async () => {
     await expect(load("chat:\n  steps:\n    orchestrator: max\n")).rejects.toThrow(/chat\.steps.*orchestrator/);
   });
+});
+
+test("the agents block defaults to nothing set", async () => {
+  const cfg = validateConfig({ version: 1, commands: { test: "bun test" } });
+  expect(cfg.agents).toEqual({ sources: "all", teams: {}, all: { subagents: [], teams: [], skills: [], tools: [], mcp_tools: [] }, steps: {} });
+  expect("mcp_tools" in cfg.claude).toBe(false);
+});
+
+test("agents settings are refused in plain words", () => {
+  const ok = { version: 1, commands: { test: "bun test" } };
+  const problems = (agents: unknown) => { try { validateConfig({ ...ok, agents }); return []; } catch (e) { return (e as ConfigError).problems.map((p) => p.text); } };
+  expect(problems({ steps: { reviews: {} } })[0]).toStartWith("agents.steps: unknown step reviews; the steps are intake, design,");
+  expect(problems({ steps: { fix: { agent: "x" } } })).toEqual(["agents.steps.fix.agent: fix continues the build session and runs as the build's agent; set the agent on build"]);
+  expect(problems({ steps: { review: { tools: ["Edit"] } } })).toEqual(["agents.steps.review.tools.0: review is read-only; Edit would let it change files"]);
+  // A built-in cannot be the agent a step runs as (it could not report), but can be a subagent.
+  expect(problems({ steps: { design: { agent: "Explore" } } })).toEqual(["agents.steps.design.agent: Explore is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
+  expect(problems({ all: { agent: "general-purpose" } })).toEqual(["agents.all.agent: general-purpose is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
+  expect(problems({ all: { subagents: ["Explore"] }, steps: { review: { subagents: ["Plan"] } } })).toEqual([]);
+  expect(problems({ steps: { review: { tools: ["Bash"] } } })).toEqual(["agents.steps.review.tools.0: review is read-only; a bare Bash rule would let it run anything"]);
+  expect(problems({ steps: { build: { tools: ["Bash(git push *)"] } } })).toEqual(["agents.steps.build.tools.0: only Loopstra commits, branches, merges and pushes; git push is not allowed"]);
+  expect(problems({ all: { tools: ["Write"] } })).toEqual(["agents.all.tools.0: these reach read-only steps too; Write would let them change files"]);
+  expect(problems({ all: { mcp_tools: ["mcp__x,Bash"] } })).toEqual(["agents.all.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
+  expect(problems({ teams: { Reviewers: { members: ["a"] } } })).toEqual(["agents.teams.Reviewers: a team name is lowercase words joined by dashes"]);
+  expect(problems({ teams: { r: { members: [] } } })).toEqual(["agents.teams.r.members: a team needs at least one member"]);
+  expect(problems({ steps: { review: { teams: ["nope"] } } })).toEqual(["agents.steps.review.teams.0: there is no team nope under agents.teams"]);
+  // A name an object has from its prototype is not a team.
+  expect(problems({ all: { teams: ["constructor"] } })).toEqual(["agents.all.teams.0: there is no team constructor under agents.teams"]);
+  expect(problems({ sources: "mine" })).toEqual(["agents.sources: must be all or repo"]);
+  expect(problems({ steps: { review: { mcp_tools: ["mcp__x,Bash"] } } })).toEqual(["agents.steps.review.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
+  // Editing and a bare Bash are fine on a step that changes files.
+  expect(problems({ steps: { build: { tools: ["Edit", "Write", "Bash"] } } })).toEqual([]);
+  // Narrow commands and read-only git are fine anywhere; Bash(git diff *) is not history-changing.
+  expect(problems({ steps: { review: { tools: ["Bash(npm run e2e *)", "Bash(git diff *)", "WebFetch"] } } })).toEqual([]);
 });

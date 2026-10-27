@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, runPhase, unavailable, type SessionControl } from "../../src/claude";
 import { MEANWHILE_HEADING } from "../../src/console/steerable";
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "../../src/budget";
-import { SessionStopped } from "../../src/stop";
+import { Cancelled, SessionStopped } from "../../src/stop";
 import { until } from "../console-helpers";
 import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, tempDir } from "../helpers";
 
@@ -214,6 +215,146 @@ describe("runPhase", () => {
       const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
       expect(args[args.indexOf("--settings") + 1]).toBe(settings);
     } finally { t.cleanup(); }
+  });
+
+  test("agents and settings go to claude as files only its user can read, removed when the session ends", async () => {
+    const t = tempDir();
+    try {
+      const argsFile = join(t.path, "args.json");
+      const settings = '{"env":{"SECRET":"s3cret"}}';
+      // Larger than Linux allows for one argument (128 KB).
+      const agents = { "loopstra-x": { description: "d", prompt: "p".repeat(200_000) } };
+      await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+        allowedTools: [], settings, agents, timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+      const { args, files } = (await Bun.file(argsFile).json()) as { args: string[]; files: Record<string, { path: string; mode: number }> };
+      // The fake puts each file's text in place of its path; the paths themselves are in `files`.
+      expect(args[args.indexOf("--settings") + 1]).toBe(settings);
+      expect(JSON.parse(args[args.indexOf("--agents") + 1]!)).toEqual(agents);
+      expect(Object.keys(files).sort()).toEqual(["--agents", "--settings"]);
+      for (const { path, mode } of Object.values(files)) {
+        expect(path.startsWith(tmpdir())).toBe(true);
+        if (process.platform !== "win32") expect(mode).toBe(0o600);
+        expect(existsSync(path)).toBe(false);
+        expect(existsSync(dirname(path))).toBe(false);
+      }
+    } finally { t.cleanup(); }
+  });
+
+  describe("agent setup", () => {
+    const base = (cwd: string) => ({ cwd, schema: {}, model: "haiku", permissionMode: "default" as const, allowedTools: ["Read"], settings: "{}", timeoutMs: 10_000, maxBudgetUsd: 1, executable: FAKE });
+    const AGENT_FLAGS = ["--agents", "--agent", "--setting-sources", "--add-dir", "--forward-subagent-text"];
+    /** The init-lists fixture's init line, with the session id `id`. */
+    const listsInit = (id: string) => fixture("init-lists").split("\n")[0]!.replace("fake-session-1", id);
+
+    test("agent flags reach the CLI only when set, after the tool lists and before --settings", async () => {
+      const t = tempDir();
+      try {
+        const plain = join(t.path, "plain.json");
+        await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", env: { LOOPSTRA_FAKE_ARGS: plain } });
+        const without = ((await Bun.file(plain).json()) as { args: string[] }).args;
+        for (const flag of AGENT_FLAGS) expect(without).not.toContain(flag);
+        // An empty agents map is no --agents either.
+        const empty = join(t.path, "empty.json");
+        await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", agents: {}, addDirs: [], forwardSubagentText: false, env: { LOOPSTRA_FAKE_ARGS: empty } });
+        const none = ((await Bun.file(empty).json()) as { args: string[] }).args;
+        for (const flag of AGENT_FLAGS) expect(none).not.toContain(flag);
+
+        const set = join(t.path, "set.json");
+        const agents = { "loopstra-x": { description: "d", prompt: "p" } };
+        await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", agents, agent: "loopstra-x", settingSources: "project", addDirs: ["/snap", "/other"], forwardSubagentText: true, env: { LOOPSTRA_FAKE_ARGS: set } });
+        const args = ((await Bun.file(set).json()) as { args: string[] }).args;
+        const flags = ["--agents", JSON.stringify(agents), "--agent", "loopstra-x", "--setting-sources", "project", "--add-dir", "/snap", "--add-dir", "/other", "--forward-subagent-text"];
+        const at = args.indexOf("--agents");
+        expect(args.slice(at, at + flags.length)).toEqual(flags);
+        expect(at).toBeGreaterThan(args.indexOf("--allowedTools"));
+        expect(args.indexOf("--settings")).toBe(at + flags.length);
+      } finally { t.cleanup(); }
+    });
+
+    test("an init event that lacks a named skill ends the session as a setup failure", async () => {
+      const t = tempDir();
+      try {
+        const seen: Array<{ agents?: string[]; skills?: string[] }> = [];
+        const r = await runPhase({ ...base(t.path), prompt: "FIXTURE:init-lists", checkInit: (i) => {
+          seen.push(i);
+          return i.skills?.includes("b") ? null : "this session did not load the skill `b`";
+        } });
+        expect(r).toMatchObject({ ok: false, reason: "setup", detail: "this session did not load the skill `b`", sessionId: "fake-session-1" });
+        expect(seen).toEqual([{ agents: ["loopstra-x"], skills: ["a"] }]);
+        expect(unavailable("setup")).toBe(false);
+      } finally { t.cleanup(); }
+    });
+
+    test("a failed init check stops reading there: the session does not run on to its deadline", async () => {
+      const t = tempDir();
+      // After its init line the session would wait for a file that never comes.
+      const fixtures = fixtureDir({ fix: [listsInit("held"), JSON.stringify({ type: "fake_action", wait_for: join(t.path, "never") })].join("\n") });
+      try {
+        const started = Date.now();
+        const r = await runPhase({ ...base(t.path), prompt: "go", timeoutMs: 30_000, exitGraceMs: 200,
+          env: { LOOPSTRA_PHASE: "fix", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, checkInit: () => "missing" });
+        expect(r).toMatchObject({ ok: false, reason: "setup", detail: "missing", sessionId: "held" });
+        expect(Date.now() - started).toBeLessThan(15_000);
+      } finally { fixtures.cleanup(); t.cleanup(); }
+    }, 60_000);
+
+    test("an init event without lists is not judged", async () => {
+      const t = tempDir();
+      try {
+        let calls = 0;
+        // The default fixture's init has no agents or skills.
+        const r = await runPhase({ ...base(t.path), prompt: "FIXTURE:simple-success", checkInit: () => { calls++; return "would fail"; } });
+        expect(r.ok).toBe(true);
+        expect(calls).toBe(0);
+      } finally { t.cleanup(); }
+    });
+
+    test("a list with no names in it (not strings) is one the init event cannot tell, not an empty one", async () => {
+      const t = tempDir();
+      const objects = fixture("init-lists").replace('"skills":["a"]', '"skills":[{"name":"a"}]');
+      const neither = objects.replace('"agents":["loopstra-x"]', '"agents":[{"name":"loopstra-x"}]');
+      const fixtures = fixtureDir({ "fix-1": objects, "fix-2": neither });
+      try {
+        const seen: Array<{ agents?: string[]; skills?: string[] }> = [];
+        const run = () => runPhase({ ...base(t.path), prompt: "go", env: { LOOPSTRA_PHASE: "fix", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, checkInit: (i) => { seen.push(i); return null; } });
+        expect((await run()).ok).toBe(true);
+        expect(seen).toEqual([{ agents: ["loopstra-x"] }]);
+        expect((await run()).ok).toBe(true);
+        expect(seen).toHaveLength(1);
+      } finally { fixtures.cleanup(); t.cleanup(); }
+    });
+
+    test("an init check that passed is not made again when the session is sent again", async () => {
+      const t = tempDir();
+      // The first send finishes without structured output, so the session is asked again (resumed) for it.
+      const [, ...noEnvelope] = fixture("no-envelope").replaceAll("no-envelope-session", "lists-session").split("\n");
+      const fixtures = fixtureDir({ "fix-1": [listsInit("lists-session"), ...noEnvelope].join("\n"), "fix-2": fixture("init-lists") });
+      try {
+        const callsFile = join(t.path, "calls.jsonl");
+        let calls = 0;
+        const r = await runPhase({ ...base(t.path), prompt: "go", env: { LOOPSTRA_PHASE: "fix", LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path, LOOPSTRA_FAKE_CALLS: callsFile },
+          checkInit: () => (++calls === 1 ? null : "checked again") });
+        expect(r.ok).toBe(true);
+        expect(calls).toBe(1);
+        const sent = (await Bun.file(callsFile).text()).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+        expect(sent[1]).toEqual(expect.arrayContaining(["--resume", "lists-session"]));
+      } finally { fixtures.cleanup(); t.cleanup(); }
+    });
+
+    test("a stop or a cancel still wins over a failed init check", async () => {
+      const t = tempDir();
+      try {
+        // A person stops the live session as its init event is judged.
+        let ctl: SessionControl | null = null;
+        const stopped = await runPhase({ ...base(t.path), prompt: "FIXTURE:init-lists", live: { attach: (c) => { ctl = c; return () => {}; } },
+          checkInit: () => { ctl!.stop("John"); return "missing"; } }).then(() => null, (e: unknown) => e);
+        expect(stopped).toBeInstanceOf(SessionStopped);
+        const abort = new AbortController();
+        const cancelled = await runPhase({ ...base(t.path), prompt: "FIXTURE:init-lists", signal: abort.signal,
+          checkInit: () => { abort.abort(); return "missing"; } }).then(() => null, (e: unknown) => e);
+        expect(cancelled).toBeInstanceOf(Cancelled);
+      } finally { t.cleanup(); }
+    }, 60_000);
   });
 
   test("sessions run with background tasks turned off", async () => {

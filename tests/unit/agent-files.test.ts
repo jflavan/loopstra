@@ -1,0 +1,162 @@
+import { expect, test } from "bun:test";
+import { join } from "node:path";
+import { checkAgentSetup, findAgent, findSkill, inlineAgents, parseAgentFile, pathRule } from "../../src/agent-files";
+import { validateConfig } from "../../src/config";
+import { tempDir, write } from "../helpers";
+
+test("an agent file parses with CRLF, a tools string, and unknown keys dropped", () => {
+  const d = parseAgentFile("lead", "---\r\nname: lead\r\ndescription: Leads\r\ntools: Read, Grep\r\nmodel: opus\r\npermissionMode: bypassPermissions\r\nhooks: {}\r\n---\r\nYou lead.\r\n", "repo", "/r/.claude/agents/lead.md");
+  expect(d).toMatchObject({ description: "Leads", prompt: "You lead.", tools: ["Read", "Grep"], model: "opus", dropped: ["permissionMode", "hooks"] });
+  expect(parseAgentFile("x", "Just a prompt.\n", "repo", "p")).toMatchObject({ description: "", prompt: "Just a prompt.", tools: null, model: null, dropped: [] });
+});
+
+test("findAgent looks in the repo, then the user's folder, then installed and enabled plugins", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, ".claude/agents/lead.md"), "---\ndescription: repo lead\n---\nR");
+  write(join(home, ".claude/agents/lead.md"), "---\ndescription: home lead\n---\nH");
+  write(join(home, ".claude/agents/mine.md"), "---\ndescription: mine\n---\nM");
+  const plug = join(home, "plugins-cache/sp");
+  write(join(plug, "agents/code-reviewer.md"), "---\ndescription: cr\n---\nC");
+  write(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "sp@market": [{ scope: "user", installPath: plug }] } }));
+  write(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "sp@market": true } }));
+  const all = { repo, home, sources: "all" as const };
+  expect((await findAgent("lead", all))?.description).toBe("repo lead");
+  expect((await findAgent("mine", all))?.from).toBe("personal");
+  expect((await findAgent("sp:code-reviewer", all))?.from).toBe("plugin");
+  expect(await findAgent("mine", { ...all, sources: "repo" })).toBeNull();
+  write(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "sp@market": false } }));
+  expect(await findAgent("sp:code-reviewer", all)).toBeNull();
+  t.cleanup();
+});
+
+test("findSkill looks in the same places, and a missing or broken file is not a throw", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, ".claude/skills/a/SKILL.md"), "A");
+  write(join(home, ".claude/skills/b/SKILL.md"), "B");
+  const plug = join(home, "cache/sp");
+  write(join(plug, "skills/tdd/SKILL.md"), "T");
+  write(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ plugins: { "sp@market": [{ installPath: plug }] } }));
+  write(join(home, ".claude/settings.json"), "{ not json");
+  const all = { repo, home, sources: "all" as const };
+  expect(await findSkill("a", all)).toBe("repo");
+  expect(await findSkill("b", all)).toBe("personal");
+  expect(await findSkill("sp:tdd", all)).toBeNull();
+  write(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "sp@market": true } }));
+  expect(await findSkill("sp:tdd", all)).toBe("plugin");
+  expect(await findSkill("b", { ...all, sources: "repo" })).toBeNull();
+  expect(await findSkill("nope", all)).toBeNull();
+  t.cleanup();
+});
+
+test("inline agents: loopstra names, StructuredOutput for the main agent, its model left to the step", () => {
+  const lead = parseAgentFile("lead", "---\ndescription: L\ntools: [Read]\nmodel: opus\n---\nP", "repo", "p");
+  const sec = parseAgentFile("sec", "---\ndescription: S\nmodel: haiku\n---\nQ", "repo", "p");
+  expect(inlineAgents(lead, [sec])).toEqual({
+    "loopstra-lead": { description: "L", prompt: "P", tools: ["Read", "StructuredOutput"] },
+    "loopstra-sec": { description: "S", prompt: "Q", model: "haiku" },
+  });
+});
+
+test("inline agents: no tools key without tools, StructuredOutput not doubled, skills copied", () => {
+  const bare = parseAgentFile("bare", "---\ndescription: B\nskills: [tdd]\n---\nP", "repo", "p");
+  expect(inlineAgents(bare, [])["loopstra-bare"]).toEqual({ description: "B", prompt: "P", skills: ["tdd"] });
+  expect("tools" in inlineAgents(bare, [])["loopstra-bare"]!).toBe(false);
+  const has = parseAgentFile("has", "---\ndescription: H\ntools: Read, StructuredOutput\n---\nP", "repo", "p");
+  expect(inlineAgents(has, [])["loopstra-has"]!.tools).toEqual(["Read", "StructuredOutput"]);
+});
+
+test("findAgent finds nothing for names that climb out of the agent folders", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, "secret.md"), "---\ndescription: s\n---\nS");
+  const all = { repo, home, sources: "all" as const };
+  for (const n of ["../../secret", "a/b", "a\\b", "..", "sp:../x"]) expect(await findAgent(n, all)).toBeNull();
+  t.cleanup();
+});
+
+test("checkAgentSetup: missing agents fail, machine-only ones and unknown skills warn", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, ".claude/agents/lead.md"), "---\ndescription: L\nhooks: {}\n---\nP");
+  write(join(home, ".claude/agents/mine.md"), "M");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: { steps: { review: { agent: "lead", subagents: ["mine", "Explore", "gone"], skills: ["pdf"] } } } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["warn", "review", "lead"], ["warn", "review", "mine"], ["fail", "review", "gone"], ["warn", "review", "pdf"],
+  ]);
+  expect(p[2]!.text).toContain("Add it with `loopstra setup agents`");
+  t.cleanup();
+});
+
+test("pathRule writes an absolute path as Claude Code's rules do: two slashes, forward slashes, a drive as a folder", () => {
+  expect(pathRule("/home/me/r/.loopstra/snapshots/x")).toBe("//home/me/r/.loopstra/snapshots/x");
+  expect(pathRule("C:\\Users\\me\\r\\.loopstra\\snapshots\\x")).toBe("//c/Users/me/r/.loopstra/snapshots/x");
+});
+
+test("checkAgentSetup names a missing agent once: build's not again for the steps that continue it, agents.all's under all", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: {
+    all: { agent: "ghost" },
+    steps: { build: { agent: "builder" }, fix: { subagents: ["helper"] }, review: { agent: "reviewer" } },
+  } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["fail", "all", "ghost"], ["fail", "build", "builder"], ["fail", "fix", "helper"], ["fail", "review", "reviewer"],
+  ]);
+  expect(p[0]!.text).toStartWith("`ghost`, the agent every step runs as (agents.all), is not in .claude/agents/");
+  t.cleanup();
+});
+
+test("checkAgentSetup names what all steps or a stage give once, under all or the stage; what a step sets itself, under the step", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(home, ".claude/skills/tone/SKILL.md"), "T");
+  write(join(home, ".claude/agents/mine.md"), "M");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" },
+    stages: { review: { skills: ["house", "tone"] } },
+    agents: {
+      teams: { crew: { members: ["gone"] } },
+      all: { subagents: ["mine"], teams: ["crew"], skills: ["tone"] },
+      steps: { review: { subagents: ["mine"], skills: ["pdf"] }, orchestrator: { skills: ["tone"] } },
+    } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["warn", "all", "mine"], ["fail", "all", "gone"], ["warn", "all", "tone"],
+    // tone is all steps' already; house is the review stage's alone.
+    ["warn", "stage review", "house"],
+    ["warn", "review", "mine"], ["warn", "review", "pdf"],
+    ["warn", "orchestrator", "tone"],
+  ]);
+  expect(p[0]!.text).toBe("`mine` (all steps) is only on this machine, so a loop running elsewhere will not have it.");
+  expect(p[1]!.text).toStartWith("`gone`, in the team crew of every step (agents.all), is not in .claude/agents/");
+  expect(p[3]!.text).toStartWith("The skill `house` (stage review) is not in .claude/skills/");
+  t.cleanup();
+});
+
+test("an agent file saved with a byte order mark and CRLF still has its frontmatter read", async () => {
+  const text = "\uFEFF---\r\nname: lead\r\ndescription: Leads\r\ntools: Read\r\n---\r\nYou lead.\r\n";
+  expect(parseAgentFile("lead", text, "repo", "p")).toMatchObject({ description: "Leads", prompt: "You lead.", tools: ["Read"], dropped: [] });
+  const t = tempDir(); const repo = join(t.path, "repo");
+  write(join(repo, ".claude/agents/lead.md"), text);
+  expect(await findAgent("lead", { repo, home: join(t.path, "home"), sources: "repo" })).toMatchObject({ description: "Leads", prompt: "You lead." });
+  t.cleanup();
+});
+
+test("a plugin's agent or skill that is not found says to enable the plugin", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  const plug = join(home, "cache/sp");
+  write(join(plug, "agents/code-reviewer.md"), "---\ndescription: cr\n---\nC");
+  write(join(plug, "skills/tdd/SKILL.md"), "T");
+  write(join(home, ".claude/plugins/installed_plugins.json"), JSON.stringify({ plugins: { "sp@market": [{ installPath: plug }] } }));
+  write(join(home, ".claude/settings.json"), JSON.stringify({ enabledPlugins: { "sp@market": false } }));
+  const cfg = validateConfig({ version: 1, commands: { test: "t" }, agents: { steps: { review: { subagents: ["sp:code-reviewer", "gone"], skills: ["sp:tdd", "pdf"] } } } });
+  const hint = "if it comes from a plugin, enable the plugin in Claude Code";
+  const all = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(all.map((x) => [x.name, x.text.includes(hint)])).toEqual([["sp:code-reviewer", true], ["gone", false], ["sp:tdd", true], ["pdf", false]]);
+  expect(all[0]!.text).toBe(`\`sp:code-reviewer\`, a subagent of review, is not in .claude/agents/ on main or on this machine; ${hint}. Add it with \`loopstra setup agents\`, or commit it.`);
+  // A repo-only setup never loads plugins, so enabling one would not help.
+  const repoOnly = validateConfig({ version: 1, commands: { test: "t" }, agents: { sources: "repo", steps: { review: { subagents: ["sp:code-reviewer"], skills: ["sp:tdd"] } } } });
+  for (const p of await checkAgentSetup(repoOnly, { repo, home, sources: "repo" })) expect(p.text).not.toContain(hint);
+  t.cleanup();
+});
+
+test("parseAgentFile keeps source as a known key", () => {
+  expect(parseAgentFile("a", "---\ndescription: d\nsource: somewhere\n---\nBody\n", "repo", "p").dropped).toEqual([]);
+});

@@ -22,6 +22,12 @@ export function tempDir(prefix = "loopstra-"): { path: string; cleanup: () => vo
   return { path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
 }
 
+/** Writes a file, making its folder first. */
+export function write(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+}
+
 /** A shipped fake-claude fixture's text. */
 export function fixture(name: string): string {
   return readFileSync(join(dirname(FAKE_CLAUDE), "fixtures", `${name}.jsonl`), "utf8");

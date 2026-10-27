@@ -3,6 +3,8 @@ import { runDir } from "../paths";
 import type { z } from "zod";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, staleBefore, startOfToday } from "../budget";
 import type { FailureReason } from "../claude";
+import { findAgent, setupSession, userHome, type Where } from "../agent-files";
+import { BUILTIN_AGENTS, resolveSetup, setupLines, type AgentSetup } from "../agents";
 import { modelFor, type Config } from "../config";
 import { jsonSchemaOf } from "../envelopes";
 import { stepModel, type StepKey } from "../models";
@@ -94,6 +96,17 @@ export function secretEnvNames(cfg: Config, env: Record<string, string | undefin
   return [...new Set([...named, ...namedHere, ...looksSecret])];
 }
 
+/** Each subagent's and team member's description, from its file, for the prompt's lines; null when it has none. */
+async function describe(setup: AgentSetup, where: Where): Promise<(name: string) => string | null> {
+  const found = new Map<string, string>();
+  for (const name of new Set([...setup.subagents, ...setup.teams.flatMap((t) => t.members)])) {
+    if (BUILTIN_AGENTS.has(name)) continue;
+    const def = await findAgent(name, where);
+    if (def?.description) found.set(name, def.description);
+  }
+  return (name) => found.get(name) ?? null;
+}
+
 type ChatAgentResult<T> =
   | { ok: true; value: T; sessionId: string | null; costUsd: number }
   | { ok: false; reason: FailureReason; detail: string; sessionId: string | null; costUsd: number;
@@ -132,17 +145,29 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     return { ok: false, reason: "budget", detail: why === "today" ? "the day's chat budget is used up" : "what is left of the day's chat budget is held by sessions still running", sessionId: null, costUsd: 0, budgetUsedUp: why };
   }
   const ref = stepModel(o.cfg, o.name);
+  // The step's own setup (agents.all never reaches a chat step, see resolveSetup); chat runs in the main checkout, so its definitions come from there.
+  const setup = resolveSetup(o.cfg.agents, o.name, []);
+  const where: Where = { repo: o.root, home: userHome(), sources: setup.sources };
+  const extra = await setupSession(setup, o.name, o.cfg.main_branch, o.root, {}, async () => where);
+  if ("missing" in extra) {
+    // No session starts: the hold made above ends, costing nothing.
+    o.trace.phaseEnd(CHAT_SLUG, held.seq, { status: "fail", costUsd: 0, error: `setup: ${extra.missing}` });
+    return { ok: false, reason: "setup", detail: extra.missing, sessionId: null, costUsd: 0 };
+  }
   const out = await tracedSession({
     trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd, ref,
     dir: join(runDir(o.root, CHAT_SLUG), "phases", `${held.seq}-${o.name}`),
     run: {
+      // The step's agent setup first, so chat's own allow and deny lists, folder and environment always stand.
+      // It never adds a dir (chat runs in the main checkout its agents come from), so it has no deny rules.
+      ...extra.run,
       cwd: o.root,
-      prompt: o.prompt,
+      prompt: setupLines(setup, await describe(setup, where)) + o.prompt,
       schema: jsonSchemaOf(o.schema),
       // Its step's model (see stepModel): chat loads the config for every message, so a change applies on the next turn.
       model: modelFor(o.cfg, ref),
       permissionMode: "default",
-      allowedTools: CHAT_TOOLS,
+      allowedTools: [...CHAT_TOOLS, ...setup.tools, ...setup.mcpTools],
       disallowedTools: CHAT_DENIED,
       timeoutMs: o.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: held.heldUsd,

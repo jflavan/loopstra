@@ -40,10 +40,19 @@
 // result's total_cost_usd is the fixture's times the turn number (a running total, as the CLI reports). Once
 // stdin closes the fake ends, after its turn and one for each message already queued. "hang" never ends, but
 // still echoes and logs what it is sent; a session that answers only notifications ends after its turn.
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
-const args = Bun.argv.slice(2);
+// --agents and --settings name a file, as the CLI takes them: the file's text is put in their place, so what a
+// session was given can be read back from args, and `files` keeps each path with its permission bits.
+const rawArgs = Bun.argv.slice(2);
+const files: Record<string, { path: string; mode: number }> = {};
+const args = rawArgs.map((a, i) => {
+  const flag = rawArgs[i - 1];
+  if ((flag !== "--agents" && flag !== "--settings") || !isAbsolute(a) || !existsSync(a)) return a;
+  files[flag] = { path: a, mode: statSync(a).mode & 0o777 };
+  return readFileSync(a, "utf8");
+});
 const phase = process.env.LOOPSTRA_PHASE ?? "";
 const inputAt = args.indexOf("--input-format");
 const streaming = inputAt >= 0 && args[inputAt + 1] === "stream-json";
@@ -104,7 +113,7 @@ if (streaming) {
 }
 
 if (process.env.LOOPSTRA_FAKE_ARGS) {
-  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, prompt, cwd: process.cwd(), env: {
+  await Bun.write(process.env.LOOPSTRA_FAKE_ARGS, JSON.stringify({ args, files, prompt, cwd: process.cwd(), env: {
     LOOPSTRA_PHASE: phase || null,
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
     LOOPSTRA_BASE: process.env.LOOPSTRA_BASE ?? null,

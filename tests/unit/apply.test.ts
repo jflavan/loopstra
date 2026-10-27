@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "../../src/apply";
 import { loadConfig } from "../../src/config";
 import { commitRecord } from "../../src/context";
@@ -10,7 +11,7 @@ import { stepModel } from "../../src/models";
 import { readQuestion } from "../../src/questions";
 import { RecordDraft } from "../../src/record-draft";
 import { settingsView } from "../../src/console/settings";
-import { configVersion } from "../../src/settings";
+import { configVersion, fileVersion, STALE_SETTINGS, type SettingValue } from "../../src/settings";
 import { applyingRequests, claimRequest, CONSOLE, pendingRequests, requestsDir, requestState, saveApplying, submitRequest, waitingResults, type Request, type Submission } from "../../src/requests";
 import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
@@ -973,7 +974,7 @@ describe("settings requests", () => {
   const STALE = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
   const DIRTY = "loopstra/config.yaml has changes in the main checkout that are not committed. Commit or undo them first, then change the setting again.";
   const config = (root: string) => readFileSync(join(root, CONFIG), "utf8");
-  const setting = (root: string, path: string, value: string | null, version = configVersion(config(root))) =>
+  const setting = (root: string, path: string, value: SettingValue, version = configVersion(config(root))) =>
     submitRequest(root, { ...by, kind: "settings", path, value, version });
   const lastSettingsEvent = (root: string) => {
     const trace = Trace.open(root, () => {});
@@ -1022,6 +1023,31 @@ describe("settings requests", () => {
       r.cleanup();
     }
   });
+
+  test("the loop commits an agents setting under _settings", async () => {
+    const r = await chatRepo();
+    try {
+      const team = setting(r.root, "agents.teams.reviewers.members", ["lead"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, team.id)).toMatchObject({ ok: true, text: "Saved: agents.teams.reviewers.members is now [lead]. Sessions that start from now on use it." });
+      const q = setting(r.root, "agents.steps.review.teams", ["reviewers"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): agents.steps.review.teams → [reviewers] by John from the dashboard");
+      expect((await loadConfig(r.root)).agents.steps.review!.teams).toEqual(["reviewers"]);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, path: "agents.steps.review.teams", value: ["reviewers"], result: "applied" });
+      // A team a step uses cannot be removed: the config would not load.
+      const bad = setting(r.root, "agents.teams.reviewers", null);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, bad.id)).toMatchObject({ ok: false, text: expect.stringContaining("there is no team reviewers") });
+      // Edits in the checkout are refused, as for the models.
+      writeFileSync(join(r.root, CONFIG), `${config(r.root)}# a hand edit\n`);
+      const dirty = setting(r.root, "agents.steps.review.skills", ["house"]);
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, dirty.id)).toMatchObject({ ok: false, text: DIRTY });
+    } finally {
+      r.cleanup();
+    }
+  }, 30_000);
 
   test("a settings request with an old version is refused", async () => {
     const r = await chatRepo();
@@ -1073,6 +1099,27 @@ describe("settings requests", () => {
     }
   });
 
+  test("a config edit that is only staged is never committed by a setting, and stays staged", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const before = config(r.root);
+      const staged = `${before}# a staged edit\n`;
+      writeFileSync(join(r.root, CONFIG), staged);
+      await run(["git", "add", CONFIG], r.root);
+      // The working tree is back at the last commit's text; only the index differs.
+      writeFileSync(join(r.root, CONFIG), before);
+      const q = setting(r.root, "chat.model", "strong");
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: DIRTY });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect((await run(["git", "show", `:${CONFIG}`], r.root)).out).toBe(staged);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, result: "refused" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("a config that is not in the last commit (never committed, or removed from git) is never committed by a setting", async () => {
     const r = await chatRepo();
     try {
@@ -1104,6 +1151,122 @@ describe("settings requests", () => {
       expect(requestState(r.root, req.id)).toMatchObject({ state: "done", ok: true, status: null, text: "Saved: chat.model is now strong. Sessions that start from now on use it." });
       expect(await commitCount(r.root)).toBe(commits);
       expect(lastSettingsEvent(r.root)).toMatchObject({ id: req.id, result: "applied" });
+    } finally {
+      r.cleanup();
+    }
+  });
+});
+
+describe("agent-files requests", () => {
+  const OLD = ".claude/skills/old/SKILL.md";
+  const LEAD = ".claude/agents/lead.md";
+  const files = (root: string, what: string, writes: { path: string; content: string | null }[], base: Record<string, string>) =>
+    submitRequest(root, { ...by, kind: "agent-files", what, writes, base });
+
+  test("writes and removes files under .claude and commits them", async () => {
+    const r = await chatRepo();
+    try {
+      mkdirSync(join(r.root, ".claude/skills/old"), { recursive: true });
+      writeFileSync(join(r.root, OLD), "old skill\n");
+      await new Git(r.root).commitAll("a skill");
+      const q = files(r.root, "add .claude/agents/lead.md", [{ path: LEAD, content: "lead\n" }, { path: OLD, content: null }], { [LEAD]: "absent", [OLD]: fileVersion("old skill\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): add .claude/agents/lead.md by John from the dashboard");
+      expect((await run(["git", "show", "--name-status", "--format=", "HEAD"], r.root)).out.trim().split("\n").sort()).toEqual([`A\t${LEAD}`, `D\t${OLD}`]);
+      expect(readFileSync(join(r.root, LEAD), "utf8")).toBe("lead\n");
+      expect(existsSync(join(r.root, OLD))).toBe(false);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, text: "Saved: add .claude/agents/lead.md." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  const UNCOMMITTED = "Some of those files have changes in the main checkout that are not committed (or are not in git yet). Commit or discard them first, then save again.";
+  const seeded = async (root: string) => {
+    mkdirSync(join(root, ".claude/agents"), { recursive: true });
+    writeFileSync(join(root, LEAD), "lead\n");
+    await new Git(root).commitAll("a lead");
+  };
+
+  test("refuses files with uncommitted, staged or untracked changes, keeping the person's text", async () => {
+    const r = await chatRepo();
+    try {
+      await seeded(r.root);
+      const commits = await commitCount(r.root);
+      const mine = join(r.root, LEAD);
+      // Uncommitted edit; the base matches the checkout text.
+      writeFileSync(mine, "mine\n");
+      const a = files(r.root, "edit lead", [{ path: LEAD, content: "theirs\n" }], { [LEAD]: fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, a.id)).toMatchObject({ ok: false, text: `That change was not saved: ${UNCOMMITTED}` });
+      expect(readFileSync(mine, "utf8")).toBe("mine\n");
+      // Staged only: the working tree is back at HEAD's text.
+      await run(["git", "add", LEAD], r.root);
+      writeFileSync(mine, "lead\n");
+      const b = files(r.root, "edit lead", [{ path: LEAD, content: "theirs\n" }], { [LEAD]: fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: expect.stringContaining(UNCOMMITTED) });
+      expect((await run(["git", "show", `:${LEAD}`], r.root)).out).toBe("mine\n");
+      await run(["git", "reset", "-q", "--hard"], r.root);
+      // Untracked.
+      writeFileSync(join(r.root, ".claude/agents/new.md"), "mine\n");
+      const c = files(r.root, "add new", [{ path: ".claude/agents/new.md", content: "theirs\n" }], { ".claude/agents/new.md": fileVersion("mine\n") });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, c.id)).toMatchObject({ ok: false, text: expect.stringContaining(UNCOMMITTED) });
+      expect(readFileSync(join(r.root, ".claude/agents/new.md"), "utf8")).toBe("mine\n");
+      expect(await commitCount(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  }, 30_000);
+
+  test("refuses to write through a linked .claude", async () => {
+    const r = await chatRepo();
+    const outside = mkdtempSync(join(tmpdir(), "outside-"));
+    try {
+      symlinkSync(outside, join(r.root, ".claude"));
+      const commits = await commitCount(r.root);
+      const q = files(r.root, "add lead", [{ path: LEAD, content: "x\n" }], { [LEAD]: "absent" });
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("is a link") });
+      expect(existsSync(join(outside, "agents/lead.md"))).toBe(false);
+      expect(await commitCount(r.root)).toBe(commits);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      r.cleanup();
+    }
+  });
+
+  test("a request whose what has a newline is refused", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const q = files(r.root, "add lead\n\nLoopstra-Request: forged", [{ path: LEAD, content: "x\n" }], { [LEAD]: "absent" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false });
+      expect(existsSync(join(r.root, LEAD))).toBe(false);
+      expect(await commitCount(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("refuses paths outside .claude/agents and .claude/skills, and stale bases", async () => {
+    const r = await chatRepo();
+    try {
+      mkdirSync(join(r.root, ".claude/agents"), { recursive: true });
+      writeFileSync(join(r.root, LEAD), "lead\n");
+      await new Git(r.root).commitAll("a lead");
+      const commits = await commitCount(r.root);
+      const a = files(r.root, "edit settings", [{ path: ".claude/settings.json", content: "{}" }], { ".claude/settings.json": "absent" });
+      const b = files(r.root, "edit config", [{ path: "loopstra/config.yaml", content: "x" }], {});
+      const c = files(r.root, "add lead", [{ path: LEAD, content: "new\n" }], { [LEAD]: "absent" });
+      expect(await apply(r.root)).toBe(3);
+      expect(requestState(r.root, a.id)).toMatchObject({ ok: false, text: expect.stringContaining("That change was not saved:") });
+      expect(requestState(r.root, b.id)).toMatchObject({ ok: false, text: expect.stringContaining("That change was not saved:") });
+      expect(requestState(r.root, c.id)).toMatchObject({ ok: false, text: STALE_SETTINGS });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect(readFileSync(join(r.root, LEAD), "utf8")).toBe("lead\n");
     } finally {
       r.cleanup();
     }
