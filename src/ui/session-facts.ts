@@ -49,8 +49,10 @@ export function setupFacts(s: AgentSetupView | null): Array<[string, string]> {
   if (!s) return [];
   const lines: Array<[string, string]> = [["Agent", s.agent ?? "none"]];
   const add = (label: string, names: string[]) => { if (names.length) lines.push([label, names.join(", ")]); };
-  add("Subagents", s.subagents.map((n) => (s.models[n] ? `${n} (${s.models[n]})` : n)));
-  add("Teams", s.teams);
+  const named = (n: string) => (s.models[n] ? `${n} (${s.models[n]})` : n);
+  add("Subagents", s.subagents.map(named));
+  // A team with its members (each with its model when known); teams are set apart by semicolons.
+  if (s.teams.length) lines.push(["Teams", s.teams.map((t) => (s.teamMembers[t]?.length ? `${t}: ${s.teamMembers[t].map(named).join(", ")}` : t)).join("; ")]);
   add("Skills", s.skills);
   add("Tools", s.tools);
   add("MCP tools", s.mcpTools);

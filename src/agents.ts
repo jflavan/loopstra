@@ -22,32 +22,69 @@ const HISTORY_GIT = new Set(["commit", "push", "merge", "rebase", "reset", "chec
 /** Git options that take their value as the next word when written without `=`. */
 const GIT_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
 
-/**
- * The git subcommand a `Bash(git ...)` rule covers, "" when it covers any (a bare git rule, or only
- * options), and null when the rule is not about git. Global options before the subcommand are skipped.
- */
-function gitSubcommand(rule: string): string | null {
+/** Words that run the command after them (`env git push`), skipped with their options to find the command. */
+const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "nice", "sudo"]);
+
+/** Whether a rule's word, with `*` matching anything as Claude Code's rules do, matches `word`. */
+function globMatches(pattern: string, word: string): boolean {
+  const re = new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+  return re.test(word);
+}
+
+/** A Bash rule's words, without the legacy `:*` ending; null when the rule is not a Bash rule with a command. */
+function bashWords(rule: string): string[] | null {
   const m = /^Bash\(([\s\S]*)\)$/.exec(rule);
   if (!m) return null;
-  const words = (m[1] ?? "").trim().replace(/:\*$/, "").split(/\s+/);
-  if (!/^git\*?$/.test(words[0] ?? "")) return null;
-  if (words[0] === "git*") return "";
-  let i = 1;
+  const words = (m[1] ?? "").trim().replace(/:\*$/, "").split(/\s+/).filter(Boolean);
+  return words.length ? words : null;
+}
+
+/**
+ * The history-changing git subcommand a `Bash(...)` rule could allow: "" when it could allow any of
+ * them (a bare git rule, only options, or a wildcard in the subcommand's place that matches one), the
+ * first one it matches otherwise, and null when it allows none. Wrappers (`env`, `command`, ...) and
+ * `VAR=value` words before the command are skipped, and a wildcard in the command's place counts as
+ * git when it could match `git` (`g*`); one that matches anything is a bare Bash rule, judged elsewhere.
+ */
+function historyGit(rule: string): string | null {
+  const words = bashWords(rule);
+  if (!words) return null;
+  let i = 0;
+  for (;;) {
+    const w = words[i] ?? "";
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue; }
+    if (WRAPPERS.has(w)) { i++; while ((words[i] ?? "").startsWith("-")) i++; continue; }
+    break;
+  }
+  const cmd = words[i] ?? "";
+  if (!globMatches(cmd, "git") || /^\**$/.test(cmd)) return null;
+  i++;
   while (i < words.length && (words[i] ?? "").startsWith("-")) {
     i += GIT_VALUE_OPTIONS.has(words[i] ?? "") ? 2 : 1;
   }
-  return (words[i] ?? "").replace(/(:\*|\*)$/, "");
+  const sub = words[i];
+  if (sub === undefined) return "";
+  if (!sub.includes("*")) return HISTORY_GIT.has(sub) ? sub : null;
+  const hit = [...HISTORY_GIT].filter((g) => globMatches(sub, g));
+  return hit.length === HISTORY_GIT.size ? "" : (hit[0] ?? null);
+}
+
+/** Whether a rule allows any command: `Bash`, or a Bash rule made only of wildcards (`Bash(*)`, `Bash(:*)`, `Bash(**)`). */
+function bareBash(rule: string): boolean {
+  if (rule === "Bash") return true;
+  const m = /^Bash\(([\s\S]*)\)$/.exec(rule);
+  return m !== null && /^[\s*]*(:\*)?\s*$/.test(m[1] ?? "");
 }
 
 /** The reason a `tools` rule is refused, or null. A read-only step also refuses file changes and a bare Bash. */
 export function toolProblem(rule: string, readOnly: boolean): string | null {
-  const sub = gitSubcommand(rule);
+  const sub = historyGit(rule);
   if (sub === "") return "only Loopstra commits, branches, merges and pushes; git is not allowed";
-  if (sub !== null && HISTORY_GIT.has(sub)) return `only Loopstra commits, branches, merges and pushes; git ${sub} is not allowed`;
+  if (sub !== null) return `only Loopstra commits, branches, merges and pushes; git ${sub} is not allowed`;
   if (!readOnly) return null;
-  const edit = /^(Edit|Write|NotebookEdit)(\(.*\))?$/.exec(rule);
+  const edit = /^(Edit|MultiEdit|Write|NotebookEdit)(\(.*\))?$/.exec(rule);
   if (edit) return `${edit[1] ?? rule} would let it change files`;
-  if (/^Bash(\(\*?\))?$/.test(rule)) return "a bare Bash rule would let it run anything";
+  if (bareBash(rule)) return "a bare Bash rule would let it run anything";
   return null;
 }
 

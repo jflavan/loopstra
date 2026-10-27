@@ -32,6 +32,30 @@ test("toolProblem sees through git spellings, and leaves other tools alone", () 
   }
 });
 
+test("toolProblem sees a wildcard in git's or its subcommand's place, and the words before git", () => {
+  const why = (r: string) => toolProblem(r, false);
+  expect(why("Bash(git c*)")).toBe("only Loopstra commits, branches, merges and pushes; git commit is not allowed");
+  expect(why("Bash(git st*)")).toBe("only Loopstra commits, branches, merges and pushes; git stash is not allowed");
+  expect(why("Bash(git * *)")).toBe("only Loopstra commits, branches, merges and pushes; git is not allowed");
+  expect(why("Bash(g* push *)")).toBe("only Loopstra commits, branches, merges and pushes; git push is not allowed");
+  expect(why("Bash(env git push *)")).toBe("only Loopstra commits, branches, merges and pushes; git push is not allowed");
+  for (const r of ["Bash(env -i git push *)", "Bash(GIT_DIR=. git reset *)", "Bash(command git tag *)", "Bash(A=1 B=2 git checkout *)"]) {
+    expect(why(r)).toMatch(/^only Loopstra commits/);
+  }
+  // A wildcard that matches no history-changing subcommand is a reading rule.
+  for (const r of ["Bash(git d*)", "Bash(git l*)", "Bash(env FOO=1 bun test *)"]) expect(why(r)).toBeNull();
+});
+
+test("toolProblem: a read-only step refuses every Bash rule that matches anything, and MultiEdit", () => {
+  for (const r of ["Bash", "Bash()", "Bash(*)", "Bash(:*)", "Bash(**)", "Bash( * )"]) {
+    expect(toolProblem(r, true)).toBe("a bare Bash rule would let it run anything");
+    // A writing step may run anything, as before; only git is held back.
+    expect(toolProblem(r, false)).toBeNull();
+  }
+  expect(toolProblem("MultiEdit", true)).toBe("MultiEdit would let it change files");
+  expect(toolProblem("Bash(gh issue view *)", true)).toBeNull();
+});
+
 const agents = (over: object = {}) => validateConfig({ version: 1, commands: { test: "t" }, agents: over }).agents;
 
 test("all, then stage skills, then the step's own; each name once", () => {

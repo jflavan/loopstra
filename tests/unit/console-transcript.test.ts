@@ -235,6 +235,11 @@ describe("session transcripts", () => {
     // A prompt given as a string is the subagent's prompt too; an empty one shows nothing.
     expect(toItems({ type: "user", message: { content: "Look at b.txt" }, parent_tool_use_id: "p" })).toEqual([{ kind: "delegated", parent: "p", text: "Look at b.txt" }]);
     expect(toItems({ type: "user", message: { content: [{ type: "text", text: "  " }] }, parent_tool_use_id: "p" })).toEqual([]);
+    // A subagent's todo list is a row in its block; the session's own is its list.
+    const todo = { type: "tool_use", id: "tw", name: "TodoWrite", input: { todos: [{ content: "check a.txt", status: "pending" }] } };
+    expect(toItems({ type: "assistant", message: { content: [todo] }, parent_tool_use_id: "p" }))
+      .toEqual([expect.objectContaining({ kind: "tool", id: "tw", tool: "TodoWrite", parent: "p" })]);
+    expect(toItems({ type: "assistant", message: { content: [todo] } })).toEqual([{ kind: "todos", items: [{ text: "check a.txt", state: "pending" }] }]);
     // An Agent call with no subagent type (and an older CLI's Task) names what it hands off.
     expect(toItems({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Task", input: { description: "Find the parser" } }] } }))
       .toEqual([{ kind: "tool", id: "t", tool: "Task", target: "Find the parser", input: { description: "Find the parser" } }]);

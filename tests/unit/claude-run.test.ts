@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { ENVIRONMENT_PATTERNS, FAKE_CLAUDE_ENV, runPhase, unavailable, type SessionControl } from "../../src/claude";
 import { MEANWHILE_HEADING } from "../../src/console/steerable";
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "../../src/budget";
@@ -213,6 +214,29 @@ describe("runPhase", () => {
         allowedTools: [], settings, timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
       const { args } = (await Bun.file(argsFile).json()) as { args: string[] };
       expect(args[args.indexOf("--settings") + 1]).toBe(settings);
+    } finally { t.cleanup(); }
+  });
+
+  test("agents and settings go to claude as files only its user can read, removed when the session ends", async () => {
+    const t = tempDir();
+    try {
+      const argsFile = join(t.path, "args.json");
+      const settings = '{"env":{"SECRET":"s3cret"}}';
+      // Larger than Linux allows for one argument (128 KB).
+      const agents = { "loopstra-x": { description: "d", prompt: "p".repeat(200_000) } };
+      await runPhase({ cwd: t.path, prompt: "FIXTURE:simple-success", schema: {}, model: "haiku", permissionMode: "default",
+        allowedTools: [], settings, agents, timeoutMs: 10_000, maxBudgetUsd: 1, env: { LOOPSTRA_FAKE_ARGS: argsFile }, executable: FAKE });
+      const { args, files } = (await Bun.file(argsFile).json()) as { args: string[]; files: Record<string, { path: string; mode: number }> };
+      // The fake puts each file's text in place of its path; the paths themselves are in `files`.
+      expect(args[args.indexOf("--settings") + 1]).toBe(settings);
+      expect(JSON.parse(args[args.indexOf("--agents") + 1]!)).toEqual(agents);
+      expect(Object.keys(files).sort()).toEqual(["--agents", "--settings"]);
+      for (const { path, mode } of Object.values(files)) {
+        expect(path.startsWith(tmpdir())).toBe(true);
+        if (process.platform !== "win32") expect(mode).toBe(0o600);
+        expect(existsSync(path)).toBe(false);
+        expect(existsSync(dirname(path))).toBe(false);
+      }
     } finally { t.cleanup(); }
   });
 

@@ -54,13 +54,15 @@ function setupView(e: Record<string, unknown> | undefined): AgentSetupView | nul
   // The event keys models by inline name (loopstra-<name>); the page's view is keyed by the plain name.
   const recorded = e.models && typeof e.models === "object" ? (e.models as Record<string, unknown>) : {};
   const subagents = list(e.subagents);
+  const recordedMembers = e.team_members && typeof e.team_members === "object" ? (e.team_members as Record<string, unknown>) : {};
+  const teamMembers = Object.fromEntries(Object.entries(recordedMembers).map(([team, m]) => [team, list(m)]));
   const models: Record<string, string> = {};
-  for (const n of subagents) {
+  for (const n of [...subagents, ...Object.values(teamMembers).flat()]) {
     const m = recorded[inlineName(n)];
     if (typeof m === "string") models[n] = m;
   }
   return {
-    agent: typeof e.agent === "string" ? e.agent : null, subagents, teams: list(e.teams), skills: list(e.skills),
+    agent: typeof e.agent === "string" ? e.agent : null, subagents, teams: list(e.teams), teamMembers, skills: list(e.skills),
     tools: list(e.tools), mcpTools: list(e.mcp_tools), sources: e.sources === "repo" ? "repo" : "all", models,
   };
 }

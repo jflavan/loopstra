@@ -955,7 +955,7 @@ describe("a step's agent setup", () => {
       const events = trace.events("x").filter((e) => e.type === "agent_setup");
       expect(events).toHaveLength(1);
       expect(JSON.parse(events[0]!.payload)).toEqual({
-        agent: "lead", subagents: [], teams: ["reviewers"], skills: [], tools: ["WebFetch"], mcp_tools: ["mcp__gh"], sources: "all",
+        agent: "lead", subagents: [], teams: ["reviewers"], team_members: { reviewers: ["sec", "perf"] }, skills: [], tools: ["WebFetch"], mcp_tools: ["mcp__gh"], sources: "all",
         models: { "loopstra-sec": "haiku" },
       });
       expect(events[0]!.phase_seq).toBe(trace.phases("x")[0]!.seq);
@@ -988,6 +988,8 @@ describe("a step's agent setup", () => {
       expect(r.ok).toBe(true);
       const inline = JSON.parse(args![args!.indexOf("--agents") + 1]!) as Record<string, { prompt: string }>;
       expect(inline["loopstra-lead"]!.prompt).toBe("MAIN");
+      // The agent is read from the commit, so a worktree step that names no skill makes no snapshot.
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
     } finally { trace.close(); repo.cleanup(); }
   });
 

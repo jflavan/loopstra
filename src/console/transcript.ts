@@ -134,7 +134,8 @@ function eventItems(e: Raw, cwd?: string, parent?: string): TranscriptItem[] {
         out.push({ kind: "text", text: b.text });
       } else if (e.type === "assistant" && b.type === "tool_use" && typeof b.name === "string" && b.name && typeof b.id === "string" && b.id && !HIDDEN.has(b.name)) {
         const input = isObject(b.input) ? b.input : {};
-        if (b.name === "TodoWrite" && Array.isArray(input.todos)) {
+        // A subagent's todo list is a row in its block, not the session's list.
+        if (b.name === "TodoWrite" && Array.isArray(input.todos) && !parent) {
           out.push({ kind: "todos", items: (input.todos as unknown[]).filter(isObject).map((t) => ({ text: text(t.content), state: text(t.status) })) });
         } else if (EDITS.has(b.name)) {
           const path = relativePath(text(input.file_path), cwd);

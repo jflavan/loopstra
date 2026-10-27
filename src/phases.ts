@@ -213,7 +213,10 @@ async function setupOf(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "sk
  * could otherwise rewrite the agent a later session of the step runs as. Its skills are the snapshot's.
  */
 async function setupWhere(ctx: StepContext, setup: AgentSetup): Promise<Where> {
-  return { repo: await ctx.snapshot(), home: userHome(), sources: setup.sources, commit: { git: ctx.git, sha: await ctx.readCommit() } };
+  // Agents come from the commit, so only skills need the snapshot on disk: a writing step that names no
+  // skill makes none (its session runs in the change's worktree, and `repo` is then never read).
+  const repo = setup.skills.length ? await ctx.snapshot() : ctx.root;
+  return { repo, home: userHome(), sources: setup.sources, commit: { git: ctx.git, sha: await ctx.readCommit() } };
 }
 
 /** Each subagent's and team member's description, from its file (see setupWhere), for the prompt's lines; null when it has none. */
@@ -509,7 +512,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   const { seq, capUsd, fromDay } = startPhase(ctx, traceName);
   if (extra) {
     ctx.trace.event(ctx.slug, "agent_setup", {
-      agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name), skills: setup.skills,
+      agent: setup.agent, subagents: setup.subagents, teams: setup.teams.map((t) => t.name),
+      team_members: Object.fromEntries(setup.teams.map((t) => [t.name, t.members])), skills: setup.skills,
       tools: setup.tools, mcp_tools: setup.mcpTools, sources: setup.sources, models: extra.models,
     }, seq);
   }

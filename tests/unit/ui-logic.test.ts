@@ -1384,7 +1384,7 @@ describe("the Agents section of the Settings page", () => {
 });
 
 describe("the setup lines of a session's facts", () => {
-  const base = { agent: null, subagents: [], teams: [], skills: [], tools: [], mcpTools: [], sources: "all" as const, models: {} };
+  const base = { agent: null, subagents: [], teams: [], teamMembers: {}, skills: [], tools: [], mcpTools: [], sources: "all" as const, models: {} };
   test("nothing for no setup", () => {
     expect(setupFacts(null)).toEqual([]);
   });
@@ -1394,6 +1394,11 @@ describe("the setup lines of a session's facts", () => {
   test("subagents carry their model when known; empty lists and the default sources are left out", () => {
     expect(setupFacts({ ...base, agent: "lead", subagents: ["sec", "doc"], models: { sec: "haiku" }, teams: ["ops"], skills: ["a", "b"], tools: ["Read"], mcpTools: ["mcp__x__y"], sources: "repo" })).toEqual([
       ["Agent", "lead"], ["Subagents", "sec (haiku), doc"], ["Teams", "ops"], ["Skills", "a, b"], ["Tools", "Read"], ["MCP tools", "mcp__x__y"], ["Sources", "repo only"],
+    ]);
+  });
+  test("a team lists its members, each with its model when known", () => {
+    expect(setupFacts({ ...base, teams: ["ops", "docs"], teamMembers: { ops: ["sec", "perf"], docs: [] }, models: { sec: "opus" } })).toEqual([
+      ["Agent", "none"], ["Teams", "ops: sec (opus), perf; docs"],
     ]);
   });
 });

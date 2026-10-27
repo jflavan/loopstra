@@ -116,8 +116,10 @@ export interface PhaseView {
 /** The agent setup a step ran with: names only, as the trace recorded them. */
 export interface AgentSetupView {
   agent: string | null; subagents: string[]; teams: string[]; skills: string[]; tools: string[]; mcpTools: string[];
+  /** Each team's members, by team name; empty for a step traced before members were recorded. */
+  teamMembers: Record<string, string[]>;
   sources: "all" | "repo";
-  /** Each inline subagent's model, by name. */
+  /** Each inline subagent's and team member's model, by name. */
   models: Record<string, string>;
 }
 

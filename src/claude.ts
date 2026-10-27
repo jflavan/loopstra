@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MIN_SESSION_USD, USD_PER_MINUTE } from "./budget";
 import { lastLine, spawnBounded, withBunOnPath, type StdinWriter, withoutGitHookEnv } from "./shell";
 import { Cancelled, SessionStopped, StopRequested, stopRequested } from "./stop";
@@ -412,8 +415,41 @@ class Sends {
   }
 }
 
+/** Where a session's `--agents` and `--settings` are written (see sessionFiles). */
+interface SessionFiles { agents?: string; settings?: string }
+
+/**
+ * Writes a session's inline agents and settings to files only its user can read, in a folder of its own,
+ * so they are passed by path: on the command line, other local users could read them (the settings may
+ * hold the user's `env` and `apiKeyHelper`), and a large agent setup would pass the system's limit on an
+ * argument's length. `remove` deletes the folder once the session has ended. Null when there is neither.
+ */
+function sessionFiles(input: RunPhaseInput): { paths: SessionFiles; remove: () => void } | null {
+  const agents = input.agents && Object.keys(input.agents).length ? JSON.stringify(input.agents) : null;
+  if (agents === null && !input.settings) return null;
+  const dir = mkdtempSync(join(tmpdir(), "loopstra-session-"));
+  const remove = () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a leftover temp folder is harmless */ } };
+  try {
+    const put = (name: string, text: string) => {
+      const path = join(dir, name);
+      writeFileSync(path, text, { mode: 0o600, flag: "wx" });
+      return path;
+    };
+    return {
+      paths: {
+        ...(agents !== null ? { agents: put("agents.json", agents) } : {}),
+        ...(input.settings ? { settings: put("settings.json", input.settings) } : {}),
+      },
+      remove,
+    };
+  } catch (e) {
+    remove();
+    throw e;
+  }
+}
+
 /** The command that starts a session: the CLI and its flags (each send adds its cap and --resume). */
-function claudeCommand(exe: string, input: RunPhaseInput): string[] {
+function claudeCommand(exe: string, input: RunPhaseInput, files: SessionFiles): string[] {
   const args = [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", JSON.stringify(input.schema),
@@ -422,12 +458,12 @@ function claudeCommand(exe: string, input: RunPhaseInput): string[] {
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
-  if (input.agents && Object.keys(input.agents).length) args.push("--agents", JSON.stringify(input.agents));
+  if (files.agents) args.push("--agents", files.agents);
   if (input.agent) args.push("--agent", input.agent);
   if (input.settingSources !== undefined) args.push("--setting-sources", input.settingSources);
   for (const dir of input.addDirs ?? []) args.push("--add-dir", dir);
   if (input.forwardSubagentText) args.push("--forward-subagent-text");
-  if (input.settings) args.push("--settings", input.settings);
+  if (files.settings) args.push("--settings", files.settings);
   // Every user message the session takes is echoed, so the runner knows which result answers it.
   if (input.live) args.push("--input-format", "stream-json", ...(input.live.replay === false ? [] : ["--replay-user-messages"]));
   // A .ts fake must be run through bun; the real CLI is a native executable.
@@ -441,7 +477,16 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   if (!exe) {
     return failure(new StreamCollector().finish(), { started, nudged: false }, "not-started", "could not start claude: not found on PATH. Install Claude Code or set LOOPSTRA_CLAUDE_EXECUTABLE.");
   }
-  const cmd = claudeCommand(exe, input);
+  const files = sessionFiles(input);
+  try {
+    return await runStarted(input, live, started, claudeCommand(exe, input, files?.paths ?? {}));
+  } finally {
+    files?.remove();
+  }
+}
+
+/** runSession once the command is known: every send of the session, until its result. */
+async function runStarted(input: RunPhaseInput, live: LiveSession | null, started: number, cmd: string[]): Promise<RunPhaseResult> {
   const echoWaitMs = input.live?.echoWaitMs ?? ECHO_WAIT_MS;
   // No background tasks: one left pending when a session ends is delivered first when it is
   // resumed, and that session may then end without reading the prompt.
