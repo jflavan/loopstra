@@ -128,7 +128,8 @@ describe("the agents view", () => {
       expect(item("agent", "mine")).toMatchObject({ from: "personal", usedBy: [], editable: false });
 
       expect(view.problems).toContainEqual({ level: "fail", step: "plan", name: "ghost", text: expect.stringContaining("`ghost`") as string });
-      expect(view.problems).toContainEqual({ level: "warn", step: "build", name: "tone", text: expect.stringContaining("only on this machine") as string });
+      // tone comes to every step from all steps: it is told once, under all.
+      expect(view.problems.filter((x) => x.name === "tone")).toEqual([{ level: "warn", step: "all", name: "tone", text: "`tone` (all steps) is only on this machine, so a loop running elsewhere will not have it." }]);
 
       // A repo agent whose name the edit operation would not take is shown, but not offered for editing.
       write(join(root, ".claude/agents/Odd_Name.md"), agentText("odd"));

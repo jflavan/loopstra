@@ -197,5 +197,11 @@ describe("the agents section", () => {
 
     const none = world();
     expect(await withEnv({ HOME: none.home, USERPROFILE: none.home }, () => checkSection(agents, none.root))).toEqual([]);
+
+    // What all steps get is told once, not once per step.
+    const shared = world(`${BASE}agents:\n  all:\n    subagents: [ghost]\n`);
+    expect(await withEnv({ HOME: shared.home, USERPROFILE: shared.home }, () => checkSection(agents, shared.root))).toEqual([
+      { level: "fail", text: expect.stringContaining("`ghost`, a subagent of every step (agents.all), is not in .claude/agents/") },
+    ]);
   });
 });

@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, resolveSetup, type AgentSetup } from "./agents";
+import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, type AgentSetup } from "./agents";
 import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
 import type { Git } from "./git";
-import { STEP_KEYS, STEPS, type StepKey } from "./models";
+import { STAGE_NAMES, STEP_KEYS, type StageName, type StepKey } from "./models";
 
 /** An agent definition read from a Claude Code agent file. */
 export interface AgentDefinition {
@@ -144,18 +144,21 @@ export async function findSkill(name: string, where: Where): Promise<AgentDefini
   return null;
 }
 
-/** Something wrong, or doubtful, about a name a config uses. */
-export interface SetupProblem { level: "fail" | "warn"; step: StepKey | "all"; name: string; text: string }
+/**
+ * Something wrong, or doubtful, about a name a config uses, under where the config sets it: a step,
+ * all steps (`agents.all`), or a stage's skills (`stage <name>`).
+ */
+export interface SetupProblem { level: "fail" | "warn"; step: StepKey | "all" | `stage ${StageName}`; name: string; text: string }
 
 /**
- * Every agent a step's setup names, each once with the first part it plays: the agent the step runs
- * as, a subagent, a team's member. Built-in agents included.
+ * Every agent a setup names, each once with the first part it plays: the agent `who` runs as, a
+ * subagent, a team's member. Built-in agents included. `who` is a step, or how all steps are named.
  */
-function setupRoles(setup: AgentSetup, step: string): { name: string; role: string }[] {
+function setupRoles(setup: { agent: string | null; subagents: readonly string[]; teams: readonly { name: string; members: readonly string[] }[] }, who: string): { name: string; role: string }[] {
   const roles: { name: string; role: string }[] = [
-    ...(setup.agent ? [{ name: setup.agent, role: `the agent ${step} runs as` }] : []),
-    ...setup.subagents.map((name) => ({ name, role: `a subagent of ${step}` })),
-    ...setup.teams.flatMap((t) => t.members.map((name) => ({ name, role: `in the team ${t.name} of ${step}` }))),
+    ...(setup.agent ? [{ name: setup.agent, role: `the agent ${who} runs as` }] : []),
+    ...setup.subagents.map((name) => ({ name, role: `a subagent of ${who}` })),
+    ...setup.teams.flatMap((t) => t.members.map((name) => ({ name, role: `in the team ${t.name} of ${who}` }))),
   ];
   const seen = new Set<string>();
   return roles.filter(({ name }) => {
@@ -181,40 +184,52 @@ function missingAgentText(name: string, role: string, mainBranch: string, where:
 }
 
 /**
- * Every agent, subagent, team member and skill each step would use, checked against `where`.
- * One problem per name per step: missing, else only on this machine, else keys Loopstra leaves out.
- * The agent a step runs as is checked where it is set: agents.all's once (under "all"), and none for
- * the steps that continue the build's session (they run as build's).
+ * Every agent, subagent, team member and skill the steps would use, checked against `where`, each
+ * where the config sets it, so one name is told once however many steps get it: what all steps get
+ * (`agents.all`) under "all", a stage's skills under "stage <name>" (those all steps do not already
+ * get), and what a step sets itself under that step. One problem per name per place: missing, else
+ * only on this machine, else keys Loopstra leaves out. The steps that continue the build's session
+ * run as build's agent, so their own is not checked.
  */
 export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupProblem[]> {
   const problems: SetupProblem[] = [];
+  const said = (step: SetupProblem["step"]) => (step === "all" ? "all steps" : step);
   const checkAgent = async (name: string, role: string, step: SetupProblem["step"]) => {
     if (BUILTIN_AGENTS.has(name)) return;
     const def = await findAgent(name, where);
     if (!def) {
       problems.push({ level: "fail", step, name, text: missingAgentText(name, role, cfg.main_branch, where) });
     } else if (def.from !== "repo") {
-      problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
+      problems.push({ level: "warn", step, name, text: `\`${name}\` (${said(step)}) is only on this machine, so a loop running elsewhere will not have it.` });
     } else if (def.dropped.length) {
       problems.push({ level: "warn", step, name, text: `${def.path}: Loopstra leaves out ${def.dropped.join(", ")} when it runs this agent.` });
     }
   };
-  if (cfg.agents.all.agent !== undefined) await checkAgent(cfg.agents.all.agent, "the agent every step runs as (agents.all)", "all");
-  for (const step of STEP_KEYS) {
-    const group = STEPS.find((s) => s.key === step)!.group;
-    const stageSkills = group === "chat" ? [] : cfg.stages[group].skills;
-    const setup = resolveSetup(cfg.agents, step, stageSkills);
-    // Without an agent of its own, a step runs as agents.all's (checked above), or as build's.
-    const ownAgent = !CONTINUES_BUILD.has(step) && cfg.agents.steps[step]?.agent !== undefined;
-    for (const { name, role } of setupRoles(ownAgent ? setup : { ...setup, agent: null }, step)) await checkAgent(name, role, step);
-    for (const name of setup.skills) {
-      const from = await findSkill(name, where);
-      if (from === null) {
-        problems.push({ level: "warn", step, name, text: `The skill \`${name}\` (${step}) is not in .claude/skills/${where.sources === "all" ? " or on this machine" : ""}${pluginHint(name, where) || "; it may be built in to Claude Code"}. If a session does not load it, the step stops and says so.` });
-      } else if (from !== "repo") {
-        problems.push({ level: "warn", step, name, text: `\`${name}\` (${step}) is only on this machine, so a loop running elsewhere will not have it.` });
-      }
+  const checkSkill = async (name: string, step: SetupProblem["step"]) => {
+    const from = await findSkill(name, where);
+    if (from === null) {
+      problems.push({ level: "warn", step, name, text: `The skill \`${name}\` (${said(step)}) is not in .claude/skills/${where.sources === "all" ? " or on this machine" : ""}${pluginHint(name, where) || "; it may be built in to Claude Code"}. If a session does not load it, the step stops and says so.` });
+    } else if (from !== "repo") {
+      problems.push({ level: "warn", step, name, text: `\`${name}\` (${said(step)}) is only on this machine, so a loop running elsewhere will not have it.` });
     }
+  };
+  const a = cfg.agents;
+  const teams = (names: readonly string[]) => [...new Set(names)].flatMap((name) => (a.teams[name] ? [{ name, members: a.teams[name].members }] : []));
+  // What every loop step gets.
+  const all = { agent: a.all.agent ?? null, subagents: a.all.subagents, teams: teams(a.all.teams) };
+  for (const { name, role } of setupRoles(all, "every step")) await checkAgent(name, `${role} (agents.all)`, "all");
+  for (const name of new Set(a.all.skills)) await checkSkill(name, "all");
+  // What every step of a stage gets.
+  for (const stage of STAGE_NAMES) {
+    for (const name of new Set(cfg.stages[stage].skills)) if (!a.all.skills.includes(name)) await checkSkill(name, `stage ${stage}`);
+  }
+  // What each step sets itself.
+  for (const step of STEP_KEYS) {
+    const own = a.steps[step];
+    if (!own) continue;
+    const agent = CONTINUES_BUILD.has(step) ? null : own.agent ?? null;
+    for (const { name, role } of setupRoles({ agent, subagents: own.subagents, teams: teams(own.teams) }, step)) await checkAgent(name, role, step);
+    for (const name of new Set(own.skills)) await checkSkill(name, step);
   }
   return problems;
 }

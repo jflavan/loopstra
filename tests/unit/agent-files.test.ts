@@ -105,6 +105,31 @@ test("checkAgentSetup names a missing agent once: build's not again for the step
   t.cleanup();
 });
 
+test("checkAgentSetup names what all steps or a stage give once, under all or the stage; what a step sets itself, under the step", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(home, ".claude/skills/tone/SKILL.md"), "T");
+  write(join(home, ".claude/agents/mine.md"), "M");
+  const cfg = validateConfig({ version: 1, commands: { test: "t" },
+    stages: { review: { skills: ["house", "tone"] } },
+    agents: {
+      teams: { crew: { members: ["gone"] } },
+      all: { subagents: ["mine"], teams: ["crew"], skills: ["tone"] },
+      steps: { review: { subagents: ["mine"], skills: ["pdf"] }, orchestrator: { skills: ["tone"] } },
+    } });
+  const p = await checkAgentSetup(cfg, { repo, home, sources: "all" });
+  expect(p.map((x) => [x.level, x.step, x.name])).toEqual([
+    ["warn", "all", "mine"], ["fail", "all", "gone"], ["warn", "all", "tone"],
+    // tone is all steps' already; house is the review stage's alone.
+    ["warn", "stage review", "house"],
+    ["warn", "review", "mine"], ["warn", "review", "pdf"],
+    ["warn", "orchestrator", "tone"],
+  ]);
+  expect(p[0]!.text).toBe("`mine` (all steps) is only on this machine, so a loop running elsewhere will not have it.");
+  expect(p[1]!.text).toStartWith("`gone`, in the team crew of every step (agents.all), is not in .claude/agents/");
+  expect(p[3]!.text).toStartWith("The skill `house` (stage review) is not in .claude/skills/");
+  t.cleanup();
+});
+
 test("an agent file saved with a byte order mark and CRLF still has its frontmatter read", async () => {
   const text = "\uFEFF---\r\nname: lead\r\ndescription: Leads\r\ntools: Read\r\n---\r\nYou lead.\r\n";
   expect(parseAgentFile("lead", text, "repo", "p")).toMatchObject({ description: "Leads", prompt: "You lead.", tools: ["Read"], dropped: [] });

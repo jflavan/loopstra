@@ -340,6 +340,16 @@ describe("scheduler resilience", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("start names a missing agent all steps get once, not once per step", async () => {
+    const { repo, trace } = await setupRepo("draft", { config: "agents:\n  all:\n    subagents: [ghost]\n" });
+    const refused = await start(repo.path, { once: true, installSignals: false });
+    const lines = refused?.split("\n") ?? [];
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("Some steps name agents that are not set up:");
+    expect(lines[1]).toStartWith("- `ghost`, a subagent of every step (agents.all), is not in .claude/agents/");
+    trace.close(); repo.cleanup();
+  });
+
   test("start refuses, without a throw or a lock left, when it cannot make main's snapshot to check the agents", async () => {
     const { repo, trace } = await setupRepo("draft", { config: "main_branch: nope\nagents:\n  steps:\n    design:\n      agent: lead\n" });
     try {
