@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { BUILTIN_AGENTS, inlineName, resolveSetup, type AgentSetup } from "./agents";
+import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
 import { STEP_KEYS, STEPS, type StepKey } from "./models";
 
@@ -186,7 +187,7 @@ export async function checkAgentSetup(cfg: Config, where: Where): Promise<SetupP
  * when none, or a built-in), then its subagents and team members, each once and built-ins left out.
  * `missing`: what a person is told about the first one not found, in checkAgentSetup's words.
  */
-export async function setupAgents(setup: AgentSetup, step: string, where: Where, mainBranch: string): Promise<{ main: AgentDefinition | null; others: AgentDefinition[] } | { missing: string }> {
+async function setupAgents(setup: AgentSetup, step: string, where: Where, mainBranch: string): Promise<{ main: AgentDefinition | null; others: AgentDefinition[] } | { missing: string }> {
   let main: AgentDefinition | null = null;
   const others: AgentDefinition[] = [];
   for (const { name, role } of setupRoles(setup, step)) {
@@ -205,7 +206,7 @@ export async function setupAgents(setup: AgentSetup, step: string, where: Where,
  * skill counts under its name or as `<x>:<name>`. A built-in agent the step runs as is not passed, so
  * not expected.
  */
-export function initProblem(setup: AgentSetup, init: { agents?: string[]; skills?: string[] }): string | null {
+function initProblem(setup: AgentSetup, init: { agents?: string[]; skills?: string[] }): string | null {
   const missing: string[] = [];
   if (init.agents) {
     const names = [...new Set([
@@ -235,7 +236,7 @@ export function userHome(): string {
  * A `sources: repo` session loads only project settings, so Loopstra passes these through its own
  * `--settings`: a machine that signs in with them can still start sessions.
  */
-export function userSettingsPassthrough(home: string): { apiKeyHelper?: string; env?: Record<string, string> } {
+function userSettingsPassthrough(home: string): { apiKeyHelper?: string; env?: Record<string, string> } {
   const settings = readJson(join(home, ".claude", "settings.json"));
   const out: { apiKeyHelper?: string; env?: Record<string, string> } = {};
   if (typeof settings?.apiKeyHelper === "string") out.apiKeyHelper = settings.apiKeyHelper;
@@ -262,4 +263,38 @@ export function inlineAgents(main: AgentDefinition | null, others: AgentDefiniti
   if (main) out[inlineName(main.name)] = entry(main, true);
   for (const d of others) out[inlineName(d.name)] = entry(d, false);
   return out;
+}
+
+/**
+ * The run options a step's agent setup adds to its session, for loop steps and chat steps alike:
+ * - every agent it names is read from `whereOf()` and passed inline under its Loopstra name (see
+ *   inlineAgents); the session runs as its agent with `--agent`. `whereOf` is asked only when the setup
+ *   names an agent or a skill.
+ * - `sources: repo` loads project settings only, so `baseSettings` and the user's sign-in settings
+ *   ride along in `--settings`.
+ * - a session outside `where.repo` (`cwd` differs) that uses skills also loads that folder's (`--add-dir`).
+ * - subagents' text reaches the trace; the init event must list every agent and skill (see initProblem).
+ * `models`: the model each inline agent sets, for the trace. `missing`: see setupAgents.
+ */
+export async function setupSession(
+  setup: AgentSetup, step: string, mainBranch: string, cwd: string, baseSettings: Record<string, unknown>, whereOf: () => Promise<Where>,
+): Promise<{ run: Partial<RunPhaseInput>; models: Record<string, string> } | { missing: string }> {
+  const run: Partial<RunPhaseInput> = { checkInit: (init) => initProblem(setup, init) };
+  let models: Record<string, string> = {};
+  if (setup.agent !== null || setup.subagents.length > 0 || setup.teams.length > 0 || setup.skills.length > 0) {
+    const where = await whereOf();
+    const found = await setupAgents(setup, step, where, mainBranch);
+    if ("missing" in found) return found;
+    const agents = inlineAgents(found.main, found.others);
+    if (Object.keys(agents).length) run.agents = agents;
+    if (found.main) run.agent = inlineName(found.main.name);
+    models = Object.fromEntries(Object.entries(agents).flatMap(([name, a]) => (a.model ? [[name, a.model]] : [])));
+    if (setup.skills.length && cwd !== where.repo) run.addDirs = [where.repo];
+  }
+  if (setup.sources === "repo") {
+    run.settingSources = "project";
+    run.settings = JSON.stringify({ ...baseSettings, ...userSettingsPassthrough(userHome()) });
+  }
+  if (setup.subagents.length || setup.teams.length) run.forwardSubagentText = true;
+  return { run, models };
 }

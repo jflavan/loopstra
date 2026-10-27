@@ -277,6 +277,7 @@ export class Orchestrator {
       await say(unavailable(r.reason)
         ? `I cannot reach the assistant right now (${r.detail.replace(/^the assistant is unavailable: /, "")}). Please try again in a few minutes.`
         : r.reason === "model" ? badModelNote(orchestratorModel, modelFor(cfg, orchestratorModel), "orchestrator")
+        : r.reason === "setup" ? `My setup is not complete: ${r.detail}`
         : r.reason === "budget" ? "That answer hit its spending limit before it finished. Try asking something narrower."
         : r.reason === "timeout" ? "That took too long to answer. Please try again, or ask something narrower."
         : "Something went wrong answering that. Please try again; an engineer can find the details in the trace.");

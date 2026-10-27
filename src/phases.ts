@@ -5,8 +5,8 @@ import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfTo
 import { runPhase, unavailable, type FailureReason, type PermissionMode, type RunPhaseInput } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
 import { badModelNote, STEP_KEYS, stepModel, type StepKey } from "./models";
-import { BUILTIN_AGENTS, inlineName, isEmptySetup, resolveSetup, setupLines, type AgentSetup } from "./agents";
-import { findAgent, initProblem, inlineAgents, setupAgents, userHome, userSettingsPassthrough, type AgentDefinition, type Where } from "./agent-files";
+import { BUILTIN_AGENTS, isEmptySetup, resolveSetup, setupLines, type AgentSetup } from "./agents";
+import { findAgent, setupSession, userHome, type AgentDefinition, type Where } from "./agent-files";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
 import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
@@ -585,32 +585,11 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
  * What a session's run gets from its step's setup when that is not empty, and the models of its
  * inline agents for the trace; `missing`, instead, when an agent it names is not found.
  * - `tools` and `mcp_tools` go on the allow list (see toolsFor).
- * - Every agent it names is read from main (see setupWhere), never the change's branch, and passed
- *   inline under its Loopstra name (see inlineAgents); the session runs as its agent with `--agent`.
- * - `sources: repo` loads project settings only, so the user's sign-in settings ride along in `--settings`.
- * - A session outside the snapshot of main (a worktree) also loads main's skills (`--add-dir`).
- * - Subagents' text reaches the trace; the init event must list every agent and skill (see initProblem).
+ * - Every agent it names is read from main (see setupWhere), never the change's branch; the rest is
+ *   setupSession's: inline agents, `--agent`, settings sources, `--add-dir`, subagent text, the init check.
  */
 async function setupRun(ctx: StepContext, spec: AgentPhaseSpec, setup: AgentSetup, cwd: string): Promise<{ run: Partial<RunPhaseInput>; models: Record<string, string> } | { missing: string }> {
-  const run: Partial<RunPhaseInput> = { checkInit: (init) => initProblem(setup, init) };
-  let models: Record<string, string> = {};
-  const usesMain = setup.agent !== null || setup.subagents.length > 0 || setup.teams.length > 0 || setup.skills.length > 0;
-  const where = usesMain ? await setupWhere(ctx, setup) : null;
-  if (where) {
-    const found = await setupAgents(setup, spec.name, where, ctx.cfg.main_branch);
-    if ("missing" in found) return found;
-    const agents = inlineAgents(found.main, found.others);
-    if (Object.keys(agents).length) run.agents = agents;
-    if (found.main) run.agent = inlineName(found.main.name);
-    models = Object.fromEntries(Object.entries(agents).flatMap(([name, a]) => (a.model ? [[name, a.model]] : [])));
-    if (setup.skills.length && cwd !== where.repo) run.addDirs = [where.repo];
-  }
-  if (setup.sources === "repo") {
-    run.settingSources = "project";
-    run.settings = JSON.stringify({ ...(JSON.parse(hookSettings()) as Record<string, unknown>), ...userSettingsPassthrough(userHome()) });
-  }
-  if (setup.subagents.length || setup.teams.length) run.forwardSubagentText = true;
-  return { run, models };
+  return setupSession(setup, spec.name, ctx.cfg.main_branch, cwd, JSON.parse(hookSettings()) as Record<string, unknown>, () => setupWhere(ctx, setup));
 }
 
 /**

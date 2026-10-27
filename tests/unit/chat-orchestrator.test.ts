@@ -532,6 +532,37 @@ describe("the orchestrator's guards (review fixes)", () => {
   });
 });
 
+describe("a chat step's agent setup", () => {
+  test("a chat step gets only its own tools; agents.all never reaches it", async () => {
+    const r = await chatRepo({ config: "agents:\n  all:\n    tools: [WebFetch]\n    mcp_tools: [mcp__x]\n  steps:\n    orchestrator:\n      skills: [tone]\n      mcp_tools: [mcp__docs]\n" });
+    const seen = join(r.root, ".loopstra", "fake-args.json");
+    const restore = setEnv({ LOOPSTRA_FAKE_ARGS: seen });
+    try {
+      mkdirSync(join(r.root, ".claude", "skills", "tone"), { recursive: true });
+      writeFileSync(join(r.root, ".claude", "skills", "tone", "SKILL.md"), "---\nname: tone\ndescription: how to sound\n---\nBe kind.\n");
+      await r.answer("orchestrator", 1, turn("ok"));
+      await new Orchestrator(r.root).handle(message("hi"), sink().send);
+      const call = JSON.parse(readFileSync(seen, "utf8")) as { args: string[]; prompt: string };
+      const flag = (name: string) => call.args[call.args.indexOf(name) + 1]!.split(",");
+      expect(flag("--allowedTools")).toEqual(expect.arrayContaining(["Read", "mcp__docs"]));
+      expect(flag("--allowedTools")).not.toContain("WebFetch");
+      expect(flag("--allowedTools")).not.toContain("mcp__x");
+      expect(flag("--disallowedTools")).toEqual(CHAT_DENIED);
+      expect(call.prompt.startsWith("Use these skills: `tone`.")).toBe(true);
+    } finally { restore(); r.cleanup(); }
+  });
+
+  test("a chat agent that cannot be found is answered in words", async () => {
+    const r = await chatRepo({ config: "agents:\n  steps:\n    orchestrator:\n      agent: ghost\n" });
+    try {
+      const out = sink();
+      await new Orchestrator(r.root).handle(message("hi"), out.send);
+      expect(out.sent[0]).toStartWith("My setup is not complete:");
+      expect(out.sent[0]).toContain("ghost");
+    } finally { r.cleanup(); }
+  });
+});
+
 describe("the daily budget is held, not just checked (Copilot review)", () => {
   test("running sessions count at what they hold; a phase that would go past the day's budget does not start", async () => {
     const r = await chatRepo({ config: "claude:\n  max_budget_usd: 2\nchat:\n  max_budget_usd_per_day: 3\n" });
