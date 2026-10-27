@@ -65,6 +65,34 @@ export function getsText(e: Effective, row: AgentStepRow, field: Field): string 
 }
 
 /**
+ * A list picker's summary: what the step gets for a list field, in the order the session gets it,
+ * with the names it gets from all steps or its stage marked, as the models page's picker says what a
+ * step runs on: "tone (from all steps)", "tone, house (tone from all steps)", "none". A name the step
+ * also sets itself counts as inherited: taking it off the step would leave it. The checkboxes stay
+ * the step's own list.
+ */
+export function pickSummary(row: AgentStepRow, field: Field): string {
+  const e = effective(row, field);
+  const names = Array.isArray(e.value) ? e.value : [];
+  const fromAll = listOf(row.fromAll[field]);
+  const fromStage = field === "skills" ? row.fromStage.filter((n) => !fromAll.includes(n)) : [];
+  const sources = [{ names: fromAll, where: "from all steps" }, { names: fromStage, where: "from the stage" }].filter((x) => x.names.length);
+  if (!sources.length) return listText(names);
+  if (sources.length === 1 && sources[0]!.names.length === names.length) return `${listText(names)} (${sources[0]!.where})`;
+  return `${listText(names)} (${sources.map((x) => `${x.names.join(", ")} ${x.where}`).join("; ")})`;
+}
+
+/** A text with backticked names, as parts: the names to show as code, the rest as text. A backtick without its pair stays text. */
+export function codeParts(text: string): { text: string; code: boolean }[] {
+  const parts = text.split("`");
+  if (parts.length % 2 === 0) {
+    const tail = parts.pop()!;
+    parts[parts.length - 1] += `\`${tail}`;
+  }
+  return parts.map((t, i) => ({ text: t, code: i % 2 === 1 })).filter((p) => p.text !== "");
+}
+
+/**
  * What a step's picker offers for a field: for its own agent, the library's agents but Claude Code's
  * built-ins (a step runs as an agent defined in a file), none for a step that runs as the build's;
  * for subagents (and a team's members), the library's agents and the built-ins; the teams by name;

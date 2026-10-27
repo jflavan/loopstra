@@ -17,7 +17,7 @@ import { barEnd, barGeometry, codeKey, detailKey } from "../../src/ui/change-key
 import { aboutOf, aboutPrefix, addLines } from "../../src/ui/chat";
 import { act, beforeOf, bodyFor, nextPoll, steer, steerOffer, stopChange, UNDOABLE, undoFor, unsentText } from "../../src/ui/requests";
 import { lastRanText, pendingText, pickerChoices } from "../../src/ui/settings";
-import { choicesFor, effective, fromNote, getsText, listText, parseList, withChosen } from "../../src/ui/agent-settings";
+import { choicesFor, codeParts, effective, fromNote, getsText, listText, parseList, pickSummary, withChosen } from "../../src/ui/agent-settings";
 import { follow, streamGone } from "../../src/ui/stream";
 import { feedAfter, liveRows, mergeFeed, type FeedState } from "../../src/ui/feed";
 import { sessionFacts } from "../../src/ui/session-facts";
@@ -1239,6 +1239,30 @@ describe("the Agents section of the Settings page", () => {
     const fix = row({ key: "fix", continuesBuild: true });
     expect(getsText(effective(fix, "agent", row({ key: "build", own: { agent: "lead" } })), fix, "agent")).toBe("lead (as build)");
     expect(getsText(effective(fix, "agent"), fix, "agent")).toBe("none (as build)");
+  });
+
+  test("a list picker's summary is what the step gets, the inherited names marked", () => {
+    expect(pickSummary(row({ key: "plan", fromAll: { skills: ["tone"] } }), "skills")).toBe("tone (from all steps)");
+    expect(pickSummary(row({ key: "review", own: { skills: ["house"] }, fromAll: { skills: ["tone"] } }), "skills")).toBe("tone, house (tone from all steps)");
+    expect(pickSummary(row({ key: "verify", fromStage: ["checks", "tdd"] }), "skills")).toBe("checks, tdd (from the stage)");
+    expect(pickSummary(row({ key: "build", own: { skills: ["mine"] }, fromAll: { skills: ["tone"] }, fromStage: ["tdd"] }), "skills"))
+      .toBe("tone, tdd, mine (tone from all steps; tdd from the stage)");
+    expect(pickSummary(row({ key: "plan", fromAll: { skills: ["tone"] }, fromStage: ["tdd"] }), "skills")).toBe("tone, tdd (tone from all steps; tdd from the stage)");
+    // A name the step also sets itself still comes from all steps: taking it off the step leaves it.
+    expect(pickSummary(row({ key: "plan", own: { subagents: ["lead"] }, fromAll: { subagents: ["lead"] } }), "subagents")).toBe("lead (from all steps)");
+    // Its own alone, or nothing.
+    expect(pickSummary(row({ key: "plan", own: { teams: ["crew"] } }), "teams")).toBe("crew");
+    expect(pickSummary(row({ key: "plan" }), "teams")).toBe("none");
+    // Stage skills reach only the skills; chat steps get nothing from all steps (their row says so).
+    expect(pickSummary(row({ key: "verify", fromStage: ["checks"] }), "subagents")).toBe("none");
+  });
+
+  test("codeParts reads backticked names as code, and a lone backtick as text", () => {
+    expect(codeParts("`ghost`, a subagent of review, needs `loopstra setup agents`.")).toEqual([
+      { text: "ghost", code: true }, { text: ", a subagent of review, needs ", code: false }, { text: "loopstra setup agents", code: true }, { text: ".", code: false },
+    ]);
+    expect(codeParts("no names")).toEqual([{ text: "no names", code: false }]);
+    expect(codeParts("a `b` c `d")).toEqual([{ text: "a ", code: false }, { text: "b", code: true }, { text: " c `d", code: false }]);
   });
 
   test("parseList splits, trims, dedupes and keeps order", () => {

@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 import type { AgentFilesOp, AgentsView, AgentStepRow, LibraryItemView, SourceItems } from "../../console/types";
-import { choicesFor, effective, getsText, listText, parseList, withChosen, type Field } from "../agent-settings";
+import { choicesFor, codeParts, effective, getsText, listText, parseList, pickSummary, withChosen, type Field } from "../agent-settings";
 import { listSource, sendAgentFiles, sendSetting } from "../requests";
 import { toast } from "../store";
 
@@ -65,9 +65,9 @@ export function AgentSettings(p: Props) {
       <p class="muted">Which agent each step runs as, and what it may use. Lists add up: all steps, then the stage's skills, then the step's own.</p>
       {p.failed && <p class="muted">The latest read of the agents failed; this may be out of date.</p>}
       {problems.length > 0 && (
-        <div class={`callout${problems.some((x) => x.level === "fail") ? " bad" : ""}`} role={problems.some((x) => x.level === "fail") ? "alert" : undefined}>
+        <div class={`callout${problems.some((x) => x.level === "fail") ? " bad" : ""}`} role="status">
           <ul class="agent-problems">
-            {problems.map((x, i) => <li key={i}><strong>{x.level === "fail" ? "Missing" : "Note"}</strong> {x.text}</li>)}
+            {problems.map((x, i) => <li key={i}><strong>{x.level === "fail" ? "Missing" : "Note"}</strong> <WithCode text={x.text} /></li>)}
           </ul>
         </div>
       )}
@@ -106,8 +106,9 @@ function StepRow({ w, row, build }: { w: Writes; row: AgentStepRow; build: Agent
           const path = `${base}.${field}`;
           const e = effective(row, field, build);
           const typed = field === "tools" || field === "mcp_tools";
-          // What it gets, beside the control. A picker or a select shows "none" itself; a typed field, empty, does not.
-          const gets = getsText(e, row, field);
+          // What it gets, beside the control. A list picker's summary says it itself, and a select shows
+          // "none" itself; a typed field, empty, does not.
+          const gets = LIST_FIELDS.includes(field) ? "" : getsText(e, row, field);
           const id = `ag-${row.key}-${field}`;
           return (
             <div key={field} class="agent-field">
@@ -122,7 +123,7 @@ function StepRow({ w, row, build }: { w: Writes; row: AgentStepRow; build: Agent
                 <ToolsInput w={w} id={id} row={row} field={field} path={path} />
               ) : (
                 <ListPicker w={w} id={id} label={`${FIELD_LABELS[field]} for ${row.key === "all" ? "all steps" : row.key}`} chosen={asList(row.own[field])}
-                  choices={choicesFor(w.view, field, row.key)} onSave={(list, after) => w.setting(path, list, after)} />
+                  summary={pickSummary(row, field)} choices={choicesFor(w.view, field, row.key)} onSave={(list, after) => w.setting(path, list, after)} />
               )}
               {gets && !(field === "agent" && row.continuesBuild) && (typed || gets !== "none") && <span class="muted">{gets}</span>}
               {row.chat && (field === "tools" || field === "mcp_tools") && <span class="agent-warn">{CHAT_WARNING}</span>}
@@ -164,14 +165,15 @@ function ToolsInput({ w, id, row, field, path }: { w: Writes; id: string; row: A
 }
 
 /**
- * A list picked from checkboxes in a fold: its summary is the list as it stands, Save sends the whole
- * list (an empty one removes it). `atLeastOne`: a team's members, which cannot be empty.
+ * A list picked from checkboxes in a fold: its summary is `summary` (what a step gets, inherited names
+ * marked) or else the list as it stands; the checkboxes are the list itself, and Save sends it whole
+ * (an empty one removes it). `atLeastOne`: a team's members, which cannot be empty.
  */
-function ListPicker(p: { w: Writes; id: string; label: string; chosen: string[]; choices: string[]; onSave: (list: string[], after: (ok: boolean) => void) => void; atLeastOne?: boolean }) {
+function ListPicker(p: { w: Writes; id: string; label: string; chosen: string[]; summary?: string; choices: string[]; onSave: (list: string[], after: (ok: boolean) => void) => void; atLeastOne?: boolean }) {
   return <ListPickerBody key={`${p.id}-${p.w.rev}`} {...p} />;
 }
 
-function ListPickerBody({ w, id, label, chosen, choices, onSave, atLeastOne }: Parameters<typeof ListPicker>[0]) {
+function ListPickerBody({ w, id, label, chosen, summary = listText(chosen), choices, onSave, atLeastOne }: Parameters<typeof ListPicker>[0]) {
   const [picked, setPicked] = useState<string[]>(chosen);
   const all = withChosen(choices, chosen);
   const changed = !same(picked, chosen);
@@ -182,7 +184,7 @@ function ListPickerBody({ w, id, label, chosen, choices, onSave, atLeastOne }: P
   };
   return (
     <details class="agent-pick">
-      <summary id={id} aria-label={`${label}: ${listText(chosen)}`}>{listText(chosen)}</summary>
+      <summary id={id} aria-label={`${label}: ${summary}`}>{summary}</summary>
       <div class="agent-pick-box" role="group" aria-label={label}>
         {all.length === 0 && <span class="muted">Nothing to pick yet: add agents or skills below.</span>}
         {all.length > 0 && (
@@ -367,6 +369,8 @@ function FromSource({ w, repoHas }: { w: Writes; repoHas: (kind: LibraryItemView
   const [looking, setLooking] = useState(false);
   const [found, setFound] = useState<{ url: string; listed: SourceItems } | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
+  /** The kind whose add waits for "Replace it?": some picked names replace the repo's. */
+  const [confirming, setConfirming] = useState<LibraryItemView["kind"] | null>(null);
   const look = async () => {
     const u = url.trim();
     if (!u) return;
@@ -375,15 +379,22 @@ function FromSource({ w, repoHas }: { w: Writes; repoHas: (kind: LibraryItemView
     setLooking(false);
     setFound({ url: u, listed });
     setPicked([]);
+    setConfirming(null);
   };
-  const add = (kind: LibraryItemView["kind"], names: string[]) => {
+  /** Adds the picked items of a kind. One that replaces the repo's is sent only once `replace` says so (after "Replace it?"). */
+  const add = (kind: LibraryItemView["kind"], names: string[], replace: boolean) => {
     if (!found) return;
     const existing = names.filter((n) => repoHas(kind, n));
+    if (existing.length && !replace) { setConfirming(kind); return; }
     // Replacing one names the version read of each, "absent" for one the repo does not have.
     const op: AgentFilesOp = existing.length
       ? { op: "fetch", url: found.url, kind, names, replace: true, base: Object.fromEntries(names.map((n) => [n, repoHas(kind, n)?.base ?? "absent"])) }
       : { op: "fetch", url: found.url, kind, names };
-    w.files(`files:source:${kind}`, op, (ok) => { if (ok) setPicked((was) => was.filter((x) => !x.startsWith(`${kind}:`))); });
+    w.files(`files:source:${kind}`, op, (ok) => {
+      if (!ok) return;
+      setPicked((was) => was.filter((x) => !x.startsWith(`${kind}:`)));
+      setConfirming(null);
+    });
   };
   const items = found && "items" in found.listed ? found.listed.items : [];
   return (
@@ -400,12 +411,19 @@ function FromSource({ w, repoHas }: { w: Writes; repoHas: (kind: LibraryItemView
         const these = items.filter((i) => i.kind === kind);
         if (!these.length) return null;
         const names = these.filter((i) => picked.includes(`${kind}:${i.name}`)).map((i) => i.name);
+        const existing = names.filter((n) => repoHas(kind, n));
+        const asking = confirming === kind && existing.length > 0;
         return (
           <div key={kind} class="set-group">
             {these.map((i) => (
               <label key={i.name} class="agent-check agent-source-item">
                 <input type="checkbox" checked={picked.includes(`${kind}:${i.name}`)} disabled={w.locked}
-                  onChange={(e) => { const on = e.currentTarget.checked; const k = `${kind}:${i.name}`; setPicked((was) => (on ? [...was, k] : was.filter((x) => x !== k))); }} />
+                  onChange={(e) => {
+                    const on = e.currentTarget.checked; const k = `${kind}:${i.name}`;
+                    // A changed pick asks "Replace it?" again.
+                    setPicked((was) => (on ? [...was, k] : was.filter((x) => x !== k)));
+                    setConfirming(null);
+                  }} />
                 <span class="chip">{kind}</span>
                 <code class="agent-name">{i.name}</code>
                 {repoHas(kind, i.name) && <span class="muted">replaces the repo's</span>}
@@ -413,11 +431,18 @@ function FromSource({ w, repoHas }: { w: Writes; repoHas: (kind: LibraryItemView
               </label>
             ))}
             <div class="control-form">
-              <button type="button" class="btn primary" disabled={w.locked || !names.length} onClick={() => add(kind, names)}>
+              <button type="button" class="btn primary" disabled={w.locked || !names.length || asking} onClick={() => add(kind, names, false)}>
                 Add {names.length || ""} {kind}{names.length === 1 ? "" : "s"}
               </button>
               {w.wait(`files:source:${kind}`)}
             </div>
+            {asking && (
+              <div class="control-form" role="group" aria-label="Confirm replacing">
+                <span>Replace the repo's {kind}{existing.length === 1 ? "" : "s"} {existing.join(", ")} with {existing.length === 1 ? "this one" : "these"}?</span>
+                <button type="button" class="btn primary" disabled={w.locked} onClick={() => add(kind, names, true)}>Replace {existing.length === 1 ? "it" : "them"}</button>
+                <button type="button" class="btn" onClick={() => setConfirming(null)}>Cancel</button>
+              </div>
+            )}
           </div>
         );
       })}
@@ -450,4 +475,9 @@ function NewAgent({ w }: { w: Writes }) {
       </div>
     </details>
   );
+}
+
+/** A text with its backticked names shown as code. */
+function WithCode({ text }: { text: string }) {
+  return <>{codeParts(text).map((p, i) => (p.code ? <code key={i}>{p.text}</code> : p.text))}</>;
 }
