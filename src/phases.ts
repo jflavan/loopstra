@@ -26,8 +26,7 @@ import { toolTarget } from "./tools";
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
  * configured project commands except install, and read-only git (verify, done-check). build:
- * `claude.allowed_tools` plus every configured project command, install included. Every set also
- * gets `claude.mcp_tools`.
+ * `claude.allowed_tools` plus every configured project command, install included.
  */
 type ToolSet = "read" | "read+git" | "read+commands" | "build";
 
@@ -97,9 +96,9 @@ function commandParts(cmd: string): string[] {
   return parts.map((p) => p.trim()).filter((p) => p);
 }
 
-/** Tools a session may use without asking: the set's own, then `claude.mcp_tools`, each once. Always a fresh array. */
+/** Tools a session may use without asking: the set's own, each once. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
-  return [...new Set([...setTools(ctx, set), ...ctx.cfg.claude.mcp_tools])];
+  return [...new Set([...setTools(ctx, set)])];
 }
 
 /** The tool set's own tools, before the MCP rules every set gets. */

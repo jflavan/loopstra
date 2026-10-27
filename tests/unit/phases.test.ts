@@ -174,24 +174,6 @@ describe("agentPhase tools and prompt", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("claude.mcp_tools are allowed in every tool set, judges' included, once each", async () => {
-    const { repo, ctx, trace } = await setup();
-    ctx.cfg.claude.mcp_tools = ["mcp__github", "mcp__docs__guide", "mcp__github"];
-    for (const set of ["read", "read+git", "read+commands", "build"] as const) {
-      const tools = toolsFor(ctx, set);
-      expect(tools.slice(-2)).toEqual(["mcp__github", "mcp__docs__guide"]);
-      expect(new Set(tools).size).toBe(tools.length);
-    }
-    // MCP rules are not shell commands.
-    expect(commandsFor(ctx, "read")).toBe("none");
-
-    const argsFile = join(repo.path, "args.json");
-    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
-    const recorded = await Bun.file(argsFile).json();
-    expect(recorded.args).toEqual(expect.arrayContaining(["--allowedTools", "Read,Glob,Grep,mcp__github,mcp__docs__guide"]));
-    trace.close(); repo.cleanup();
-  });
-
   test("a chained command also allows each of its parts, since Claude Code checks each part on its own", async () => {
     const { repo, ctx, trace } = await setup();
     ctx.cfg.commands.test = "dotnet test api/App.sln && npm --prefix web test || echo failed; npm --prefix e2e test";

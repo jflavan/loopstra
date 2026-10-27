@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { MODEL_REFS, stepsOf, type ModelRef, type StageName, type StepGroup } from "./models";
+import { CONTINUES_BUILD, READ_ONLY_STEPS, TEAM_WAYS, toolProblem } from "./agents";
+import { MODEL_REFS, STEP_KEYS, stepsOf, type ModelRef, type StepKey, type StageName, type StepGroup } from "./models";
 import { errorText } from "./shell";
 
 /** One thing wrong with a config: where (["claude", "timeout_minutes"]), and in words. */
@@ -102,6 +103,66 @@ const modelName = (fallback: string) => z.string().trim().min(1, "must be a mode
 /** How long the loop waits between ticks when the config does not say (or cannot be loaded). */
 export const DEFAULT_POLL_SECONDS = 60;
 
+const mcpRule = z.string().regex(/^mcp__[\w*-]+$/, "must be an MCP rule, like mcp__github or mcp__github__get_issue");
+const nameList = z.array(z.string().trim().min(1, "must be a name")).default([]);
+
+const stepAgents = z.object({
+  /** The agent this step runs as. Unset: no agent. */
+  agent: z.string().trim().min(1, "must be an agent name").optional(),
+  subagents: nameList,
+  teams: nameList,
+  skills: nameList,
+  /** Tool allow rules added to this step's own. */
+  tools: z.array(z.string()).default([]),
+  /**
+   * MCP allow rules (`mcp__<server>` or `mcp__<server>__<tool>`). No commas or spaces: the list
+   * reaches the CLI joined with commas.
+   */
+  mcp_tools: z.array(mcpRule).default([]),
+}).strict();
+
+/** One step's agent setup, or what `agents.all` gives every step. */
+export type StepAgents = z.infer<typeof stepAgents>;
+
+const agents = z.object({
+  sources: z.enum(["all", "repo"], { error: "must be all or repo" }).default("all"),
+  teams: z.record(z.string(), z.object({
+    members: z.array(z.string().trim().min(1, "must be an agent name")).min(1, "a team needs at least one member"),
+    way: z.enum(TEAM_WAYS).default("parallel"),
+  }).strict()).default({}),
+  all: stepAgents.prefault({}),
+  steps: z.record(z.string(), stepAgents).default({}),
+}).strict().superRefine((a, ctx) => {
+  const bad = (path: (string | number)[], message: string) => ctx.addIssue({ code: "custom", path, message });
+  for (const name of Object.keys(a.teams)) {
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) bad(["teams", name], "a team name is lowercase words joined by dashes");
+  }
+  const tools = (path: string[], set: StepAgents, readOnly: boolean, who: string, it: string) => {
+    set.tools.forEach((rule, i) => {
+      const problem = toolProblem(rule, readOnly);
+      if (!problem) return;
+      // A git rule is refused the same way everywhere; the rest depend on the step being read-only.
+      bad([...path, "tools", i], problem.startsWith("only Loopstra") ? problem : `${who}; ${problem.replace(" would let it ", ` would let ${it} `)}`);
+    });
+    set.teams.forEach((t, i) => {
+      if (!(t in a.teams)) bad([...path, "teams", i], `there is no team ${t} under agents.teams`);
+    });
+  };
+  tools(["all"], a.all, true, "these reach read-only steps too", "them");
+  for (const [step, set] of Object.entries(a.steps)) {
+    if (!(STEP_KEYS as readonly string[]).includes(step)) {
+      bad(["steps"], `unknown step ${step}; the steps are ${STEP_KEYS.join(", ")}`);
+      continue;
+    }
+    const key = step as StepKey;
+    if (set.agent !== undefined && CONTINUES_BUILD.has(key)) {
+      bad(["steps", step, "agent"], `${step} continues the build session and runs as the build's agent; set the agent on build`);
+    }
+    const readOnly = READ_ONLY_STEPS.has(key);
+    tools(["steps", step], set, readOnly, `${step} is read-only`, "it");
+  }
+});
+
 export const ConfigSchema = z.object({
   version: z.literal(1, { error: "must be 1" }),
   main_branch: z.string().trim().min(1, "must be a branch name, like main").default("main"),
@@ -128,12 +189,8 @@ export const ConfigSchema = z.object({
     max_budget_usd_per_day: z.number().positive().optional(),
     // Git that only reads: the runtime makes every commit, branch, and merge itself.
     allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
-    /**
-     * MCP allow rules (`mcp__<server>` or `mcp__<server>__<tool>`) added to every session's allow list,
-     * judges' included. No commas or spaces: the list reaches the CLI joined with commas.
-     */
-    mcp_tools: z.array(z.string().regex(/^mcp__[\w*-]+$/, "must be an MCP rule, like mcp__github or mcp__github__get_issue")).default([]),
   }).strict().prefault({}),
+  agents: agents.prefault({}),
   // There is no intent gate to set: a person always accepts a change by setting its status to accepted.
   gates: z.object({
     spec: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
