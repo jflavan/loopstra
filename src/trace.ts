@@ -277,7 +277,8 @@ export class Trace {
     this.db.run("INSERT INTO events (slug, phase_seq, type, ts, payload) VALUES (?, ?, ?, ?, ?)", [slug, phaseSeq, type, ts, json]);
     const dir = runDir(this.root, slug);
     mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, "events.jsonl"), JSON.stringify({ ts, slug, phase_seq: phaseSeq, type, payload: payload ?? {} }) + "\n");
+    // The row as JSON with the payload stringified once: `{"ts":…,"type":…,"payload":…}`.
+    appendFileSync(join(dir, "events.jsonl"), `${JSON.stringify({ ts, slug, phase_seq: phaseSeq, type }).slice(0, -1)},"payload":${json}}\n`);
   }
 
   /** Records a change's status and priority; a row that already has them is left alone (no write), so `updated` is when they last changed. */

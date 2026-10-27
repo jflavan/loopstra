@@ -188,6 +188,11 @@ export interface StdinWriter {
   end(): void;
 }
 
+/** `text`, cut to its last `keep` characters once it has grown to twice that (so the cut is rare). */
+function tailOf(text: string, keep: number | undefined): string {
+  return keep !== undefined && text.length > 2 * keep ? text.slice(-keep) : text;
+}
+
 interface SpawnOptions {
   cmd: string[];
   cwd: string;
@@ -213,6 +218,8 @@ interface SpawnOptions {
   graceMs?: number;
   /** Reads stdout line by line; returning true ends the call (the process then gets `graceMs` to exit before it is killed). */
   onLine?: (line: string) => boolean | void;
+  /** Keep only about the last this many characters of stdout and of stderr (the whole of each when unset). */
+  keepTail?: number;
   /** Aborting it kills the process tree at once (the result says `cancelled`). Once aborted, nothing starts (Cancelled is thrown). */
   signal?: AbortSignal;
 }
@@ -313,7 +320,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
         if (done) break;
         const text = dec.decode(value, { stream: true });
         // With onLine the lines are what matters; the whole output is kept only for a caller that reads `out`.
-        if (!o.onLine) { out += text; continue; }
+        if (!o.onLine) { out = tailOf(out + text, o.keepTail); continue; }
         buffer += text;
         let nl: number;
         while ((nl = buffer.indexOf("\n", scanFrom)) >= 0) {
@@ -329,7 +336,7 @@ export async function spawnBounded(o: SpawnOptions): Promise<SpawnResult> {
   })();
   const errDone = (async () => {
     const dec = new TextDecoder();
-    try { for await (const chunk of proc.stderr) err += dec.decode(chunk, { stream: true }); } catch { /* closed */ }
+    try { for await (const chunk of proc.stderr) err = tailOf(err + dec.decode(chunk, { stream: true }), o.keepTail); } catch { /* closed */ }
   })();
 
   // With onLine the deadline bounds the reading; otherwise it bounds the exit.
@@ -381,6 +388,12 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 }
 
 /**
+ * How much of a project command's stdout and stderr is kept: its callers read only the end (a failure's
+ * last lines), and a verbose test run of half an hour would otherwise be held whole.
+ */
+const COMMAND_OUTPUT_KEPT = 1_000_000;
+
+/**
  * Runs one configured command string through Bun's cross-platform shell (`bun exec`).
  * Never throws on non-zero exit; the exit code is the result. Past the timeout the
  * process tree is killed and the result says so. After a stop request it does not start, or it
@@ -389,7 +402,7 @@ export function commandTimeoutMs(cfg: { claude: { timeout_minutes: number } }): 
 export async function runCommand(command: string, cwd: string, opts: RunCommandOptions = {}): Promise<CommandResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitHookEnv({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal });
+  const r = await spawnBounded({ cmd: [process.execPath, "exec", command], cwd, env: withBunOnPath(withoutGitHookEnv({ ...process.env, ...opts.env })), timeoutMs, onStop: "kill", signal: opts.signal, keepTail: COMMAND_OUTPUT_KEPT });
   if (r.stopped) throw new StopRequested();
   if (r.cancelled) throw new Cancelled();
   if (!r.started) throw new Error(r.err);
