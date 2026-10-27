@@ -1099,6 +1099,27 @@ describe("settings requests", () => {
     }
   });
 
+  test("a config edit that is only staged is never committed by a setting, and stays staged", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await commitCount(r.root);
+      const before = config(r.root);
+      const staged = `${before}# a staged edit\n`;
+      writeFileSync(join(r.root, CONFIG), staged);
+      await run(["git", "add", CONFIG], r.root);
+      // The working tree is back at the last commit's text; only the index differs.
+      writeFileSync(join(r.root, CONFIG), before);
+      const q = setting(r.root, "chat.model", "strong");
+      expect(await apply(r.root)).toBe(1);
+      expect(requestState(r.root, q.id)).toMatchObject({ state: "done", ok: false, status: null, text: DIRTY });
+      expect(await commitCount(r.root)).toBe(commits);
+      expect((await run(["git", "show", `:${CONFIG}`], r.root)).out).toBe(staged);
+      expect(lastSettingsEvent(r.root)).toMatchObject({ id: q.id, result: "refused" });
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("a config that is not in the last commit (never committed, or removed from git) is never committed by a setting", async () => {
     const r = await chatRepo();
     try {

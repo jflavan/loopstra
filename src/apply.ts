@@ -400,7 +400,7 @@ const UNCOMMITTED_CONFIG = `${CONFIG_REL} has changes in the main checkout that 
  * tagged with the request's id like every request's record, so a pass killed after it landed
  * finishes it as saved. Refused with nothing committed: a path that is not a model setting, a value it
  * cannot take or a config that would not load with it (the reason is the result), a file that
- * changed since the page read it (`version`), and a file with edits in the main checkout that are
+ * changed since the page read it (`version`), and a file with edits in the main checkout (staged or not) that are
  * not committed (or one the last commit does not have), which the record would otherwise commit with it. The last two are checked inside the
  * record, under the checkout lock and after a record a kill cut short is finished (which may bring the
  * file up itself). There is no change, so the result has no status, and it is traced under _loop.
@@ -423,11 +423,14 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
   const refuse = (outcome: () => Outcome) => { refused.outcome = outcome; return false; };
   const git = new Git(root);
   await commitRecord(root, main, SETTINGS_SLUG, `${req.path} → ${settingText(req.value, "default")} by ${byWhom(req)}`, async (draft) => {
-    const args = ["diff", "--quiet", "HEAD", "--", CONFIG_REL];
-    const diff = await git.run(args, { allowFail: true });
-    // 1 is "it differs"; anything else is git failing, which must not read as either answer.
-    if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
-    if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    // The working tree against HEAD, then the index against HEAD (a change only staged).
+    for (const extra of [[], ["--cached"]]) {
+      const args = ["diff", "--quiet", ...extra, "HEAD", "--", CONFIG_REL];
+      const diff = await git.run(args, { allowFail: true });
+      // 1 is "it differs"; anything else is git failing, which must not read as either answer.
+      if (diff.code > 1) throw new GitError(args, diff.out, diff.err, diff.code);
+      if (diff.code === 1) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
+    }
     // diff says nothing of a file the last commit does not have (never committed, or removed from git):
     // the record would commit it whole, with whatever is in it. Any failure here refuses, which commits nothing.
     if ((await git.run(["cat-file", "-e", `HEAD:${CONFIG_REL}`], { allowFail: true })).code !== 0) return refuse(() => done("refused", false, UNCOMMITTED_CONFIG));
