@@ -95,6 +95,18 @@ export function checkoutKey(cwd: string): string | null {
   return realPathKey(cwd);
 }
 
+/**
+ * Runs `fn` after whatever `queues` runs under `key` (whether that ended well or not): one at a time
+ * per key. A key leaves the map once its queue runs out. Not a lock in the lock order (see lock).
+ */
+export function inTurn<T>(queues: Map<string, Promise<unknown>>, key: string, fn: () => Promise<T>): Promise<T> {
+  const next = (queues.get(key) ?? Promise.resolve()).then(fn, fn);
+  const tail = next.catch(() => {});
+  queues.set(key, tail);
+  void tail.then(() => { if (queues.get(key) === tail) queues.delete(key); });
+  return next;
+}
+
 const keyed = new Map<string, Lock>();
 
 /** The lock of this kind for the checkout with this key. */

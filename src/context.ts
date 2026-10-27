@@ -349,8 +349,7 @@ async function settle(root: string, main: string, trace?: Trace): Promise<boolea
     commit = m.commit;
     const git = new Git(root);
     const o = { allowFail: true, cleanup: true };
-    const branch = await git.run(["symbolic-ref", "-q", "--short", "HEAD"], o);
-    if (branch.code !== 0 || branch.out.trim() !== main) return false;
+    if ((await checkoutBranch(git)) !== main) return false;
     const head = (await git.run(["rev-parse", "--verify", `refs/heads/${main}`], { cleanup: true })).out.trim();
     const landed = head === m.commit || (await git.run(["merge-base", "--is-ancestor", m.commit, head], o)).code === 0;
     if (head !== m.parent && landed) {

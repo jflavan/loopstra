@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan } from "./intents";
+import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -275,7 +275,7 @@ function forLane(i: Intent, human: HumanGates, hasRemote: boolean): boolean {
  * intent.md), or an agent's question waits for their answer (`question:`; see src/questions.ts).
  */
 function waiting(i: Intent): boolean {
-  return i.file.frontmatter.hold.trim() !== "" || hasQuestion(i);
+  return isHeld(i.file.frontmatter) || hasQuestion(i);
 }
 
 /**

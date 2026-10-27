@@ -5,7 +5,7 @@ import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resu
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, landed, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { withEntry, type ConversationEntry } from "./conversation";
-import { changeExists, effectivePriority, humanGates, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { changeExists, effectivePriority, humanGates, isHeld, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
 import { Git, GitError } from "./git";
@@ -582,8 +582,8 @@ async function applyField(root: string, cfg: Config, trace: Trace, req: FieldReq
   if ("ok" in fm) return fm;
   // Its record landed in a pass the loop was killed in: finished as applied, not refused as done already.
   const done = await doneBefore(root, cfg.main_branch, req, req.slug);
-  if (!done && req.kind === "hold" && fm.hold.trim()) return refuse(trace, req, fm.status, `${req.slug} is held already; nothing changed.`);
-  if (!done && req.kind === "release" && !fm.hold.trim()) return refuse(trace, req, fm.status, `${req.slug} is not held; nothing changed.`);
+  if (!done && req.kind === "hold" && isHeld(fm)) return refuse(trace, req, fm.status, `${req.slug} is held already; nothing changed.`);
+  if (!done && req.kind === "release" && !isHeld(fm)) return refuse(trace, req, fm.status, `${req.slug} is not held; nothing changed.`);
   // A priority of null takes the line out: the change had no stated priority.
   const patch: Partial<Frontmatter> = req.kind === "priority" ? (req.priority ? { priority: req.priority } : {}) : req.kind === "hold" ? { hold: holdLine(req) } : {};
   const remove: Array<keyof Frontmatter> = req.kind === "release" ? ["hold"] : req.kind === "priority" && !req.priority ? ["priority"] : [];

@@ -1,6 +1,6 @@
 import { localUser } from "../chat/transports/shared";
 import { pollSeconds } from "../config";
-import { changeExists, readIntent } from "../intents";
+import { changeExists, isHeld, readIntent } from "../intents";
 import { sendToSession, writeChangeStop, type InboxMessage } from "../inbox";
 import { CONSOLE, submitRequest } from "../requests";
 import { Trace, type PhaseRow } from "../trace";
@@ -92,7 +92,7 @@ async function running(root: string, slug: string): Promise<PhaseRow[]> {
 async function hold(root: string, slug: string): Promise<void> {
   let fm;
   try { fm = (await readIntent(root, slug)).file.frontmatter; } catch { return; }
-  if (fm.hold.trim()) return;
+  if (isHeld(fm)) return;
   const user = localUser();
   submitRequest(root, { kind: "hold", slug, expect: fm.status, reason: STOP_REASON, by: user, byName: user, via: VIA, transport: CONSOLE, thread: "" });
 }

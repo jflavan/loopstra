@@ -4,10 +4,11 @@ import { askedWords, askText, offers, retryOptions, type RequestShape } from "..
 import { limitOf, startOfToday } from "../budget";
 import { unavailable } from "../claude";
 import { loadConfig, modelFor, type Config } from "../config";
+import { inTurn } from "../lanes";
 import { badModelNote, stepModel } from "../models";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
-import { changeExists, humanGates, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
+import { changeExists, humanGates, isHeld, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
 import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
@@ -136,13 +137,7 @@ export class Orchestrator {
    * a time per thread, so a turn and a background update never write over each other.
    */
   withThread<T>(transport: string, thread: string, fn: (t: ThreadState) => Promise<T>): Promise<T> {
-    const key = threadKey(transport, thread);
-    const prev = this.queues.get(key) ?? Promise.resolve();
-    const next = prev.catch(() => {}).then(() => fn(this.store.get(transport, thread)));
-    const tail = next.catch(() => {});
-    this.queues.set(key, tail);
-    void tail.then(() => { if (this.queues.get(key) === tail) this.queues.delete(key); });
-    return next;
+    return inTurn(this.queues, threadKey(transport, thread), () => fn(this.store.get(transport, thread)));
   }
 
   /** Resolves once nothing runs on any thread: the turns and updates in progress have ended. */
@@ -448,7 +443,7 @@ export class Orchestrator {
     try { fm = (await readIntent(this.root, slug)).file.frontmatter; } catch { await say(`${slug}'s intent.md cannot be read, so I cannot do that.`); return; }
     const offered = offers(fm, humanGates(cfg), fm.status === "blocked" ? retryOptions(trace, slug, fm.note) : []).filter((o) => o.kind === a.kind);
     if (!offered.length) {
-      const held = !!fm.hold.trim();
+      const held = isHeld(fm);
       // A hold on a held change, or a release of one not held: its status is not the reason.
       if (a.kind === "hold" && held) await say(`${slug} is held already.`);
       else if (a.kind === "release" && !held) await say(`${slug} is not held.`);

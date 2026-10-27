@@ -552,6 +552,11 @@ export function heldNote(intent: Intent): string {
 }
 
 /** True while an agent's question waits for a person (`question:` in intent.md; see src/questions.ts). */
+/** True when a person put the change on hold (its hold line says why). */
+export function isHeld(fm: Pick<Frontmatter, "hold">): boolean {
+  return fm.hold.trim() !== "";
+}
+
 export function hasQuestion(intent: Intent): boolean {
   return intent.file.frontmatter.question.trim() !== "";
 }
@@ -603,7 +608,7 @@ export function fileHolds(ordered: Intent[], files: ReadonlyMap<string, string[]
     const holder = ordered.find((h, hat) => {
       if (h === i) return false;
       const s = h.file.frontmatter.status;
-      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !h.file.frontmatter.hold.trim() && !waitingOn(h, ordered).length);
+      const holding = HOLDS_FILES.has(s) || (s === "plan-approved" && hat < at && !isHeld(h.file.frontmatter) && !waitingOn(h, ordered).length);
       return holding && (listed(h) ?? []).some((f) => mine.includes(f));
     });
     if (holder) holds.set(i.slug, holder.slug);
@@ -657,7 +662,7 @@ const NOBODY: HumanGates = humanGates(null);
  */
 export function renderQueue(ordered: Intent[], unreadable: Unreadable[] = [], human: HumanGates = NOBODY, holds: ReadonlyMap<string, string> = new Map(), questions: ReadonlyMap<string, string> = new Map()): string {
   const finished = ordered.filter((i) => ["done", "closed"].includes(i.file.frontmatter.status));
-  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || !!i.file.frontmatter.hold.trim() || hasQuestion(i)));
+  const waiting = ordered.filter((i) => !finished.includes(i) && (waitsForPerson(i, human) || isHeld(i.file.frontmatter) || hasQuestion(i)));
   const active = ordered.filter((i) => !finished.includes(i) && !waiting.includes(i));
   const cell = (s: string) => s.replace(/\s*\r?\n\s*/g, " ").replace(/\|/g, "/");
   const row = (i: Intent) => `| ${i.slug} | ${effectivePriority(i.file.frontmatter)} | ${plainStatus(i.file.frontmatter.status)} | ${cell(shownNote(i, ordered, holds.get(i.slug), questions.get(i.slug)))} |`;

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { checkoutKey, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
+import { checkoutKey, inTurn, onCheckoutKey, onRemoteKey, realPathKey } from "./lanes";
 import { lastLine, spawnBounded, withoutGitHookEnv } from "./shell";
 import { endsStepQuietly, notTheStepsFault, StopRequested } from "./stop";
 
@@ -645,12 +645,7 @@ const admin = new Map<string, Promise<unknown>>();
  * nothing runs inside it but those git commands, so it never waits for another lock.
  */
 function worktreeAdmin<T>(git: Git, fn: () => Promise<T>): Promise<T> {
-  const key = realPathKey(git.cwd);
-  const next = (admin.get(key) ?? Promise.resolve()).then(fn, fn);
-  const tail = next.catch(() => {});
-  admin.set(key, tail);
-  void tail.then(() => { if (admin.get(key) === tail) admin.delete(key); });
-  return next;
+  return inTurn(admin, realPathKey(git.cwd), fn);
 }
 
 /**

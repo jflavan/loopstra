@@ -1,5 +1,5 @@
 import type { ActionKind, Offer } from "./console/types";
-import { plainStatus, REVIEW_GATE, STATUSES, type Frontmatter, type HumanGates, type Priority, type Status } from "./intents";
+import { isHeld, plainStatus, REVIEW_GATE, STATUSES, type Frontmatter, type HumanGates, type Priority, type Status } from "./intents";
 import type { Trace } from "./trace";
 
 /*
@@ -88,7 +88,7 @@ export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Off
   if (s === "blocked") for (const to of retry) out.push({ kind: "retry", label: `Retry from ${to}`, to });
   if (s === "draft") out.push({ kind: "accept", label: "Start", to: "accepted" });
   if (!isOpen(s)) return out;
-  if (fm.hold.trim()) out.push({ kind: "release", label: "Release" });
+  if (isHeld(fm)) out.push({ kind: "release", label: "Release" });
   else if (s !== "draft" && s !== "blocked") out.push({ kind: "hold", label: "Hold" });
   out.push({ kind: "priority", label: "Priority" });
   out.push({ kind: "close", label: "Close", to: "closed", confirm: true });
