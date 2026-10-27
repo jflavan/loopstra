@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { BUILTIN_AGENTS, inlineName, resolveSetup, type AgentSetup } from "./agents";
 import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
+import type { Git } from "./git";
 import { STEP_KEYS, STEPS, type StepKey } from "./models";
 
 /** An agent definition read from a Claude Code agent file. */
@@ -21,8 +22,12 @@ export interface AgentDefinition {
   path: string;
 }
 
-/** Where to look: `repo` is a checkout of main (the step's snapshot, or the root). */
-export interface Where { repo: string; home: string; sources: "all" | "repo" }
+/**
+ * Where to look: `repo` is a checkout of main (the step's snapshot, or the root). With `commit`, the
+ * repository's agent files are read from that commit instead of `repo`'s files, so a session that may
+ * write `repo` cannot change what a later session of the step runs as; its skills are still `repo`'s.
+ */
+export interface Where { repo: string; home: string; sources: "all" | "repo"; commit?: { git: Git; sha: string } }
 
 const KEPT = new Set(["name", "description", "tools", "model", "skills", "color"]);
 const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
@@ -84,13 +89,16 @@ function pluginRoot(plugin: string, home: string): string | null {
   return null;
 }
 
+/** A place a definition may live: its file, and for the repository's, its path in the repository (with `/`). */
+type Candidate = { from: AgentDefinition["from"]; path: string; inRepo?: string };
+
 /** The places a definition may live, in lookup order, for a file under `<base>/<dir>/…`. */
-function candidates(name: string, where: Where, file: (n: string) => string, dir: string): { from: AgentDefinition["from"]; path: string }[] {
+function candidates(name: string, where: Where, file: (n: string) => string, dir: string): Candidate[] {
   const colon = name.indexOf(":");
   const local = colon < 0 ? name : null;
   if (name.includes("/") || name.includes("\\") || name.includes("..")) return [];
-  const out: { from: AgentDefinition["from"]; path: string }[] = [];
-  if (local !== null) out.push({ from: "repo", path: join(where.repo, ".claude", dir, file(local)) });
+  const out: Candidate[] = [];
+  if (local !== null) out.push({ from: "repo", path: join(where.repo, ".claude", dir, file(local)), inRepo: `.claude/${dir}/${file(local)}` });
   if (where.sources !== "all") return out;
   if (local !== null) out.push({ from: "personal", path: join(where.home, ".claude", dir, file(local)) });
   else {
@@ -100,18 +108,30 @@ function candidates(name: string, where: Where, file: (n: string) => string, dir
   return out;
 }
 
-/** The agent definition for a name (`agent` or `plugin:agent`), or null when none is found. Built-in agents are the caller's to skip. */
+/**
+ * The agent definition for a name (`agent` or `plugin:agent`), or null when none is found. Built-in
+ * agents are the caller's to skip. A repository's file is read from `where.commit` when there is one
+ * (its path is then `<commit>:<path>`), else from `where.repo`.
+ */
 export async function findAgent(name: string, where: Where): Promise<AgentDefinition | null> {
   for (const c of candidates(name, where, (n) => `${n}.md`, "agents")) {
-    const text = readText(c.path);
-    if (text !== null) return parseAgentFile(name, text, c.from, c.path);
+    const commit = c.inRepo !== undefined ? where.commit : undefined;
+    const path = commit ? `${commit.sha}:${c.inRepo}` : c.path;
+    const text = commit ? await committedText(commit.git, path) : readText(path);
+    if (text !== null) return parseAgentFile(name, text, c.from, path);
   }
   return null;
 }
 
+/** A file of a commit (`<commit>:<path>`), or null when the commit has no such file. */
+async function committedText(git: Git, object: string): Promise<string | null> {
+  const r = await git.run(["cat-file", "blob", object], { allowFail: true });
+  return r.code === 0 ? r.out : null;
+}
+
 /** Where a skill (`skill` or `plugin:skill`) lives, or null when it is not found. */
 export async function findSkill(name: string, where: Where): Promise<AgentDefinition["from"] | null> {
-  for (const c of candidates(name, where, (n) => join(n, "SKILL.md"), "skills")) {
+  for (const c of candidates(name, where, (n) => `${n}/SKILL.md`, "skills")) {
     if (readText(c.path) !== null) return c.from;
   }
   return null;
@@ -247,6 +267,15 @@ function userSettingsPassthrough(home: string): { apiKeyHelper?: string; env?: R
   return out;
 }
 
+/**
+ * An absolute path as Claude Code's permission rules write one: `//` and the path with forward
+ * slashes. Claude Code matches Windows paths in POSIX form, a drive as a folder (`C:\x` is `/c/x`).
+ */
+export function pathRule(path: string): string {
+  const posix = path.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
+  return `//${posix.replace(/^\/+/, "")}`;
+}
+
 /** One entry of the `--agents` JSON. */
 export interface InlineAgent { description: string; prompt: string; tools?: string[]; model?: string; skills?: string[] }
 
@@ -266,6 +295,18 @@ export function inlineAgents(main: AgentDefinition | null, others: AgentDefiniti
 }
 
 /**
+ * What a step's agent setup sets on its session's run: never what the loop or chat own (the allow and
+ * deny lists, the permission mode, the folder, the environment), so theirs always stand.
+ */
+export type SetupRunOptions = Partial<Pick<RunPhaseInput, "agents" | "agent" | "settingSources" | "settings" | "addDirs" | "forwardSubagentText" | "checkInit">>;
+
+/** Deny rules that keep a session from editing anything under `dir` (an added dir it may only read). */
+function noEditsUnder(dir: string): string[] {
+  const under = `${pathRule(dir)}/**`;
+  return ["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(${under})`);
+}
+
+/**
  * The run options a step's agent setup adds to its session, for loop steps and chat steps alike:
  * - every agent it names is read from `whereOf()` and passed inline under its Loopstra name (see
  *   inlineAgents); the session runs as its agent with `--agent`. `whereOf` is asked only when the setup
@@ -273,13 +314,16 @@ export function inlineAgents(main: AgentDefinition | null, others: AgentDefiniti
  * - `sources: repo` loads project settings only, so `baseSettings` and the user's sign-in settings
  *   ride along in `--settings`.
  * - a session outside `where.repo` (`cwd` differs) that uses skills also loads that folder's (`--add-dir`).
+ *   `--add-dir` would also let it edit there, so `deny` has the rules that stop it: the caller adds them
+ *   to its own deny list.
  * - subagents' text reaches the trace; the init event must list every agent and skill (see initProblem).
  * `models`: the model each inline agent sets, for the trace. `missing`: see setupAgents.
  */
 export async function setupSession(
   setup: AgentSetup, step: string, mainBranch: string, cwd: string, baseSettings: Record<string, unknown>, whereOf: () => Promise<Where>,
-): Promise<{ run: Partial<RunPhaseInput>; models: Record<string, string> } | { missing: string }> {
-  const run: Partial<RunPhaseInput> = { checkInit: (init) => initProblem(setup, init) };
+): Promise<{ run: SetupRunOptions; deny: string[]; models: Record<string, string> } | { missing: string }> {
+  const run: SetupRunOptions = { checkInit: (init) => initProblem(setup, init) };
+  let deny: string[] = [];
   let models: Record<string, string> = {};
   if (setup.agent !== null || setup.subagents.length > 0 || setup.teams.length > 0 || setup.skills.length > 0) {
     const where = await whereOf();
@@ -289,12 +333,15 @@ export async function setupSession(
     if (Object.keys(agents).length) run.agents = agents;
     if (found.main) run.agent = inlineName(found.main.name);
     models = Object.fromEntries(Object.entries(agents).flatMap(([name, a]) => (a.model ? [[name, a.model]] : [])));
-    if (setup.skills.length && cwd !== where.repo) run.addDirs = [where.repo];
+    if (setup.skills.length && cwd !== where.repo) {
+      run.addDirs = [where.repo];
+      deny = noEditsUnder(where.repo);
+    }
   }
   if (setup.sources === "repo") {
     run.settingSources = "project";
     run.settings = JSON.stringify({ ...baseSettings, ...userSettingsPassthrough(userHome()) });
   }
   if (setup.subagents.length || setup.teams.length) run.forwardSubagentText = true;
-  return { run, models };
+  return { run, deny, models };
 }

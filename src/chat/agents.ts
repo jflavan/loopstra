@@ -158,6 +158,9 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
     trace: o.trace, slug: CHAT_SLUG, seq: held.seq, capUsd: held.heldUsd, ref,
     dir: join(runDir(o.root, CHAT_SLUG), "phases", `${held.seq}-${o.name}`),
     run: {
+      // The step's agent setup first, so chat's own allow and deny lists, folder and environment always stand.
+      // It never adds a dir (chat runs in the main checkout its agents come from), so it has no deny rules.
+      ...extra.run,
       cwd: o.root,
       prompt: setupLines(setup, await describe(setup, where)) + o.prompt,
       schema: jsonSchemaOf(o.schema),
@@ -166,7 +169,6 @@ export async function runChatAgent<T>(o: ChatAgentInput<T>): Promise<ChatAgentRe
       permissionMode: "default",
       allowedTools: [...CHAT_TOOLS, ...setup.tools, ...setup.mcpTools],
       disallowedTools: CHAT_DENIED,
-      ...extra.run,
       timeoutMs: o.cfg.claude.timeout_minutes * 60_000,
       maxBudgetUsd: held.heldUsd,
       resume: o.resume ?? undefined,

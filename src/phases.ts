@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHAT_SLUG, limitOf, MIN_SESSION_USD, roomBeside, staleBefore, startOfToday } from "./budget";
-import { runPhase, unavailable, type FailureReason, type PermissionMode, type RunPhaseInput } from "./claude";
+import { runPhase, unavailable, type FailureReason, type PermissionMode } from "./claude";
 import { modelFor, type Config, type ModelRef } from "./config";
 import { badModelNote, STEP_KEYS, stepModel, type StepKey } from "./models";
 import { BUILTIN_AGENTS, isEmptySetup, resolveSetup, setupLines, type AgentSetup } from "./agents";
@@ -206,9 +206,14 @@ async function setupOf(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "sk
   return { setup: resolveSetup(agents, spec.name, skills), applies: !isEmptySetup(resolveSetup(agents, spec.name, [])) };
 }
 
-/** Where a step's named agents and skills are looked for: the step's snapshot of main, then (with `sources: all`) this machine. */
+/**
+ * Where a step's named agents and skills are looked for: main as the step reads it, then (with
+ * `sources: all`) this machine. The repository's agent files are read from the step's commit of main
+ * (see StepContext.readCommit), never a checkout: a session that may write the snapshot (an added dir)
+ * could otherwise rewrite the agent a later session of the step runs as. Its skills are the snapshot's.
+ */
 async function setupWhere(ctx: StepContext, setup: AgentSetup): Promise<Where> {
-  return { repo: await ctx.snapshot(), home: userHome(), sources: setup.sources };
+  return { repo: await ctx.snapshot(), home: userHome(), sources: setup.sources, commit: { git: ctx.git, sha: await ctx.readCommit() } };
 }
 
 /** Each subagent's and team member's description, from its file (see setupWhere), for the prompt's lines; null when it has none. */
@@ -523,7 +528,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       model: model.name,
       permissionMode: spec.permissionMode,
       allowedTools: toolsFor(ctx, spec.tools, setup),
-      disallowedTools: disallowedFor(spec.tools),
+      // With the setup's: no edits in main's snapshot when the session may read it as an added dir.
+      disallowedTools: [...disallowedFor(spec.tools), ...(extra?.deny ?? [])],
       // The test-protection hook, from the installed package; it acts only in a fix session.
       settings: hookSettings(),
       // The step's agent setup (see setupRun), which may also replace the settings.
@@ -586,9 +592,10 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
  * inline agents for the trace; `missing`, instead, when an agent it names is not found.
  * - `tools` and `mcp_tools` go on the allow list (see toolsFor).
  * - Every agent it names is read from main (see setupWhere), never the change's branch; the rest is
- *   setupSession's: inline agents, `--agent`, settings sources, `--add-dir`, subagent text, the init check.
+ *   setupSession's: inline agents, `--agent`, settings sources, `--add-dir` (and the rules that keep the
+ *   session from editing it), subagent text, the init check.
  */
-async function setupRun(ctx: StepContext, spec: AgentPhaseSpec, setup: AgentSetup, cwd: string): Promise<{ run: Partial<RunPhaseInput>; models: Record<string, string> } | { missing: string }> {
+async function setupRun(ctx: StepContext, spec: AgentPhaseSpec, setup: AgentSetup, cwd: string): ReturnType<typeof setupSession> {
   return setupSession(setup, spec.name, ctx.cfg.main_branch, cwd, JSON.parse(hookSettings()) as Record<string, unknown>, () => setupWhere(ctx, setup));
 }
 

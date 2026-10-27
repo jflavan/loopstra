@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { checkAgentSetup, findAgent, findSkill, inlineAgents, parseAgentFile } from "../../src/agent-files";
+import { checkAgentSetup, findAgent, findSkill, inlineAgents, parseAgentFile, pathRule } from "../../src/agent-files";
 import { validateConfig } from "../../src/config";
 import { tempDir, write } from "../helpers";
 
@@ -84,4 +84,9 @@ test("checkAgentSetup: missing agents fail, machine-only ones and unknown skills
   ]);
   expect(p[2]!.text).toContain("Add it with `loopstra setup agents`");
   t.cleanup();
+});
+
+test("pathRule writes an absolute path as Claude Code's rules do: two slashes, forward slashes, a drive as a folder", () => {
+  expect(pathRule("/home/me/r/.loopstra/snapshots/x")).toBe("//home/me/r/.loopstra/snapshots/x");
+  expect(pathRule("C:\\Users\\me\\r\\.loopstra\\snapshots\\x")).toBe("//c/Users/me/r/.loopstra/snapshots/x");
 });
