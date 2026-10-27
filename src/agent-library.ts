@@ -23,7 +23,8 @@ export interface FileWrite { path: string; content: string | null }
 const NAME = /^[a-z0-9][a-z0-9-]*$/;
 const MAX_FILES = 200;
 const MAX_BYTES = 5 * 1024 * 1024;
-const CLONE_TIMEOUT_MS = 120_000;
+/** How long a clone may take before it is stopped. */
+export const CLONE_TIMEOUT_MS = 120_000;
 const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
 /**

@@ -16,7 +16,7 @@ import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { oneLine } from "./text";
 import { checkedPath, repoPath } from "./agent-library";
-import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS } from "./settings";
+import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
@@ -448,9 +448,6 @@ async function applySettings(root: string, cfg: Config, trace: Trace, req: Setti
 function agentFilesLanded(root: string, main: string, req: AgentFilesRequest): Promise<boolean> {
   return landed(root, main, req.id, SETTINGS_SLUG, req.at, req.writes.map((w) => w.path));
 }
-
-/** An agent-files request's refusal when its files have changes in the main checkout that are not committed. */
-const UNCOMMITTED_FILES = "Some of those files have changes in the main checkout that are not committed (or are not in git yet). Commit or discard them first, then save again.";
 
 const MAX_FILES_BYTES = 5 * 1024 * 1024;
 

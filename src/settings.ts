@@ -18,6 +18,9 @@ export const SETTINGS_SLUG = "_settings";
 /** Why a settings request is refused when the file is not the one the page read (the console and the loop both check). */
 export const STALE_SETTINGS = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";
 
+/** Why an agent-files request is refused when its files have changes in the main checkout that are not committed (the console and the loop both check). */
+export const UNCOMMITTED_FILES = "Some of those files have changes in the main checkout that are not committed (or are not in git yet). Commit or discard them first, then save again.";
+
 /**
  * The file's version, as the page and the applier compare it: the sha256 (hex) of its text, less one
  * leading byte order mark. The page reads the file as Bun.file(...).text(), which drops the mark, and

@@ -5,13 +5,14 @@ import { loadConfig, type Config } from "../config";
 import { SLUG } from "../intents";
 import { Trace } from "../trace";
 import { eventsPage } from "./describe";
+import { agentFilesAction, agentsView, SOURCE_IDLE_SECONDS, sourceItems } from "./agent-settings";
 import { streamAgents } from "./agents";
 import { changeDetail, spendView } from "./detail";
 import { changeDiff } from "./diff";
 import { settingsView } from "./settings";
 import { resolveDocument, resolveRunFile } from "./files";
 import { Hub, type Send } from "./hub";
-import { decode, json, NO_STORE, plain } from "./routes";
+import { decode, json, jsonWrite, NO_STORE, ownSite, plain, refuse } from "./routes";
 import { streamSession } from "./session";
 import { steerRoutes } from "./steer";
 import { resumePoint } from "./transcript";
@@ -39,8 +40,8 @@ export const JSON_IDLE_SECONDS = 60;
  * on the screens' paths (the page's router knows the same ones). They are the same static code for
  * everyone and never reach `fetch`, so only the data routes check the host. Its only writes are
  * `/api/chat` (when `chat` is given, see DashboardTransport), `/api/requests` and `/api/loop` (see
- * writes.ts), and steering a running session (see steer.ts); each needs the page's own Origin (see
- * jsonWrite in routes.ts).
+ * writes.ts), steering a running session (see steer.ts) and `/api/agents/files` (see
+ * agent-settings.ts); each needs the page's own Origin (see jsonWrite in routes.ts).
  */
 export function serveConsole(root: string, port = 4646, opts: { chat?: DashboardTransport; hub?: Hub } = {}): ReturnType<typeof Bun.serve> {
   const hub = opts.hub ?? new Hub(root, { chat: !!opts.chat });
@@ -55,7 +56,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
       const url = new URL(req.url);
       if (!LOCAL_HOSTS.has(url.hostname)) return plain("Forbidden", 403);
       if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
-      const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url));
+      const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url)) ?? (await agentFiles(root, hub, req, url, server));
       if (written) return written;
       if (req.method !== "GET" && req.method !== "HEAD") return plain("Read only", 405);
       return (await read(root, hub, req, url, server)) ?? plain("Not found", 404);
@@ -69,7 +70,21 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
 }
 
 /**
- * The data routes: `/api/stream`, `/api/agents/stream`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
+ * `/api/agents/files`: an operation on the repository's agents and skills, left for the loop as an
+ * `agent-files` request. A fetch clones, so it may take as long as a clone may. Null for any other path.
+ */
+async function agentFiles(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
+  if (url.pathname !== "/api/agents/files") return null;
+  server.timeout(req, SOURCE_IDLE_SECONDS);
+  return jsonWrite(req, url, async (body) => {
+    const answer = await agentFilesAction(root, body);
+    hub.poke();
+    return answer;
+  });
+}
+
+/**
+ * The data routes: `/api/stream`, `/api/agents/stream`, `/api/agents` and `/api/agents/source`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
  * `/api/events`, `/api/spend`, `/api/settings`, run files under `/files/`, a change's documents under `/docs/`. Null: not found.
  * Exported so a test can pass a fake `Timeouts`.
  */
@@ -85,6 +100,20 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
     });
   }
   if (path === "/api/agents/stream") return sse(server, req, (send) => streamAgents(root, hub, send));
+  if (path === "/api/agents") {
+    server.timeout(req, JSON_IDLE_SECONDS);
+    return json(await agentsView(root));
+  }
+  if (path === "/api/agents/source") {
+    // It clones: only the page's own GET may start one (a HEAD, or another site's link or image, may not).
+    if (req.method !== "GET") return plain("Method not allowed", 405);
+    if (!ownSite(req, url)) return plain("Forbidden", 403);
+    const source = url.searchParams.get("url")?.trim();
+    if (!source) return refuse("Say which git repository or folder to look in.", 400);
+    server.timeout(req, SOURCE_IDLE_SECONDS);
+    const listed = await sourceItems(source);
+    return "error" in listed ? refuse(listed.error) : json(listed);
+  }
   const change = path.match(/^\/api\/changes\/([^/]+)(\/diff)?$/);
   if (change) {
     const slug = decode(change[1]!);
