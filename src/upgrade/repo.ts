@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { configPath, DEFAULT_POLL_SECONDS, NOT_SET_UP, parseConfig } from "../config";
 import { writeFileAtomic } from "../fsutil";
-import { Git, GitError } from "../git";
+import { Git, GitError, statusPaths } from "../git";
 import { runningLoopPid } from "../heartbeat";
 import { onCheckout } from "../lanes";
 import { stampVersion } from "../package";
@@ -67,22 +67,6 @@ export interface RepoResult {
   /** The files were written (also when the commit then failed). */
   written: boolean;
   committed: boolean;
-}
-
-/**
- * The paths `git status --porcelain -z` lists: one NUL-ended entry per path ("XY path"), and a rename
- * or copy followed by its original path as a further entry. Both paths of a rename are named.
- */
-export function statusPaths(out: string): string[] {
-  const entries = out.split("\0");
-  const paths: string[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i]!;
-    if (e.length < 4) continue;
-    paths.push(e.slice(3));
-    if (/[RC]/.test(e.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]!);
-  }
-  return [...new Set(paths)];
 }
 
 /** The config's main branch and poll interval, read leniently: a config that only loads after a migration still names them. */

@@ -5,6 +5,9 @@ import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, Reconnector } f
 
 /** The Slack Web API; tests point it at a stub server. */
 export const SLACK_API_ENV = "LOOPSTRA_SLACK_API";
+
+/** Slack's Web API: LOOPSTRA_SLACK_API when set (a test's fake), else Slack's own. */
+export const slackApi = (env: Record<string, string | undefined>): string => env[SLACK_API_ENV] ?? "https://slack.com/api";
 const SLACK_MAX = 3500;
 /**
  * After this long without a frame on a Socket Mode connection, it is pinged; one that does not answer
@@ -29,8 +32,8 @@ export function noBroadcast(text: string, keep: readonly string[] = [], nameOf: 
   return text.replace(/<!/g, "&lt;!").replace(/<@([A-Z0-9]+)(\|[^>]*)?>/g, (m, id: string) => (keep.includes(id) ? m : `@${(nameOf(id) ?? id).replace(/</g, "&lt;")}`));
 }
 
-/** Errors from apps.connections.open that mean the app-level token is no good until a person replaces it. */
-const TOKEN_REFUSED = new Set(["invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"]);
+/** Errors that mean a token is no good until a person replaces it. */
+export const TOKEN_REFUSED = new Set(["invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"]);
 
 /** A Web API method Slack answered with ok: false, and its error code. */
 class SlackApiError extends Error {
@@ -66,7 +69,7 @@ export class SlackTransport implements Transport {
   private refusedCode: string | null = null;
 
   constructor(private readonly cfg: SlackTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void; quietMs?: number; pongMs?: number }) {
-    this.api = (opts.env ?? process.env)[SLACK_API_ENV] ?? "https://slack.com/api";
+    this.api = slackApi(opts.env ?? process.env);
     this.reconnect = new Reconnector(() => this.connect(), (e) => this.log(`Slack connection failed, retrying: ${e}`));
     this.access = new LiveAccess(opts.root, "slack", cfg, (l) => this.log(l));
   }

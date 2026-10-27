@@ -634,6 +634,22 @@ export async function addDetachedWorktree(git: Git, dir: string, ref: string): P
   await worktreeAdmin(git, () => git.run(["worktree", "add", "--detach", dir, ref]));
 }
 
+/**
+ * The paths `git status --porcelain -z` lists: one NUL-ended entry per path ("XY path"), and a rename
+ * or copy followed by its original path as a further entry. Both paths of a rename are named.
+ */
+export function statusPaths(out: string): string[] {
+  const entries = out.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    if (e.length < 4) continue;
+    paths.push(e.slice(3));
+    if (/[RC]/.test(e.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]!);
+  }
+  return [...new Set(paths)];
+}
+
 /** The worktree administration in flight, by repository (see worktreeAdmin). */
 const admin = new Map<string, Promise<unknown>>();
 

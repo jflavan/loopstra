@@ -10,6 +10,11 @@ import { chunked, fetchJson, fromPerson, LiveAccess, openSocket, prefixOf, Recon
 
 /** The Discord REST API; tests point it at a stub server (which also hands out the gateway address). */
 export const DISCORD_API_ENV = "LOOPSTRA_DISCORD_API";
+
+/** Discord's REST API: LOOPSTRA_DISCORD_API when set (a test's fake), else Discord's own. */
+export const discordApi = (env: Record<string, string | undefined>): string => env[DISCORD_API_ENV] ?? "https://discord.com/api/v10";
+/** The user agent Discord asks every bot to send. */
+export const DISCORD_USER_AGENT = "DiscordBot (loopstra, 1)";
 const DISCORD_MAX = 1900;
 /** GUILD_MESSAGES and MESSAGE_CONTENT (privileged: turn it on for the bot in the developer portal). */
 export const DISCORD_INTENTS = (1 << 9) | (1 << 15);
@@ -62,7 +67,7 @@ export class DiscordTransport implements Transport {
   private refusedCode: number | string | null = null;
 
   constructor(private readonly cfg: DiscordTransportConfig, private readonly opts: { root: string; env?: Record<string, string | undefined>; log?: (line: string) => void }) {
-    this.api = (opts.env ?? process.env)[DISCORD_API_ENV] ?? "https://discord.com/api/v10";
+    this.api = discordApi(opts.env ?? process.env);
     this.reconnect = new Reconnector(() => this.connect(), (e) => this.log(`Discord connection failed, retrying: ${e}`));
     this.access = new LiveAccess(opts.root, "discord", cfg, (l) => this.log(l));
   }
@@ -91,7 +96,7 @@ export class DiscordTransport implements Transport {
   async call(method: "GET" | "POST", path: string, body?: unknown): Promise<Record<string, unknown>> {
     const { res, text, json } = await fetchJson(`${this.api}${path}`, {
       method,
-      headers: { authorization: `Bot ${this.token}`, "content-type": "application/json", "user-agent": "DiscordBot (loopstra, 1)" },
+      headers: { authorization: `Bot ${this.token}`, "content-type": "application/json", "user-agent": DISCORD_USER_AGENT },
       body: body === undefined ? undefined : JSON.stringify(body),
     }, (_r, j) => j?.retry_after);
     if (!res.ok) throw new DiscordHttpError(`Discord ${method} ${path} failed: HTTP ${res.status} ${text.slice(0, 200)}`, res.status);

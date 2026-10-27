@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config";
-import { Git, GitError, literalPathspecs, pathChunks, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, withDetachedWorktree } from "./git";
+import { Git, GitError, literalPathspecs, pathChunks, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL, statusPaths, withDetachedWorktree } from "./git";
 import { onCheckout, oneSync } from "./lanes";
 import { loopstraDir } from "./paths";
 import { errorText, lastLine } from "./shell";
@@ -99,10 +99,10 @@ async function sync(git: Git, main: string, trace: Trace): Promise<SyncOutcome |
 async function checkoutReady(git: Git, main: string): Promise<SyncOutcome | null> {
   const branch = await git.currentBranch();
   if (branch !== main) return { result: "waiting", text: SYNC_TEXT.offMain, detail: { what: "skipped: the main checkout is not on main", branch } };
-  const status = await git.run(["status", "--porcelain", "--untracked-files=no"], true);
+  const status = await git.run(["status", "--porcelain", "-z", "--untracked-files=no"], true);
   if (status.code !== 0) return { result: "fail", text: SYNC_TEXT.unexpected, detail: { what: "skipped: git status failed", error: lastLine(status.err) || `exit ${status.code}` } };
-  const changed = status.out.split(/\r?\n/).filter((l) => l.trim());
-  if (changed.some((l) => l.slice(3) !== QUEUE)) return { result: "waiting", text: SYNC_TEXT.unsaved, detail: { what: "skipped: the main checkout has changes to tracked files" } };
+  const changed = statusPaths(status.out);
+  if (changed.some((p) => p !== QUEUE)) return { result: "waiting", text: SYNC_TEXT.unsaved, detail: { what: "skipped: the main checkout has changes to tracked files" } };
   if (changed.length) await git.run(["checkout", "--", QUEUE], true);
   return null;
 }
