@@ -125,6 +125,11 @@ export const ConfigSchema = z.object({
     max_budget_usd_per_day: z.number().positive().optional(),
     // Git that only reads: the runtime makes every commit, branch, and merge itself.
     allowed_tools: z.array(z.string()).default(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]),
+    /**
+     * MCP allow rules (`mcp__<server>` or `mcp__<server>__<tool>`) added to every session's allow list,
+     * judges' included. No commas or spaces: the list reaches the CLI joined with commas.
+     */
+    mcp_tools: z.array(z.string().regex(/^mcp__[\w*-]+$/, "must be an MCP rule, like mcp__github or mcp__github__get_issue")).default([]),
   }).strict().prefault({}),
   // There is no intent gate to set: a person always accepts a change by setting its status to accepted.
   gates: z.object({

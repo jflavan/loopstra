@@ -20,6 +20,7 @@ describe("loadConfig", () => {
     expect(cfg.gates.spec.agent).toBe(true);
     // Build sessions may read git history but not change it: the runtime owns commits and branches.
     expect(cfg.claude.allowed_tools).toEqual(["Read", "Edit", "Write", "Glob", "Grep", "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]);
+    expect(cfg.claude.mcp_tools).toEqual([]);
     expect(cfg.stages.build.max_fix_loops).toBe(3);
     expect(cfg.claude.models.cheap).toBe("haiku");
     // The cheap model often ends a verify session without calling the structured-output tool (#7).
@@ -142,6 +143,12 @@ describe("loadConfig", () => {
       "commands.run: must be a command, or the line removed", "commands.install: must be a command, or the line removed",
     ]);
     expect(problems({ commands: { test: "bun test" } })).toEqual(["version: must be 1"]);
+    expect(problems({ ...ok, claude: { mcp_tools: ["mcp__github", "mcp__docs__*", "Bash(rm *)", "mcp__", "mcp__x,Bash"] } })).toEqual([
+      "claude.mcp_tools.2: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+      "claude.mcp_tools.3: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+      // The list reaches the CLI joined with commas: this one would allow Bash.
+      "claude.mcp_tools.4: must be an MCP rule, like mcp__github or mcp__github__get_issue",
+    ]);
     expect(problems({ ...ok, version: 2 })).toEqual(["version: must be 1"]);
     const id = "must be a user or channel id; put long numeric ids in quotes";
     expect(problems({ ...ok, chat: { transports: { slack: {} } } })).toEqual([`chat.transports.slack.channel: ${id}`]);

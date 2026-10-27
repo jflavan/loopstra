@@ -18,6 +18,9 @@ claude:
   # What a build session may do without asking. The commands above (test, lint, build, run, install)
   # are always added. Git stays read-only: Loopstra makes every commit itself. The default:
   # allowed_tools: [Read, Edit, Write, Glob, Grep, "Bash(bun *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git status *)"]
+  # MCP tools every session may use, read-only judges included (none by default; an MCP call
+  # without a rule here is refused). mcp__<server> allows all of a server's tools:
+  # mcp_tools: [mcp__github, "mcp__claude_ai_Claude_Docs__guide"]
   # Spending limits, in US dollars, are off unless set (`loopstra setup budgets` sets them in minutes or dollars):
   #   max_budget_usd: what one session may spend
   #   max_budget_usd_per_day: what the loop's sessions may spend together in a day

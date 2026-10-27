@@ -26,7 +26,8 @@ import { toolTarget } from "./tools";
 /**
  * read: look only. read+git: look, plus read-only git (the reviewer). read+commands: look, the
  * configured project commands except install, and read-only git (verify, done-check). build:
- * `claude.allowed_tools` plus every configured project command, install included.
+ * `claude.allowed_tools` plus every configured project command, install included. Every set also
+ * gets `claude.mcp_tools`.
  */
 type ToolSet = "read" | "read+git" | "read+commands" | "build";
 
@@ -96,8 +97,13 @@ function commandParts(cmd: string): string[] {
   return parts.map((p) => p.trim()).filter((p) => p);
 }
 
-/** Tools a session may use without asking. Always a fresh array. */
+/** Tools a session may use without asking: the set's own, then `claude.mcp_tools`, each once. Always a fresh array. */
 export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
+  return [...new Set([...setTools(ctx, set), ...ctx.cfg.claude.mcp_tools])];
+}
+
+/** The tool set's own tools, before the MCP rules every set gets. */
+function setTools(ctx: StepContext, set: ToolSet): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
   const { test, lint, build, run, install } = ctx.cfg.commands;
@@ -106,9 +112,9 @@ export function toolsFor(ctx: StepContext, set: ToolSet): string[] {
   const rules = (cmds: Array<string | undefined>) =>
     cmds.filter((c): c is string => !!c).flatMap((c) => [...new Set([c, ...commandParts(c)])]).map((c) => `Bash(${c} *)`);
   // A build session runs the project's own commands (tests, install) whatever the allow list says.
-  if (set === "build") return [...new Set([...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])])];
+  if (set === "build") return [...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])];
   // The install command is not for judges.
-  return [...new Set([...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ])];
+  return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
 }
 
 /**
