@@ -29,7 +29,7 @@ export interface AgentDefinition {
  */
 export interface Where { repo: string; home: string; sources: "all" | "repo"; commit?: { git: Git; sha: string } }
 
-const KEPT = new Set(["name", "description", "tools", "model", "skills", "color"]);
+const KEPT = new Set(["name", "description", "tools", "model", "skills", "color", "source"]);
 const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
 /** A comma-separated string or a list as a list of names; null when absent or empty. */
@@ -77,17 +77,23 @@ function readJson(path: string): Record<string, unknown> | null {
   } catch { return null; }
 }
 
-/** The install folder of an installed and enabled plugin, by its short name (before the `@`). */
-function pluginRoot(plugin: string, home: string): string | null {
+/** The installed and enabled plugins: the short name (before the `@`) and the install folder of each. */
+export function enabledPlugins(home: string): Array<{ plugin: string; installPath: string }> {
   const installed = readJson(join(home, ".claude/plugins/installed_plugins.json"))?.plugins;
   const enabled = readJson(join(home, ".claude/settings.json"))?.enabledPlugins;
-  if (!installed || typeof installed !== "object" || !enabled || typeof enabled !== "object") return null;
+  if (!installed || typeof installed !== "object" || !enabled || typeof enabled !== "object") return [];
+  const out: Array<{ plugin: string; installPath: string }> = [];
   for (const [key, entries] of Object.entries(installed)) {
-    if (!key.startsWith(`${plugin}@`) || (enabled as Record<string, unknown>)[key] !== true || !Array.isArray(entries)) continue;
+    if (!key.includes("@") || (enabled as Record<string, unknown>)[key] !== true || !Array.isArray(entries)) continue;
     const path = (entries[0] as { installPath?: unknown } | undefined)?.installPath;
-    if (typeof path === "string") return path;
+    if (typeof path === "string") out.push({ plugin: key.slice(0, key.indexOf("@")), installPath: path });
   }
-  return null;
+  return out;
+}
+
+/** The install folder of an installed and enabled plugin, by its short name (before the `@`). */
+function pluginRoot(plugin: string, home: string): string | null {
+  return enabledPlugins(home).find((p) => p.plugin === plugin)?.installPath ?? null;
 }
 
 /** A place a definition may live: its file, and for the repository's, its path in the repository (with `/`). */

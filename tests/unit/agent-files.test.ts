@@ -131,3 +131,7 @@ test("a plugin's agent or skill that is not found says to enable the plugin", as
   for (const p of await checkAgentSetup(repoOnly, { repo, home, sources: "repo" })) expect(p.text).not.toContain(hint);
   t.cleanup();
 });
+
+test("parseAgentFile keeps source as a known key", () => {
+  expect(parseAgentFile("a", "---\ndescription: d\nsource: somewhere\n---\nBody\n", "repo", "p").dropped).toEqual([]);
+});
