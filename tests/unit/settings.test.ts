@@ -85,6 +85,8 @@ describe("settings", () => {
     expect(settingProblem(["agents", "steps", "review", "agent"], ["a"])).toBe("agents.steps.review.agent takes one name.");
     expect(settingProblem(["agents", "steps", "review", "skills"], ["a"])).toBeNull();
     expect(settingProblem(["agents", "teams", "r", "members"], ["a"])).toBeNull();
+    // An empty list removes a step's list, but a team without members is not a team.
+    expect(settingProblem(["agents", "teams", "r", "members"], [])).toBe("A team needs at least one member.");
     expect(settingProblem(["agents", "teams", "r", "way"], "pick")).toBeNull();
     expect(settingProblem(["agents", "steps", "review"], null)).toBeNull();
     expect(settingProblem(["agents", "steps", "review"], "x")).toBe("agents.steps.review can only be removed.");

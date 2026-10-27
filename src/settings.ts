@@ -76,12 +76,16 @@ function agentsPath(p: string[]): boolean {
   return false;
 }
 
-/** Why an agents setting cannot take the value, or null. Any may be removed (null). */
+/**
+ * Why an agents setting cannot take the value, or null. Any may be removed (null); an empty list
+ * removes a list too, but not a team's members: a team needs one (remove the team instead).
+ */
 function agentsProblem(path: string[], value: SettingValue): string | null {
   if (value === null) return null;
   const name = path.join(".");
   const field = path[path.length - 1]!;
   if ((path[1] === "steps" || path[1] === "teams") && path.length === 3) return `${name} can only be removed.`;
+  if (path[1] === "teams" && field === "members" && Array.isArray(value) && !value.length) return "A team needs at least one member.";
   if (LIST_FIELDS.includes(field) || field === "members") return Array.isArray(value) ? null : `${name} takes a list of names.`;
   return typeof value === "string" ? null : `${name} takes one name.`;
 }
