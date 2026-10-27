@@ -30,6 +30,7 @@ function names(v: unknown): string[] | null {
   return out.length ? out : null;
 }
 
+/** Parses an agent file: frontmatter via yaml (CRLF fine, none is fine), the body as the prompt. */
 export function parseAgentFile(name: string, text: string, from: AgentDefinition["from"], path: string): AgentDefinition {
   const m = FRONTMATTER.exec(text);
   let front: Record<string, unknown> = {};
@@ -95,6 +96,7 @@ function candidates(name: string, where: Where, file: (n: string) => string, dir
   return out;
 }
 
+/** The agent definition for a name (`agent` or `plugin:agent`), or null when none is found. Built-in agents are the caller's to skip. */
 export async function findAgent(name: string, where: Where): Promise<AgentDefinition | null> {
   for (const c of candidates(name, where, (n) => `${n}.md`, "agents")) {
     const text = readText(c.path);
@@ -103,6 +105,7 @@ export async function findAgent(name: string, where: Where): Promise<AgentDefini
   return null;
 }
 
+/** Where a skill (`skill` or `plugin:skill`) lives, or null when it is not found. */
 export async function findSkill(name: string, where: Where): Promise<AgentDefinition["from"] | null> {
   for (const c of candidates(name, where, (n) => join(n, "SKILL.md"), "skills")) {
     if (readText(c.path) !== null) return c.from;
@@ -110,6 +113,7 @@ export async function findSkill(name: string, where: Where): Promise<AgentDefini
   return null;
 }
 
+/** One entry of the `--agents` JSON. */
 export interface InlineAgent { description: string; prompt: string; tools?: string[]; model?: string; skills?: string[] }
 
 /** The `--agents` JSON: the main agent, then the others, keyed by their Loopstra names. */

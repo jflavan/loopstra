@@ -55,3 +55,19 @@ test("inline agents: loopstra names, StructuredOutput for the main agent, its mo
     "loopstra-sec": { description: "S", prompt: "Q", model: "haiku" },
   });
 });
+
+test("inline agents: no tools key without tools, StructuredOutput not doubled, skills copied", () => {
+  const bare = parseAgentFile("bare", "---\ndescription: B\nskills: [tdd]\n---\nP", "repo", "p");
+  expect(inlineAgents(bare, [])["loopstra-bare"]).toEqual({ description: "B", prompt: "P", skills: ["tdd"] });
+  expect("tools" in inlineAgents(bare, [])["loopstra-bare"]!).toBe(false);
+  const has = parseAgentFile("has", "---\ndescription: H\ntools: Read, StructuredOutput\n---\nP", "repo", "p");
+  expect(inlineAgents(has, [])["loopstra-has"]!.tools).toEqual(["Read", "StructuredOutput"]);
+});
+
+test("findAgent finds nothing for names that climb out of the agent folders", async () => {
+  const t = tempDir(); const repo = join(t.path, "repo"); const home = join(t.path, "home");
+  write(join(repo, "secret.md"), "---\ndescription: s\n---\nS");
+  const all = { repo, home, sources: "all" as const };
+  for (const n of ["../../secret", "a/b", "a\\b", "..", "sp:../x"]) expect(await findAgent(n, all)).toBeNull();
+  t.cleanup();
+});
