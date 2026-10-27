@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { CONTINUES_BUILD, READ_ONLY_STEPS, TEAM_WAYS, toolProblem } from "./agents";
+import { BUILTIN_AGENTS, CONTINUES_BUILD, READ_ONLY_STEPS, TEAM_WAYS, toolProblem } from "./agents";
 import { MODEL_REFS, STEP_KEYS, stepsOf, type ModelRef, type StepKey, type StageName, type StepGroup } from "./models";
 import { errorText } from "./shell";
 
@@ -147,6 +147,10 @@ const agents = z.object({
     set.teams.forEach((t, i) => {
       if (!(t in a.teams)) bad([...path, "teams", i], `there is no team ${t} under agents.teams`);
     });
+    // A built-in's fixed tool list has no StructuredOutput, so a step running as one could not report.
+    if (set.agent !== undefined && BUILTIN_AGENTS.has(set.agent)) {
+      bad([...path, "agent"], `${set.agent} is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)`);
+    }
   };
   tools(["all"], a.all, true, "these reach read-only steps too", "them");
   for (const [step, set] of Object.entries(a.steps)) {

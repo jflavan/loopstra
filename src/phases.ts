@@ -122,11 +122,12 @@ function setTools(ctx: StepContext, set: ToolSet): string[] {
 }
 
 /**
- * The shell commands a tool set lets a session run, for the prompt's `{{commands}}`: "`bun test`,
- * `git diff`" (each with any arguments), "any command" for a bare Bash rule, "none" without Bash.
+ * The shell commands a tool set, and the step's setup (see toolsFor), let a session run, for the
+ * prompt's `{{commands}}`: "`bun test`, `git diff`" (each with any arguments), "any command" for a
+ * bare Bash rule, "none" without Bash.
  */
-export function commandsFor(ctx: StepContext, set: ToolSet): string {
-  const tools = toolsFor(ctx, set);
+export function commandsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string {
+  const tools = toolsFor(ctx, set, setup);
   if (tools.includes("Bash")) return "any command";
   const cmds = tools.map((t) => /^Bash\((.+?)(?: \*|:\*)?\)$/.exec(t)?.[1]).filter((c): c is string => !!c);
   return cmds.length ? [...new Set(cmds)].map((c) => `\`${c}\``).join(", ") : "none";
@@ -190,8 +191,19 @@ const isStepKey = (name: string): name is StepKey => (STEP_KEYS as readonly stri
  * A phase that is not a step gets the spec's skills alone.
  */
 export async function stepSetup(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<AgentSetup> {
-  if (!isStepKey(spec.name)) return { sources: "all", agent: null, subagents: [], teams: [], skills: [...(spec.skills ?? [])], tools: [], mcpTools: [] };
-  return resolveSetup((await ctx.models()).agents, spec.name, spec.skills ?? []);
+  return (await setupOf(ctx, spec)).setup;
+}
+
+/**
+ * A phase's setup (see stepSetup), and whether it changes how the session runs. A stage's skills alone
+ * do not: they are the prompt's first line, as they always were. Once the step's agent settings give it
+ * anything, the stage's skills are checked and loaded with the rest (see setupRun).
+ */
+async function setupOf(ctx: StepContext, spec: Pick<AgentPhaseSpec, "name" | "skills">): Promise<{ setup: AgentSetup; applies: boolean }> {
+  const skills = spec.skills ?? [];
+  if (!isStepKey(spec.name)) return { setup: { sources: "all", agent: null, subagents: [], teams: [], skills: [...skills], tools: [], mcpTools: [] }, applies: false };
+  const agents = (await ctx.models()).agents;
+  return { setup: resolveSetup(agents, spec.name, skills), applies: !isEmptySetup(resolveSetup(agents, spec.name, [])) };
 }
 
 /** Where a step's named agents and skills are looked for: the step's snapshot of main, then (with `sources: all`) this machine. */
@@ -228,7 +240,7 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?
   const setup = await stepSetup(ctx, spec);
   const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
-  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools), ...record, ...spec.vars };
+  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup), ...record, ...spec.vars };
   const template = await Bun.file(path).text();
   let rendered = setupText + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
@@ -483,8 +495,8 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
   const cwd = spec.cwd ?? (await ctx.snapshot());
   // Read as the session starts: a model or agent setting a person changed since the step began applies from here.
   const model = await phaseModel(ctx, spec);
-  const setup = await stepSetup(ctx, spec);
-  const extra = isEmptySetup(setup) ? null : await setupRun(ctx, spec, setup, cwd);
+  const { setup, applies } = await setupOf(ctx, spec);
+  const extra = applies ? await setupRun(ctx, spec, setup, cwd) : null;
   if (extra && "missing" in extra) {
     ctx.trace.event(ctx.slug, "error", { where: traceName, reason: "setup", detail: extra.missing });
     return { ok: false, reason: "setup", note: `${ownerNote("setup")} ${extra.missing}`, sessionId: null };

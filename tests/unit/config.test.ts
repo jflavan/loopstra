@@ -208,6 +208,10 @@ test("agents settings are refused in plain words", () => {
   expect(problems({ steps: { reviews: {} } })[0]).toStartWith("agents.steps: unknown step reviews; the steps are intake, design,");
   expect(problems({ steps: { fix: { agent: "x" } } })).toEqual(["agents.steps.fix.agent: fix continues the build session and runs as the build's agent; set the agent on build"]);
   expect(problems({ steps: { review: { tools: ["Edit"] } } })).toEqual(["agents.steps.review.tools.0: review is read-only; Edit would let it change files"]);
+  // A built-in cannot be the agent a step runs as (it could not report), but can be a subagent.
+  expect(problems({ steps: { design: { agent: "Explore" } } })).toEqual(["agents.steps.design.agent: Explore is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
+  expect(problems({ all: { agent: "general-purpose" } })).toEqual(["agents.all.agent: general-purpose is a built-in agent; a step runs as an agent defined in .claude/agents/ (built-ins can be subagents)"]);
+  expect(problems({ all: { subagents: ["Explore"] }, steps: { review: { subagents: ["Plan"] } } })).toEqual([]);
   expect(problems({ steps: { review: { tools: ["Bash"] } } })).toEqual(["agents.steps.review.tools.0: review is read-only; a bare Bash rule would let it run anything"]);
   expect(problems({ steps: { build: { tools: ["Bash(git push *)"] } } })).toEqual(["agents.steps.build.tools.0: only Loopstra commits, branches, merges and pushes; git push is not allowed"]);
   expect(problems({ all: { tools: ["Write"] } })).toEqual(["agents.all.tools.0: these reach read-only steps too; Write would let them change files"]);

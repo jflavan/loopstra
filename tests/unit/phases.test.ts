@@ -893,7 +893,36 @@ describe("a step's agent setup", () => {
         for (const flag of NEW_FLAGS) expect(args).not.toContain(flag);
         expect(args![args!.indexOf("--settings") + 1]).toBe(hookSettings());
       }
+      // A stage's skills alone (spec.skills) change the prompt's first line only, as they always did.
+      await writeAgents(repo.path);
+      const skilled = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["house"] });
+      expect(skilled.args).toEqual(runs[0]![1]!.args);
+      expect(skilled.prompt).toBe(`Use these skills: \`house\`.\n\n${runs[0]![1]!.prompt}`);
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(true); // intake's, not build's
       expect(trace.events("x").some((e) => e.type === "agent_setup")).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a stage's skills alone make no snapshot for a worktree step", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await worktree(ctx);
+      const { r, args } = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["house"] });
+      expect(r.ok).toBe(true);
+      for (const flag of NEW_FLAGS) expect(args).not.toContain(flag);
+      expect(existsSync(join(repo.path, ".loopstra", "snapshots", "x"))).toBe(false);
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("the setup's Bash rules are among the prompt's commands", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "commands={{commands}}\n");
+      await writeAgents(repo.path, { steps: { intake: { tools: ["Bash(make lint *)", "WebFetch"], mcp_tools: ["mcp__gh"] } } });
+      expect(commandsFor(ctx, "read", await stepSetup(ctx, { name: "intake" }))).toBe("`make lint`");
+      expect(commandsFor(ctx, "read")).toBe("none");
+      const { prompt } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
+      expect(prompt).toStartWith("commands=`make lint`\n");
     } finally { trace.close(); repo.cleanup(); }
   });
 
@@ -1026,6 +1055,10 @@ describe("a step's agent setup", () => {
       expect(build.prompt).toStartWith("Use these skills: `house`.\n\n");
       const design = await recorded(ctx, { name: "design", permissionMode: "plan", tools: "read" });
       expect(design.args).not.toContain("--add-dir");
+      // A stage's skills join in once the setup has something of its own.
+      await writeAgents(repo.path, { all: { tools: ["WebFetch"] } });
+      const staged = await recorded(ctx, { name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, skills: ["tone"] });
+      expect(staged.args![staged.args!.indexOf("--add-dir") + 1]).toBe(await ctx.snapshot());
       await ctx.dropSnapshot();
     } finally { trace.close(); repo.cleanup(); }
   });
