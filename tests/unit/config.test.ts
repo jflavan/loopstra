@@ -216,6 +216,9 @@ test("agents settings are refused in plain words", () => {
   expect(problems({ teams: { r: { members: [] } } })).toEqual(["agents.teams.r.members: a team needs at least one member"]);
   expect(problems({ steps: { review: { teams: ["nope"] } } })).toEqual(["agents.steps.review.teams.0: there is no team nope under agents.teams"]);
   expect(problems({ sources: "mine" })).toEqual(["agents.sources: must be all or repo"]);
+  expect(problems({ steps: { review: { mcp_tools: ["mcp__x,Bash"] } } })).toEqual(["agents.steps.review.mcp_tools.0: must be an MCP rule, like mcp__github or mcp__github__get_issue"]);
+  // Editing and a bare Bash are fine on a step that changes files.
+  expect(problems({ steps: { build: { tools: ["Edit", "Write", "Bash"] } } })).toEqual([]);
   // Narrow commands and read-only git are fine anywhere; Bash(git diff *) is not history-changing.
   expect(problems({ steps: { review: { tools: ["Bash(npm run e2e *)", "Bash(git diff *)", "WebFetch"] } } })).toEqual([]);
 });

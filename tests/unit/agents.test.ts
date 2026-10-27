@@ -25,3 +25,17 @@ test("a team keeps its way", () => {
   expect(cfg.agents.teams.r).toEqual({ members: ["a"], way: "pick" });
   expect(all.tools).toEqual([]);
 });
+
+test("toolProblem sees through git spellings, and leaves other tools alone", () => {
+  const why = (r: string) => toolProblem(r, false);
+  for (const r of ["Bash(git push:*)", "Bash(git push*)", "Bash(git commit*)", "Bash(git reset:*)", "Bash(git -C . push *)", "Bash(git -c k=v commit *)", "Bash( git push *)", "Bash(git --git-dir=x push)", "Bash(git --no-pager stash *)"]) {
+    expect(why(r)).toMatch(/^only Loopstra commits/);
+  }
+  expect(why("Bash(git -C . push *)")).toBe("only Loopstra commits, branches, merges and pushes; git push is not allowed");
+  for (const r of ["Bash(git:*)", "Bash(git*)", "Bash(git -C .)", "Bash(git -P *)"]) {
+    expect(why(r)).toBe("only Loopstra commits, branches, merges and pushes; git is not allowed");
+  }
+  for (const r of ["Bash(gitk *)", "Bash(gitleaks detect)", "Bash(git diff *)", "Bash(git -C . log *)", "Bash(git status:*)"]) {
+    expect(why(r)).toBeNull();
+  }
+});

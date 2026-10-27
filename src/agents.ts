@@ -18,14 +18,31 @@ export const CHAT_STEPS: ReadonlySet<StepKey> = new Set(["orchestrator", "write-
 
 const HISTORY_GIT = new Set(["commit", "push", "merge", "rebase", "reset", "checkout", "switch", "branch", "tag", "stash"]);
 
+/** Git options that take their value as the next word when written without `=`. */
+const GIT_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/**
+ * The git subcommand a `Bash(git ...)` rule covers, "" when it covers any (a bare git rule, or only
+ * options), and null when the rule is not about git. Global options before the subcommand are skipped.
+ */
+function gitSubcommand(rule: string): string | null {
+  const m = /^Bash\(([\s\S]*)\)$/.exec(rule);
+  if (!m) return null;
+  const words = (m[1] ?? "").trim().replace(/:\*$/, "").split(/\s+/);
+  if (!/^git\*?$/.test(words[0] ?? "")) return null;
+  if (words[0] === "git*") return "";
+  let i = 1;
+  while (i < words.length && (words[i] ?? "").startsWith("-")) {
+    i += GIT_VALUE_OPTIONS.has(words[i] ?? "") ? 2 : 1;
+  }
+  return (words[i] ?? "").replace(/(:\*|\*)$/, "");
+}
+
 /** The reason a `tools` rule is refused, or null. A read-only step also refuses file changes and a bare Bash. */
 export function toolProblem(rule: string, readOnly: boolean): string | null {
-  const git = /^Bash\(git(?:\s+([^\s)]*))?[^)]*\)$/.exec(rule);
-  if (git) {
-    const sub = git[1];
-    if (sub === undefined || sub === "" || sub === "*") return "only Loopstra commits, branches, merges and pushes; git is not allowed";
-    if (HISTORY_GIT.has(sub)) return `only Loopstra commits, branches, merges and pushes; git ${sub} is not allowed`;
-  }
+  const sub = gitSubcommand(rule);
+  if (sub === "") return "only Loopstra commits, branches, merges and pushes; git is not allowed";
+  if (sub !== null && HISTORY_GIT.has(sub)) return `only Loopstra commits, branches, merges and pushes; git ${sub} is not allowed`;
   if (!readOnly) return null;
   const edit = /^(Edit|Write|NotebookEdit)(\(.*\))?$/.exec(rule);
   if (edit) return `${edit[1] ?? rule} would let it change files`;
