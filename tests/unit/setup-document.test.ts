@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { ConfigError, configPath } from "../../src/config";
+import { ConfigError, configPath, validateConfig } from "../../src/config";
 import { init } from "../../src/init";
 import { ConfigDocument } from "../../src/setup/document";
 import { tempDir, tempGitRepo } from "../helpers";
@@ -190,6 +190,24 @@ describe("ConfigDocument", () => {
       for (const line of ["# What a build session may do", "#   max_budget_usd_per_day: what the loop's sessions"]) expect(doc.text()).toContain(line);
       expect(doc.text()).toContain("together in a day\n\n# Gates between stages");
       expect(parse(doc.text()).claude).toBeUndefined();
+    } finally { t.cleanup(); }
+  });
+
+  test("on the stamped template, the commented-out agents example is a top-level block that loads once uncommented", () => {
+    const template = readFileSync(join(import.meta.dir, "../../templates/config.yaml"), "utf8")
+      .replace("__MAIN_BRANCH__", "main").replace("__COMMANDS__", "  test: bun test");
+    const { t, doc } = load(template);
+    try {
+      expect(doc.hasPlaceholder(["agents"])).toBe(true);
+      expect(doc.hasPlaceholder(["claude", "agents"])).toBe(false);
+      const lines = template.split("\n");
+      const from = lines.indexOf("# agents:");
+      let to = from + 1;
+      while (lines[to]?.startsWith("#   ")) to++;
+      const example = lines.slice(from, to).map((l) => l.slice(2)).join("\n");
+      const cfg = validateConfig({ ...(parse(template) as object), ...(parse(example) as object) });
+      expect(cfg.agents.steps.review?.agent).toBe("lead-reviewer");
+      expect(cfg.agents.teams.reviewers?.members).toEqual(["security-reviewer", "correctness-reviewer"]);
     } finally { t.cleanup(); }
   });
 
