@@ -201,8 +201,8 @@ function parseOp(b: Record<string, unknown>): AgentFilesOp | string {
       const model = typeof b.model === "string" && b.model.trim() ? b.model.trim() : null;
       const modelProblem = model === null ? null : modelName(model);
       if (modelProblem) return modelProblem;
-      const r = replaced("the agent");
-      return typeof r === "string" ? r : { op: "new", name: name!, description, prompt, tools, model, ...r };
+      // A new agent never replaces one (`replace` is not read): a clash is refused when it is built.
+      return { op: "new", name: name!, description, prompt, tools, model };
     }
     case "edit": {
       const name = str(b.name, MAX_NAME);
@@ -326,7 +326,8 @@ async function build(root: string, cfg: Config, op: AgentFilesOp): Promise<Built
       }
     }
     case "new":
-      return added(root, "agent", [{ name: op.name, writes: [newAgentFile(op)] }], replaceOf(op));
+      if (filesUnder(root, targetOf("agent", op.name)).length) return { refused: `There is already an agent called ${op.name} in the repo. Pick another name, or edit the existing agent.`, status: 409 };
+      return added(root, "agent", [{ name: op.name, writes: [newAgentFile(op)] }], { replace: false });
     case "edit": {
       const path = targetOf("agent", op.name);
       const text = readText(join(root, path));

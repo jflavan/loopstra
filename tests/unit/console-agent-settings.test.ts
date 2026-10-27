@@ -229,7 +229,12 @@ describe("agent file operations", () => {
         expect({ name, status: r.status }).toEqual({ name, status: 400 });
       }
       expect(await (await post(base, { ...form, name: "Critic" })).json()).toEqual({ error: "An agent name is lowercase letters, digits and dashes (at most 64), like lead-reviewer." });
-      expect((await post(base, { ...form, name: "lead" })).status).toBe(409);
+      // A new agent never replaces one: a clash says to pick another name or edit it, replace or not.
+      const clash = await post(base, { ...form, name: "lead" });
+      expect(clash.status).toBe(409);
+      expect(await clash.json()).toEqual({ error: "There is already an agent called lead in the repo. Pick another name, or edit the existing agent." });
+      const lead0 = (await (await fetch(`${base}/api/agents`)).json() as AgentsView).library.find((i) => i.name === "lead")!;
+      expect((await post(base, { ...form, name: "lead", replace: true, base: lead0.base })).status).toBe(409);
       expect((await post(base, { ...form, model: "two words" })).status).toBe(400);
       expect((await post(base, { ...form, tools: ["Read, Grep"] })).status).toBe(400);
       expect(filesRequests(root)).toEqual([]);

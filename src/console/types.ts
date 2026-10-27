@@ -293,7 +293,8 @@ export interface AgentsView {
 /**
  * What the page asks of `/api/agents/files`: the server turns it into an `agent-files` request.
  * `copy` takes an item from this machine or a plugin (`from`); `fetch` clones `url` again and copies
- * the named items. Copy, fetch and new refuse a target the repository has unless `replace` is true.
+ * the named items. Copy and fetch refuse a target the repository has unless `replace` is true; new
+ * always refuses one (pick another name, or edit the agent).
  * `base` is the version the page read of the agent file or SKILL.md it changes (LibraryItemView.base,
  * or "absent" when the repository has none): an edit and a remove always name it, a replacement does
  * too (a fetch by item name). It is refused as stale when the file is no longer that version.
@@ -301,7 +302,7 @@ export interface AgentsView {
 export type AgentFilesOp =
   | ({ op: "copy"; kind: "agent" | "skill"; name: string; from: "personal" | "plugin" } & Replacing<string>)
   | ({ op: "fetch"; url: string; names: string[]; kind: "agent" | "skill" } & Replacing<Record<string, string>>)
-  | ({ op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null } & Replacing<string>)
+  | { op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null }
   | { op: "edit"; name: string; text: string; base: string }
   | { op: "remove"; kind: "agent" | "skill"; name: string; base: string };
 
