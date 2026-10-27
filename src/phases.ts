@@ -165,6 +165,7 @@ export function ownerNote(reason: BlockingReason): string {
     case "model": return "Claude Code did not accept this step's model. Change it in Settings or `loopstra setup models`, then retry.";
     case "invalid-envelope": return "The assistant's report could not be read.";
     case "missing-prompt": return "A prompt file for this step is missing.";
+    case "setup": return "This step's agent setup is not complete on this machine.";
     // The agent's own summary is not written for the owner; it goes to the trace.
     case "agent-fail": return "The assistant reported it could not finish this step.";
   }

@@ -116,8 +116,9 @@ export type PermissionMode = "default" | "manual" | "plan" | "acceptEdits" | "do
  * - missing-prompt: the phase's prompt file is missing (raised by agentPhase)
  * - environment: the assistant could not be used at all (see ENVIRONMENT_PATTERNS); not the agent's doing
  * - model: Claude Code does not accept the model name (see MODEL_PATTERN); a setting to change, not an outage
+ * - setup: the step's agent setup is not complete on this machine (see RunPhaseInput.checkInit); not an outage
  */
-export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt" | "environment" | "model";
+export type FailureReason = "not-started" | "timeout" | "budget" | "no-session" | "crash" | "invalid-envelope" | "agent-fail" | "missing-prompt" | "environment" | "model" | "setup";
 
 /**
  * Text that means the assistant itself could not be used, so a failed session is the environment's
@@ -173,6 +174,21 @@ export interface RunPhaseInput {
   disallowedTools?: string[];
   /** Extra Claude Code settings for this session, as JSON (`claude --settings`): the test hook. */
   settings?: string;
+  /** Subagents defined for this session only, by name (`claude --agents`); none when empty. */
+  agents?: Record<string, object>;
+  /** The agent the session itself runs as (`claude --agent`). */
+  agent?: string;
+  /** Which settings Claude Code loads (`claude --setting-sources`, e.g. "user,project"). */
+  settingSources?: string;
+  /** More directories the session's tools may reach (`claude --add-dir`, once per directory). */
+  addDirs?: string[];
+  /** Subagents' text is forwarded into the session's stream (`claude --forward-subagent-text`). */
+  forwardSubagentText?: boolean;
+  /**
+   * Judges the session's first init event that lists its agents or skills (never one that lists neither, and
+   * not again once one passed): a string ends the session at once as a "setup" failure, with it as the detail.
+   */
+  checkInit?: (init: { agents?: string[]; skills?: string[] }) => string | null;
   timeoutMs: number;
   /** The session's spending cap. Absent or Infinity: no --max-budget-usd, and the timeout is the only stop. */
   maxBudgetUsd?: number;
@@ -406,6 +422,11 @@ function claudeCommand(exe: string, input: RunPhaseInput): string[] {
   ];
   if (input.allowedTools.length) args.push("--allowedTools", input.allowedTools.join(","));
   if (input.disallowedTools?.length) args.push("--disallowedTools", input.disallowedTools.join(","));
+  if (input.agents && Object.keys(input.agents).length) args.push("--agents", JSON.stringify(input.agents));
+  if (input.agent) args.push("--agent", input.agent);
+  if (input.settingSources !== undefined) args.push("--setting-sources", input.settingSources);
+  for (const dir of input.addDirs ?? []) args.push("--add-dir", dir);
+  if (input.forwardSubagentText) args.push("--forward-subagent-text");
   if (input.settings) args.push("--settings", input.settings);
   // Every user message the session takes is echoed, so the runner knows which result answers it.
   if (input.live) args.push("--input-format", "stream-json", ...(input.live.replay === false ? [] : ["--replay-user-messages"]));
@@ -442,6 +463,9 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
   let r: SpawnResult;
   // How many times the session was sent again after it stopped at a notification's result.
   let resends = 0;
+  // Whether an init event that lists agents or skills was judged (see checkInit), and what it found missing.
+  let initJudged = false;
+  let setupProblem: string | null = null;
   for (;;) {
     if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy, sessionNow());
     // spawnBounded checks these too, but what it throws cannot name the session a resend resumes.
@@ -473,6 +497,15 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
         if (!e) return false;
         if (live && e.session_id) live.sessionId = e.session_id;
         if (live && e.type === "user" && e.isReplay === true) live.replays++;
+        if (input.checkInit && !initJudged && e.type === "system" && e.subtype === "init") {
+          const lists = initLists(e);
+          if (lists) {
+            initJudged = true;
+            setupProblem = input.checkInit(lists);
+            // The session lacks part of its setup: reading ends here, and so does the session.
+            if (setupProblem !== null) return true;
+          }
+        }
         // Any event of the process while it waits for an echo starts the wait again; once nothing waits
         // for one (the echo came), the wait is over, so a quiet stretch later in that turn never closes stdin.
         if (echoTimer !== undefined && !echoGaveUp) {
@@ -497,6 +530,8 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     clearTimeout(echoTimer);
     live?.done();
     if (live?.stoppedBy) throw new SessionStopped(live.stoppedBy, sessionNow());
+    // A failed init check ends the session (a stop or a cancel still wins: see below).
+    if (setupProblem !== null) break;
     if (live && live.redirectTo !== null && !r.stopped && !input.signal?.aborted && r.started) {
       // What the killed process spent counts toward the cap, as a resend's does: its newest result's
       // running total, or about its minutes when it gave none (never more than it could spend).
@@ -533,7 +568,17 @@ async function runSession(input: RunPhaseInput, live: LiveSession | null): Promi
     collector = new StreamCollector();
     resends++;
   }
+  if (setupProblem !== null && !r.stopped && !r.cancelled) return failure(sends.total(collector.finish()), { started, nudged }, "setup", setupProblem, r.code, r.err);
   return classify(sends.total(collector.finish()), r, { started, timeoutMs: input.timeoutMs, resume, nudged });
+}
+
+/** An init event's agent and skill names, each list only when the event has it; null when it has neither. */
+function initLists(e: StreamEvent): { agents?: string[]; skills?: string[] } | null {
+  const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+  const agents = names(e.agents);
+  const skills = names(e.skills);
+  if (!agents && !skills) return null;
+  return { ...(agents ? { agents } : {}), ...(skills ? { skills } : {}) };
 }
 
 /** What classify needs besides the session's result and its last process's. */
