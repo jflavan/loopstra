@@ -23,7 +23,8 @@ export function toolTarget(name: string, input: unknown, cwd?: string): string {
     case "Grep": case "Glob": target = str(i.pattern); break;
     case "WebFetch": target = str(i.url); break;
     case "WebSearch": target = str(i.query); break;
-    case "Task": case "Agent": target = str(i.description); break;
+    // The subagent it hands work to, then what for: "sec: Security review of a.txt".
+    case "Task": case "Agent": target = [str(i.subagent_type), str(i.description)].filter(Boolean).join(": "); break;
     case "Skill": target = str(i.skill); break;
     default: target = "";
   }

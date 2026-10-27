@@ -68,6 +68,37 @@ export function addFrames(s: Shown, frames: Frame[]): Shown {
   return { ...addItems(s, fresh), line: { end, drawn } };
 }
 
+/**
+ * A transcript row as the page draws it: a subagent call holds the rows of its work (`children`);
+ * a row of a subagent's work whose call is not in the list (a transcript read from part way) is an
+ * `orphan`, so the page can say whose work it is.
+ */
+export type Nested<T extends TranscriptItem = TranscriptItem> = T & { children?: Array<Nested<T>>; orphan?: true };
+
+/**
+ * `items` with every row of a subagent's work (one with `parent`) placed under the call it names:
+ * the `tool` row with that id, which comes before it, so the rows nest as deep as subagents do and
+ * none can end up under itself. Rows whose call is not there stay where they are, marked `orphan`.
+ * A row that neither holds nor lost anything comes back as the same object, so rows drawn already are
+ * not drawn again.
+ */
+export function nest<T extends TranscriptItem>(items: readonly T[]): Array<Nested<T>> {
+  const top: T[] = [];
+  /** The rows under each call seen so far, by the call's id (a Map: see Shown.results). */
+  const under = new Map<string, T[]>();
+  for (const it of items) {
+    const rows = it.parent === undefined ? undefined : under.get(it.parent);
+    if (rows) rows.push(it);
+    else top.push(it);
+    if (it.kind === "tool" && !under.has(it.id)) under.set(it.id, []);
+  }
+  const placed = (it: T): Nested<T> => {
+    const rows = it.kind === "tool" ? under.get(it.id) : undefined;
+    return rows?.length ? { ...it, children: rows.map(placed) } : it;
+  };
+  return top.map((it) => (it.parent === undefined ? placed(it) : { ...placed(it), orphan: true }));
+}
+
 /** The cost the newest result row names, or null when there is none (a chat turn has no change page to read it from). */
 export function lastCost(shown: Shown): number | null {
   for (let k = shown.items.length - 1; k >= 0; k--) {

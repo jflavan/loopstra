@@ -129,7 +129,7 @@ export interface ChangeDetail extends ChangeSummary {
   gates: Array<{ gate: string; check: string; result: string; evidence: string; ts: string }>;
 }
 
-export type TranscriptItem =
+export type TranscriptItem = (
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; tool: string; target: string; input: unknown }
   | { kind: "tool-result"; id: string; ok: boolean; output: string }
@@ -137,7 +137,16 @@ export type TranscriptItem =
   | { kind: "todos"; items: Array<{ text: string; state: string }> }
   | { kind: "result"; ok: boolean; summary: string; costUsd: number | null }
   /** A person's message or redirect, as the session took it up (its echo). */
-  | { kind: "message"; text: string; redirect: boolean };
+  | { kind: "message"; text: string; redirect: boolean }
+  /** The prompt a subagent was handed: the first event of its work, not a person's message. */
+  | { kind: "delegated"; text: string; parent: string }
+) & {
+  /**
+   * The id of the subagent call (an `Agent` or `Task` tool row) whose work this row is, from the
+   * event's `parent_tool_use_id`; absent on the session's own rows.
+   */
+  parent?: string;
+};
 
 /**
  * A message on /api/sessions/<slug>/<seq>/stream. The id of an `item` frame names that row (see

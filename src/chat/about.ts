@@ -51,6 +51,7 @@ function itemLine(item: TranscriptItem): string {
     case "todos": return `todos: ${one(item.items.map((t) => `${t.text} (${t.state})`).join("; "))}`;
     case "result": return `result: ${item.ok ? "success" : "failed"}${item.summary.trim() ? ` (${one(item.summary)})` : ""}`;
     case "message": return `${item.redirect ? "redirect" : "message"}: ${one(item.text)}`;
+    case "delegated": return `subagent's prompt: ${one(item.text)}`;
   }
 }
 

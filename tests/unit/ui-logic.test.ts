@@ -7,7 +7,10 @@ import { renderMarkdown, stripFrontmatter } from "../../src/ui/markdown";
 import { clampAt, filterCommands, fuzzyScore, stepAt } from "../../src/ui/palette";
 import { changesAddress, parseRoute, routePath, type Route } from "../../src/ui/router";
 import { ACTIVITY_MAX, applyMessage, connect, connection, getJson, HttpError, STALE_MS, toasts, type State } from "../../src/ui/store";
-import { addFrames, addItems, EMPTY, lastCost, type Frame } from "../../src/ui/transcript";
+import { addFrames, addItems, EMPTY, lastCost, nest, type Frame, type Nested } from "../../src/ui/transcript";
+import { toItems } from "../../src/console/transcript";
+import type { TranscriptItem } from "../../src/console/types";
+import { readFileSync } from "node:fs";
 import { apply, FADE_MS, parseTarget, prune, slots, type Tile } from "../../src/ui/agents";
 import { needsAPerson } from "../../src/ui/alerts";
 import { parseIntentFile } from "../../src/intents";
@@ -420,6 +423,77 @@ describe("a transcript on the page", () => {
     expect(texts(addFrames(s, [text("old", "50.0"), tool("t9", "100"), text("x", "100.0"), text("z", "200")]))).toEqual(["ok", "x", "y", "z"]);
     // The old state is left alone.
     expect(texts(s)).toEqual(["ok", "x", "y", "z"]);
+  });
+});
+
+describe("a subagent's work on the page", () => {
+  /** A session that hands work to one subagent (see tests/fixtures/subagent.jsonl). */
+  const ITEMS = readFileSync(new URL("../fixtures/subagent.jsonl", import.meta.url), "utf8").split("\n").filter((l) => l.trim())
+    .flatMap((l) => toItems(JSON.parse(l) as Record<string, unknown>));
+  /** Each row by its id, its text or its kind, with the rows under it and whether it lost its call. */
+  type Shape = { row: string; children?: Shape[]; orphan?: true };
+  const shape = (rows: Array<Nested<TranscriptItem>>): Shape[] => rows.map((i) => ({
+    row: "id" in i ? i.id : i.kind === "text" ? i.text.slice(0, 12) : i.kind,
+    ...(i.children ? { children: shape(i.children) } : {}),
+    ...(i.orphan ? { orphan: true as const } : {}),
+  }));
+  const shown = (items: TranscriptItem[]) => addItems(EMPTY, items);
+
+  test("the subagent's prompt, words and calls go under the call that started it; the call's result is its own", () => {
+    const s = shown(ITEMS);
+    expect(shape(nest(s.items))).toEqual([
+      { row: "toolu_agent", children: [{ row: "delegated" }, { row: "Reading the " }, { row: "toolu_read" }, { row: "SECURITY-OK:" }] },
+      { row: "**Verdict: S" },
+      { row: "result" },
+    ]);
+    expect(s.results.get("toolu_read")).toEqual({ ok: true, output: "1\thi\n2\t" });
+    expect(s.results.get("toolu_agent")?.output).toStartWith("SECURITY-OK");
+  });
+
+  test("two subagents at once each get their own work; a subagent's own subagent nests under its call", () => {
+    const call = (id: string, parent?: string): TranscriptItem => ({ kind: "tool", id, tool: "Agent", target: id, input: {}, ...(parent ? { parent } : {}) });
+    const said = (text: string, parent: string): TranscriptItem => ({ kind: "text", text, parent });
+    const items: TranscriptItem[] = [
+      call("A"), call("B"),
+      { kind: "delegated", parent: "A", text: "do a" }, { kind: "delegated", parent: "B", text: "do b" },
+      said("a1", "A"), said("b1", "B"), { kind: "tool", id: "ra", tool: "Read", target: "x", input: {}, parent: "A" },
+      call("C", "B"), said("c1", "C"), said("b2", "B"),
+      { kind: "text", text: "main" },
+    ];
+    expect(shape(nest(items))).toEqual([
+      { row: "A", children: [{ row: "delegated" }, { row: "a1" }, { row: "ra" }] },
+      { row: "B", children: [{ row: "delegated" }, { row: "b1" }, { row: "C", children: [{ row: "c1" }] }, { row: "b2" }] },
+      { row: "main" },
+    ]);
+  });
+
+  test("a page that reconnects in the middle of a subagent's work still nests the rows it gets after", () => {
+    // Each item on a line of its own, 100 bytes long.
+    const frames: Frame[] = ITEMS.map((item, k) => ({ item, id: String((k + 1) * 100) }));
+    const read = ITEMS.findIndex((i) => "id" in i && i.id === "toolu_read");
+    let s = addFrames(EMPTY, frames.slice(0, read));
+    // The stream came back a line earlier and sent the rest.
+    s = addFrames(s, frames.slice(read - 1));
+    expect(shape(nest(s.items))).toEqual(shape(nest(shown(ITEMS).items)));
+  });
+
+  test("rows whose call is not on the page (a transcript read from part way) stay where they are, marked as a subagent's", () => {
+    const read = ITEMS.findIndex((i) => "id" in i && i.id === "toolu_read");
+    expect(shape(nest(shown(ITEMS.slice(read)).items))).toEqual([
+      { row: "toolu_read", orphan: true },
+      { row: "SECURITY-OK:", orphan: true },
+      { row: "**Verdict: S" },
+      { row: "result" },
+    ]);
+    // A call that names itself as its parent cannot hold itself.
+    expect(shape(nest([{ kind: "tool", id: "X", tool: "Agent", target: "", input: {}, parent: "X" }]))).toEqual([{ row: "X", orphan: true }]);
+  });
+
+  test("a transcript with no subagent comes back as it was, the same rows", () => {
+    const items = shown([{ kind: "text", text: "a" }, { kind: "tool", id: "t1", tool: "Task", target: "x", input: {} }, { kind: "result", ok: true, summary: "", costUsd: null }]).items;
+    const nested = nest(items);
+    expect(nested).toHaveLength(3);
+    nested.forEach((row, k) => expect(row).toBe(items[k]!));
   });
 });
 

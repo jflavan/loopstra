@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { TranscriptItem } from "../../console/types";
 import { usd } from "../format";
 import { diffCounts } from "../diff";
-import type { Shown } from "../transcript";
+import { nest, type Nested, type Shown } from "../transcript";
 import { Diff } from "./Diff";
 import { Markdown } from "./Markdown";
 import { memo } from "./memo";
@@ -13,6 +13,8 @@ const SHOWN = 1500;
 const OUTPUT_LINES = 200;
 
 type Result = ReturnType<Shown["results"]["get"]>;
+/** A row as drawn: a subagent call holds its work's rows (see nest). */
+type Item = Nested<Shown["items"][number]>;
 
 /** A session's transcript. It follows the newest row until the person scrolls up, then offers to jump back. `compact`: a tile's, of a fixed height, with edits closed and shown as counts. */
 // Memoised: the session screen redraws for other reasons (its facts, its status) and the rows need not be rebuilt for them.
@@ -20,7 +22,9 @@ export const Transcript = memo(function Transcript({ shown, live, done, compact 
   const box = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const [all, setAll] = useState(false);
-  const skipped = all ? 0 : Math.max(0, shown.items.length - SHOWN);
+  // A subagent's work is drawn inside its call, so a call and all its work count as one row.
+  const rows = useMemo(() => nest(shown.items), [shown.items]);
+  const skipped = all ? 0 : Math.max(0, rows.length - SHOWN);
   // Runs when rows arrive (or following starts), not when a row's own state changes, so a result landing
   // on a tool row the person just opened does not pull the page away from it.
   useLayoutEffect(() => {
@@ -44,7 +48,7 @@ export const Transcript = memo(function Transcript({ shown, live, done, compact 
     <div class={`transcript-wrap${compact ? " compact" : ""}`}>
       <div class="transcript" ref={box} onScroll={onScroll} onClick={onClick}>
         {skipped > 0 && <button class="link" onClick={() => setAll(true)}>Show {skipped} earlier rows</button>}
-        {shown.items.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} result={"id" in item ? shown.results.get(item.id) : undefined} compact={compact} />)}
+        {rows.slice(skipped).map((item, k) => <Row key={skipped + k} item={item} results={shown.results} compact={compact} />)}
         {!shown.items.length && done && <p class="muted">This step left no transcript.</p>}
         {live && <div class="t-live"><span class="pulse" aria-hidden="true" /> Working…</div>}
       </div>
@@ -53,11 +57,23 @@ export const Transcript = memo(function Transcript({ shown, live, done, compact 
   );
 });
 
+/**
+ * One row with its call's result. The results are handed only to a subagent call, which draws its work's
+ * rows with theirs: they change with every result, and passing them to every row would redraw them all.
+ */
+function Row({ item, results, compact }: { item: Item; results: Shown["results"]; compact: boolean }) {
+  const result = "id" in item ? results.get(item.id) : undefined;
+  const row = <ItemRow item={item} result={result} results={item.children ? results : undefined} compact={compact} />;
+  // A subagent's row whose call is not shown (a transcript read from part way) says whose it is.
+  return item.orphan ? <div class="t-orphan"><span class="t-from">(from a subagent)</span>{row}</div> : row;
+}
+
 // Memoised too: rows arrive ten times a second while a session works, and the rows already drawn are the same objects each time.
-const Row = memo(function Row({ item, result, compact }: { item: Shown["items"][number]; result: Result; compact: boolean }) {
+const ItemRow = memo(function ItemRow({ item, result, results, compact }: { item: Item; result: Result; results: Shown["results"] | undefined; compact: boolean }) {
   switch (item.kind) {
     case "text": return <Markdown text={item.text} />;
-    case "tool": return <ToolRow item={item} result={result} />;
+    case "tool": return item.children && results ? <HandOffRow item={item} result={result} results={results} compact={compact} /> : <ToolRow item={item} result={result} />;
+    case "delegated": return <PromptRow text={item.text} />;
     case "edit": return <EditRow item={item} result={result} compact={compact} />;
     case "message":
       return (
@@ -93,6 +109,47 @@ function ToolRow({ item, result }: { item: Extract<TranscriptItem, { kind: "tool
           {result ? <Output text={result.output} /> : <span class="muted">Still running…</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A call that handed work to a subagent, with that work inside it: the prompt (closed), the subagent's
+ * words and calls, then what the call gave back. Open on a session's page, closed on a tile.
+ */
+function HandOffRow({ item, result, results, compact }: { item: Extract<Item, { kind: "tool" }>; result: Result; results: Shown["results"]; compact: boolean }) {
+  const [open, setOpen] = useState(!compact);
+  const input = item.input as { subagent_type?: unknown } | null;
+  const to = typeof input?.subagent_type === "string" && input.subagent_type !== "";
+  return (
+    <div class={`t-tool t-handoff ${stateOf(result)}`}>
+      <button class="t-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span class="t-state" aria-hidden="true" />
+        <span class="t-name">{to ? "Handing off to" : "Handing off"}</span>
+        <span class="t-target">{item.target}</span>
+      </button>
+      {open && (
+        <div class="t-body">
+          <div class="t-sub">
+            {(item.children ?? []).map((child, k) => <Row key={k} item={child} results={results} compact={compact} />)}
+          </div>
+          {result ? <Output text={result.output} /> : <span class="muted">Still running…</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The prompt a subagent was handed, closed until opened: the person reads the work first. */
+function PromptRow({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div class="t-tool t-prompt">
+      <button class="t-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span class="t-name">Prompt</span>
+        <span class="t-target">{text.split("\n", 1)[0]}</span>
+      </button>
+      {open && <div class="t-body"><Output text={text} /></div>}
     </div>
   );
 }

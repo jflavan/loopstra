@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MEANWHILE_HEADING } from "../../src/console/steerable";
 import { OUTPUT_MAX, resumePoint, toItems, TranscriptReader } from "../../src/console/transcript";
@@ -37,9 +37,15 @@ const EXPECTED: TranscriptItem[] = [
 
 const jsonl = (events: Array<Record<string, unknown>>) => events.map((e) => `${JSON.stringify(e)}\n`).join("");
 
+/** A session that hands work to one subagent, from a real stream (Claude Code 2.1.311, --forward-subagent-text), paths shortened. */
+const SUBAGENT_FILE = readFileSync(new URL("../fixtures/subagent.jsonl", import.meta.url), "utf8");
+const SUBAGENT = SUBAGENT_FILE.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l) as Record<string, unknown>);
+const SUBAGENT_CALL = { subagent_type: "sec", description: "Security review of a.txt", prompt: "Review the file a.txt in /wt for security problems. Report your verdict on one line.", run_in_background: false };
+
 describe("session transcripts", () => {
   test("raw events become items; thinking, hooks, limits and the answer tool are left out", () => {
-    expect(RAW.flatMap((e) => toItems(e, CWD))).toEqual(EXPECTED);
+    // Strictly equal: a session without subagents gives the items it always gave, with no parent field.
+    expect(RAW.flatMap((e) => toItems(e, CWD))).toStrictEqual(EXPECTED);
   });
 
   test("a person's message and redirect echoed by the session are items; the prompt's echo is not", () => {
@@ -208,6 +214,44 @@ describe("session transcripts", () => {
       const cut = new TranscriptReader(path);
       expect(cut.read(undefined, { final: true }).map((r) => r.item)).toEqual(EXPECTED.slice(0, 3));
       expect(cut.atEnd()).toBe(true);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a subagent's work carries the id of the call that started it, and its prompt is never a person's message", () => {
+    // Strictly equal: the main session's own rows have no parent at all, as before.
+    expect(SUBAGENT.flatMap((e) => toItems(e, "/wt"))).toStrictEqual([
+      { kind: "tool", id: "toolu_agent", tool: "Agent", target: "sec: Security review of a.txt", input: SUBAGENT_CALL },
+      { kind: "delegated", parent: "toolu_agent", text: "Review the file a.txt in /wt for security problems. Report your verdict on one line." },
+      { kind: "text", text: "Reading the file first.", parent: "toolu_agent" },
+      { kind: "tool", id: "toolu_read", tool: "Read", target: "a.txt", input: { file_path: "/wt/a.txt" }, parent: "toolu_agent" },
+      { kind: "tool-result", id: "toolu_read", ok: true, output: "1\thi\n2\t", parent: "toolu_agent" },
+      { kind: "text", text: "SECURITY-OK: a.txt holds only the text \"hi\".", parent: "toolu_agent" },
+      { kind: "tool-result", id: "toolu_agent", ok: true, output: "SECURITY-OK: a.txt holds only the text \"hi\".\nagentId: a1\n<usage>subagent_tokens: 5264\ntool_uses: 1\nduration_ms: 4102</usage>" },
+      { kind: "text", text: "**Verdict: SECURITY-OK.** The reviewer found no security problems in `a.txt`." },
+      { kind: "result", ok: true, summary: "Verdict: SECURITY-OK.", costUsd: 0.0067 },
+    ]);
+    // A prompt given as a string is the subagent's prompt too; an empty one shows nothing.
+    expect(toItems({ type: "user", message: { content: "Look at b.txt" }, parent_tool_use_id: "p" })).toEqual([{ kind: "delegated", parent: "p", text: "Look at b.txt" }]);
+    expect(toItems({ type: "user", message: { content: [{ type: "text", text: "  " }] }, parent_tool_use_id: "p" })).toEqual([]);
+    // An Agent call with no subagent type (and an older CLI's Task) names what it hands off.
+    expect(toItems({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Task", input: { description: "Find the parser" } }] } }))
+      .toEqual([{ kind: "tool", id: "t", tool: "Task", target: "Find the parser", input: { description: "Find the parser" } }]);
+  });
+
+  test("a reader resumed in the middle of a subagent's work still knows which call each row belongs to", () => {
+    const t = tempDir();
+    try {
+      const path = join(t.path, "raw.jsonl");
+      writeFileSync(path, SUBAGENT_FILE);
+      const read = SUBAGENT_FILE.split("\n").findIndex((l) => l.includes('"toolu_read","name"'));
+      const from = Buffer.byteLength(SUBAGENT_FILE.split("\n").slice(0, read).join("\n")) + 1;
+      expect(new TranscriptReader(path, from).read().map((r) => r.item).slice(0, 3)).toEqual([
+        { kind: "tool", id: "toolu_read", tool: "Read", target: "a.txt", input: { file_path: "/wt/a.txt" }, parent: "toolu_agent" },
+        { kind: "tool-result", id: "toolu_read", ok: true, output: "1\thi\n2\t", parent: "toolu_agent" },
+        { kind: "text", text: "SECURITY-OK: a.txt holds only the text \"hi\".", parent: "toolu_agent" },
+      ]);
     } finally {
       t.cleanup();
     }
