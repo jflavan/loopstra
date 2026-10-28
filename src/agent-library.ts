@@ -2,10 +2,10 @@ import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, read
 import { tmpdir } from "node:os";
 import { basename, join, posix } from "node:path";
 import { stringify } from "yaml";
-import { enabledPlugins, splitFrontmatter } from "./agent-files";
+import { enabledPlugins } from "./agent-files";
 import { readText } from "./fsutil";
 import { errorText } from "./shell";
-import { printable } from "./text";
+import { printable, splitFrontmatter } from "./text";
 
 /** A skill or an agent that can be put in the repository's `.claude/`. */
 export interface LibraryItem {

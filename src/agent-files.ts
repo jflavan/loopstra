@@ -1,12 +1,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parse } from "yaml";
 import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, type AgentSetup } from "./agents";
 import type { RunPhaseInput } from "./claude";
 import type { Config } from "./config";
 import { readText } from "./fsutil";
 import type { Git } from "./git";
 import { STAGE_NAMES, STEP_KEYS, type StageName, type StepKey } from "./models";
+import { splitFrontmatter } from "./text";
 
 /** An agent definition read from a Claude Code agent file. */
 export interface AgentDefinition {
@@ -30,29 +30,12 @@ export interface AgentDefinition {
 export interface Where { repo: string; home: string; sources: "all" | "repo"; commit?: { git: Git; sha: string } }
 
 const KEPT = new Set(["name", "description", "tools", "model", "skills", "color", "source"]);
-const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
 /** A comma-separated string or a list as a list of names; null when absent or empty. */
 function names(v: unknown): string[] | null {
   const list = typeof v === "string" ? v.split(",") : Array.isArray(v) ? v : [];
   const out = list.filter((x): x is string | number => typeof x === "string" || typeof x === "number").map((x) => String(x).trim()).filter(Boolean);
   return out.length ? out : null;
-}
-
-/**
- * The frontmatter keys of a markdown file (CRLF fine, a byte order mark fine), and the rest of it: null
- * when it has no frontmatter. Frontmatter that is not YAML keys and values counts as none, and
- * `problem` says what it is instead.
- */
-export function splitFrontmatter(text: string): { front: Record<string, unknown>; body: string | null; problem?: string } {
-  const m = FRONTMATTER.exec(text.replace(/^\uFEFF/, ""));
-  if (!m) return { front: {}, body: null };
-  const body = m[2] ?? "";
-  let v: unknown;
-  try { v = parse(m[1] ?? ""); } catch { return { front: {}, body, problem: "not YAML" }; }
-  if (v === null || v === undefined) return { front: {}, body };
-  if (typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body };
-  return { front: {}, body, problem: "not YAML keys and values" };
 }
 
 /** Parses an agent file: frontmatter via yaml (none is fine, and unreadable counts as none), the body as the prompt. */
