@@ -69,7 +69,7 @@ export async function runVerifyStep(ctx: StepContext): Promise<StepResult> {
   const rules = held ? judgeRules(held.list, held.record, judged.rules) : [];
   const unmetRules = rules.filter((r) => r.result === "unmet");
   const rulesForPerson = rules.filter((r) => r.result === "needs-person");
-  if (held && judged.rules) ctx.trace.gate(ctx.slug, "done", "standards", unmetRules.length ? "fail" : "pass", ruleEvidence(rules, unmetRules));
+  if (held && judged.rules && rules.length) ctx.trace.gate(ctx.slug, "done", "standards", unmetRules.length ? "fail" : "pass", ruleEvidence(rules, unmetRules));
 
   // Lessons that ran alongside saw the history as it was when the done-check started; when a
   // done-check attempt failed meanwhile (and its retry passed), they run again with it.
@@ -145,10 +145,10 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }, 
   const items = r.envelope.evidence;
   const unmet = items.filter((i) => i.result === "unmet");
   ctx.trace.gate(ctx.slug, "done", "done-check", unmet.length ? "fail" : "pass", unmet.length ? unmet.map(line).join("; ") : r.envelope.summary);
-  return { ok: true, items, outcome: r.envelope.outcome_markdown, rules: r.envelope.standards };
+  return { ok: true, items, outcome: r.envelope.outcome_markdown, rules: r.envelope.standards ?? [] };
 }
 
-type RuleItem = Envelope<"done-check">["standards"][number];
+type RuleItem = NonNullable<Envelope<"done-check">["standards"]>[number];
 
 /** A rule's line in the outcome: judged, or "not-checked" when the done-check agent is off. */
 interface RuleResult { label: string; title: string; result: RuleItem["result"] | "not-checked"; evidence: string }
@@ -211,6 +211,7 @@ function ruleEvidence(rules: RuleResult[], unmet: RuleResult[]): string {
  * standard a person added to the change or removed from it. `titles` names standards that do not apply (removed).
  */
 function standardsSection(commit: string, items: RuleResult[], applying: Applying[], record: ChangeStandards, checks: string[], titles: ReadonlyMap<string, string> = new Map()): string {
+  // Exceptions are listed only for standards that applied (an exception for a rule that did not apply is not shown).
   const title = (name: string): string => titles.get(name) ?? applying.find((a) => a.standard.name === name)?.standard.title ?? name;
   const lines = [
     ...items.map((i) => i.result === "not-checked" ? `- ${i.label} (${i.title}): not checked automatically` : `- ${i.label} (${i.title}): ${i.result}: ${i.evidence}`.trimEnd()),
