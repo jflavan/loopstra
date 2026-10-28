@@ -75,6 +75,12 @@ export const Envelopes = {
     review_markdown: z.string(),
   }),
   revise: askingCodeChange,
+  /** resolved: every conflict is resolved in the files; false with a reason when it could not be done safely. */
+  resolve: base.extend({
+    resolved: z.boolean(),
+    summary_markdown: z.string(),
+    reason: z.string(),
+  }),
   "done-check": base.extend({
     /** One item per Done when criterion. needs-person: it cannot be judged from the repository. */
     evidence: z.array(z.object({ criterion: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })),

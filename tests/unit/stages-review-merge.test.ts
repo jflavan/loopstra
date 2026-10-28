@@ -808,7 +808,7 @@ describe("merge", () => {
     expect(await wt.rebaseOnto("main")).toBe(true);
     const tree = (await git.run(["merge-tree", "--write-tree", main, head])).out.trim().split("\n")[0]!;
     const squash = (await git.run(["commit-tree", tree, "-p", main, "-m", "add-numbers (#1)"])).out.trim();
-    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, merged: true, mergeCommit: squash, url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
+    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, approvedAt: null, merged: true, mergeCommit: squash, url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
     expect(await fixesNotMerged(ctx, pr)).toBe(false);
     // The pull request's head still counts when the branch was not brought up to date.
     await wt.run(["reset", "-q", "--hard", head]);
@@ -827,7 +827,7 @@ describe("merge", () => {
     await git.run(["remote", "add", "origin", join(repo.path, "no-such-remote")]);
     const head = await new Git(ctx.worktreeDir).headSha();
     // GitHub names a merge commit this repository does not have yet.
-    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, merged: true, mergeCommit: "f".repeat(40), url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
+    const pr: PrInfo = { number: 1, state: "MERGED", approved: true, approvedAt: null, merged: true, mergeCommit: "f".repeat(40), url: "https://example.test/pr/1", createdAt: "2026-10-19T00:00:00Z", head, draft: false };
     const hangs = spyOn(ctx.git, "fetch").mockImplementation(() => Promise.reject(new GitTimeout(["fetch"], 1_000)));
     try {
       expect(await fixesNotMerged(ctx, pr)).toBe(false);

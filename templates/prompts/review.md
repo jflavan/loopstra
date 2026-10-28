@@ -12,4 +12,8 @@ Plan:
 
 {{plan}}
 
+If this change was brought up to date with `{{main_branch}}` and an agent resolved conflicts on the way, this is the record: the conflicts as they were (both sides), and what the agent kept. Check that the resolution keeps what both sides meant; a resolution that drops either side's behavior is an important finding.
+
+{{resolution}}
+
 Report findings with `severity` `important` only for things that break behavior, leak data, breach policy, or contradict the spec or plan. Everything else is a `nit`; report at most five nits. For a finding about a whole file, use `line` 0. Set `approved` to true when there are no important findings. Write `review_markdown` as a short document with a `## Summary` heading and a `## Findings` heading listing each finding with its severity and location.

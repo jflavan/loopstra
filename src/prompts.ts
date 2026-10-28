@@ -9,7 +9,7 @@ import { templatePath } from "./package";
 export const PROMPT_VARS = [
   "slug", "main_branch", "intent", "priority", "spec", "plan", "review", "previous", "failure_output",
   "done_when", "concerns", "findings", "test_command", "test_result", "run_command", "commands", "feedback",
-  "conversation", "acceptance",
+  "conversation", "acceptance", "conflicts", "resolution",
 ] as const;
 
 export type PromptVars = Partial<Record<(typeof PROMPT_VARS)[number], string>>;

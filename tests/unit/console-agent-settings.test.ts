@@ -110,7 +110,7 @@ describe("the agents view", () => {
 
       expect(view.steps[0]).toEqual({ key: "all", what: expect.any(String) as string, readOnly: true, chat: false, continuesBuild: false, own: { skills: ["tone"] }, fromAll: {}, fromStage: [] });
       const row = (key: string) => view.steps.find((s) => s.key === key)!;
-      expect(view.steps.slice(1).map((s) => s.key)).toEqual(["intake", "design", "spec-check", "plan", "plan-challenge", "acceptance", "build", "reconcile", "fix", "review", "revise", "verify", "done-check", "lessons", "orchestrator", "write-intent"]);
+      expect(view.steps.slice(1).map((s) => s.key)).toEqual(["intake", "design", "spec-check", "plan", "plan-challenge", "acceptance", "build", "reconcile", "fix", "review", "revise", "resolve", "verify", "done-check", "lessons", "orchestrator", "write-intent"]);
       expect(row("review")).toMatchObject({ readOnly: true, chat: false, continuesBuild: false, own: { agent: "lead", teams: ["reviewers"] }, fromAll: { skills: ["tone"] }, fromStage: ["house"] });
       expect(row("fix")).toMatchObject({ readOnly: false, continuesBuild: true, own: {}, fromAll: { skills: ["tone"] }, fromStage: [] });
       // Chat steps take nothing from all steps.

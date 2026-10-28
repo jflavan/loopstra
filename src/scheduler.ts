@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
+import { changeGates, checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -20,9 +20,10 @@ import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
 import { runBuildStep } from "./stages/build";
 import { runDesignStep } from "./stages/design";
-import { cleanupChange, runMergeStep } from "./stages/merge";
+import { cleanupChange, conflictsWhileWaiting, runMergeStep } from "./stages/merge";
 import { runPlanStep } from "./stages/plan";
 import { RECONCILED_PLAN } from "./stages/shared";
+import { sweepTempFolders } from "./resources";
 import { runVerifyStep } from "./stages/verify";
 import { sweepInbox } from "./steering";
 import { clearChangeStop } from "./inbox";
@@ -189,7 +190,11 @@ export async function tick(root: string): Promise<TickResult> {
     // With speed.think_ahead, design and plan steps also run beside the lanes (see thinkAhead), so
     // the lanes take the steps that may run the project's commands first.
     const human = humanGates(cfg);
-    const runnable = ordered.filter((i) => forLane(i, human, hasRemote) && !waitingOn(i, ordered).length && !holds.has(i.slug));
+    // Without a remote, a change waiting for a person at the merge gate runs only when it no longer
+    // merges cleanly into main, to be brought up to date (with a remote, the watcher looks at it).
+    const stale = hasRemote ? new Set<string>() : await staleWhileWaiting(root, cfg, ordered, human);
+    const lane = (i: Intent) => forLane(i, human, hasRemote) || (stale.has(i.slug) && !waiting(i));
+    const runnable = ordered.filter((i) => lane(i) && !waitingOn(i, ordered).length && !holds.has(i.slug));
     // Not when the day's budget has no room for a second session (never with a daily budget and no
     // session limit): the thinker could not start, and design and plan steps would only wait longer.
     const thinking = cfg.speed.think_ahead && roomFor(cfg, trace, 2);
@@ -201,7 +206,7 @@ export async function tick(root: string): Promise<TickResult> {
     const shared: TickLanes = { taken: new Set(), halt: false, problems: [], lanesRunning: 0 };
     const started = Date.now();
     // Settled, not all: the tick goes on only once every lane has ended, even one that failed outright.
-    const running = Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, human, hasRemote)));
+    const running = Promise.allSettled(Array.from({ length: lanes }, () => runLane(root, cfg, trace, candidates, shared, lane)));
     // Started after the lanes, which take their changes at once: the thinker gets what they left.
     const thinker = thinking ? thinkAhead(root, cfg, trace, shared, human, hasRemote, running) : Promise.resolve([]);
     // Watching until the thinker's step has ended too: the tick waits for it.
@@ -250,7 +255,7 @@ export async function tick(root: string): Promise<TickResult> {
  * (afterLanes). It rejects only when the trace cannot be written while it records a problem (a full
  * disk, a database held too long); see laneSteps.
  */
-async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, human: HumanGates, hasRemote: boolean): Promise<LaneStep[]> {
+async function runLane(root: string, cfg: Config, trace: Trace, candidates: Intent[], shared: TickLanes, lane: (i: Intent) => boolean): Promise<LaneStep[]> {
   // Counted from the moment the lane is started until it ends (see thinkAhead).
   shared.lanesRunning++;
   try {
@@ -259,12 +264,32 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
       if (shared.halt || stopRequested() || readLoopHold(root)) return [];
       const next = candidates.find((i) => takeChange(shared, i.slug));
       if (!next) return [];
-      const ran = await runClaimed(root, cfg, trace, shared, next.slug, (i) => forLane(i, human, hasRemote));
+      const ran = await runClaimed(root, cfg, trace, shared, next.slug, lane);
       if (ran) return [ran];
     }
   } finally {
     shared.lanesRunning--;
   }
+}
+
+/**
+ * Without a remote: the changes waiting for a person at the merge gate (merge-review) that no longer
+ * merge cleanly into main (see conflictsWhileWaiting), so a lane brings them up to date. A git
+ * failure leaves the change out: the merge checks bring it up to date later.
+ */
+async function staleWhileWaiting(root: string, cfg: Config, ordered: Intent[], human: HumanGates): Promise<Set<string>> {
+  const stale = new Set<string>();
+  const git = new Git(root);
+  for (const i of ordered) {
+    // A change's own gate: a risky change waits for a person even when the config's merge gate has nobody.
+    if (i.file.frontmatter.status !== "merge-review" || changeGates(human, i.file.frontmatter).merge === "none") continue;
+    try {
+      if (await conflictsWhileWaiting(git, cfg.main_branch, `intent/${i.slug}`)) stale.add(i.slug);
+    } catch (e) {
+      if (e instanceof StopRequested) throw e;
+    }
+  }
+  return stale;
 }
 
 /** True when a change is a lane's to run now: runnable, not held, and (with a remote) not watching its pull request. */
@@ -802,6 +827,8 @@ const HANDOFF_LEFT_MS = 60 * 60_000;
  * never blocks anything.
  */
 async function cleanupLeftovers(root: string, cfg: Config, trace: Trace, intents: Intent[]): Promise<void> {
+  // Temp folders of steps that crashed or of a loop that was killed (nothing is claimed at a tick's start).
+  sweepTempFolders(root);
   if (existsSync(snapshotsDir(root))) {
     for (const name of readdirSync(snapshotsDir(root))) {
       try {

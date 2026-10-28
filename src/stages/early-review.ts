@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { writeMarker, type StepContext } from "../context";
+import { readMarker, writeMarker, type StepContext } from "../context";
+import { RESOLUTION } from "./catch-up";
 import { Git, withDetachedWorktree } from "../git";
 import { cheapMayDecide, runJudge, type JudgeResult } from "../judges";
 import { loopstraDir } from "../paths";
@@ -20,8 +21,18 @@ export async function reviewPhase(ctx: StepContext, round: number, spec: string,
   const stage = ctx.cfg.stages.review;
   return {
     name: "review", traceName: `review-${round}`, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-    vars: { spec, plan, test_result: await testResult(ctx, new Git(ctx.worktreeDir)) }, skills: stage.skills,
+    vars: { spec, plan, test_result: await testResult(ctx, new Git(ctx.worktreeDir)), resolution: readMarker(ctx, RESOLUTION) ?? "" }, skills: stage.skills,
   };
+}
+
+/**
+ * A round's review prompt (the early review's too, so the two match). A conflict resolution since
+ * the last passing review reaches the reviewer even through a repository's own review.md without
+ * `{{resolution}}`.
+ */
+export function reviewPrompt(ctx: StepContext, phase: AgentPhaseSpec & { name: "review" }): Promise<string | null> {
+  const note = phase.vars.resolution ?? "";
+  return phasePrompt(ctx, phase, { variable: "resolution", note, text: `This change was brought up to date with ${ctx.cfg.main_branch}, and conflicts were resolved; review the resolution too:\n\n${note}` });
 }
 
 /**
@@ -43,7 +54,7 @@ function reviewKey(sha: string, model: string, prompt: string): string {
  */
 export async function reviewAhead(ctx: StepContext, spec: string, plan: string): Promise<string | null> {
   const phase = { ...(await reviewPhase(ctx, 1, spec, plan)), traceName: `${EARLY}review` };
-  const prompt = await phasePrompt(ctx, phase);
+  const prompt = await reviewPrompt(ctx, phase);
   if (prompt === null) return null;
   const sha = await new Git(ctx.worktreeDir).headSha();
   const dir = join(loopstraDir(ctx.root), "review", ctx.slug);

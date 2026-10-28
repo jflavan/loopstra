@@ -231,7 +231,11 @@ export const ConfigSchema = z.object({
       /** A session writes tests from the owner's Done when list before each build, and the build may not change them. Off unless set, so an upgraded repo is unchanged; `loopstra init` turns it on. */
       acceptance_tests: z.boolean({ error: "must be true or false" }).default(false),
     }).prefault({}),
-    review: stage("review").extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
+    review: stage("review").extend({
+      model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2),
+      /** Conflict resolutions with main per build; the review round each one adds does not count against max_rounds. 0: a conflict blocks. */
+      max_resolutions: z.number().int("must be a whole number").min(0, "must be 0 or more").default(3),
+    }).prefault({}),
     verify: stage("verify").extend({ model: modelRef.default("default") }).prefault({}),
   }).strict().prefault({}),
   // Work that runs at the same time to save waiting. Only cheap_judges: first changes who decides: once earned, a cheaper judge's pass stands.
@@ -248,6 +252,12 @@ export const ConfigSchema = z.object({
     think_ahead: z.boolean().default(true),
     /** How many changes may each run a step at the same time. 1 = one at a time (as before). */
     max_parallel_changes: z.number().int("must be a whole number").min(1, "must be 1 or more").max(4, "must be 4 or less").default(1),
+    /** How many ports each running change gets (LOOPSTRA_PORT_BASE, LOOPSTRA_PORT_COUNT), checked free. 0 = none. */
+    ports_per_change: z.number().int("must be a whole number").min(0, "must be 0 or more").max(100, "must be 100 or less").default(10),
+    /** The first port of the first block. */
+    ports_from: z.number().int("must be a whole number").min(1024, "must be 1024 or more").max(65535, "must be 65535 or less").default(20000),
+    /** Tool caches (XDG_CACHE_HOME, npm, bun, yarn, pip, go) per slot, so changes running at the same time never share one. */
+    own_caches: z.boolean().default(false),
   }).strict().prefault({}),
   signals: z.object({
     main_health: z.object({ every_minutes: z.number().positive().default(30) }).strict().prefault({}),

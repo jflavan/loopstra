@@ -510,6 +510,20 @@ export class Git {
     return false;
   }
 
+  /**
+   * Whether `branch` merges into `into` without a conflict, worked out without touching any checkout
+   * (`git merge-tree --write-tree`). Null when git cannot say: before git 2.38, or no common history.
+   */
+  async mergesCleanly(into: string, branch: string): Promise<boolean | null> {
+    const r = await this.run(["merge-tree", "--write-tree", "--no-messages", "--name-only", into, branch], true);
+    return r.code === 0 ? true : r.code === 1 ? false : null;
+  }
+
+  /** The files a merge left unmerged in this checkout (conflicts). */
+  async unmergedFiles(): Promise<string[]> {
+    return (await this.run(["diff", "--name-only", "--diff-filter=U", "-z"])).out.split("\0").filter(Boolean);
+  }
+
   /** Replays this checkout's branch onto `base`, as the runtime. A conflict is aborted and reported as false. */
   async rebaseOnto(base: string): Promise<boolean> {
     // A rebase left over from an interrupted step is the runtime's own (this is its worktree).

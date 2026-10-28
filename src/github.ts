@@ -42,7 +42,8 @@ export function recordGitHub(trace: Trace, error: string | null): void {
  * `head`: the commit at the tip of the pull request's branch on GitHub (null when gh does not say).
  * `draft`: a draft pull request, which GitHub refuses to merge until it is marked ready for review.
  */
-export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null; draft: boolean }
+/** `approvedAt`: when the newest approval that counts was given (see approvedAt), null when none or GitHub gives no time. */
+export interface PrInfo { number: number; state: "OPEN" | "MERGED" | "CLOSED"; approved: boolean; approvedAt: string | null; merged: boolean; mergeCommit: string | null; url: string; createdAt: string; head: string | null; draft: boolean }
 /** `none`: GitHub reports no checks on the pull request (none configured, or not registered yet). */
 type ChecksState = "pass" | "fail" | "pending" | "none" | "unknown";
 
@@ -67,7 +68,7 @@ const ghUser = z.looseObject({ login: z.string().nullish() }).nullish();
 /** The fields of a pull request gh pr view --json prints that approved reads (see lookupPr). */
 const REVIEW_FIELDS = {
   reviewDecision: z.string().nullish(),
-  latestReviews: z.array(z.looseObject({ author: ghUser, authorAssociation: z.string().nullish(), state: z.string().nullish() })).nullish(),
+  latestReviews: z.array(z.looseObject({ author: ghUser, authorAssociation: z.string().nullish(), state: z.string().nullish(), submittedAt: z.string().nullish() })).nullish(),
   author: ghUser,
 };
 
@@ -112,8 +113,19 @@ const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
  */
 function approved(j: PrJson): boolean {
   if (j.reviewDecision) return j.reviewDecision === "APPROVED";
-  const reviews = (j.latestReviews ?? []).filter((r) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login);
+  const reviews = withSay(j);
   return reviews.some((r) => r.state === "APPROVED") && !reviews.some((r) => r.state === "CHANGES_REQUESTED");
+}
+
+/** The latest reviews of those with a say in the repository (see approved). */
+function withSay(j: PrJson): NonNullable<PrJson["latestReviews"]> {
+  return (j.latestReviews ?? []).filter((r) => r.authorAssociation ? TRUSTED.has(r.authorAssociation) : r.author?.login !== j.author?.login);
+}
+
+/** When the newest approval among the latest reviews of those with a say was given; null when none, or GitHub gives no time. */
+function approvedAt(j: PrJson): string | null {
+  const times = withSay(j).filter((r) => r.state === "APPROVED" && r.submittedAt).map((r) => r.submittedAt!).filter((t) => Number.isFinite(Date.parse(t)));
+  return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 
 export class GitHub {
@@ -170,7 +182,7 @@ export class GitHub {
       return { error: reviewsOnly ? "gh pr view printed reviews in a shape Loopstra does not read" : "gh pr view printed something that is not a pull request" };
     }
     const p = parsed.data;
-    return { pr: { number: p.number, state: p.state, approved: approved(p), merged: !!p.mergedAt, mergeCommit: p.mergeCommit?.oid || null, url: p.url, createdAt: p.createdAt, head: p.headRefOid || null, draft: p.isDraft === true } };
+    return { pr: { number: p.number, state: p.state, approved: approved(p), approvedAt: approvedAt(p), merged: !!p.mergedAt, mergeCommit: p.mergeCommit?.oid || null, url: p.url, createdAt: p.createdAt, head: p.headRefOid || null, draft: p.isDraft === true } };
   }
 
   async createPr(p: { head: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }> {

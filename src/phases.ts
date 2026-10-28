@@ -15,7 +15,8 @@ import { promptPath, renderPrompt, type PromptVars } from "./prompts";
 import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
-import { assertNoCheckoutLock, assertNoLock, slotEnv } from "./lanes";
+import { assertNoCheckoutLock, assertNoLock } from "./lanes";
+import { changeEnv } from "./resources";
 import { AssistantUnavailable, Cancelled, endsStepQuietly, LoopBudgetReached, QuestionAsked, SessionStopped, StopRequested, throwIfCancelled, throwIfStopping } from "./stop";
 import { answerFor, answerPrompt, askedAt, closeQuestion, MAX_QUESTIONS, NO_MORE_QUESTIONS, questionIn, recordQuestion, TOO_MANY_NOTE, type Question } from "./questions";
 import { readConversation } from "./conversation";
@@ -562,12 +563,12 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
         timeoutMs: ctx.cfg.claude.timeout_minutes * 60_000,
         maxBudgetUsd: capUsd,
         resume: spec.resume,
-        // A session that may run the project's commands gets the change's slot, as its commands do.
+        // A session that may run the project's commands gets the change's slot, temp folder and ports, as its commands do.
         // LOOPSTRA_ACCEPTANCE: the tests written from Done when, which the hook keeps the build's sessions from editing.
         env: {
           LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog,
           LOOPSTRA_ACCEPTANCE: JSON.stringify(acceptanceFiles(ctx)),
-          ...(RUNS_COMMANDS.has(spec.tools) ? slotEnv(ctx.slug) : {}), ...main?.env, ...(spec.env ?? {}),
+          ...(RUNS_COMMANDS.has(spec.tools) ? await changeEnv(ctx) : {}), ...main?.env, ...(spec.env ?? {}),
         },
         signal,
         // Live: what people send this session while it runs reaches it (see src/steering.ts).
@@ -721,17 +722,18 @@ export function summarize(e: Record<string, unknown>, cwd?: string): Record<stri
 
 /**
  * Runs a configured project command in `cwd` with the configured time limit, and traces it as a
- * `command` event of `on.slug` (under phase `seq` when given). `env` defaults to LOOPSTRA_SLUG.
+ * `command` event of `on.slug` (under phase `seq` when given). `env` defaults to LOOPSTRA_SLUG and
+ * the change's own resources (see changeEnv).
  * `signal` cancels it (Cancelled is thrown); it defaults to the one for work run alongside.
  */
 export async function projectCommand(
-  on: { trace: Trace; cfg: Config; slug: string }, command: string, cwd: string,
+  on: { root: string; trace: Trace; cfg: Config; slug: string }, command: string, cwd: string,
   opts: { env?: Record<string, string>; seq?: number; where?: string; signal?: AbortSignal } = {},
 ): Promise<CommandResult> {
   const where = opts.where ? { where: opts.where } : {};
   let r: CommandResult;
   try {
-    r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug, ...slotEnv(on.slug) }, timeoutMs: commandTimeoutMs(on.cfg), signal: opts.signal ?? cancelSignal() });
+    r = await runCommand(command, cwd, { env: opts.env ?? { LOOPSTRA_SLUG: on.slug, ...(await changeEnv(on)) }, timeoutMs: commandTimeoutMs(on.cfg), signal: opts.signal ?? cancelSignal() });
   } catch (e) {
     if (e instanceof Cancelled) on.trace.event(on.slug, "command", { command, note: e.message, ...where }, opts.seq);
     throw e;
