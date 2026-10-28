@@ -246,3 +246,8 @@ export async function listSource(url: string): Promise<SourceItems> {
 export function cancelSetting(id: string): Promise<boolean> {
   return cancel(id);
 }
+
+/** Adds a standard to one change or removes it (`POST /api/standards/scope`) and follows the loop's answer to `onDone`. */
+export function sendScope(body: { slug: string; action: "add" | "remove"; name: string; note: string }, onDone: (d: { ok: boolean; text: string }) => void): Promise<Sent> {
+  return sendFollowed("/api/standards/scope", body, onDone);
+}

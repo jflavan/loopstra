@@ -1,5 +1,5 @@
 import { STANDARD_EXAMPLES } from "../standard-examples";
-import type { DraftCheck, ExceptionRow, StandardForm, StandardRow, StandardsProblem, StandardsView } from "../console/types";
+import type { ChangeStandardsView, DraftCheck, ExceptionRow, StandardForm, StandardRow, StandardsProblem, StandardsView } from "../console/types";
 
 /*
  * Settings › Standards on the page's side: what the editor says next to each field, when Save is
@@ -104,3 +104,58 @@ export const BLANK: StandardForm = { name: "", title: "", patterns: [], needsPer
 
 /** The README's two examples, offered by New standard to start from. */
 export const EXAMPLES: { label: string; form: StandardForm }[] = STANDARD_EXAMPLES;
+
+/*
+ * The change page's Standards panel: its rows, the words of its buttons and the add / remove dialog.
+ * What applies, and why, is the server's (`ChangeDetail.standards`); the page only orders and words it.
+ */
+
+type Applying = ChangeStandardsView["applying"][number];
+
+/** An exception nobody approved yet, or a standard the change is held to. `gate`: where the exception is asked. */
+export type PanelRow =
+  | { kind: "waiting"; label: string; standard: string; title: string; reason: string; gate: "spec" | "plan" }
+  | { kind: "standard"; name: string; title: string; why: string; rules: Applying["rules"]; check?: string };
+
+/** Waiting exceptions first, then each standard that applies with the server's `why`. `status` tells where an exception is asked. */
+export function panelRows(v: ChangeStandardsView, status?: string): PanelRow[] {
+  const waiting: PanelRow[] = v.waiting.map((b) => {
+    const owner = v.applying.find((a) => a.rules.some((r) => r.label === b.label));
+    const rule = owner?.rules.find((r) => r.label === b.label);
+    const asked = (t?: string) => t?.startsWith("Exception: ") === true;
+    const gate = status === "spec-review" ? "spec" : status === "plan-review" ? "plan" : asked(rule?.plan) ? "plan" : asked(rule?.spec) ? "spec" : "plan";
+    return { kind: "waiting", label: b.label, standard: owner?.name ?? "", title: owner?.title ?? "", reason: b.text, gate };
+  });
+  return [...waiting, ...v.applying.map((a): PanelRow => ({ kind: "standard", name: a.name, title: a.title, why: a.why, rules: a.rules, ...(a.check === undefined ? {} : { check: a.check }) }))];
+}
+
+/** The button that allows an exception and approves the document it is asked in. */
+export const approveLabel = (gate: "spec" | "plan"): string => `Allow the exception and approve the ${gate}`;
+
+/** Whether a change of this status gets the panel: not a finished or closed one. */
+export const panelShown = (status: string): boolean => status !== "done" && status !== "closed";
+
+/** The standards on main that do not apply to the change: what Add offers. */
+export function addChoices<T extends { name: string }>(all: readonly T[], v: ChangeStandardsView): T[] {
+  return all.filter((s) => !v.applying.some((a) => a.name === s.name));
+}
+
+/** The standards that apply to the change: what Remove offers. */
+export const removeChoices = (v: ChangeStandardsView): { name: string; title: string }[] => v.applying.map((a) => ({ name: a.name, title: a.title }));
+
+const AFTER_PLAN = new Set(["plan-approved", "building", "reviewing", "merge-review", "merge-approved", "merged", "verifying"]);
+
+/** What the add / remove dialog asks and says: the note (required to remove), and, for an add after the plan was approved, that the plan does not cover it. */
+export function scopeDialog(action: "add" | "remove", status: string): { ask: string; required: boolean; notice: string | null } {
+  if (action === "remove") return { ask: "Why does this standard not apply to this change? (required)", required: true, notice: null };
+  return {
+    ask: "Add a note: why does this change need it? (optional, but the record keeps it)",
+    required: false,
+    notice: AFTER_PLAN.has(status) ? "The plan does not cover it; review, the merge checks and the final check will." : null,
+  };
+}
+
+/** Why the dialog cannot be sent yet; null when it can. */
+export function scopeProblem(action: "add" | "remove", note: string): string | null {
+  return action === "remove" && !note.trim() ? "Say why this standard does not apply to this change." : null;
+}

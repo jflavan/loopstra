@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { DraftCheck, ExceptionRow, StandardForm } from "../../src/console/types";
+import type { ChangeStandardsView, DraftCheck, ExceptionRow, StandardForm } from "../../src/console/types";
 import { parseRoute, routePath } from "../../src/ui/router";
-import { canSave, EXAMPLES, fieldProblems, filterExceptions, isStandardName, opensAsMarkdown, removeText, saveNotice, scopeLine, takenNames } from "../../src/ui/standards";
+import { addChoices, approveLabel, canSave, EXAMPLES, fieldProblems, filterExceptions, isStandardName, opensAsMarkdown, panelRows, panelShown, removeChoices, removeText, scopeDialog, scopeProblem, saveNotice, scopeLine, takenNames } from "../../src/ui/standards";
 import { formToMarkdown, parseStandard, RULE_LABEL, STANDARD_NAME } from "../../src/standards";
 
 const form = (over: Partial<StandardForm> = {}): StandardForm => ({
@@ -145,5 +145,71 @@ describe("exceptions granted", () => {
     expect(parseRoute("/settings/exceptions")).toEqual({ name: "exceptions" });
     expect(routePath({ name: "exceptions" })).toBe("/settings/exceptions");
     expect(parseRoute("/settings/nope")).toEqual({ name: "missing", path: "/settings/nope" });
+  });
+});
+
+describe("the change page's Standards panel", () => {
+  const view = (): ChangeStandardsView => ({
+    applying: [
+      { name: "architecture", title: "Architecture", why: "The change touches services/billing/api.ts.", rules: [{ label: "ARCH-1", text: "No cycles.", plan: "Exception: needed for the bridge.", findings: [] }] },
+      { name: "security", title: "Security", why: "It applies to every change.", rules: [{ label: "SEC-1", text: "No secrets.", findings: [] }] },
+      { name: "style", title: "Style", why: "Added by J.", rules: [] },
+    ],
+    waiting: [{ label: "ARCH-1", kind: "exception", text: "needed for the bridge." }],
+    record: { added: [], removed: [], exceptions: [], problems: [] },
+  });
+
+  test("waiting exceptions come first, then the standards as the server described them", () => {
+    const rows = panelRows(view(), "plan-review");
+    expect(rows.map((r) => r.kind)).toEqual(["waiting", "standard", "standard", "standard"]);
+    expect(rows[0]).toMatchObject({ kind: "waiting", label: "ARCH-1", standard: "architecture", title: "Architecture", reason: "needed for the bridge.", gate: "plan" });
+    expect(rows.flatMap((r) => (r.kind === "standard" ? [r.why] : []))).toEqual(["The change touches services/billing/api.ts.", "It applies to every change.", "Added by J."]);
+  });
+
+  test("where an exception is asked follows the review the change is in, else the rule's text", () => {
+    expect(panelRows(view(), "spec-review")[0]).toMatchObject({ gate: "spec" });
+    expect(panelRows(view())[0]).toMatchObject({ gate: "plan" });
+    const v = view();
+    v.applying[0]!.rules[0] = { label: "ARCH-1", text: "No cycles.", spec: "Exception: x", findings: [] };
+    expect(panelRows(v)[0]).toMatchObject({ gate: "spec" });
+  });
+
+  test("an exception for a rule no standard has any more still shows", () => {
+    const v = view();
+    v.waiting = [{ label: "GONE-1", kind: "exception", text: "why" }];
+    expect(panelRows(v, "plan-review")[0]).toMatchObject({ kind: "waiting", label: "GONE-1", standard: "", title: "" });
+  });
+
+  test("the approve button names the gate", () => {
+    expect(approveLabel("plan")).toBe("Allow the exception and approve the plan");
+    expect(approveLabel("spec")).toBe("Allow the exception and approve the spec");
+  });
+
+  test("the panel is not for done or closed changes", () => {
+    expect(panelShown("building")).toBe(true);
+    expect(panelShown("done")).toBe(false);
+    expect(panelShown("closed")).toBe(false);
+  });
+
+  test("Add offers standards not applying, Remove only those applying", () => {
+    const all = [{ name: "architecture", title: "Architecture" }, { name: "security", title: "Security" }, { name: "docs", title: "Docs" }];
+    expect(addChoices(all, view()).map((s) => s.name)).toEqual(["docs"]);
+    expect(removeChoices(view()).map((s) => s.name)).toEqual(["architecture", "security", "style"]);
+  });
+
+  test("Remove needs a note; Add may go without but asks for one", () => {
+    expect(scopeProblem("remove", "  ")).toBe("Say why this standard does not apply to this change.");
+    expect(scopeProblem("remove", "legacy code")).toBeNull();
+    expect(scopeProblem("add", "")).toBeNull();
+    expect(scopeDialog("add", "building").ask).toMatch(/note/i);
+    expect(scopeDialog("remove", "building").required).toBe(true);
+    expect(scopeDialog("add", "building").required).toBe(false);
+  });
+
+  test("Add at or after plan-approved says the plan does not cover it", () => {
+    const words = "The plan does not cover it; review, the merge checks and the final check will.";
+    for (const s of ["plan-approved", "building", "reviewing", "merge-review"]) expect(scopeDialog("add", s).notice).toBe(words);
+    for (const s of ["accepted", "designing", "spec-review", "planning", "plan-review"]) expect(scopeDialog("add", s).notice).toBeNull();
+    expect(scopeDialog("remove", "building").notice).toBeNull();
   });
 });
