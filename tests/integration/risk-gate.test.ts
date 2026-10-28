@@ -18,7 +18,7 @@ describe("risky changes with a GitHub remote", () => {
       await tick(s.repo); // review, merge checks, pull request
       const waiting = await intentOf(s.repo);
       expect(waiting).toMatchObject({ status: "merge-review", merge_gate: "pr" });
-      expect(waiting.note).toBe("This change touches files set to need a person before merging: src/add.ts. Approve the pull request on GitHub, or set status to merge-approved.");
+      expect(waiting.note).toBe("This change touches files set to need a person before merging: src/add.ts. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.");
       expect(inTrace(s.repo, (t) => t.lastGate(SLUG, "merge", "risk"))).toMatchObject({ result: "waiting", evidence: "touches src/add.ts" });
 
       // Its checks pass, but nobody approved: it does not merge, look after look.
@@ -46,7 +46,7 @@ describe("risky changes with a GitHub remote", () => {
       await tick(s.repo);
       const waiting = await intentOf(s.repo);
       expect(waiting).toMatchObject({ status: "merge-review", merge_gate: "status" });
-      expect(waiting.note).toBe("This change touches files set to need a person before merging: src/add.ts. Read review.md. To let this change in, change the status line to merge-approved.");
+      expect(waiting.note).toBe("This change touches files set to need a person before merging: src/add.ts. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.");
       await s.setPr({ checks: "pass", reviewDecision: "APPROVED" });
       await tick(s.repo);
       expect((await intentOf(s.repo)).status).toBe("merge-review");

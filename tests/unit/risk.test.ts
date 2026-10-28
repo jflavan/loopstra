@@ -129,16 +129,16 @@ describe("the words", () => {
 
   test("the owner's note names up to 3 files and says who decides and how", () => {
     expect(riskNote(risk([".github/workflows/ci.yml", "package.json"]), "pr")).toBe(
-      "This change touches files set to need a person before merging: .github/workflows/ci.yml and package.json. Approve the pull request on GitHub, or set status to merge-approved.",
+      "This change touches files set to need a person before merging: .github/workflows/ci.yml and package.json. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.",
     );
     expect(riskNote(risk(["a", "b", "c", "d", "e"]), "status")).toBe(
-      "This change touches files set to need a person before merging: a, b, c and 2 more. Read review.md. To let this change in, change the status line to merge-approved.",
+      "This change touches files set to need a person before merging: a, b, c and 2 more. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.",
     );
     expect(riskNote(risk([], { lines: 1612, limit: 1500 }), "status")).toBe(
-      "This change has 1612 changed lines, more than the 1500 set to need a person before merging. Read review.md. To let this change in, change the status line to merge-approved.",
+      "This change has 1612 changed lines, more than the 1500 set to need a person before merging. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.",
     );
     expect(riskNote(risk(["a"], { lines: 1612, limit: 1500 }), "pr")).toBe(
-      "This change touches files set to need a person before merging: a. It also has 1612 changed lines, more than the 1500 set. Approve the pull request on GitHub, or set status to merge-approved.",
+      "This change touches files set to need a person before merging: a. It also has 1612 changed lines, more than the 1500 set. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.",
     );
   });
 });

@@ -188,10 +188,11 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 
 /**
  * Scores the change's branch in its worktree against main (see scoreRisk) and records it as the
- * merge gate's risk row; null, with no row, when the config names nothing risky.
+ * merge gate's risk row; null, with no row, when the config names nothing risky, or already has a
+ * person on the merge gate (risk would change nothing, so it is neither scored nor shown).
  */
 async function riskOf(ctx: StepContext): Promise<Risk | null> {
-  if (!riskySet(ctx.cfg)) return null;
+  if (!riskySet(ctx.cfg) || ctx.cfg.gates.merge.human !== "none") return null;
   const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg);
   ctx.trace.gate(ctx.slug, "merge", "risk", risk.risky ? "waiting" : "pass", riskEvidence(risk));
   return risk;

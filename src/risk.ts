@@ -91,6 +91,9 @@ export function riskEvidence(r: Risk): string {
   return parts.join("; ");
 }
 
+/** The words every risk note has: what makes it one (see isRiskNote). */
+const NEEDS_PERSON = "set to need a person before merging";
+
 /**
  * The owner's note on a risky change waiting in merge-review: why (at most 3 files, so whoever
  * approves knows what to look at), and how to let it in. `human` is who decides: pr when there is a
@@ -98,14 +101,19 @@ export function riskEvidence(r: Risk): string {
  */
 export function riskNote(r: Risk, human: "status" | "pr"): string {
   const why: string[] = [];
-  if (r.files.length) why.push(`This change touches files set to need a person before merging: ${someOf(r.files, 3)}.`);
+  if (r.files.length) why.push(`This change touches files ${NEEDS_PERSON}: ${someOf(r.files, 3)}.`);
   if (r.overLines) {
     why.push(r.files.length
       ? `It also has ${r.lines} changed lines, more than the ${r.limit ?? 0} set.`
-      : `This change has ${r.lines} changed lines, more than the ${r.limit ?? 0} set to need a person before merging.`);
+      : `This change has ${r.lines} changed lines, more than the ${r.limit ?? 0} ${NEEDS_PERSON}.`);
   }
   const how = human === "pr"
     ? "Approve the pull request on GitHub, or set status to merge-approved."
     : "Read review.md. To let this change in, change the status line to merge-approved.";
-  return [...why, how].join(" ");
+  return [...why, how, "To stop this change, set it to closed."].join(" ");
+}
+
+/** True when a note is one riskNote wrote (the merge gate's own words, which a pull request's wait may stand in for). */
+export function isRiskNote(note: string): boolean {
+  return note.includes(NEEDS_PERSON);
 }

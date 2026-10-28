@@ -397,7 +397,7 @@ describe("merge", () => {
     const fm = ctx.intent.file.frontmatter;
     // Who decides is a pull request, which without a remote is the status line.
     expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
-    expect(fm.note).toBe("This change touches files set to need a person before merging: src/add.ts. Read review.md. To let this change in, change the status line to merge-approved.");
+    expect(fm.note).toBe("This change touches files set to need a person before merging: src/add.ts. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.");
     expect(trace.lastGate("add-numbers", "merge", "risk")).toMatchObject({ result: "waiting", evidence: "touches src/add.ts" });
     expect(await onMain(repo.path, "src/add.ts")).toBe(false);
     // The record that moved it to merge-review wrote the field: one commit, both lines.
@@ -434,14 +434,14 @@ describe("merge", () => {
     trace.close(); repo.cleanup();
   });
 
-  test("with a person on the config's merge gate, a risky change gets the risk row but no merge_gate", async () => {
+  test("with a person on the config's merge gate, risk is not scored: no risk row and no merge_gate", async () => {
     const { repo, ctx, trace } = await builtWith("gates:\n  merge:\n    human: status\n    risky:\n      paths: [\"src/**\"]\n      human: pr\n");
     await runMergeStep(ctx);
     const i = await readIntent(repo.path, "add-numbers");
     expect(i.file.frontmatter.status).toBe("merge-review");
     expect(i.file.frontmatter.merge_gate).toBeUndefined();
     expect(i.file.frontmatter.note).toBe(MERGE_WAIT_NOTE);
-    expect(trace.lastGate("add-numbers", "merge", "risk")?.result).toBe("waiting");
+    expect(trace.lastGate("add-numbers", "merge", "risk")).toBeNull();
     trace.close(); repo.cleanup();
   });
 

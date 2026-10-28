@@ -123,6 +123,7 @@ describe("buildRetro", () => {
         gateRow("b", "spec", "spec-check", "pass"),
         gateRow("a", "done", "human", "waiting"),
         gateRow("a", "merge", "pr-approved", "pass"),
+        gateRow("a", "merge", "risk", "waiting"),
         gateRow("a", "done", "done-check", "pass"),
       ],
     }));

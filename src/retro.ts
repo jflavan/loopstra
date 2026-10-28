@@ -131,8 +131,11 @@ export function windowStart(now: Date, days: number): string {
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
-/** Checks that record what a person did, not an automatic check. */
-const PERSON_CHECKS: ReadonlySet<string> = new Set(["done/human", "merge/pr-approved"]);
+/**
+ * Rows that are not an automatic check that passes or fails: what a person did, and merge/risk, which
+ * says whether a person decides (its `waiting` is a risky change waiting for one, not a failure).
+ */
+const PERSON_CHECKS: ReadonlySet<string> = new Set(["done/human", "merge/pr-approved", "merge/risk"]);
 
 /** The gates in the order a change meets them. */
 const GATE_ORDER = ["spec", "plan", "review", "merge", "done"];
@@ -287,10 +290,18 @@ function waits(moves: readonly StatusMove[], since: string, now: string, questio
     w.ms.push(Date.parse(end ?? now) - Date.parse(start));
     if (end === undefined) w.open++;
   };
+  // Each move's next move of the same change, found in one pass from the newest.
+  const next: (string | undefined)[] = [];
+  const later = new Map<string, string>();
+  for (let i = moves.length - 1; i >= 0; i--) {
+    const m = moves[i]!;
+    next[i] = later.get(m.slug);
+    later.set(m.slug, m.ts);
+  }
   moves.forEach((m, i) => {
     if (m.ts < since || !(m.to in REVIEW_GATE)) return;
     if (m.to === "merge-review" && m.note === PR_CHECKS_NOTE) return;
-    add(m.to as Status, m.ts, moves.slice(i + 1).find((n) => n.slug === m.slug)?.ts);
+    add(m.to as Status, m.ts, next[i]);
   });
   const answers = requests.filter((r) => {
     let raw: unknown;
