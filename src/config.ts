@@ -26,6 +26,19 @@ const humanGate = z.enum(["status", "pr", "none"]);
 const statusGate = z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" });
 const modelRef = z.enum(MODEL_REFS);
 
+/**
+ * Changes a person must let in, whatever gates.merge.human says (see src/risk.ts): ones touching a
+ * file a pattern matches, or bigger than `lines`. Empty (the default), nothing is risky.
+ */
+const riskyGate = z.object({
+  /** Patterns of repository paths, with `/`, as Bun.Glob reads them: `package.json` only at the top, `**\/package.json` anywhere. */
+  paths: z.array(z.string().refine((p) => p.trim() !== "", "must be a pattern of files, like .github/**")).default([]),
+  /** Lines added plus removed, outside intent/, over which a change is risky. Unset: size never makes it so. */
+  lines: z.number().int("must be a whole number").positive("must be more than 0").optional(),
+  /** Who decides a risky change. Without a remote, pr acts as status: there is no pull request to approve. */
+  human: z.enum(["pr", "status"], { error: "must be pr or status; a risky change always waits for a person" }).default("pr"),
+}).strict();
+
 type Steps = Partial<Record<string, ModelRef>>;
 
 /** Each step of a group may name its own model; unset, the step's built-in default applies (see STEPS). */
@@ -205,7 +218,7 @@ export const ConfigSchema = z.object({
   gates: z.object({
     spec: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
     plan: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
-    merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash") }).strict().prefault({}),
+    merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash"), risky: riskyGate.prefault({}) }).strict().prefault({}),
     // A pull request cannot confirm a result after the merge either.
     done: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
   }).strict().prefault({}),

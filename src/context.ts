@@ -433,9 +433,9 @@ export async function commitForStep(ctx: StepContext, what: string, write: (draf
  * before writing, never over a status a person set while the step ran, nor into a change a person
  * deleted meanwhile (throws PersonChangedStatus instead).
  */
-export async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>, draft: RecordDraft): Promise<void> {
+export async function writeForStep(ctx: StepContext, patch: Partial<Intent["file"]["frontmatter"]>, draft: RecordDraft, remove: Array<keyof Frontmatter> = []): Promise<void> {
   const expected = ctx.intent.file.frontmatter.status;
-  if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected }, draft))) {
+  if (!(await writeIntent(ctx.intent, patch, { expectStatus: expected, remove }, draft))) {
     throwIfDeleted(ctx, draft);
     const found = parseIntentFile(draft.read(intentRel(ctx))!).frontmatter.status;
     throw new PersonChangedStatus(expected, found);
@@ -464,14 +464,21 @@ export function statusPatch(from: Status, to: Status, note: string): Partial<Fro
 }
 
 /**
- * Writes the status and commits it (see commitRecord). `extra` goes into the traced status change,
- * which is traced once the commit landed (a write tried again, or never committed, is not traced).
+ * Other runtime-managed frontmatter a status change writes in the same record: keys `set`, and keys
+ * whose lines are `remove`d. One record, so nothing that reads the change sees the status without them.
  */
-export async function setStatus(ctx: StepContext, status: Status, note = "", extra: Record<string, unknown> = {}): Promise<void> {
+export interface StatusFields { set?: Partial<Frontmatter>; remove?: Array<keyof Frontmatter> }
+
+/**
+ * Writes the status and commits it (see commitRecord), with `fields` in the same record. `extra`
+ * goes into the traced status change, which is traced once the commit landed (a write tried again,
+ * or never committed, is not traced).
+ */
+export async function setStatus(ctx: StepContext, status: Status, note = "", extra: Record<string, unknown> = {}, fields: StatusFields = {}): Promise<void> {
   const from = ctx.intent.file.frontmatter.status;
-  const patch = statusPatch(from, status, note);
+  const patch = { ...fields.set, ...statusPatch(from, status, note) };
   const landed = await commitForStep(ctx, `${from} → ${status}`, async (draft) => {
-    await writeForStep(ctx, patch, draft);
+    await writeForStep(ctx, patch, draft, fields.remove);
   });
   if (!landed) return;
   ctx.trace.upsertIntent(ctx.slug, status, effectivePriority(ctx.intent.file.frontmatter));

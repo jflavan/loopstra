@@ -25,6 +25,11 @@ claude:
 
 # Gates between stages. human: status (a person edits the status line) | none; the merge gate also
 # takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.
+# A risky change waits for a person before it merges, even with merge human: none. It is risky when it
+# touches a file one of merge.risky's paths matches (globs: package.json only at the top,
+# **/package.json anywhere), or changes more than its lines (outside intent/). Its human: pr (default;
+# without a remote, the status line) or status. Nothing is risky unless set, for example:
+#   merge: { human: none, method: squash, risky: { paths: [".github/**", "package.json", "**/migrations/**"], lines: 1500 } }
 # A person always accepts an intent (draft -> accepted); by default everything after runs on its own.
 gates:
   spec: { human: none, agent: true }

@@ -2,7 +2,7 @@ import { roomBeside } from "../budget";
 import { filesExistOrNew, parsePlanFiles } from "../checks";
 import type { Config } from "../config";
 import { clearMarker, writeMarker, type StepContext, type StepResult } from "../context";
-import { scanRepo, type Status } from "../intents";
+import { changeGates, humanGates, scanRepo, type Frontmatter } from "../intents";
 import { agentPhase, phaseModel, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
@@ -74,11 +74,13 @@ function ruledOut(cfg: Config): string | null {
 }
 
 /**
- * Another change in this status may merge into main before this change's plan step: its code would
- * then not be the code the plan read. A pull request waiting for a person is not counted.
+ * Another change, at this frontmatter, may merge into main before this change's plan step: its code
+ * would then not be the code the plan read. A change waiting for a person in merge-review (the
+ * config's gate, or its own merge_gate: see changeGates) is not counted.
  */
-function mayMergeFirst(cfg: Config, status: Status): boolean {
-  return status === "reviewing" || status === "merge-approved" || (status === "merge-review" && cfg.gates.merge.human === "none");
+function mayMergeFirst(cfg: Config, fm: Frontmatter): boolean {
+  const s = fm.status;
+  return s === "reviewing" || s === "merge-approved" || (s === "merge-review" && changeGates(humanGates(cfg), fm).merge === "none");
 }
 
 /**
@@ -91,7 +93,7 @@ async function plansAhead(ctx: StepContext): Promise<boolean> {
   const cfg = ctx.cfg;
   if (ruledOut(cfg) !== null || cfg.gates.spec.human !== "none" || !roomBeside(cfg, ctx.trace, ctx.slug, 2)) return false;
   const others = (await scanRepo(ctx.root)).intents.filter((i) => i.slug !== ctx.slug);
-  return !others.some((i) => mayMergeFirst(cfg, i.file.frontmatter.status));
+  return !others.some((i) => mayMergeFirst(cfg, i.file.frontmatter));
 }
 
 /**

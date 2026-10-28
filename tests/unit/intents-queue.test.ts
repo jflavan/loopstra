@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  checkConsistency, dependencyNote, isRunnable, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn,
+  changeGates, checkConsistency, dependencyNote, humanGates, isRunnable, waitsForPerson, orderQueue, parseIntentFile, plainStatus, readIntent, renderQueue, scanRepo, waitingOn,
   type Intent,
 } from "../../src/intents";
 import { sameFileHolds } from "../../src/scheduler";
@@ -128,6 +128,27 @@ describe("scan and queue", () => {
     expect(isRunnable(with_("merge-approved"), { spec: "none", plan: "none", merge: "status", done: "none" })).toBe(true);
     expect(isRunnable(with_("verifying"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(false);
     expect(isRunnable(with_("merged"), { spec: "none", plan: "none", merge: "none", done: "status" })).toBe(true);
+  });
+
+  test("a change's merge_gate puts a person on its merge gate when the config has nobody there, and never takes one off", () => {
+    const base = { slug: "x", dir: "", file: { frontmatter: { status: "merge-review", priority: "normal", author: "", opened: "", note: "", hold: "", question: "" }, title: "x", body: "", sections: {} }, artifacts: new Set<string>() } as unknown as Intent;
+    const gated = (gate?: "pr" | "status"): Intent => ({ ...base, file: { ...base.file, frontmatter: { ...base.file.frontmatter, ...(gate ? { merge_gate: gate } : {}) } } });
+    const nobody = humanGates(null);
+    const status = { ...nobody, merge: "status" } as const;
+    expect(changeGates(nobody, gated("pr").file.frontmatter)).toEqual({ ...nobody, merge: "pr" });
+    expect(changeGates(nobody, gated().file.frontmatter)).toEqual(nobody);
+    // The config's own person stays: merge_gate only ever adds one.
+    expect(changeGates(status, gated("pr").file.frontmatter)).toEqual(status);
+    // Waits for a person, so it is not run without a remote, and is listed as waiting.
+    expect(waitsForPerson(gated("pr"), nobody)).toBe(true);
+    expect(waitsForPerson(gated("status"), nobody)).toBe(true);
+    expect(waitsForPerson(gated(), nobody)).toBe(false);
+    expect(isRunnable(gated("pr"), nobody)).toBe(false);
+    expect(isRunnable(gated("status"), nobody)).toBe(false);
+    expect(isRunnable(gated(), nobody)).toBe(true);
+    // With a remote, the merge step watches its pull request, as for any merge-review.
+    expect(isRunnable(gated("pr"), nobody, true)).toBe(true);
+    expect(renderQueue([gated("pr")], [], nobody)).toMatch(/## Needs a person[\s\S]*\| x \|/);
   });
 
   test("writeIntent updates status and note and readIntent sees it", async () => {

@@ -108,6 +108,28 @@ describe("loadConfig", () => {
     expect(problems.map((p) => p.text)).toEqual(["commands.test is required: the single command that runs your tests"]);
   });
 
+  test("gates.merge.risky is empty by default: nothing makes a change risky, and a pull request decides one that is", () => {
+    const cfg = validateConfig({ version: 1, commands: { test: "bun test" } });
+    expect(cfg.gates.merge.risky).toEqual({ paths: [], human: "pr" });
+    const set = validateConfig({ version: 1, commands: { test: "bun test" }, gates: { merge: { risky: { paths: [".github/**", "package.json"], lines: 1500, human: "status" } } } });
+    expect(set.gates.merge.risky).toEqual({ paths: [".github/**", "package.json"], lines: 1500, human: "status" });
+  });
+
+  test("gates.merge.risky refuses a blank pattern, a size that is not a positive whole number, nobody to decide, and keys it does not know", () => {
+    const problems = (risky: unknown) => {
+      try { validateConfig({ version: 1, commands: { test: "bun test" }, gates: { merge: { risky } } }); } catch (e) { return (e as ConfigError).problems.map((p) => ({ path: p.path.join("."), text: p.text, unknownKey: p.unknownKey })); }
+      return [];
+    };
+    expect(problems({ paths: ["", " "] })).toEqual([
+      { path: "gates.merge.risky.paths.0", text: "gates.merge.risky.paths.0: must be a pattern of files, like .github/**", unknownKey: false },
+      { path: "gates.merge.risky.paths.1", text: "gates.merge.risky.paths.1: must be a pattern of files, like .github/**", unknownKey: false },
+    ]);
+    expect(problems({ lines: 0 })).toEqual([{ path: "gates.merge.risky.lines", text: "gates.merge.risky.lines: must be more than 0", unknownKey: false }]);
+    expect(problems({ lines: 2.5 })).toEqual([{ path: "gates.merge.risky.lines", text: "gates.merge.risky.lines: must be a whole number", unknownKey: false }]);
+    expect(problems({ human: "none" })).toEqual([{ path: "gates.merge.risky.human", text: "gates.merge.risky.human: must be pr or status; a risky change always waits for a person", unknownKey: false }]);
+    expect(problems({ size: 3 })).toEqual([{ path: "gates.merge.risky", text: "gates.merge.risky: unknown key(s) size", unknownKey: true }]);
+  });
+
   test("an empty optional command reads as none, as it did before the blank-name rule", () => {
     const cfg = validateConfig({ version: 1, commands: { test: "bun test", lint: "", build: "", run: "", install: "" } });
     expect([cfg.commands.lint, cfg.commands.build, cfg.commands.run, cfg.commands.install]).toEqual([undefined, undefined, undefined, undefined]);

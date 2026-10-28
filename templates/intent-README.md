@@ -53,6 +53,8 @@ The console's buttons (approve, send back, retry, start, hold, release, priority
 
 To hold a change for a while, write a `hold:` line with a reason at the top of `intent.md`, for example `hold: waiting for legal`. The loop starts no step for it until the line is removed. The console's Hold and Release buttons write and remove it.
 
+Some changes wait for a person before they go into the main code even when others go in on their own: those that touch files your engineers marked as needing a look (for example the files that say how the code is tested and released), or that are very large. Such a change waits at `merge-review` with a `merge_gate:` line at the top of `intent.md`, and its note names the files. With `merge_gate: pr`, approve its pull request on GitHub or set `merge-approved`; with `merge_gate: status`, read `review.md` and set `merge-approved`. The system writes and removes the line itself. Removing it by hand lets the change go in without anyone looking, so leave that to an engineer.
+
 Sometimes the system needs a decision only a person can make. It then asks a question, and the change waits whatever its status. The `question: open` line at the top of `intent.md` is set by the loop while an agent's question waits, and `queue.md` lists the change under "Needs a person" as "Has a question". Answer it with the console's Answer button, or in the chat. To answer by hand, write your answer under the question in `conversation.md` and remove the `question:` line.
 
 `conversation.md` is the change's record of what people told the system while it worked (messages, answers, notes from sending it back) and of the questions it asked. The system writes it, and the agents that do the work read it. You can read it at any time.

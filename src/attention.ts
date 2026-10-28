@@ -2,7 +2,7 @@ import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { ghProblem, GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
-import { dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
+import { changeGates, dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
 import { humanNote, prWait } from "./stages/shared";
@@ -143,7 +143,7 @@ export async function attention(root: string, config: Config | { problem: string
       continue;
     }
     const gate = REVIEW_GATE[fm.status]!;
-    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, human[gate]));
+    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]));
   }
   return items;
 }

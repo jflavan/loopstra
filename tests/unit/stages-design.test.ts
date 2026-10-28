@@ -407,13 +407,14 @@ describe("plan ahead", () => {
     ["reviewing", "", false],
     ["merge-review", "", false], // no person on the merge gate: it merges once its checks pass
     ["merge-review", "gates:\n  merge:\n    human: status\n", true], // waiting for a person
+    ["merge-review", "risky", true], // a risky change: waiting for a person though nobody is on the config's gate
     ["building", "", true],
   ] as const) {
-    test(`with another change at ${status}${config ? " (a person on the merge gate)" : ""}, a plan is ${ahead ? "" : "not "}written ahead`, async () => {
-      const { repo, ctx, trace } = await setupRepo("accepted", { config });
+    test(`with another change at ${status}${config === "risky" ? " (risky)" : config ? " (a person on the merge gate)" : ""}, a plan is ${ahead ? "" : "not "}written ahead`, async () => {
+      const { repo, ctx, trace } = await setupRepo("accepted", { config: config === "risky" ? "" : config });
       const other = join(repo.path, "intent", "other-change");
       mkdirSync(other, { recursive: true });
-      const text = readFileSync(join(repo.path, "intent", "add-numbers", "intent.md"), "utf8").replace(/status: \S+/, `status: ${status}`);
+      const text = readFileSync(join(repo.path, "intent", "add-numbers", "intent.md"), "utf8").replace(/status: \S+/, `status: ${status}${config === "risky" ? "\nmerge_gate: pr" : ""}`);
       writeFileSync(join(other, "intent.md"), text);
       await runDesignStep(ctx);
       expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");

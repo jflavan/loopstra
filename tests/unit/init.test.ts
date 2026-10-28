@@ -24,7 +24,8 @@ describe("init", () => {
       expect(cfg.commands.build).toBe("bun run build");
       expect(cfg.commands.run).toBe("bun run start");
       expect(cfg.gates.spec).toEqual({ human: "none", agent: true });
-      expect(cfg.gates.merge).toEqual({ human: "none", method: "squash" });
+      // The template names risky files only in a comment: nothing is risky until a person says so.
+      expect(cfg.gates.merge).toEqual({ human: "none", method: "squash", risky: { paths: [], human: "pr" } });
       for (const f of ["intent/README.md", "intent/queue.md", "REVIEW.md", ".claude/skills/loopstra/SKILL.md", "loopstra/stamp.json"]) {
         expect(existsSync(join(t.path, f))).toBe(true);
       }
