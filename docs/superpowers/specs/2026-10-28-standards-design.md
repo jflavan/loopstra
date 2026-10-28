@@ -9,7 +9,10 @@
 - changing a change's standards by hand;
 - the console's editor, and its list of exceptions.
 
-The user also asked that the whole workflow be possible in the console (writing and scoping standards, approving exceptions, reviewing them), and that `loopstra setup` set up standards and their tool checks.
+The user also asked for three more things:
+- the whole workflow possible in the console (writing and scoping standards, approving exceptions, reviewing them);
+- `loopstra setup` able to set up standards and their tool checks;
+- the onboarding agent (the operator skill in a Claude Code session) able to help draft them.
 
 ## Why
 
@@ -33,7 +36,7 @@ Today a repository can tell Loopstra's sessions how to work (`CLAUDE.md`, `.clau
 
 - Loopstra does not make an application compliant with anything, and does not claim to. SOC 2 is an auditor's opinion of an organisation's controls over a period. Standards let a team state the technical controls it wants in the code and get evidence that each change kept them; access reviews, vendor management, incident response and the rest stay outside.
 - No standards library shipped with Loopstra (no "SOC 2 pack"). The README shows an example; the rules are the team's, in its words.
-- No agent writes or edits standards. A person changes them on `main`: by hand, on the console's Standards page, or in `loopstra setup standards`. The console's writes are made by the loop's runtime (code) for the person who asked, as with agent files.
+- No session of the loop writes or edits standards. A person changes them on `main`: by hand, on the console's Standards page, or in `loopstra setup standards`. The console's writes are made by the loop's runtime (code) for the person who asked, as with agent files. The onboarding agent may draft them in the main checkout with a person (see The onboarding agent). Nothing it writes is in force until that person commits it, since the loop reads standards only from `main`'s commits.
 - Chat neither edits standards nor changes which apply to a change (Claude's call: the orchestrator is an agent, and edits made through it would come from an agent). Chat still approves a spec or plan, its exceptions included, as it can today.
 - Acceptance tests are not written from standards in this change (a follow-up; see the end).
 - Chat does not read standards in this change. The orchestrator is not told them, and intents are unchanged: product owners never need to know the standards exist.
@@ -41,7 +44,7 @@ Today a repository can tell Loopstra's sessions how to work (`CLAUDE.md`, `.clau
 
 ## Anti-goals
 
-- **An agent must never weaken the rules that judge it.** No session may edit `loopstra/standards/`, and a change whose diff does is blocked, whatever the hook let through. No agent can grant an exception either.
+- **The loop's agents must never weaken the rules that judge their work.** No session of the loop may edit `loopstra/standards/`, and a change whose diff does is blocked, whatever the hook let through. No agent can grant an exception either. (The onboarding agent is not a session of the loop: it works with a person, outside any change, and only a commit by that person puts what it wrote in force.)
 - **A broken standards file must never mean "no standards".** If a file on `main` cannot be read, the loop does nothing until it is fixed. It does not run changes as if the rules were not there.
 - **Standards must not turn the owner's documents into engineering documents.** The parts of the spec and outcome written for the owner stay in plain words; rule labels and technical evidence go in sections of their own.
 
@@ -72,6 +75,8 @@ Sessions are given the whole file, so this text is context, not decoration.
   - `applies_to`: glob patterns, matched against repo-relative paths with `/`, with the same semantics as `gates.merge.risky.paths` (Bun.Glob; a bare name matches only at the top). The standard then applies only to a change that touches a matching file. Without it, the standard applies to every change.
   - `needs_person`: `true` makes a change this standard applies to wait for a person before it merges (see Merge). The default is `false`. The user's choice: keep it, so a standard's scope and who must approve it stay in one place rather than repeating the patterns in `gates.merge.risky.paths`.
   - `check`: a shell command that exits 0 when the code keeps the standard's rules a tool can check (a secret scanner, semgrep rules, a layering checker). It runs in the merge checks of every change the standard applies to (see Merge). Optional.
+    - It gets `LOOPSTRA_BASE`, the commit where the change's branch left `main`, so a tool can report only what the change introduced: `semgrep scan --error --baseline-commit "$LOOPSTRA_BASE"`, `gitleaks git --log-opts="$LOOPSTRA_BASE..HEAD"`.
+    - A check that looks at the whole repository fails every change while `main` itself fails it (see Checks that fail on main).
   - Unknown keys are errors, as in the config.
 - **The title is the first `# ` heading.** It is required.
 - **The rules are under `## Rules`.** The section is required and holds at least one rule.
@@ -238,7 +243,7 @@ A standard's `check` is not run in the build's own test runs. The user's choice:
 
 ### Merge
 
-**Tool checks.** After the tests pass in the merge checks, each standard that applies to the diff and has a `check` runs it, in the change's worktree, with the same environment as the project's commands (`LOOPSTRA_SLUG`, `LOOPSTRA_SLOT`, the change's temp folder and ports).
+**Tool checks.** After the tests pass in the merge checks, each standard that applies to the diff and has a `check` runs it, in the change's worktree. It gets the same environment as the project's commands (`LOOPSTRA_SLUG`, `LOOPSTRA_SLOT`, the change's temp folder and ports), plus `LOOPSTRA_BASE`: the merge base of the branch and `main`, the same commit the test-protection hook's `LOOPSTRA_BASE` names.
 - **Failure.** A check that fails is handled as a failing test there: its output goes to the same test loop (`testLoop`, with the build's fix budget, `stages.build.max_fix_loops`), and fixes then go back to review as other merge-check fixes do.
 - **Reruns.** Like the tests, a check that passed on the same code is not run again.
 - **Past the fix budget.** The change blocks with a note that names the standard: "The change does not pass the automatic check of the standard Secrets (loopstra/standards/secrets.md), even after 3 tries to fix it. The details are in the trace. An engineer can fix it on the branch and retry the change, or close it."
@@ -246,6 +251,11 @@ A standard's `check` is not run in the build's own test runs. The user's choice:
 - **Where the command comes from.** It is read from `main`'s commit with the rest of the standard, so a branch cannot change it. As with hooks from `main`'s settings, a check that runs a script from the repository runs the branch's copy of that script, and a reviewer should read changes to such scripts.
 
 The user's choice: at the merge checks only, once per merge attempt, rather than in every build test run.
+
+**Checks that fail on main.** A tool that scans the whole repository fails on problems already on `main` (an old secret in the history, existing code a new semgrep rule flags). Each change would then fail its merge check for something it did not do, and its fix session would be sent after code outside the change. Loopstra does not try to tell old findings from new ones itself, since only the tool knows its findings. Instead:
+- **Base-aware commands.** Every check gets `LOOPSTRA_BASE`, and the README, setup's suggestions, the console's examples and the onboarding agent all use the forms that report only new findings.
+- **Trying a check on main.** Setup, `loopstra setup --check`, the console's "Try it on main" and the onboarding agent run each check on `main`'s last commit, with `LOOPSTRA_BASE` set to that commit. A check that fails there is reported with what to do: "The check of Secrets fails on main already, so every change under it would fail it too. Use a form that looks only at what a change adds (with $LOOPSTRA_BASE), or fix main first." In setup it is listed under "To fix", in the console it is a problem at the top of Standards, and `loopstra start` warns once (Claude's call: a warning, not a refusal, since the team may be fixing `main` right now).
+- **The block note.** When a change blocks past the fix budget on a check that does not use `LOOPSTRA_BASE`, the note adds: "If main fails this check too, the problem may not be this change's; see loopstra setup --check."
 
 The merge gate also gets two checks, both code, both at `passMergeGate` with the risk check, on the same diff:
 
@@ -305,7 +315,7 @@ A third section of the Settings page, after Models and Agents.
   - **Markdown:** the whole file in one editor, with the same problems listed under it and a preview.
   - **Saving:** "Save" is offered only when the file would read. The console cannot put an unreadable standard on `main`.
   - **Changing the rules a change in progress is held to:** saving says so, naming the changes ("billing-refunds and csv-export are in progress under this standard; their next steps use the new rules").
-- **Try it on main** runs the standard's `check` in a throwaway checkout of `main`'s last commit, as `loopstra setup` runs `commands.test`, with `commands.install` first and `timeout_minutes` as its limit. It shows whether it passed, how long it took and the end of its output. It writes nothing to the repository.
+- **Try it on main** runs the standard's `check` in a throwaway checkout of `main`'s last commit, as `loopstra setup` runs `commands.test`, with `commands.install` first, `LOOPSTRA_BASE` set to that commit, and `timeout_minutes` as its limit. It shows whether it passed, how long it took and the end of its output. A failure on main gets the warning in Checks that fail on main, with the base-aware form of the command when it is one of the known scanners. It writes nothing to the repository.
 - **Exceptions granted.** The user's choice: one list across all changes, read from every change's `standards.md`. For each exception it shows the rule (with its standard), the change, the reason, who approved it, from where, when, and at which gate. It can be filtered by standard and by rule, and links to the change. Standards added to or removed from a change are listed beside it, under "Changes to scope", with the same columns.
 
 ### The change page
@@ -352,10 +362,10 @@ A **Standards** panel, shown when the repository has standards. It lists each st
 - **`loopstra init`** writes no standards. Off is the default and means absent.
 - **`loopstra setup standards`**, a new section (see below).
 - **`loopstra setup --check`** reads the standards from `main`'s last commit and lists each problem under "To fix". It warns when a standard's `check` names a program that is not installed, as it does for the commands.
-- **The operator skill** (`templates/skill/SKILL.md`) gets a section on writing a standard. It covers the file's shape, choosing rule labels, scoping with `applies_to`, putting what a tool can check in `check`, when to ask for an exception, and writing a rule a judge can check ("every endpoint under api/ checks the caller's role with `requireRole`", not "be secure"). It ends by saying to commit the file on `main`.
+- **The operator skill** (`templates/skill/SKILL.md`) gets an Onboard step for standards (see The onboarding agent). Its Tune section says the same flow is how to change standards later, beside `loopstra setup standards` and the console's Standards page.
 - **README** gets a Standards section with two worked examples:
   - an architecture standard for every change;
-  - a SOC 2 technical-controls standard scoped to `services/**` and `infra/**`: authentication and role checks, audit logs for access to customer data, encryption in transit and at rest, no secrets or personal data in logs, keeping and deleting data on schedule. Its `check` runs a secret scanner.
+  - a SOC 2 technical-controls standard scoped to `services/**` and `infra/**`: authentication and role checks, audit logs for access to customer data, encryption in transit and at rest, no secrets or personal data in logs, keeping and deleting data on schedule. Its `check` runs a secret scanner over what a change adds (`$LOOPSTRA_BASE`).
 
   It states plainly the limits under Non-goals, and how the records it leaves map to a change-management control (the intent is the request, the spec and plan the design, `review.md` the review, the outcome the evidence, and the pull request's approval with `merge.human: pr` the approval).
 - **`docs/architecture.md`** lists `standards.ts` in layer 3.
@@ -371,12 +381,42 @@ A new section, listed with the others and runnable alone. Like agents, it is not
    - the title;
    - which files it applies to: comma-separated patterns, `-` for every change. It answers with how many files on `main` they match, and asks again if one is not a valid pattern;
    - "Does a change under this standard need a person before it merges? (y/N)";
-   - the tool check. The suggestion is the first of these found on PATH, as a command that fails on findings: `gitleaks detect --no-banner`, `semgrep scan --error`, `trivy fs --exit-code 1 .`, `checkov -d . --quiet`. Otherwise there is none. `-` leaves it out;
+   - the tool check. The suggestion is the first of these found on PATH, in a form that fails on findings and, where the tool can, looks only at what a change adds: `gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"`, `semgrep scan --error --baseline-commit "$LOOPSTRA_BASE"`, `trivy fs --exit-code 1 .`, `checkov -d . --quiet`. Otherwise there is none. `-` leaves it out. Setup says in one line that `$LOOPSTRA_BASE` is where the change left `main`;
    - **the rules.** It lists the current ones by label, then asks "Add a rule as LABEL: text (Enter when done)", one at a time. A label already used is refused with the rule that has it. Then it asks "Rules to remove (labels, comma-separated)". To reword a rule, a person removes it and adds it again with the same label.
    - The context text is not asked. A new file gets a line saying where to write it, and setup says the file is plain Markdown to edit any time.
-4. **Saving and checking.** It saves with the rest of setup, once, at the end. If the result would not read, it saves nothing, as for the config. Then it checks, with the section's other checks: every standard reads, and each new or changed tool check passes on `main` in a throwaway checkout, as `commands.test` is checked. What is not ok is listed under "To fix", with `loopstra setup standards` to run again. Like the rest of setup, it does not commit; it says to commit `loopstra/standards/`.
+4. **Saving and checking.** It saves with the rest of setup, once, at the end. If the result would not read, it saves nothing, as for the config. Then it checks, with the section's other checks: every standard reads, and each new or changed tool check passes on `main` in a throwaway checkout, as `commands.test` is checked, with `LOOPSTRA_BASE` set to `main`'s commit. A check that fails there gets the warning in Checks that fail on main. What is not ok is listed under "To fix", with `loopstra setup standards` to run again. Like the rest of setup, it does not commit; it says to commit `loopstra/standards/`.
 
 `loopstra setup --defaults` adds no standards. `loopstra setup --check` reads them and runs each tool check on `main`, as it does `commands.test`.
+
+### The onboarding agent
+
+The `loopstra` operator skill, in a Claude Code session with an engineer, can do more than setup's questions: it can read the team's own material and draft standards from it. The skill's Onboard list gets a new step after "Set up the agents", "Set up the standards". It is offered, not required; a team with no rules to state skips it.
+
+1. **Ask what governs the code,** in the team's words:
+   - an architecture team's principles, design records, a compliance framework (SOC 2, HIPAA, PCI), security policies;
+   - where each lives: in the repository, pasted into the session, or behind an MCP tool the session has (a wiki, say).
+
+   Ask who approves exceptions today, and which kinds of change already need a named person.
+2. **Read what is there:**
+   - `docs/adr/` or wherever design records are, `CLAUDE.md`, `.claude/rules`, `REVIEW.md`, `CODEOWNERS`;
+   - lint and layering configs (eslint boundaries, dependency-cruiser, import-linter, ArchUnit);
+   - the CI workflows, for the scanners that already run;
+   - the code's layout, for where each rule would apply.
+3. **Propose the standards,** one file per subject, each shown in full before anything is written:
+   - rules stated against this repository's real code ("through the repository layer in `src/db/`", not "use good data access"), each one a judge could check from a spec, a plan or a diff; a vague source rule is rewritten so, and the original quoted beside it;
+   - rule labels in the team's own scheme, a framework's control numbers included (`SOC2-CC6.1`);
+   - `applies_to` patterns taken from the actual layout, with how many files each matches (from `loopstra standards`, once written, or by globbing);
+   - `needs_person` where the team already wants a named person;
+   - a `check` wherever a tool can enforce a rule, preferring a tool the repository or its CI already uses, in a form that looks only at what a change adds (`$LOOPSTRA_BASE`). A tool that would need installing is said so.
+4. **Sort what goes where.** Must-haves are standards. Conventions and how-tos belong in `CLAUDE.md` or `.claude/rules`, which the skill can add to with the engineer. Who must approve becomes `needs_person` or the gates (`loopstra setup gates`). Controls that are not about code (access reviews, vendor management, incident response) are outside Loopstra, and the agent says so plainly, rather than writing rules no judge can check.
+5. **Write and check.** Once the engineer agrees:
+   - The agent writes the files in `loopstra/standards/` in the main checkout, with the context text the team's sources gave: why, links to the design records, examples.
+   - It runs `loopstra setup --check`, which reads them and runs each tool check on `main`.
+   - It fixes what does not read. For a check that fails on `main`, it explains why (old findings, or a real problem on `main`) and offers the base-aware form, or a change to fix `main` first.
+   - It shows the diff, and the engineer commits it on `main`. Until then nothing is in force.
+6. **Afterwards,** it says where standards are changed: this flow again, `loopstra setup standards`, or the console's Standards page. It also says what the team will see: the Standards sections in specs and plans, exceptions waiting in the inbox, and the record in each outcome.
+
+The agent never writes a standard the engineer has not seen and agreed to, and never commits. Like the skill's other steps, it does not run `loopstra start`. It does not grant exceptions or change a change's standards: those are a person's actions in the console or the change's records, and the agent can explain them.
 - **`docs/decisions.md`** gets the calls in this spec.
 
 ## Code
@@ -440,7 +480,10 @@ A new section, listed with the others and runnable alone. Like agents, it is not
   - Try it on main in a throwaway checkout, which leaves the repository unchanged;
   - the exceptions list read from several changes' `standards.md`;
   - the UI's views, as the Agents settings views are tested.
-- **Setup:** the section adds, edits and removes a standard, refuses a label used twice, suggests a scanner found on PATH, saves nothing when the result would not read, and lists a failing tool check under "To fix".
+- **Setup:** the section adds, edits and removes a standard, refuses a label used twice, suggests a scanner found on PATH in its base-aware form, saves nothing when the result would not read, and lists a tool check that fails on `main` under "To fix" with the warning.
+- **`LOOPSTRA_BASE`:** a tool check at the merge checks gets the merge base. A check that writes it out shows the right commit, after main has moved on, and after a conflict resolution squashed the branch.
+- **Checks that fail on main:** "Try it on main" and `setup --check` report the warning, `loopstra start` warns once, and the block note gets its extra sentence only for a check that does not use `LOOPSTRA_BASE`.
+- **The skill:** its Onboard list has the standards step, and its Tune section points to it. The skill's existing structure checks cover it, if any.
 
 ## Follow-ups (not in this change)
 
