@@ -37,6 +37,13 @@ export const STANDARDS_INSTRUCTIONS: Partial<Record<PhaseName, string>> = {
     "   - Does the plan break any rule that applies, or claim something the Order of work does not carry out? That is a concern with `blocking` true. Set `standard` to the rule's label.",
     "   - An exception is not yours to grant or refuse. Check that its reason is stated and that the plan does what it says. Whether the exception is acceptable is a person's call.",
   ].join("\n"),
+  "done-check": [
+    "Judge each rule below that applies to this change, in `standards`, as you judge the Done when criteria: one item for each, with its `label`, a `result` and the `evidence`.",
+    "- `met`: only with evidence from the repository (a test, a command's output, a file you inspected). A standard's check that passed at merge, listed below, can be the evidence for the rules it covers.",
+    "- `unmet`: you checked, and the repository shows the change does not keep the rule.",
+    "- `needs-person`: the repository cannot show it (for example, \"the alert exists in the monitoring system\"). Say briefly what a person should check.",
+    "A rule listed under an approved exception is not yours to judge. Leave the standards out of `outcome_markdown`: the runtime writes their section.",
+  ].join("\n"),
   build: KEEP_THE_RULES,
   resolve: KEEP_THE_RULES,
   review: [
