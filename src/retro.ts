@@ -319,6 +319,7 @@ const BUDGET_BLOCKS = 1;
 const LONG_WAIT_MS = DAY_MS;
 const QUIET_GATE_RUNS = 5;
 const RISKY_MERGES = 1;
+const UNMET_BLOCKS = 1;
 
 const money = (usd: number) => `$${usd.toFixed(2)}`;
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -365,8 +366,9 @@ export function suggestions(f: RetroFacts, cfg: Config): string[] {
   if (cfg.gates.merge.human === "none" && !riskySet(cfg) && f.merged >= RISKY_MERGES) {
     out.push(`${count(f.merged, "change")} merged with nobody looking, and no file is set to need a person: set gates.merge.risky.paths (loopstra setup github suggests some) so changes to CI, dependencies or migrations wait for a person.`);
   }
-  // One more rule comes with the setting it names, once it exists:
-  // - acceptance tests: stages.build.acceptance_tests off, f.blocks.unmet >= 1.
+  if (!cfg.stages.build.acceptance_tests && f.blocks.unmet >= UNMET_BLOCKS) {
+    out.push(`${count(f.blocks.unmet, "change")} merged without meeting a Done when criterion: set stages.build.acceptance_tests to true, so tests written from Done when hold each build to it.`);
+  }
   return out;
 }
 

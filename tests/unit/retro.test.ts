@@ -268,6 +268,14 @@ describe("suggestions", () => {
     expect(say({ moves: merged, cfg: cfgOf("gates:\n  merge:\n    human: status\n") })).toEqual([]);
   });
 
+  test("acceptance tests: off, with a change blocked on an unmet Done when criterion, suggests turning them on", () => {
+    expect(say({ moves: blocks("unmet", 1) })).toEqual([
+      "1 change merged without meeting a Done when criterion: set stages.build.acceptance_tests to true, so tests written from Done when hold each build to it.",
+    ]);
+    expect(say({ moves: blocks("unmet", 1), cfg: cfgOf("stages:\n  build:\n    acceptance_tests: true\n") })).toEqual([]);
+    expect(say()).toEqual([]);
+  });
+
   test("waits: a person's gate with a median wait over a day, whose automatic checks all passed at least 5 times, may not need the person", () => {
     const merge = cfgOf("gates:\n  merge:\n    human: status\n");
     const waits = (hours: number) => [mv("a", ago(5), "reviewing", "merge-review", MERGE_WAIT_NOTE), mv("a", ago(5, hours), "merge-review", "merge-approved")];
