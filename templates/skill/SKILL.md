@@ -62,6 +62,8 @@ If the loop line says "Paused — " followed by "The assistant is unavailable", 
 Read the `note` in the change's `intent.md`. Explain the choices: follow the status the note names (it says which status to set to try again, or the two ways on); `resume_from`, the last approved state, is the fallback when the note names none; fix something first and then retry; or `closed`. Make the edit only when the person says which. For details, read `.loopstra/runs/<slug>/events.jsonl` or the phase folders under `.loopstra/runs/<slug>/phases/`.
 
 ## Tune
+To see how the loop is doing before changing anything, run `loopstra retro` (the last 7 days; `--days 30` for longer). It says what reached main, where changes blocked and why, how each gate check did, what the loop spent by kind of step, and how long changes waited for a person, then suggests settings to change, each with its evidence. Explain its suggestions in plain words and change a setting only when the person agrees; retro itself changes nothing.
+
 Edit `loopstra/config.yaml`, or a phase's prompt. Prompts ship with Loopstra: to change one, have them run `loopstra customize <phase>` (`loopstra customize` lists them), which copies it to `loopstra/prompts/<phase>.md` and records it in `loopstra/stamp.json`; edit that copy and commit both. Deleting the copy goes back to the shipped prompt. Changes take effect on the next pass; commit them. Keep prompts short and explicit; keep gate defaults deterministic. To change which MCP tools the loop may use, list them and ask again as in Onboard step 5. To change the agents (a step's agent, subagents, skills, teams), go through Onboard step 6 again, run `loopstra setup agents`, or use the Agents part of the console's Settings page.
 
 ## Upgrade

@@ -10,7 +10,7 @@ import { errorText } from "../shell";
 
 const JUDGE_FAILED = "The final check could not be completed; an engineer should look.";
 export const NEEDS_PERSON_DONE_NOTE = "Done. A few results need a person to confirm; see outcome.md.";
-const UNMET_NOTE = "The change merged, but the final check found Done when criteria that are not met. The details are in outcome.md. Decide whether to open a follow-up change, then set this one to done or closed.";
+export const UNMET_NOTE = "The change merged, but the final check found Done when criteria that are not met. The details are in outcome.md. Decide whether to open a follow-up change, then set this one to done or closed.";
 
 const NO_CHECK_OUTCOME = "# Outcome\n\n## Outcome\nThe change is merged.\n\n## Evidence\nNo automatic check of the Done when criteria is configured. A person may want to confirm them.\n";
 

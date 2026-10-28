@@ -164,7 +164,10 @@ loopstra status         # loop state, what needs a person, then every change: pr
 loopstra tail           # live events; `loopstra tail <slug>` for one change
 loopstra ui             # the console at http://127.0.0.1:4646 (--port <n>), with the orchestrator (see Chat)
 loopstra judges         # how often the cheaper judges agreed with the strong ones (speed.cheap_judges)
+loopstra retro          # how the loop did over the last 7 days, and what to change (--days <n>)
 ```
+
+`loopstra retro` reads the trace back and reports on a window of days (7 unless `--days` says otherwise): which changes reached main, finished, blocked or were closed, and how long a change took from accepted to merged; where changes blocked, grouped by why (timed out, tests kept failing, the reviewer kept finding problems, checks on GitHub failed, and so on); each gate check, how often it ran and how many changes passed it the first time; what the loop spent, by kind of step, with chat on its own line; and how long changes waited for a person at each review status and for answers to questions. It ends with suggestions, each naming its evidence and the setting to change: more fix loops or review rounds, a longer timeout, a higher session limit, trying the cheaper judges or letting them go first, or taking a person off a gate whose checks always pass while changes wait on them for days. It only reads; changing a setting is up to you.
 
 The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not shut down cleanly" (the loop process is gone: killed or crashed; start it again), or "Not responding" (the process is there but has not checked in: hung, or the machine slept).
 

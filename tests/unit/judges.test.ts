@@ -150,6 +150,14 @@ describe("judgeReport", () => {
     expect(report(rows(...caught(3)), "off")).toBeNull();
   });
 
+  test("earned says whether the record has earned going first, whatever the setting; never for a judge that cannot be compared", () => {
+    const earned = (seeded: JudgeRow[], setting = "shadow", yaml = "") => judgeReport(cfg(yaml, setting), seeded, TEMPLATES).judges.find((j) => j.judge === "review")!.earned;
+    expect(earned(rows(...caught(29)))).toBe(false);
+    expect(earned(rows(...caught(30)))).toBe(true);
+    expect(earned(rows(...caught(30)), "off")).toBe(true);
+    expect(earned(rows(...caught(30)), "shadow", "stages:\n  review:\n    model: default\n")).toBe(false);
+  });
+
   test("a judge that cannot be compared says why in words", () => {
     const why = (yaml: string, judge = "review") => judgeReport(cfg(yaml), [], TEMPLATES).judges.find((j) => j.judge === judge)!.why;
     expect(why("stages:\n  review:\n    model: default\n")).toBe("review already runs on sonnet; there is nothing cheaper to compare");
