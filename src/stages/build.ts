@@ -1,7 +1,8 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { ACCEPTANCE, acceptanceFiles, block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, alongside, codePhase, mayOverlap, phasePrompt, projectCommand, type AgentPhaseSpec } from "../phases";
+import { writeAcceptance } from "./acceptance";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
@@ -10,7 +11,11 @@ import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSH
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
-  if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
+  if (ctx.intent.file.frontmatter.status !== "building") {
+    // A new build writes its own acceptance tests; one resumed after a stop keeps what it wrote.
+    clearMarker(ctx, ACCEPTANCE);
+    await setStatus(ctx, "building");
+  }
   clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
   clearMarker(ctx, RECONCILED_PLAN); // nor is it compared with a plan reconciled for an earlier build
   clearMarker(ctx, EARLY_REVIEW); // nor reviewed by a review of an earlier build
@@ -45,6 +50,12 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   const a = await artifacts(ctx);
   const stage = ctx.cfg.stages.build;
 
+  // Tests from the owner's Done when list, written before the build, once per build.
+  if (stage.acceptance_tests && readMarker(ctx, ACCEPTANCE) === null) {
+    const wrote = await writeAcceptance(ctx, wt, a);
+    if (!wrote.ok) return block(ctx, wrote.note, wrote);
+  }
+
   const feedback = readMarker(ctx, SENT_BACK)?.trim() ?? "";
   const phase: AgentPhaseSpec & { name: "build" } = {
     name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -60,10 +71,11 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   // Used: the build it asked to change is saved.
   clearMarker(ctx, SENT_BACK);
 
-  // Plan drift: files changed that main's plan did not list.
+  // Plan drift: files changed that main's plan did not list. The acceptance tests are not the build's to list.
   let plan = a.plan;
+  const accepted = new Set(acceptanceFiles(ctx));
   const drift = await codePhase(ctx, "drift", async () => {
-    const changed = await wt.changedFilesSince(ctx.cfg.main_branch);
+    const changed = (await wt.changedFilesSince(ctx.cfg.main_branch)).filter((f) => !accepted.has(f));
     const planned = parsePlanFiles(plan);
     if (planned === null) {
       // No file list to compare against: say so in the trace rather than flag every file.
@@ -114,7 +126,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     const again = await verifyChange(ctx, a.spec, plan, "verify-2");
     if (!again.ok) return block(ctx, again.note, again);
     if (!again.passed) {
-      return block(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.`, { detail: { observations: again.observations } });
+      return block(ctx, VERIFY_STILL_FAILED_NOTE, { detail: { observations: again.observations } });
     }
   }
 
@@ -142,6 +154,13 @@ async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
     return false;
   }
 }
+
+/** The owner's notes when the checks still fail after every fix allowed (see testLoop): the tests, or a command that kept running past its limit. */
+export const TESTS_KEPT_FAILING_NOTE = "The tests kept failing after several attempts to fix them. An engineer needs to look at the change.";
+export const CHECKS_KEPT_TIMING_OUT_NOTE = "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it.";
+
+/** The owner's note when the verifier still finds the change does not work after its round of fixes. */
+export const VERIFY_STILL_FAILED_NOTE = "The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.";
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
 const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
@@ -191,9 +210,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       return { ok: true };
     }
     if (i > max) {
-      const note = failure.timedOut
-        ? "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it."
-        : "The tests kept failing after several attempts to fix them. An engineer needs to look at the change.";
+      const note = failure.timedOut ? CHECKS_KEPT_TIMING_OUT_NOTE : TESTS_KEPT_FAILING_NOTE;
       return { ok: false, note, detail: `${failure.command} still failing after ${max} fix attempts: ${failure.lastLine}` };
     }
     const fix = await buildSession(ctx, {

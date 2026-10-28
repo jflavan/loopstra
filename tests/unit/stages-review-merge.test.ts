@@ -106,6 +106,21 @@ async function landSquash(git: Git, branch: string, message: string): Promise<vo
   await git.run(["commit", "-q", "-m", message]);
 }
 
+/**
+ * A copy of the built repository (nobody on the merge gate), with `config` appended to its config
+ * and committed, as an engineer's edit to it would be.
+ */
+async function builtWith(config: string) {
+  const s = await built();
+  s.trace.close();
+  await Bun.write(configPath(s.repo.path), `${await Bun.file(configPath(s.repo.path)).text()}${config}`);
+  await new Git(s.repo.path).commitAll("config");
+  return { repo: s.repo, ...(await openRepo(s.repo.path)) };
+}
+
+/** The build adds src/add.ts and tests/add.test.ts: this pattern makes it risky. */
+const RISKY_SRC = "gates:\n  merge:\n    risky:\n      paths: [\"src/**\"]\n";
+
 /** A person edits the status line by hand and commits it. */
 async function personSets(ctx: StepContext, to: "merge-approved" | "done"): Promise<void> {
   await ctx.reload();
@@ -372,6 +387,95 @@ describe("merge", () => {
     expect(i.file.frontmatter.resume_from).toBe("merged");
     expect(await onMain(repo.path, "src/add.ts")).toBe(true);
     expect(await new Git(repo.path).branchExists("intent/add-numbers")).toBe(false);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a risky change without a remote waits in merge-review for merge-approved, though nobody is on the merge gate", async () => {
+    const { repo, ctx, trace } = await builtWith(RISKY_SRC);
+    await runMergeStep(ctx);
+    await ctx.reload();
+    const fm = ctx.intent.file.frontmatter;
+    // Who decides is a pull request, which without a remote is the status line.
+    expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(fm.note).toBe("This change touches files set to need a person before merging: src/add.ts. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.");
+    expect(trace.lastGate("add-numbers", "merge", "risk")).toMatchObject({ result: "waiting", evidence: "touches src/add.ts" });
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+    // The record that moved it to merge-review wrote the field: one commit, both lines.
+    const shown = (await new Git(repo.path).run(["show", "HEAD", "--", "intent/add-numbers/intent.md"])).out;
+    expect(shown).toContain("+status: merge-review");
+    expect(shown).toContain("+merge_gate: pr");
+    // Stepping the waiting status never merges.
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merge-review");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(false);
+
+    await personSets(ctx, "merge-approved");
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
+    expect(await onMain(repo.path, "src/add.ts")).toBe(true);
+    trace.close(); repo.cleanup();
+  });
+
+  test("a change that touches nothing risky merges on its own, with a risk row that says so and no merge_gate", async () => {
+    const { repo, ctx, trace } = await builtWith("gates:\n  merge:\n    risky:\n      paths: [\".github/**\"]\n      lines: 500\n");
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(i.file.frontmatter.merge_gate).toBeUndefined();
+    expect(gateRows(trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass", "risk:pass"]);
+    expect(trace.lastGate("add-numbers", "merge", "risk")?.evidence).toBe("nothing risky");
+    trace.close(); repo.cleanup();
+  });
+
+  test("with nothing set to be risky, the merge gate writes no risk row", async () => {
+    const { repo, ctx, trace } = await built();
+    await runMergeStep(ctx);
+    expect(gateRows(trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("with a person on the config's merge gate, risk is not scored: no risk row and no merge_gate", async () => {
+    const { repo, ctx, trace } = await builtWith("gates:\n  merge:\n    human: status\n    risky:\n      paths: [\"src/**\"]\n      human: pr\n");
+    await runMergeStep(ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merge-review");
+    expect(i.file.frontmatter.merge_gate).toBeUndefined();
+    expect(i.file.frontmatter.note).toBe(MERGE_WAIT_NOTE);
+    expect(trace.lastGate("add-numbers", "merge", "risk")).toBeNull();
+    trace.close(); repo.cleanup();
+  });
+
+  test("a merge_gate a change no longer earns is removed at its next pass of the merge gate, and it merges", async () => {
+    const { repo, ctx, trace } = await builtWith(RISKY_SRC);
+    await runMergeStep(ctx);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.merge_gate).toBe("pr");
+    // Built again without the risky files, as far as the gate can tell: the pattern no longer matches.
+    trace.close();
+    const config = (await Bun.file(configPath(repo.path)).text()).replace('paths: ["src/**"]', 'paths: ["docs/**"]');
+    await Bun.write(configPath(repo.path), config);
+    await new Git(repo.path).commitAll("config");
+    const again = await openRepo(repo.path);
+    await writeIntentOnDisk(again.ctx.intent, { status: "reviewing", note: "" });
+    await again.ctx.git.commitPaths(["intent/add-numbers"], "person: reviewing");
+    await again.ctx.reload();
+    await runMergeStep(again.ctx);
+    const i = await readIntent(repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("merged");
+    expect(i.file.frontmatter.merge_gate).toBeUndefined();
+    expect(await Bun.file(join(repo.path, "intent", "add-numbers", "intent.md")).text()).not.toContain("merge_gate");
+    again.trace.close(); repo.cleanup();
+  });
+
+  test("a person who deletes the merge_gate line takes the change back to the config's gate: the merge step merges it", async () => {
+    const { repo, ctx, trace } = await builtWith(RISKY_SRC);
+    await runMergeStep(ctx);
+    await ctx.reload();
+    await writeIntentOnDisk(ctx.intent, {}, { remove: ["merge_gate"] });
+    await ctx.git.commitPaths(["intent/add-numbers"], "person: no merge_gate");
+    await ctx.reload();
+    expect(ctx.intent.file.frontmatter.merge_gate).toBeUndefined();
+    await runMergeStep(ctx);
+    expect(await status(repo.path)).toBe("merged");
     trace.close(); repo.cleanup();
   });
 

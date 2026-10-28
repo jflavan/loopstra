@@ -25,6 +25,61 @@ describe("protect-tests hook", () => {
     expect(blocked.err).toContain("protected");
   });
 
+  test("the acceptance step may write only tests and test fixtures", async () => {
+    const acceptance = { LOOPSTRA_PHASE: "acceptance" };
+    for (const p of ["/repo/tests/count.test.ts", "/repo/tests/fixtures/words.txt", "/repo/src/__tests__/count.ts", "C:\\repo\\tests\\count.test.ts", "/repo/pkg/calc/testdata/input.json", "/repo/fixtures/users.json", "/repo/src/__fixtures__/a.json", "/repo/test-utils/helpers.ts"]) {
+      expect({ p, code: (await runHook({ tool_name: "Write", tool_input: { file_path: p } }, acceptance)).code }).toEqual({ p, code: 0 });
+    }
+    for (const p of ["/repo/src/count.ts", "/repo/package.json", "/repo/docs/testing.md"]) {
+      expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, acceptance)).code }).toEqual({ p, code: 2 });
+    }
+    const refused = await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/src/count.ts" } }, { ...acceptance, CLAUDE_PROJECT_DIR: "/repo" });
+    expect(refused.err).toBe("Loopstra: the acceptance step writes only tests and test fixtures (src/count.ts).\n");
+  });
+
+  test("build, fix, reconcile and revise may not edit an acceptance test; other phases and other files are left alone", async () => {
+    const t = tempDir();
+    try {
+      const log = join(t.path, "protected-tests.txt");
+      const accepted = JSON.stringify(["tests/count.test.ts", "tests/fixtures/words.txt"]);
+      const env = (phase: string) => ({ LOOPSTRA_PHASE: phase, LOOPSTRA_ACCEPTANCE: accepted, LOOPSTRA_PROTECTED_LOG: log, CLAUDE_PROJECT_DIR: "/repo" });
+      for (const phase of ["build", "fix", "reconcile", "revise"]) {
+        const r = await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, env(phase));
+        expect({ phase, code: r.code }).toEqual({ phase, code: 2 });
+        expect(r.err).toBe("Loopstra: this is an acceptance test written from Done when; fix the code, not the test (tests/count.test.ts).\n");
+      }
+      expect(readFileSync(log, "utf8")).toBe("tests/count.test.ts\n".repeat(4));
+      // A fixture the acceptance step wrote is held the same way.
+      expect((await runHook({ tool_name: "Write", tool_input: { file_path: "/repo/tests/fixtures/words.txt" } }, env("build"))).code).toBe(2);
+      // The build writes its own tests and code freely.
+      expect((await runHook({ tool_name: "Write", tool_input: { file_path: "/repo/tests/other.test.ts" } }, env("build"))).code).toBe(0);
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/src/count.ts" } }, env("revise"))).code).toBe(0);
+      // Phases that do not write code, and the acceptance step itself, are not held by the list.
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, env("acceptance"))).code).toBe(0);
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, env("review"))).code).toBe(0);
+    } finally { t.cleanup(); }
+  });
+
+  test("an acceptance test is matched through Windows backslashes, and its case only where the file system ignores case", async () => {
+    const accepted = { LOOPSTRA_PHASE: "build", LOOPSTRA_ACCEPTANCE: JSON.stringify(["tests/count.test.ts"]) };
+    const backslashed = await runHook({ tool_name: "Edit", tool_input: { file_path: "C:\\repo\\tests\\count.test.ts" } }, { ...accepted, CLAUDE_PROJECT_DIR: "C:\\repo" });
+    expect(backslashed.code).toBe(2);
+    expect(backslashed.err).toContain("(tests/count.test.ts)");
+    // The list may be written with backslashes too.
+    const listed = { LOOPSTRA_PHASE: "fix", LOOPSTRA_ACCEPTANCE: JSON.stringify(["tests\\count.test.ts"]), CLAUDE_PROJECT_DIR: "/repo" };
+    expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, listed)).code).toBe(2);
+    const caseless = process.platform === "win32" || process.platform === "darwin";
+    const upper = await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/Tests/Count.test.ts" } }, { ...accepted, CLAUDE_PROJECT_DIR: "/repo" });
+    expect(upper.code).toBe(caseless ? 2 : 0);
+  });
+
+  test("an unreadable acceptance list holds nothing back", async () => {
+    for (const list of ["not json", "{\"a\": 1}", "[1, 2]", ""]) {
+      const r = await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, { LOOPSTRA_PHASE: "build", LOOPSTRA_ACCEPTANCE: list, CLAUDE_PROJECT_DIR: "/repo" });
+      expect({ list, code: r.code }).toEqual({ list, code: 0 });
+    }
+  });
+
   test("knows the test names of other languages: Go, pytest, .NET, Java", async () => {
     const fix = { LOOPSTRA_PHASE: "fix" };
     for (const p of ["/repo/pkg/add_test.go", "/repo/app/calc_test.py", "/repo/src/App.Tests/CalcTests.cs", "/repo/Tests/X.cs",

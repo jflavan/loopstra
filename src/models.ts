@@ -11,7 +11,7 @@ export type StageName = (typeof STAGE_NAMES)[number];
 export type StepGroup = StageName | "chat";
 
 export const STEP_KEYS = [
-  "intake", "design", "spec-check", "plan", "plan-challenge", "build", "reconcile", "fix",
+  "intake", "design", "spec-check", "plan", "plan-challenge", "acceptance", "build", "reconcile", "fix",
   "review", "revise", "resolve", "verify", "done-check", "lessons", "orchestrator", "write-intent",
 ] as const;
 export type StepKey = (typeof STEP_KEYS)[number];
@@ -34,6 +34,7 @@ export const STEPS: readonly StepInfo[] = [
   { key: "spec-check", group: "design", what: "judges the spec", byDefault: { ref: "strong" } },
   { key: "plan", group: "plan", what: "writes the plan (also the plan written ahead)", byDefault: { follows: "plan" } },
   { key: "plan-challenge", group: "plan", what: "judges the plan", byDefault: { ref: "strong" } },
+  { key: "acceptance", group: "build", what: "writes tests from Done when before the build", byDefault: { follows: "build" } },
   { key: "build", group: "build", what: "writes the code", byDefault: { follows: "build" } },
   { key: "reconcile", group: "build", what: "reconciles after the base moved", byDefault: { follows: "build" } },
   { key: "fix", group: "build", what: "fixes after failed checks, and after a failed verify", byDefault: { follows: "build" } },

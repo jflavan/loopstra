@@ -1,5 +1,5 @@
 import type { ActionKind, Offer } from "./console/types";
-import { isHeld, plainStatus, REVIEW_GATE, STATUSES, type Frontmatter, type HumanGates, type Priority, type Status } from "./intents";
+import { changeGates, isHeld, plainStatus, REVIEW_GATE, STATUSES, type Frontmatter, type HumanGates, type Priority, type Status } from "./intents";
 import type { Trace } from "./trace";
 
 /*
@@ -38,7 +38,10 @@ export function isOpen(s: Status): boolean {
   return s !== "done" && s !== "closed";
 }
 
-/** True when a person sits on the gate of this review status (so Approve and Send back are theirs to give). */
+/**
+ * True when a person sits on the gate of this review status (so Approve and Send back are theirs to
+ * give). `human` is the change's own gates (see changeGates).
+ */
 export function personReviews(s: Status, human: HumanGates): boolean {
   const gate = REVIEW_GATE[s];
   return !!gate && human[gate] !== "none";
@@ -75,13 +78,17 @@ export function retryOptions(trace: Trace, slug: string, note: string): Status[]
   return retryTargets(note, fromBlock);
 }
 
-/** What a change offers a person now. `retry`: its retry targets (see retryOptions); only a blocked change uses them. */
+/**
+ * What a change offers a person now: its own gates (see changeGates), so a risky change offers
+ * Approve and Send back though the config has nobody on the merge gate. `retry`: its retry targets
+ * (see retryOptions); only a blocked change uses them.
+ */
 export function offers(fm: Frontmatter, human: HumanGates, retry: Status[]): Offer[] {
   const s = fm.status;
   const out: Offer[] = [];
   // An agent's question waits for a person: answering it is what the change needs first.
   if (isOpen(s) && fm.question.trim()) out.push({ kind: "answer", label: "Answer" });
-  if (personReviews(s, human) && APPROVE_TO[s]) {
+  if (personReviews(s, changeGates(human, fm)) && APPROVE_TO[s]) {
     out.push({ kind: "approve", label: APPROVE_LABEL[s]!, to: APPROVE_TO[s] });
     if (SEND_BACK_TO[s]) out.push({ kind: "send-back", label: "Send back", to: SEND_BACK_TO[s] });
   }

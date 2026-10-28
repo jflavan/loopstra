@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
+import { z } from "zod";
+import { CHAT_SLUG } from "./budget";
 import type { ModelRef } from "./models";
 import { loopstraDir, runDir } from "./paths";
 import { errorCode, errorText } from "./shell";
@@ -64,6 +66,15 @@ export interface JudgeRow {
 export interface ModelRun {
   ref: ModelRef; asked: string; ran: string | null; result: "ok" | "bad-model"; slug: string; seq: number; ts: string;
 }
+
+/** A status_change event's payload, as statusChange writes it (other fields, like who moved it, are not read here). */
+const StatusPayload = z.object({ from: z.string(), to: z.string(), note: z.string().default("") });
+
+/** One status move of a change: when, from what, to what, and the note it left. */
+export interface StatusMove { slug: string; ts: string; from: string; to: string; note: string }
+
+/** One gate check's result, without its evidence. */
+export interface GateRow { slug: string; gate: string; check: string; result: string; ts: string }
 
 /** A judges row as written: the trace adds the id, the change and the time. */
 export type NewJudgeRow = Omit<JudgeRow, "id" | "slug" | "ts">;
@@ -542,6 +553,38 @@ export class Trace {
     const running = opts.endedOnly ? " AND status != 'running'" : stale ? " AND (status != 'running' OR started >= ?)" : "";
     const args = [("slug" in pool ? pool.slug : pool.except), since, ...(stale ? [stale] : [])];
     return this.db.query<{ c: number | null }, string[]>(`SELECT SUM(cost_usd) AS c FROM phases WHERE ${who} AND started >= ?${running}`).get(...args)?.c ?? 0;
+  }
+
+  /**
+   * Every status move of every change (chat's left out) at or after `since` (an ISO time), oldest
+   * first. A row whose payload cannot be read is passed over.
+   */
+  statusChangesSince(since: string): StatusMove[] {
+    const rows = this.eventsOfTypeSince("status_change", since);
+    const out: StatusMove[] = [];
+    for (const r of rows) {
+      if (r.slug === CHAT_SLUG) continue;
+      let raw: unknown;
+      try { raw = JSON.parse(r.payload); } catch { continue; }
+      const p = StatusPayload.safeParse(raw);
+      if (p.success) out.push({ slug: r.slug, ts: r.ts, ...p.data });
+    }
+    return out;
+  }
+
+  /** Every event of one type at or after `since` (an ISO time), of every slug, oldest first. */
+  eventsOfTypeSince(type: EventType, since: string): EventRow[] {
+    return this.db.query<EventRow, [string, string]>("SELECT * FROM events WHERE type = ? AND ts >= ? ORDER BY id").all(type, since);
+  }
+
+  /** Every gate check's result at or after `since` (an ISO time), of every change, oldest first. */
+  gatesSince(since: string): GateRow[] {
+    return this.db.query<GateRow, [string]>('SELECT slug, gate, "check", result, ts FROM gates WHERE ts >= ? ORDER BY id').all(since);
+  }
+
+  /** Every phase (chat's too) started at or after `since` (an ISO time), in the order they started. */
+  phasesSince(since: string): PhaseRow[] {
+    return this.db.query<PhaseRow, [string]>("SELECT * FROM phases WHERE started >= ? ORDER BY started, rowid").all(since);
   }
 
   /** What a slug's ended phases cost, in all (a running phase's budget hold is not spending). */

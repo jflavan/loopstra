@@ -53,6 +53,15 @@ export const Envelopes = {
     approved: z.boolean(),
     concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean() })),
   }),
+  /**
+   * Tests written from the owner's Done when list before the build: each test by the criterion it covers
+   * (in the owner's words), its file and its name, and each criterion no test could cover, with why.
+   * It never asks: the Done when list is the owner's answer already. The files it protects come from git.
+   */
+  acceptance: codeChange.extend({
+    tests: z.array(z.object({ criterion: z.string(), file: z.string(), test: z.string() })),
+    not_testable: z.array(z.object({ criterion: z.string(), why: z.string() })),
+  }),
   build: askingCodeChange,
   fix: codeChange,
   reconcile: base.extend({ plan_markdown: z.string() }),

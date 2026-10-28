@@ -8,6 +8,7 @@ import { changeEnv } from "../resources";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { WATCHING_PR, type Intent, type Status } from "../intents";
 import { runDir } from "../paths";
+import { isRiskNote } from "../risk";
 import { errorText } from "../shell";
 
 /**
@@ -208,7 +209,7 @@ export function prWait(root: string, intent: Intent): { wait: string; note: stri
   if (!WATCHING_PR.has(intent.file.frontmatter.status)) return { wait: "", note, needsPerson: false };
   let wait = "";
   try { wait = readFileSync(join(runDir(root, intent.slug), PR_WAIT), "utf8").trim(); } catch { /* none */ }
-  return { wait, note: wait && GATE_NOTES.has(note.trim()) ? "" : note, needsPerson: wait === PR_MERGED_ELSEWHERE };
+  return { wait, note: wait && (GATE_NOTES.has(note.trim()) || isRiskNote(note)) ? "" : note, needsPerson: wait === PR_MERGED_ELSEWHERE };
 }
 
 /**

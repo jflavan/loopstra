@@ -270,6 +270,23 @@ describe("a change waiting for a person is kept mergeable", () => {
     }
   }, 60_000);
 
+  test("a risky change waiting under its own merge_gate, with nobody on the config's gate, is kept mergeable too", async () => {
+    const repo = await copyRepo(templates.get("reviewed")!.path);
+    const configFile = join(repo.path, "loopstra", "config.yaml");
+    await Bun.write(configFile, (await Bun.file(configFile).text()).replace("human: status", "human: none"));
+    const intentFile = join(repo.path, "intent", "add-numbers", "intent.md");
+    await Bun.write(intentFile, (await Bun.file(intentFile).text()).replace("status: merge-review", "status: merge-review\nmerge_gate: status"));
+    await new Git(repo.path).commitAll("risky: a person decides this one");
+    const { ctx, trace } = await openRepo(repo.path);
+    try {
+      await mainMoves(repo.path);
+      await withResolve({ resolve: resolveFixture(RESOLVED, true) }, () => runMergeStep(ctx));
+      expect(await status(repo.path)).toEqual({ status: "reviewing", note: CAUGHT_UP_NOTE });
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
   test("main gains a change elsewhere: the waiting change is left alone", async () => {
     const { repo, ctx, trace } = await copy("reviewed");
     try {

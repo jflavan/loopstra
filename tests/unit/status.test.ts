@@ -103,6 +103,22 @@ describe("renderStatus", () => {
     }
   });
 
+  test("a risky change waiting in merge-review needs a person though nobody is on the config's merge gate; its own note, else the gate's, says what to do", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "risky", "status: merge-review\nmerge_gate: pr\nnote: \"This change touches files set to need a person before merging: package.json.\"");
+      await intent(t.path, "bare", "status: merge-review\nmerge_gate: status");
+      await intent(t.path, "plain", "status: merge-review\nnote: Waiting for the automatic checks on GitHub.");
+      const text = await renderStatus(t.path, 1000);
+      expect(text).toContain("- Waiting for you (risky): This change touches files set to need a person before merging: package.json.");
+      expect(text).toContain("- Waiting for you (bare): Read review.md. When you are happy with it, change the status line to merge-approved.");
+      expect(text).not.toContain("Waiting for you (plain)");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a change whose pull request waits says why in place of the merge gate's note; one only an engineer can end needs attention whoever is on the gate", async () => {
     const t = tempDir();
     try {
@@ -118,6 +134,10 @@ describe("renderStatus", () => {
       await intent(t.path, "elsewhere", "status: merge-review\nnote: Main has my migration in progress.");
       await wait("elsewhere", PR_MERGED_ELSEWHERE);
       await intent(t.path, "open", `status: merge-review\nnote: ${PR_APPROVE_NOTE}`);
+      // A risky change's note is the merge gate's too: the pull request's wait stands in for it.
+      const risky = "This change touches files set to need a person before merging: package.json. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.";
+      await intent(t.path, "risky", `status: merge-review\nmerge_gate: pr\nnote: "${risky}"`);
+      await wait("risky", behind);
       // Left by an earlier build's pull request: no longer shown once the change moved on.
       await intent(t.path, "rebuilt", "status: building");
       await wait("rebuilt", behind);
@@ -133,6 +153,8 @@ describe("renderStatus", () => {
       expect(block).toContain(`- Waiting for you (elsewhere): ${PR_MERGED_ELSEWHERE}`);
       expect(block).toContain(`- Waiting for you (open): ${PR_APPROVE_NOTE}`);
       expect(row("rebuilt")).not.toContain(behind);
+      expect(row("risky")).toContain(behind);
+      expect(row("risky")).not.toContain("package.json");
     } finally {
       t.cleanup();
     }

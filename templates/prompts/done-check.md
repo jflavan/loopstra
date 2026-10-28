@@ -12,9 +12,13 @@ Review summary:
 
 {{review}}
 
+Acceptance tests, written from the Done when criteria before the change was built (the build could not change them):
+
+{{acceptance}}
+
 Return one item in `evidence` for each criterion, in the owner's words, with a `result`:
 
-- `met`: you confirmed it from the repository: a test that covers it and passes, a command's output, or a file you inspected.
+- `met`: you confirmed it from the repository: a test that covers it and passes, a command's output, or a file you inspected. A criterion covered by an acceptance test that passes in this copy of main is met, with the test as its evidence (say in plain words what it checks).
 - `unmet`: you checked, and the repository shows it is not achieved.
 - `needs-person`: it cannot be judged from the repository alone (for example how people feel about it, or something in production). Say briefly what a person should check.
 

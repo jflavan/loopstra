@@ -25,6 +25,11 @@ claude:
 
 # Gates between stages. human: status (a person edits the status line) | none; the merge gate also
 # takes pr (approval of its GitHub pull request). agent: true runs an independent reviewer with a fresh context.
+# A risky change waits for a person before it merges, even with merge human: none. It is risky when it
+# touches a file one of merge.risky's paths matches (globs: package.json only at the top,
+# **/package.json anywhere), or changes more than its lines (outside intent/). Its human: pr (default;
+# without a remote, the status line) or status. Nothing is risky unless set, for example:
+#   merge: { human: none, method: squash, risky: { paths: [".github/**", "package.json", "**/migrations/**"], lines: 1500 } }
 # A person always accepts an intent (draft -> accepted); by default everything after runs on its own.
 gates:
   spec: { human: none, agent: true }
@@ -35,13 +40,21 @@ gates:
 # Per-stage model, skills to load, and deterministic commands to run before and after.
 # A step of a stage can have its own model too, for example under a stage:
 #   steps: { done-check: max }  # a step's own model; see the step table in the README
+# acceptance_tests: before each build, a session writes tests from the owner's Done when list
+# (one more session per change); the build may not change them, and the final check reads them.
 # review can also take max_resolutions (3): how many times a build may have conflicts with main
 # resolved (each is tested and reviewed in a round of its own, on top of max_rounds); past it, a
 # conflict blocks.
 stages:
   design: { model: strong, skills: [], before: [], after: [] }
   plan: { model: strong, skills: [], before: [], after: [] }
-  build: { model: default, skills: [], before: [], after: [], max_fix_loops: 3 }
+  build:
+    model: default
+    skills: []
+    before: []
+    after: []
+    max_fix_loops: 3
+    acceptance_tests: true
   review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 

@@ -152,6 +152,8 @@ export interface JudgeReportRow {
   firstWouldCost: number | null;
   /** Whether it goes first, in words; null when the setting is off or it cannot be compared. */
   goesFirst: string | null;
+  /** Its record has earned going first (see firstStanding); false when it cannot be compared. */
+  earned: boolean;
 }
 
 export interface JudgeReport {
@@ -179,7 +181,7 @@ function goesFirstText(setting: JudgeReport["setting"], s: FirstStanding): strin
 }
 
 /** One judge's counts over its rows with the current key. */
-function reportRow(key: JudgeKey | null, rows: readonly JudgeRow[]): { row: Omit<JudgeReportRow, "judge" | "why" | "goesFirst">; standing: FirstStanding } {
+function reportRow(key: JudgeKey | null, rows: readonly JudgeRow[]): { row: Omit<JudgeReportRow, "judge" | "why" | "goesFirst" | "earned">; standing: FirstStanding } {
   const mine = key ? rows.filter((r) => matches(r, key)) : [];
   const shadow = mine.filter((r) => r.how === "shadow");
   const compared = shadow.filter((r) => r.cheap !== "failed" && r.strong !== "failed");
@@ -227,7 +229,7 @@ export function judgeReport(cfg: Config, rows: readonly JudgeRow[], templates: P
     judges: JUDGES.map((judge) => {
       const { row, standing } = reportRow(keyOf(judge), rows);
       const why = notComparable(cfg, judge);
-      return { judge, why, ...row, goesFirst: why ? null : goesFirstText(setting, standing) };
+      return { judge, why, ...row, goesFirst: why ? null : goesFirstText(setting, standing), earned: !why && standing.earned };
     }),
     notCounted: rows.filter((r) => !counted(r)).length,
     falsePasses: rows.filter((r) => counted(r) && r.how === "shadow" && r.cheap === "pass" && r.strong === "reject").reverse(),

@@ -161,3 +161,19 @@ describe("question", () => {
     expect(text).toStartWith("---\nstatus: designing\n");
   });
 });
+
+describe("merge_gate", () => {
+  test("pr or status is read; blank or absent reads as none and gets no line; anything else is a problem", () => {
+    const gated = parseIntentFile("---\nstatus: merge-review\nmerge_gate: pr\n---\n# Intent: x\n");
+    expect(gated.frontmatter.merge_gate).toBe("pr");
+    expect(serializeIntentFile(gated)).toContain("merge_gate: pr\n");
+    expect(parseIntentFile("---\nstatus: merge-review\nmerge_gate: status\n---\n# Intent: x\n").frontmatter.merge_gate).toBe("status");
+    for (const blank of ["merge_gate:\n", "merge_gate: \"\"\n", ""]) {
+      const none = parseIntentFile(`---\nstatus: merge-review\n${blank}---\n# Intent: x\n`);
+      expect(none.frontmatter.merge_gate).toBeUndefined();
+      expect(serializeIntentFile(none)).not.toContain("merge_gate");
+    }
+    expect(() => parseIntentFile("---\nstatus: merge-review\nmerge_gate: none\n---\n# Intent: x\n")).toThrow(FrontmatterProblem);
+    expect(() => parseIntentFile("---\nstatus: merge-review\nmerge_gate: none\n---\n# Intent: x\n")).toThrow("intent.md frontmatter problem at merge_gate: must be pr or status, or the line removed");
+  });
+});

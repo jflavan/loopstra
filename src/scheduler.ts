@@ -12,7 +12,7 @@ import { activePause, clearPause, dropLoopLock, heartbeatDayPause, heartbeatDone
 import { ownerNote, probeAssistant, STOPPED_NOTE } from "./phases";
 import { settleCutShortMove, shareMain, syncMain } from "./remote";
 import { errorText, timerMs } from "./shell";
-import { checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
+import { changeGates, checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
@@ -279,10 +279,10 @@ async function runLane(root: string, cfg: Config, trace: Trace, candidates: Inte
  */
 async function staleWhileWaiting(root: string, cfg: Config, ordered: Intent[], human: HumanGates): Promise<Set<string>> {
   const stale = new Set<string>();
-  if (human.merge === "none") return stale;
   const git = new Git(root);
   for (const i of ordered) {
-    if (i.file.frontmatter.status !== "merge-review") continue;
+    // A change's own gate: a risky change waits for a person even when the config's merge gate has nobody.
+    if (i.file.frontmatter.status !== "merge-review" || changeGates(human, i.file.frontmatter).merge === "none") continue;
     try {
       if (await conflictsWhileWaiting(git, cfg.main_branch, `intent/${i.slug}`)) stale.add(i.slug);
     } catch (e) {

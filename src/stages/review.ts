@@ -10,6 +10,9 @@ import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
 
+/** The owner's note when the review rounds run out with important findings left. */
+export const REVIEW_STILL_FOUND_NOTE = "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.";
+
 /**
  * Brings the branch up to date with main (see catchUp), and runs the test loop on a resolution, so
  * whoever reviews it next reads tested code. A failure to block with.
@@ -81,7 +84,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
 
     if (round > roundsAllowed(ctx)) {
       clearMarker(ctx, REVIEW_ROUND);
-      return block(ctx, "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.", { detail: { rounds: round, important } });
+      return block(ctx, REVIEW_STILL_FOUND_NOTE, { detail: { rounds: round, important } });
     }
     const revise = await buildSession(ctx, {
       name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,

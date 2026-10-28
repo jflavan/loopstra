@@ -1,12 +1,13 @@
 import { existsSync } from "node:fs";
-import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, settleRecord, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, onceMarker, PersonChangedStatus, readArtifact, readMarker, recordPersonEdits, setStatus, settleRecord, writeMarker, type Failure, type StatusFields, type StepContext, type StepResult } from "../context";
 import { evaluateGate, type Check } from "../gates";
 import { Git, NO_AUTO_MAINTENANCE, passOn, statusPaths } from "../git";
 import { GitHub, recordGitHub, type PrInfo } from "../github";
 import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
-import type { Status } from "../intents";
+import { changeGates, humanGates, type Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain, type SyncOutcome } from "../remote";
+import { riskEvidence, riskNote, riskySet, scoreRisk, type Risk } from "../risk";
 import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
@@ -16,12 +17,12 @@ import { catchUpTested, REVIEW_PASSED, runReviewRounds } from "./review";
 import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
-const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
-const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
+export const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
+export const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
-const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
-const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
+export const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
+export const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
 const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";
@@ -67,9 +68,22 @@ const FINISH_FAILING_MS = 30 * 60_000;
 /** A failure this long after the last one (the loop was off meanwhile) starts the count again. */
 const FINISH_FAILING_GAP_MS = 10 * 60_000;
 
-/** How a person asks the merge step to look again without a rebuild: the status that is runnable for this gate. */
+/**
+ * Who decides this change's merge: the config's merge gate, or the change's own merge_gate when the
+ * config has nobody there (see changeGates). Without a remote there is no pull request to approve,
+ * so a merge_gate of pr acts as status.
+ */
+function mergeHuman(ctx: StepContext, hasRemote: boolean): "none" | "status" | "pr" {
+  const gate = changeGates(humanGates(ctx.cfg), ctx.intent.file.frontmatter).merge;
+  return gate === "pr" && !hasRemote && ctx.cfg.gates.merge.human !== "pr" ? "status" : gate;
+}
+
+/**
+ * How a person asks the merge step to look again without a rebuild: the status that is runnable for
+ * this change's gate. Only on the pull request's path, so a remote exists.
+ */
 function mergeRetry(ctx: StepContext): Status {
-  return ctx.cfg.gates.merge.human === "status" ? "merge-approved" : "merge-review";
+  return mergeHuman(ctx, true) === "status" ? "merge-approved" : "merge-review";
 }
 
 /** What the merge gate's automated checks concluded. `changed`: they passed, but fixes were committed that no review has seen. */
@@ -141,25 +155,47 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
 }
 
 /**
- * The merge gate after its automated checks passed (the gate timing rule). With a remote: push the
- * branch, open its pull request, and wait in merge-review (the merge step watches the pull request
- * unless a person decides on the status line). Without one: no person → merge now; a person →
- * merge-review with a note; a pull request → block plainly (there is nowhere to open one).
+ * The merge gate after its automated checks passed (the gate timing rule). First, whether the change
+ * is risky (see src/risk.ts), on the code that will merge: a risky change with nobody on the
+ * config's merge gate gets a person, gates.merge.risky.human, as its merge_gate, written in the same
+ * record as its move to merge-review, so nothing reads the status without it; a change that is not
+ * risky loses one an earlier pass wrote. With a remote: push the branch, open its pull request, and
+ * wait in merge-review (the merge step watches the pull request unless a person decides on the
+ * status line). Without one: no person → merge now; a person → merge-review with a note; a pull
+ * request set in the config → block plainly (there is nowhere to open one).
  */
 async function passMergeGate(ctx: StepContext): Promise<StepResult> {
-  const human = ctx.cfg.gates.merge.human;
-  if ((await ctx.git.remoteName()) !== null) {
+  const hasRemote = (await ctx.git.remoteName()) !== null;
+  const risk = await riskOf(ctx);
+  const own = ctx.cfg.gates.merge.human === "none" && risk?.risky ? ctx.cfg.gates.merge.risky.human : undefined;
+  const fields = own ? { set: { merge_gate: own } } : { remove: ["merge_gate" as const] };
+  // The note says why when the change's own gate brings in the person.
+  const human = own === "pr" && !hasRemote ? "status" : own ?? ctx.cfg.gates.merge.human;
+  const why = (r: Risk | null, otherwise: string) => (own && r ? riskNote(r, human === "pr" ? "pr" : "status") : otherwise);
+  if (hasRemote) {
     const opened = await openPullRequest(ctx, true);
     if (!opened.ok) return block(ctx, opened.note, opened);
-    await setStatus(ctx, "merge-review", human === "none" ? PR_CHECKS_NOTE : human === "pr" ? PR_APPROVE_NOTE : MERGE_WAIT_NOTE);
+    await setStatus(ctx, "merge-review", why(risk, human === "none" ? PR_CHECKS_NOTE : human === "pr" ? PR_APPROVE_NOTE : MERGE_WAIT_NOTE), {}, fields);
     return { ok: true };
   }
-  if (human === "none") return mergeNow(ctx);
+  if (human === "none") return mergeNow(ctx, fields);
   if (human === "status") {
-    await setStatus(ctx, "merge-review", MERGE_WAIT_NOTE);
+    await setStatus(ctx, "merge-review", why(risk, MERGE_WAIT_NOTE), {}, fields);
     return { ok: true };
   }
   return block(ctx, NO_REMOTE_PR_NOTE, { detail: "gates.merge.human is pr and the repository has no remote" });
+}
+
+/**
+ * Scores the change's branch in its worktree against main (see scoreRisk) and records it as the
+ * merge gate's risk row; null, with no row, when the config names nothing risky, or already has a
+ * person on the merge gate (risk would change nothing, so it is neither scored nor shown).
+ */
+async function riskOf(ctx: StepContext): Promise<Risk | null> {
+  if (!riskySet(ctx.cfg) || ctx.cfg.gates.merge.human !== "none") return null;
+  const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg);
+  ctx.trace.gate(ctx.slug, "merge", "risk", risk.risky ? "waiting" : "pass", riskEvidence(risk));
+  return risk;
 }
 
 /**
@@ -372,9 +408,11 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   }
 
   const status = ctx.intent.file.frontmatter.status;
+  // Who decides this change: the config's merge gate, or its own merge_gate (a risky change).
+  const human = mergeHuman(ctx, true);
   // A person decides on the status line and has not yet: only a merge or close on GitHub counts,
   // and the change is kept mergeable meanwhile.
-  if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return keepCurrentWhileWatching(ctx);
+  if (human === "status" && status !== "merge-approved") return keepCurrentWhileWatching(ctx);
   // A draft: GitHub refuses to merge it until a person marks it ready for review, so it is not
   // approved yet, whatever its checks say (traced once).
   if (pr.draft) {
@@ -394,7 +432,7 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line. An
   // approval from before a conflict resolution approved other code (see freshApproval).
   const approved = pr.approved && freshApproval(ctx, pr);
-  if (ctx.cfg.gates.merge.human === "pr" && !approved && status !== "merge-approved") {
+  if (human === "pr" && !approved && status !== "merge-approved") {
     if (pr.approved) {
       // Approved on GitHub, but before a conflict resolution: say why it waits, or it would look stuck.
       if (onceMarker(ctx, STALE_APPROVAL)) ctx.trace.event(ctx.slug, "command", { command: "merge", waiting: STALE_APPROVAL_TEXT, pr: pr.number });
@@ -404,7 +442,7 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   }
   clearMarker(ctx, STALE_APPROVAL);
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
-  if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", approved ? "approved on GitHub" : "merge-approved on the status line");
+  if (human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", approved ? "approved on GitHub" : "merge-approved on the status line");
   // At every speed.max_parallel_changes: the watcher runs beside the lanes even at one, so another
   // pull request may merge while this one waits, and it is then out of date.
   return mergeWhenUpToDate(ctx, gh, pr, waits);
@@ -834,7 +872,7 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
   if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
   // A person decides and has not yet: the change is kept mergeable meanwhile (the scheduler runs
   // this step only when it no longer merges cleanly; see conflictsWhileWaiting).
-  if (status === "merge-review" && ctx.cfg.gates.merge.human !== "none") return (await keepCurrent(ctx)) ?? { ok: true };
+  if (status === "merge-review" && mergeHuman(ctx, false) !== "none") return (await keepCurrent(ctx)) ?? { ok: true };
 
   // A person may have set merge-approved (or edited the change's other files) without committing:
   // record the change's own folder first, so their edit is part of main before the checks run.
@@ -863,11 +901,11 @@ async function checkAgain(ctx: StepContext, onPass: () => Promise<StepResult>): 
  * intent/ has unsaved changes, so a person's work there is never touched. Unsaved edits inside
  * intent/ (an owner's status lines) never block it; the merge takes only the branch. The look at
  * the checkout, the catch-up rebase, the marker and the move are one checkout-lock section, so no
- * other change commits on main in between.
+ * other change commits on main in between. `fields` go into the record of the merge (see finishMerge).
  */
-async function mergeNow(ctx: StepContext): Promise<StepResult> {
+async function mergeNow(ctx: StepContext, fields?: StatusFields): Promise<StepResult> {
   const landed = await onCheckout(ctx.root, () => mergeIntoMain(ctx));
-  return landed === true ? finishMerge(ctx) : landed;
+  return landed === true ? finishMerge(ctx, fields) : landed;
 }
 
 /**
@@ -952,11 +990,11 @@ async function alreadyMerged(ctx: StepContext): Promise<boolean> {
   return false;
 }
 
-/** The change is on main: tidy up (best effort) and record it as merged. */
-async function finishMerge(ctx: StepContext): Promise<StepResult> {
+/** The change is on main: tidy up (best effort) and record it as merged, with `fields` (see setStatus) in the same record. */
+async function finishMerge(ctx: StepContext, fields?: StatusFields): Promise<StepResult> {
   await cleanupChange(ctx);
   markHealthPending(ctx.root, ctx.slug);
-  await setStatus(ctx, "merged");
+  await setStatus(ctx, "merged", "", {}, fields);
   clearMarker(ctx, MERGING);
   clearMarker(ctx, REVIEW_ROUND);
   clearMarker(ctx, REMOTE_AHEAD);

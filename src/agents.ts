@@ -12,7 +12,7 @@ export const TEAM_WAYS = ["parallel", "pick"] as const;
 export type TeamWay = (typeof TEAM_WAYS)[number];
 
 /** Steps that change files: the rest are read-only. */
-const WRITING_STEPS: readonly StepKey[] = ["build", "reconcile", "fix", "revise"];
+const WRITING_STEPS: readonly StepKey[] = ["acceptance", "build", "reconcile", "fix", "revise"];
 
 /** Every step except those that change files. */
 export const READ_ONLY_STEPS: ReadonlySet<StepKey> = new Set(STEP_KEYS.filter((k) => !WRITING_STEPS.includes(k)));

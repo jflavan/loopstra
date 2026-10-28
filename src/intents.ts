@@ -48,6 +48,12 @@ export const Frontmatter = z.object({
   hold: blankableString,
   /** "open" while an agent's question waits for a person (runtime-managed; see src/questions.ts). Blank reads as absent. */
   question: blankableString,
+  /**
+   * Who lets this change merge when the config has nobody on the merge gate: written by the runtime
+   * when the change is risky (see src/risk.ts), removed when it is not. A person who deletes the line
+   * takes the change back to the config's gate. Blank reads as absent.
+   */
+  merge_gate: z.preprocess((v) => (v === null || (typeof v === "string" && v.trim() === "") ? undefined : v), z.enum(["pr", "status"], { error: "must be pr or status, or the line removed" }).optional()),
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
 
@@ -119,7 +125,8 @@ export function parseIntentFile(rawText: string): IntentFile {
   return { frontmatter: fm.data, title, body, sections: parseSections(body) };
 }
 
-function parseSections(body: string): Record<string, string> {
+/** A Markdown document's `## ` sections, by heading, each trimmed; text before the first heading is left out. */
+export function parseSections(body: string): Record<string, string> {
   const sections: Record<string, string> = {};
   const lines = body.split(/\r?\n/);
   let current: string | null = null;
@@ -135,7 +142,7 @@ function parseSections(body: string): Record<string, string> {
 }
 
 /** Runtime-managed fields that get no line while blank. */
-const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question"]);
+const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question", "merge_gate"]);
 
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
@@ -155,7 +162,7 @@ export interface Intent {
   artifacts: Set<string>;
 }
 
-export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
+export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "acceptance.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
 
 export function intentRoot(root: string): string {
   return join(root, "intent");
@@ -434,20 +441,30 @@ export const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
 };
 
 /**
- * Waiting for a person: blocked, a draft, or a review status whose gate has a person on it. (A
- * merge-review with nobody on the gate waits for GitHub's checks, not for a person.)
+ * The gates of one change: the config's, with a person on the merge gate when the config has nobody
+ * there and the change's merge_gate names one (a risky change). merge_gate never takes a person off.
+ */
+export function changeGates(human: HumanGates, fm: Pick<Frontmatter, "merge_gate">): HumanGates {
+  return human.merge === "none" && fm.merge_gate ? { ...human, merge: fm.merge_gate } : human;
+}
+
+/**
+ * Waiting for a person: blocked, a draft, or a review status whose gate has a person on it, for this
+ * change (see changeGates). (A merge-review with nobody on the gate waits for GitHub's checks, not
+ * for a person.)
  */
 export function waitsForPerson(intent: Intent, human: HumanGates): boolean {
   const s = intent.file.frontmatter.status;
   if (s === "blocked" || s === "draft") return true;
   const gate = REVIEW_GATE[s];
-  return !!gate && human[gate] !== "none";
+  return !!gate && changeGates(human, intent.file.frontmatter)[gate] !== "none";
 }
 
 /**
  * Runnable: the runtime has something to do for this intent right now.
- * A review status whose gate has a person on it is not runnable: it means the automated checks
- * passed and a person is deciding; the scan picks up their status change (for example
+ * A review status whose gate has a person on it (for this change: see changeGates) is not
+ * runnable: it means the automated checks passed and a person is deciding; the scan picks up
+ * their status change (for example
  * merge-review → merge-approved, which is runnable).
  * With a remote, merge-review is always runnable: the merge step watches the pull request (merged
  * or closed on GitHub, its checks, and its approval when merge.human is pr).
@@ -457,7 +474,7 @@ export function isRunnable(intent: Intent, human: HumanGates, hasRemote = false)
   if (s === "draft" || s === "blocked" || s === "done" || s === "closed") return false;
   if (s === "merge-review" && hasRemote) return true;
   const gate = REVIEW_GATE[s];
-  if (gate && human[gate] !== "none") return false;
+  if (gate && changeGates(human, intent.file.frontmatter)[gate] !== "none") return false;
   return true;
 }
 

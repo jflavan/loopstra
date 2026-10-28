@@ -26,6 +26,19 @@ const humanGate = z.enum(["status", "pr", "none"]);
 const statusGate = z.enum(["status", "none"], { error: "must be status or none; a pull request cannot be used for this gate" });
 const modelRef = z.enum(MODEL_REFS);
 
+/**
+ * Changes a person must let in, whatever gates.merge.human says (see src/risk.ts): ones touching a
+ * file a pattern matches, or bigger than `lines`. Empty (the default), nothing is risky.
+ */
+const riskyGate = z.object({
+  /** Patterns of repository paths, with `/`, as Bun.Glob reads them: `package.json` only at the top, `**\/package.json` anywhere. */
+  paths: z.array(z.string().refine((p) => p.trim() !== "", "must be a pattern of files, like .github/**")).default([]),
+  /** Lines added plus removed, outside intent/, over which a change is risky. Unset: size never makes it so. */
+  lines: z.number().int("must be a whole number").positive("must be more than 0").optional(),
+  /** Who decides a risky change. Without a remote, pr acts as status: there is no pull request to approve. */
+  human: z.enum(["pr", "status"], { error: "must be pr or status; a risky change always waits for a person" }).default("pr"),
+}).strict();
+
 type Steps = Partial<Record<string, ModelRef>>;
 
 /** Each step of a group may name its own model; unset, the step's built-in default applies (see STEPS). */
@@ -205,14 +218,19 @@ export const ConfigSchema = z.object({
   gates: z.object({
     spec: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
     plan: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
-    merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash") }).strict().prefault({}),
+    merge: z.object({ human: humanGate.default("none"), method: z.enum(["squash", "merge"]).default("squash"), risky: riskyGate.prefault({}) }).strict().prefault({}),
     // A pull request cannot confirm a result after the merge either.
     done: z.object({ human: statusGate.default("none"), agent: z.boolean().default(true) }).strict().prefault({}),
   }).strict().prefault({}),
   stages: z.object({
     design: stage("design").extend({ model: modelRef.default("strong") }).prefault({}),
     plan: stage("plan").extend({ model: modelRef.default("strong") }).prefault({}),
-    build: stage("build").extend({ model: modelRef.default("default"), max_fix_loops: z.number().int().min(1).default(3) }).prefault({}),
+    build: stage("build").extend({
+      model: modelRef.default("default"),
+      max_fix_loops: z.number().int().min(1).default(3),
+      /** A session writes tests from the owner's Done when list before each build, and the build may not change them. Off unless set, so an upgraded repo is unchanged; `loopstra init` turns it on. */
+      acceptance_tests: z.boolean({ error: "must be true or false" }).default(false),
+    }).prefault({}),
     review: stage("review").extend({
       model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2),
       /** Conflict resolutions with main per build; the review round each one adds does not count against max_rounds. 0: a conflict blocks. */
