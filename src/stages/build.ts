@@ -262,10 +262,10 @@ async function removeNewFiles(ctx: StepContext, wt: Git): Promise<void> {
 type Failed = { result: CommandResult; check: ToolCheck | null } | null;
 
 /**
- * Runs test, lint, build in the worktree, then the tool checks `extra` with their environment (see
- * toolCheckEnv): in order, stopping at the first failure, or with `speed.parallel_checks` all at
- * once. Returns the first failure in that order, or null when all pass. The phase is recorded as
- * failed when a command fails.
+ * Runs test, lint, build in the worktree, then, once they all passed, the tool checks `extra` with
+ * their environment (see toolCheckEnv): in order, stopping at the first failure, or with
+ * `speed.parallel_checks` each of the two groups all at once. Returns the first failure in that
+ * order, or null when all pass. The phase is recorded as failed when a command fails.
  */
 async function runChecks(ctx: StepContext, phaseName: string, extra: ToolCheck[]): Promise<Failed> {
   const configured = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
@@ -273,14 +273,25 @@ async function runChecks(ctx: StepContext, phaseName: string, extra: ToolCheck[]
   const r = await codePhase(ctx, phaseName, async (seq) => {
     // Read each run: the base moves when the branch is brought up to date with main.
     const env = extra.length ? await toolCheckEnv(ctx, new Git(ctx.worktreeDir)) : undefined;
-    const cmds = [...configured.map((command) => ({ command, check: null })), ...extra.map((check) => ({ command: check.command, check }))];
-    const run = (c: (typeof cmds)[number], signal?: AbortSignal) => projectCommand(ctx, c.command, ctx.worktreeDir, { seq, signal, ...(c.check ? { env } : {}) });
+    type Cmd = { command: string; check: ToolCheck | null };
+    const groups: Cmd[][] = [configured.map((command) => ({ command, check: null })), extra.map((check) => ({ command: check.command, check }))];
+    const cmds = groups.flat();
+    const run = (c: Cmd, signal?: AbortSignal) => projectCommand(ctx, c.command, ctx.worktreeDir, { seq, signal, ...(c.check ? { env } : {}) });
     const results: CommandResult[] = [];
-    if (ctx.cfg.speed.parallel_checks) {
+    // A group's results go to `results` in order, ending at its first failure.
+    const runGroup = async (group: Cmd[]): Promise<void> => {
+      if (!ctx.cfg.speed.parallel_checks) {
+        for (const c of group) {
+          const res = await run(c);
+          results.push(res);
+          if (res.code !== 0) return;
+        }
+        return;
+      }
       // All at once, read in order: once one fails (or throws), every one before it has ended, so it
       // is the failure to report, and those still running are cancelled.
       const cancel = new AbortController();
-      const runs = cmds.map((c) => run(c, cancel.signal));
+      const runs = group.map((c) => run(c, cancel.signal));
       for (const pending of runs) pending.catch(() => {}); // each is read below; one may reject before it is reached
       let thrown: { error: unknown } | null = null;
       for (const pending of runs) {
@@ -300,12 +311,11 @@ async function runChecks(ctx: StepContext, phaseName: string, extra: ToolCheck[]
       const stop = settled.find((s) => s.status === "rejected" && s.reason instanceof StopRequested);
       if (stop) throw (stop as PromiseRejectedResult).reason;
       if (thrown) throw thrown.error;
-    } else {
-      for (const c of cmds) {
-        const res = await run(c);
-        results.push(res);
-        if (res.code !== 0) break;
-      }
+    };
+    // The standards' checks run only on code whose tests pass, as the spec has it, in parallel too.
+    for (const group of groups) {
+      await runGroup(group);
+      if (results.some((x) => x.code !== 0)) break;
     }
     const at = results.findIndex((x) => x.code !== 0);
     if (at >= 0) {

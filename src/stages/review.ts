@@ -1,3 +1,4 @@
+import { oneLine } from "../text";
 import { block, clearMarker, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { Git } from "../git";
@@ -32,7 +33,8 @@ export async function catchUpTested(ctx: StepContext): Promise<{ ok: true } | Fa
 function withStandardsFindings(e: Envelope<"review">): string {
   const named = e.findings.flatMap((f) => (f.standard ? [{ ...f, standard: f.standard }] : []));
   if (!named.length) return e.review_markdown;
-  const lines = named.map((f) => `- ${f.severity} · ${f.standard} · ${f.file}:${f.line}: ${f.finding}`);
+  // One line each, however the reviewer wrapped it: the console reads the section line by line.
+  const lines = named.map((f) => `- ${f.severity} · ${f.standard} · ${f.file}:${f.line}: ${oneLine(f.finding)}`);
   return `${e.review_markdown.trimEnd()}\n\n## Findings against the standards\n${lines.join("\n")}\n`;
 }
 

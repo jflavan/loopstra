@@ -307,6 +307,20 @@ describe("review with standards", () => {
     s.trace.close(); s.repo.cleanup();
   });
 
+  test("a finding written over several lines stays on one line under Findings against the standards", async () => {
+    const wrapped = fixture("review-standard").replace('"finding":"logs the card number"', '"finding":"logs the\\n  card   number"');
+    const dir = fixtureDir({ "review-1": wrapped, "review-2": wrapped, "review-3": wrapped });
+    try {
+      const s = await withStandards(true);
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => runMergeStep(s.ctx));
+      const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+      expect(md.endsWith("\n## Findings against the standards\n- important · SEC-3 · src/add.ts:1: logs the card number\n")).toBe(true);
+      s.trace.close(); s.repo.cleanup();
+    } finally {
+      dir.cleanup();
+    }
+  });
+
   test("review.md is as the reviewer wrote it when no finding names a rule", async () => {
     const s = await withStandards(false);
     await runMergeStep(s.ctx);
@@ -502,6 +516,22 @@ describe("tool checks at merge", () => {
       s.trace.close(); s.repo.cleanup();
     });
   }
+
+  test("with speed.parallel_checks the standards' checks start after the configured commands passed", async () => {
+    const s = await withStandards({ linted: withCheck(`bun -e "process.exit(require('fs').existsSync('linted') ? 0 : 1)"`, "Linted") }, "speed:\n  parallel_checks: true\nstages:\n  build:\n    max_fix_loops: 1\n");
+    s.trace.close();
+    const lint = join(s.repo.path, "slow-lint.ts");
+    await Bun.write(lint, `import { writeFileSync } from "node:fs";\nawait Bun.sleep(500);\nwriteFileSync("linted", "");\n`);
+    const config = await Bun.file(configPath(s.repo.path)).text();
+    await Bun.write(configPath(s.repo.path), config.replace("commands:\n", `commands:\n  lint: bun "${lint.replace(/\\/g, "/")}"\n`));
+    await new Git(s.repo.path).commitAll("a slow lint");
+    const { ctx, trace } = await openRepo(s.repo.path);
+    await runMergeStep(ctx);
+    expect(await status(s.repo.path)).toBe("merged");
+    expect(phaseNames(trace)).not.toContain("fix-1");
+    expect(trace.lastGate("add-numbers", "merge", "check:linted")?.result).toBe("pass");
+    trace.close(); s.repo.cleanup();
+  });
 
   test("a check that keeps failing still puts back the files a lint command rewrote", async () => {
     const s = await withStandards({ secrets: withCheck("exit 1", "Secrets") }, "stages:\n  build:\n    max_fix_loops: 1\n");
