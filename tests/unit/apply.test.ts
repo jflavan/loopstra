@@ -1082,7 +1082,7 @@ describe("approving exceptions", () => {
       expect(shown).toContain("intent/a/standards.md");
       expect(shown).toContain("intent/a/intent.md");
       // The plan, written again with the same exception, asks for it again.
-      expect(exceptionsToApprove(PLAN, "plan", parseRecord(text)).map((b) => b.label)).toEqual(["SEC-1"]);
+      expect(exceptionsToApprove(PLAN, parseRecord(text)).map((b) => b.label)).toEqual(["SEC-1"]);
       expect((await readIntent(r.root, "a")).file.frontmatter).toMatchObject({ status: "plan-review", plan_gate: "status" });
       const trace = Trace.open(r.root);
       expect(trace.gates("a").map((g) => `${g.check}:${g.result}:${g.evidence}`)).toEqual(["exception:pass:SEC-1", "exception:waiting:SEC-1"]);

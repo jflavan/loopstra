@@ -214,7 +214,7 @@ async function exceptionsAsked<W extends Writer, J extends Judge>(ctx: StepConte
   // A repository without standards has no rule to except (it reads as before standards existed).
   const read = await ctx.standards();
   if (!read.standards.length) return null;
-  const asks = exceptionsToApprove((await readArtifact(ctx, s.artifact)) ?? "", s.gate, ctx.standardsRecord());
+  const asks = exceptionsToApprove((await readArtifact(ctx, s.artifact)) ?? "", ctx.standardsRecord());
   if (!asks.length) return null;
   const titles = new Map(read.standards.flatMap((st) => st.rules.map((r) => [r.label, st.title] as const)));
   return exceptionNote(s.gate, asks, titles);

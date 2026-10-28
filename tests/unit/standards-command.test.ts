@@ -1,11 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderStandardsList } from "../../src/commands/standards";
 import { loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
-import { baseAware, checkOnMain } from "../../src/standards-check";
+import { baseAware, checkOnMain, runOnMain } from "../../src/standards-check";
 import { run, tempDir, tempGitRepo, writeTestStamp } from "../helpers";
 
 const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
@@ -114,6 +114,28 @@ describe("checkOnMain", () => {
       expect(bad.code).toBe(3);
       expect(bad.lastLines).toContain("nope");
       expect(bad.failsOnMain).toBe("The check of Secrets fails on main already, so every change under it would fail it too. Use a form that looks only at what a change adds (with $LOOPSTRA_BASE), or fix main first.");
+    } finally { repo.cleanup(); }
+  });
+
+  test("main is resolved once: the checkout and LOOPSTRA_BASE are the same commit", async () => {
+    const repo = await repoWith({});
+    const resolves = spyOn(Git.prototype, "commitOf");
+    try {
+      const r = await checkOnMain(repo.path, await loadConfig(repo.path), `test "$(git rev-parse HEAD)" = "$LOOPSTRA_BASE"`, "Secrets");
+      expect(r.ok).toBe(true);
+      expect(resolves.mock.calls.filter(([ref]) => ref === "main")).toHaveLength(1);
+    } finally { resolves.mockRestore(); repo.cleanup(); }
+  });
+
+  test("runOnMain checks out the commit it is given", async () => {
+    const repo = await repoWith({});
+    try {
+      const git = new Git(repo.path);
+      const older = (await git.run(["rev-parse", "main"])).out.trim();
+      writeFileSync(join(repo.path, "later.txt"), "x\n");
+      await git.commitAll("later");
+      const r = await runOnMain(repo.path, await loadConfig(repo.path), { name: "run-on-older", command: `test "$(git rev-parse HEAD)" = ${older}`, what: "check", commit: older });
+      expect(r.code).toBe(0);
     } finally { repo.cleanup(); }
   });
 

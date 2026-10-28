@@ -8,7 +8,7 @@ import { changeGates, humanGates, type Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain, type SyncOutcome } from "../remote";
 import { branchDiff, changedFiles, filesOf, riskEvidence, riskNote, riskySet, scoreRisk, type BranchDiff, type Risk, type RiskSource } from "../risk";
-import { STANDARDS_DIR, type Applying } from "../standards";
+import { STANDARDS_APPLIED, STANDARDS_DIR, type AppliedRecord, type Applying } from "../standards";
 import { errorText } from "../shell";
 import { andList } from "../text";
 import { markHealthPending } from "../signals";
@@ -60,12 +60,6 @@ const GH_MERGE = "gh-merge";
 const PR_DRAFT = "pr-draft";
 /** Run-folder marker: the pull request merged, but main here does not have it yet (traced once). */
 const MAIN_BEHIND = "main-behind";
-/**
- * Run-folder marker: the standards that applied to the change when the merge gate's checks passed,
- * JSON `{ commit, applying: { name, why, files }[] }` (commit: the one the standards were read at).
- * The done step judges the merged files by it. Not written in a repository without standards.
- */
-export const STANDARDS_APPLIED = "standards.applied";
 /**
  * Run-folder marker: when recording a merged pull request first failed and when it last did (two ISO
  * times, one per line; see finishRemoteMerge).
@@ -249,10 +243,11 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 async function recordStandards(ctx: StepContext, diff: () => Promise<BranchDiff>): Promise<Applying[]> {
   if (!(await ctx.standards()).standards.length) return [];
   const list = (await stageStandards(ctx, filesOf(await diff()))).list;
-  writeMarker(ctx, STANDARDS_APPLIED, JSON.stringify({
+  const marker: AppliedRecord = {
     commit: await ctx.readCommit(),
     applying: list.map((a) => ({ name: a.standard.name, why: a.why, files: a.files })),
-  }, null, 2));
+  };
+  writeMarker(ctx, STANDARDS_APPLIED, JSON.stringify(marker, null, 2));
   const named = list.map((a) => `${a.standard.title} (${a.standard.rules.map((r) => r.label).join(", ")})`);
   ctx.trace.gate(ctx.slug, "merge", "standards", "pass", named.length ? `applying ${named.join("; ")}` : "no standard applies to this change");
   return list;

@@ -196,5 +196,5 @@ function exceptionsWaiting(dir: string, gate: "spec" | "plan"): string[] {
   const read = (name: string): string | null => {
     try { return readFileSync(join(dir, name), "utf8"); } catch { return null; }
   };
-  return exceptionsToApprove(read(`${gate}.md`) ?? "", gate, parseRecord(read(STANDARDS_RECORD))).map((b) => b.label);
+  return exceptionsToApprove(read(`${gate}.md`) ?? "", parseRecord(read(STANDARDS_RECORD))).map((b) => b.label);
 }

@@ -1,4 +1,5 @@
 import { readStandardsSection, RULE_LABEL, STANDARD_NAME, type Scope, type SectionBullet } from "./standards";
+import { oneLine } from "./text";
 
 /** The file in a change's folder that holds what people decided about its standards. */
 export const STANDARDS_RECORD = "standards.md";
@@ -59,7 +60,6 @@ function unread(line: string, form: string): string {
   return `standards.md has a line that does not read: ${line} (write it as ${form}).`;
 }
 
-const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 const decision = (d: Decision): string => `- ${d.name}: ${oneLine(d.note)} (${d.by}, from ${d.via}, ${d.date})`;
 const exception = (e: ApprovedException): string => `- ${e.label} at the ${e.gate}: ${oneLine(e.reason)} (${e.by}, from ${e.via}, ${e.date})`;
 
@@ -89,9 +89,9 @@ const approved = (r: ChangeStandards, label: string, reason: string): boolean =>
 /**
  * The exceptions a spec's or plan's Standards section asks for that the record has not approved yet:
  * one approved at the spec and repeated in the plan for the same rule with the same reason needs no
- * second approval. The gate (which artifact this is) does not change what counts as approved.
+ * second approval, whichever artifact this is.
  */
-export function exceptionsToApprove(artifact: string, _gate: Gate, r: ChangeStandards): SectionBullet[] {
+export function exceptionsToApprove(artifact: string, r: ChangeStandards): SectionBullet[] {
   const out: SectionBullet[] = [];
   for (const b of readStandardsSection(artifact) ?? []) {
     if (b.kind !== "exception" || approved(r, b.label, b.text) || out.some((o) => o.label === b.label && oneLine(o.text) === oneLine(b.text))) continue;

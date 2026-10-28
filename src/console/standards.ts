@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { localUser } from "../chat/transports/shared";
 import type { Config } from "../config";
+import { readText } from "../fsutil";
 import { Git, statusPaths } from "../git";
 import { isOpen } from "../actions";
 import { changeExists, readIntent, scanRepo, SLUG } from "../intents";
@@ -11,12 +11,13 @@ import { CONSOLE, submitRequest } from "../requests";
 import { fileVersion } from "../settings";
 import { planFiles } from "../stages/shared";
 import {
-  applying, formToMarkdown, parseStandards, problemText, readOutcomeStandards, readStandards, readStandardsSection, standardsFilesAt, standardToForm,
-  STANDARD_NAME, STANDARDS_DIR, type Applying, type Scope, type Standard,
+  applying, formToMarkdown, parseStandards, problemText, readAppliedMarker, readOutcomeStandards, readStandards, readStandardsSection, standardsFilesAt, standardToForm,
+  STANDARD_NAME, STANDARDS_APPLIED, STANDARDS_DIR, type Applying, type Scope, type Standard,
 } from "../standards";
 import { programsIn } from "../shell";
 import { baseAware, checkOnMain } from "../standards-check";
 import { exceptionsToApprove, parseRecord, scopeOf, STANDARDS_RECORD } from "../standards-record";
+import { oneLine } from "../text";
 import type { Trace } from "../trace";
 import { loopNow } from "./model";
 import { json, refuse } from "./routes";
@@ -35,8 +36,6 @@ const MAX_NAME = 64;
 const MAX_TEXT = 200_000;
 const MAX_NOTE = 4_000;
 const SAMPLES = 3;
-/** The marker the merge gate writes in a change's run folder (see STANDARDS_APPLIED in src/stages/merge.ts). */
-const APPLIED_MARKER = "standards.applied";
 
 const FormShape: z.ZodType<StandardForm> = z.strictObject({
   name: z.string().max(MAX_NAME),
@@ -73,15 +72,12 @@ function matchCount(s: Standard, tree: string[]): number | null {
 
 /** The files a change's standards are judged by: what the merge gate recorded, else the plan's Files that change, else none known yet. */
 function judgedFiles(root: string, slug: string): { names: Map<string, { why: Applying["why"]; files: string[] }>; files: string[] } | { files: string[] } {
-  const marker = join(runDir(root, slug), APPLIED_MARKER);
-  if (existsSync(marker)) {
-    try {
-      const m = z.object({ applying: z.array(z.object({ name: z.string(), why: z.enum(["every", "files", "added"]), files: z.array(z.string()).default([]) })) }).parse(JSON.parse(readFileSync(marker, "utf8")));
-      return { names: new Map(m.applying.map((a) => [a.name, { why: a.why, files: a.files }])), files: [] };
-    } catch { /* not what the gate writes: as no marker */ }
-  }
+  // A marker that is not what the gate writes counts as none.
+  const m = readAppliedMarker(readText(join(runDir(root, slug), STANDARDS_APPLIED)));
+  if (m) return { names: new Map(m.applying.map((a) => [a.name, { why: a.why, files: a.files }])), files: [] };
   const plan = join(root, "intent", slug, "plan.md");
-  return { files: existsSync(plan) ? planFiles(readFileSync(plan, "utf8")) : [] };
+  const text = readText(plan);
+  return { files: text === null ? [] : planFiles(text) };
 }
 
 /**
@@ -99,10 +95,6 @@ function applyingTo(root: string, slug: string, standards: Standard[], record = 
     return out;
   }
   return applying(standards, judged.files, scope);
-}
-
-function readText(path: string): string | null {
-  try { return readFileSync(path, "utf8"); } catch { return null; }
 }
 
 /** Open changes each standard applies to now (see applyingTo for how that is decided). */
@@ -280,8 +272,6 @@ export async function scopeAction(root: string, body: Record<string, unknown>): 
   return json({ id: sent.id, loop: loopNow(root, m.cfg.poll_seconds, new Date()).state.state }, 202);
 }
 
-const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
-
 const WHY: Record<Applying["why"], (a: Applying, by: string | undefined) => string> = {
   every: () => "It applies to every change.",
   files: (a) => (a.files.length ? `The change touches ${a.files.slice(0, 5).join(", ")}${a.files.length > 5 ? " and more" : ""}.` : "The change's files match its patterns."),
@@ -325,8 +315,8 @@ export async function changeStandards(root: string, trace: Trace, slug: string):
   const results = new Map((outcome === null ? [] : readOutcomeStandards(outcome)).map((o) => [o.label, o.result]));
   const gates = trace.gates(slug);
   const list = applyingTo(root, slug, read.standards, record);
-  const atSpec = spec === null ? [] : exceptionsToApprove(spec, "spec", record);
-  const atPlan = plan === null ? [] : exceptionsToApprove(plan, "plan", record);
+  const atSpec = spec === null ? [] : exceptionsToApprove(spec, record);
+  const atPlan = plan === null ? [] : exceptionsToApprove(plan, record);
   return {
     applying: list.map((a) => {
       const row = gates.filter((g) => g.gate === "merge" && g.check === `check:${a.standard.name}`).at(-1);

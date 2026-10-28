@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { z } from "zod";
 import { acceptanceFiles, block, readArtifact, readMarker, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
@@ -7,10 +6,10 @@ import { loopstraDir } from "../paths";
 import { agentPhase, alongside, mayOverlap, phasePrompt, projectCommand, type AgentPhaseSpec } from "../phases";
 import { besideWork, EARLY } from "../trace";
 import { coveredByTests, NONE_WRITTEN } from "./acceptance";
-import { STANDARDS_APPLIED } from "./merge";
 import { artifacts, bullets, humanNote, planFiles, runHookCommands, stageStandards, toolChecks } from "./shared";
 import { errorText } from "../shell";
-import { renderStandards, type Applying } from "../standards";
+import { oneLine } from "../text";
+import { readAppliedMarker, renderStandards, STANDARDS_APPLIED, type Applying } from "../standards";
 import type { ChangeStandards } from "../standards-record";
 
 const JUDGE_FAILED = "The final check could not be completed; an engineer should look.";
@@ -156,8 +155,6 @@ interface RuleResult { label: string; title: string; result: RuleItem["result"] 
 /** What the done step holds the merged change to: the standards that applied, less the exceptions, and what the record and the gate rows say. */
 interface Held { list: Applying[]; record: ChangeStandards; commit: string; checks: string[]; titles: Map<string, string>; text: string }
 
-const AppliedMarker = z.object({ applying: z.array(z.object({ name: z.string(), why: z.enum(["every", "files", "added"]), files: z.array(z.string()) })) });
-
 /**
  * The standards the done step holds the change to: those the merge gate recorded in STANDARDS_APPLIED,
  * read as main has them now (see StepContext.standards), or, with no marker (a change merged before
@@ -167,9 +164,8 @@ async function heldStandards(ctx: StepContext, plan: string): Promise<Held | nul
   const read = await ctx.standards();
   if (!read.standards.length) return null;
   const record = ctx.standardsRecord();
-  const raw = readMarker(ctx, STANDARDS_APPLIED);
-  let marked: z.infer<typeof AppliedMarker> | null = null;
-  try { const m = AppliedMarker.safeParse(raw === null ? null : JSON.parse(raw)); if (m.success) marked = m.data; } catch { /* not JSON: as no marker */ }
+  // A marker that is not what the merge gate writes counts as none.
+  const marked = readAppliedMarker(readMarker(ctx, STANDARDS_APPLIED));
   const list: Applying[] = marked
     ? marked.applying.flatMap((m) => { const standard = read.standards.find((s) => s.name === m.name); return standard ? [{ standard, why: m.why, files: m.files }] : []; })
     : (await stageStandards(ctx, planFiles(plan))).list;
@@ -182,8 +178,6 @@ async function heldStandards(ctx: StepContext, plan: string): Promise<Held | nul
     text: list.length ? `${renderStandards(list, { excepted })}${passed}` : "",
   };
 }
-
-const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 /**
  * One result for each rule of the standards that applied, less those under an approved exception, in

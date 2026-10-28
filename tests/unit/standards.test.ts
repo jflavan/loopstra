@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import {
-  applying, checkStandardsSection, formToMarkdown, parseStandard, parseStandards, problemText, readOutcomeStandards, readStandards, readStandardsSection,
+  applying, checkStandardsSection, formToMarkdown, parseStandard, parseStandards, problemText, readAppliedMarker, readOutcomeStandards, readStandards, readStandardsSection,
   renderStandards, STANDARD_NAME, STANDARDS_DIR, standardsBytes, standardToForm, type Applying, type Rule, type Standard,
 } from "../../src/standards";
 import { tempGitRepo } from "../helpers";
@@ -353,6 +353,13 @@ describe("readOutcomeStandards", () => {
       { label: "API-3", title: "APIs (v2): the public ones", result: "not-checked", evidence: "" },
     ]);
   });
+});
+
+test("readAppliedMarker reads what the merge gate writes, and nothing else", () => {
+  expect(readAppliedMarker(null)).toBeNull();
+  expect(readAppliedMarker("not json")).toBeNull();
+  expect(readAppliedMarker(JSON.stringify({ applying: [{ name: "x", why: "sometimes" }] }))).toBeNull();
+  expect(readAppliedMarker(JSON.stringify({ commit: "abc", applying: [{ name: "x", why: "added" }] }))).toEqual({ commit: "abc", applying: [{ name: "x", why: "added", files: [] }] });
 });
 
 test("standardsBytes adds up the files' text", () => {

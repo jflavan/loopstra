@@ -684,7 +684,7 @@ async function approveExceptions(root: string, main: string, req: StatusRequest,
   const rel = (name: string) => `intent/${req.slug}/${name}`;
   const text = draft.read(rel(STANDARDS_RECORD));
   const before = parseRecord(text);
-  const asks = exceptionsToApprove(draft.read(rel(`${gate}.md`)) ?? "", gate, before);
+  const asks = exceptionsToApprove(draft.read(rel(`${gate}.md`)) ?? "", before);
   if (!asks.length || !(await hasStandards(root, main))) return [];
   const who = { by: oneLine(req.byName, 80), via: req.transport === CONSOLE ? "the console" : oneLine(req.via, 40) };
   const next = approvedRecord(req.slug, text, gate, asks, who, localDate());

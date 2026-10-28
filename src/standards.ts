@@ -318,6 +318,32 @@ export function applying(standards: Standard[], files: string[], scope: Scope = 
   return out;
 }
 
+/**
+ * Run-folder marker: the standards that applied to the change when the merge gate's checks passed,
+ * JSON `{ commit, applying: { name, why, files }[] }` (commit: the one the standards were read at).
+ * The done step and the console's panel judge the merged files by it. Not written in a repository without standards.
+ */
+export const STANDARDS_APPLIED = "standards.applied";
+
+const AppliedMarker = z.object({
+  commit: z.string().optional(),
+  applying: z.array(z.object({ name: z.string(), why: z.enum(["every", "files", "added"]), files: z.array(z.string()).default([]) })),
+});
+
+/** What STANDARDS_APPLIED holds. */
+export type AppliedRecord = z.infer<typeof AppliedMarker>;
+
+/** The marker's text read, or null when there is none or it is not what the merge gate writes. */
+export function readAppliedMarker(text: string | null): AppliedRecord | null {
+  if (text === null) return null;
+  try {
+    const m = AppliedMarker.safeParse(JSON.parse(text));
+    return m.success ? m.data : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A rule under an approved exception, with the reason. */
 export interface Excepted { label: string; reason: string }
 

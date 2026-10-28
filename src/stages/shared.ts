@@ -109,7 +109,7 @@ export async function stageStandards(ctx: StepContext, files: string[] | null): 
  */
 export async function recordApprovals(ctx: StepContext, gate: "spec" | "plan", who: { by: string; via: string }): Promise<void> {
   if (!(await ctx.standards()).standards.length) return;
-  const asks = exceptionsToApprove((await readArtifact(ctx, `${gate}.md`)) ?? "", gate, ctx.standardsRecord());
+  const asks = exceptionsToApprove((await readArtifact(ctx, `${gate}.md`)) ?? "", ctx.standardsRecord());
   if (!asks.length) return;
   await writeArtifact(ctx, STANDARDS_RECORD, approvedRecord(ctx.slug, await readArtifact(ctx, STANDARDS_RECORD), gate, asks, who, localDate()));
   ctx.trace.gate(ctx.slug, gate, "exception", "pass", asks.map((b) => b.label).join(", "));

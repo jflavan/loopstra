@@ -27,13 +27,15 @@ const LAST_LINES = 10;
  * `command` once in a throwaway checkout of main's last commit, after commands.install when there is
  * one, never touching the working tree. Both share one claude.timeout_minutes. `name` is the folder
  * under .loopstra/ (runs at the same time need different ones); `env` is added to the command's
- * environment, not the install's. Throws when main has no commit or the checkout cannot be made.
+ * environment, not the install's. `commit` is main's commit when the caller already resolved it (so
+ * what it tells the command, LOOPSTRA_BASE say, is the commit checked out). Throws when main has no
+ * commit or the checkout cannot be made.
  */
-export async function runOnMain(root: string, cfg: Config, o: { name: string; command: string; what: string; env?: Record<string, string> }): Promise<CommandResult & { what: string }> {
+export async function runOnMain(root: string, cfg: Config, o: { name: string; command: string; what: string; env?: Record<string, string>; commit?: string }): Promise<CommandResult & { what: string }> {
   const deadline = Date.now() + cfg.claude.timeout_minutes * 60_000;
   const left = () => Math.max(1000, deadline - Date.now());
   const git = new Git(root);
-  const main = await git.commitOf(cfg.main_branch);
+  const main = o.commit ?? await git.commitOf(cfg.main_branch);
   if (!main) throw new Error(`${cfg.main_branch} has no commit yet`);
   return withDetachedWorktree(git, join(loopstraDir(root), o.name), main, async (cwd) => {
     if (cfg.commands.install) {
@@ -52,7 +54,7 @@ export async function runOnMain(root: string, cfg: Config, o: { name: string; co
 export async function checkOnMain(root: string, cfg: Config, command: string, title = "this standard"): Promise<CheckOnMain> {
   const base = await new Git(root).commitOf(cfg.main_branch);
   if (!base) throw new Error(`${cfg.main_branch} has no commit yet`);
-  const r = await runOnMain(root, cfg, { name: `check-main-${randomUUID().slice(0, 8)}`, command, what: "check", env: { LOOPSTRA_BASE: base } });
+  const r = await runOnMain(root, cfg, { name: `check-main-${randomUUID().slice(0, 8)}`, command, what: "check", env: { LOOPSTRA_BASE: base }, commit: base });
   const installFailed = r.what === "commands.install" && r.code !== 0;
   const missing = r.code === 0 ? null : missingProgram(r.command, r.output) ?? null;
   const fails = r.code !== 0 && !r.timedOut && !installFailed && !missing;

@@ -65,15 +65,15 @@ describe("exceptions to approve", () => {
   const approvedAt = (reason: string) => parseRecord(`## Exceptions approved\n- ARCH-1 at the spec: ${reason} (J., from the console, 2026-10-28)\n`);
 
   test("an exception bullet waits unless the record approved the same rule with the same reason, at either gate", () => {
-    expect(exceptionsToApprove(PLAN, "plan", parseRecord(null))).toEqual([{ label: "ARCH-1", kind: "exception", text: "billing keeps reading the legacy orders table until it is migrated (ADR-12)" }]);
-    expect(exceptionsToApprove(PLAN, "plan", approvedAt("billing keeps reading the legacy orders table until it is migrated (ADR-12)"))).toEqual([]);
+    expect(exceptionsToApprove(PLAN, parseRecord(null))).toEqual([{ label: "ARCH-1", kind: "exception", text: "billing keeps reading the legacy orders table until it is migrated (ADR-12)" }]);
+    expect(exceptionsToApprove(PLAN, approvedAt("billing keeps reading the legacy orders table until it is migrated (ADR-12)"))).toEqual([]);
     // Reworded: a new exception.
-    expect(exceptionsToApprove(PLAN, "plan", approvedAt("billing keeps reading the legacy orders table"))).toHaveLength(1);
-    expect(exceptionsToApprove("# Plan\n\nNo section.\n", "plan", parseRecord(null))).toEqual([]);
+    expect(exceptionsToApprove(PLAN, approvedAt("billing keeps reading the legacy orders table"))).toHaveLength(1);
+    expect(exceptionsToApprove("# Plan\n\nNo section.\n", parseRecord(null))).toEqual([]);
   });
 
   test("the note names the rule, its standard and the reason, and says what to set", () => {
-    const one = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const one = exceptionsToApprove(PLAN, parseRecord(null));
     expect(exceptionNote("plan", one, new Map([["ARCH-1", "Service architecture"]]))).toBe(
       "The plan asks for an exception to ARCH-1 (Service architecture): billing keeps reading the legacy orders table until it is migrated (ADR-12). Read plan.md. To allow it, set status to plan-approved; to have the plan written again without it, send it back with a note.",
     );
@@ -84,7 +84,7 @@ describe("exceptions to approve", () => {
   });
 
   test("approvals are added to the record once, with who, where, the gate and the date", () => {
-    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const bullets = exceptionsToApprove(PLAN, parseRecord(null));
     const r = withApprovals(parseRecord(null), "plan", bullets, { by: "John", via: "the console" }, "2026-10-28");
     expect(r.exceptions).toEqual([{ label: "ARCH-1", gate: "plan", reason: "billing keeps reading the legacy orders table until it is migrated (ADR-12)", by: "John", via: "the console", date: "2026-10-28" }]);
     expect(withApprovals(r, "plan", bullets, { by: "M.", via: "intent.md" }, "2026-10-29").exceptions).toHaveLength(1);
@@ -95,7 +95,7 @@ describe("exceptions to approve", () => {
   });
 
   test("the record's file with approvals: rendered whole, or added at the end so a person's unreadable lines are kept", () => {
-    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const bullets = exceptionsToApprove(PLAN, parseRecord(null));
     const who = { by: "John", via: "Slack" };
     const line = "- ARCH-1 at the plan: billing keeps reading the legacy orders table until it is migrated (ADR-12) (John, from Slack, 2026-10-28)";
     expect(approvedRecord("b", null, "plan", bullets, who, "2026-10-28")).toBe(`# Standards decisions for b\n\n## Exceptions approved\n${line}\n`);
@@ -108,7 +108,7 @@ describe("exceptions to approve", () => {
   });
 
   test("who and where are written without parentheses, so they read back", () => {
-    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const bullets = exceptionsToApprove(PLAN, parseRecord(null));
     const text = approvedRecord("b", null, "plan", bullets, { by: "Ann Lee (she/her)", via: "Slack (eu)" }, "2026-10-28");
     expect(text).toContain("(Ann Lee [she/her], from Slack [eu], 2026-10-28)");
     const back = parseRecord(text);
@@ -120,7 +120,7 @@ describe("exceptions to approve", () => {
     const text = "# Standards decisions for b\n\nWe agreed this in the review.\n\n## Added\n- payments: why (J., from the console, 2026-10-27)\n  wrapped onto a second line\n### Notes\n";
     expect(parseRecord(text).problems).toHaveLength(3);
     expect(parseRecord(text).problems[0]).toContain("We agreed this in the review.");
-    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const bullets = exceptionsToApprove(PLAN, parseRecord(null));
     const out = approvedRecord("b", text, "plan", bullets, { by: "J.", via: "the console" }, "2026-10-28");
     expect(out.startsWith(text)).toBe(true);
     expect(parseRecord(out).exceptions).toHaveLength(1);
@@ -130,7 +130,7 @@ describe("exceptions to approve", () => {
 
   test("an approval taken back removes exactly the entries it added", () => {
     const base = parseRecord("## Exceptions approved\n- ARCH-1 at the spec: billing keeps reading the legacy orders table until it is migrated (ADR-12) (M., from a status edit, 2026-10-27)\n");
-    const two = [...exceptionsToApprove(PLAN, "plan", parseRecord(null)), { label: "SEC-1", kind: "exception" as const, text: "the debug log stays" }];
+    const two = [...exceptionsToApprove(PLAN, parseRecord(null)), { label: "SEC-1", kind: "exception" as const, text: "the debug log stays" }];
     const before = renderRecord("b", base)!;
     const after = approvedRecord("b", before, "plan", two, { by: "J.", via: "the console" }, "2026-10-28");
     const added = addedApprovals(base, parseRecord(after));
