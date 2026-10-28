@@ -377,6 +377,22 @@ describe("merge with standards", () => {
     s.trace.close(); s.repo.cleanup();
   });
 
+  test("a scoped needs_person standard a person added to the change makes it wait, though no file matches", async () => {
+    const billing = PAYMENTS.replace("src/**", "services/billing/**");
+    const s = await withStandards({ payments: billing });
+    await Bun.write(join(s.repo.path, "intent", "add-numbers", "standards.md"), "# Standards decisions for add-numbers\n\n## Added\n- payments: it takes card numbers (J., from the console, 2026-10-28)\n");
+    await new Git(s.repo.path).commitAll("add payments");
+    await s.ctx.reload();
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    const fm = s.ctx.intent.file.frontmatter;
+    expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(fm.note).toContain("falls under the standard Payments data (loopstra/standards/payments.md)");
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")?.result).toBe("waiting");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
   test("a needs_person standard without applies_to makes every change wait", async () => {
     const s = await withStandards({ everything: EVERY });
     await runMergeStep(s.ctx);
@@ -485,6 +501,23 @@ describe("tool checks at merge", () => {
       s.trace.close(); s.repo.cleanup();
     });
   }
+
+  test("a check that keeps failing still puts back the files a lint command rewrote", async () => {
+    const s = await withStandards({ secrets: withCheck("exit 1", "Secrets") }, "stages:\n  build:\n    max_fix_loops: 1\n");
+    s.trace.close();
+    const fmt = join(s.repo.path, "fmt.ts");
+    await Bun.write(fmt, `import { writeFileSync } from "node:fs";\nwriteFileSync("src/add.ts", "export const formatted = 1;\\n");\n`);
+    const config = await Bun.file(configPath(s.repo.path)).text();
+    await Bun.write(configPath(s.repo.path), config.replace("commands:\n", `commands:\n  lint: bun "${fmt.replace(/\\/g, "/")}"\n`));
+    await new Git(s.repo.path).commitAll("a formatter");
+    const { ctx, trace } = await openRepo(s.repo.path);
+    expect(ctx.cfg.commands.lint).toContain("fmt.ts");
+    await runMergeStep(ctx);
+    expect(await status(s.repo.path)).toBe("blocked");
+    expect(gateRows(trace, "merge")).toEqual(["standards-untouched:pass", "up-to-date:pass", "tests:pass", "check:secrets:fail"]);
+    expect(await new Git(ctx.worktreeDir).changedTrackedFiles()).toEqual([]);
+    trace.close(); s.repo.cleanup();
+  });
 
   test("the check sees LOOPSTRA_BASE as a commit: the merge base, after main moved on", async () => {
     const dir = tempDir("loopstra-base-");

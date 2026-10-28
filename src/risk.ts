@@ -63,8 +63,21 @@ function numstat(out: string): Changed[] {
  * them (spaces, other alphabets) and both paths of a rename.
  */
 export async function changedFiles(wt: Git, main: string): Promise<string[]> {
-  const out = (await wt.run(["diff", "--numstat", "-z", "-M", `${main}...HEAD`])).out;
-  return [...new Set(numstat(out).flatMap((c) => c.paths).filter((p) => !p.startsWith("intent/")))];
+  return filesOf(await branchDiff(wt, main));
+}
+
+/** What the branch in `wt` changed since it parted from `main`, file by file: read once, then given to filesOf and scoreRisk. */
+export type BranchDiff = Changed[];
+
+/** The branch's diff against `main` (from where the two parted). */
+export async function branchDiff(wt: Git, main: string): Promise<BranchDiff> {
+  // -z: names as they are (spaces, other alphabets); -M: a rename is one record, whatever diff.renames says.
+  return numstat((await wt.run(["diff", "--numstat", "-z", "-M", `${main}...HEAD`])).out);
+}
+
+/** The files of a diff outside intent/, both paths of a rename (see changedFiles). */
+export function filesOf(diff: BranchDiff): string[] {
+  return [...new Set(diff.flatMap((c) => c.paths).filter((p) => !p.startsWith("intent/")))];
 }
 
 /**
@@ -73,15 +86,13 @@ export async function changedFiles(wt: Git, main: string): Promise<string[]> {
  * renamed one when a pattern matches its new path or its old one (moving a file out of a risky
  * folder changes it as much as moving one in), listed under the name that matched.
  */
-export async function scoreRisk(wt: Git, main: string, cfg: Config, extra: RiskSource[] = []): Promise<Risk> {
+export async function scoreRisk(wt: Git, main: string, cfg: Config, extra: RiskSource[] = [], diff?: BranchDiff): Promise<Risk> {
   const { paths, lines: limit } = cfg.gates.merge.risky;
   const globs = paths.map((p) => new Bun.Glob(p));
   const sources = extra.map((e) => ({ ...e, globs: e.patterns.map((p) => new Bun.Glob(p)), hits: [] as string[] }));
-  // -z: names as they are (spaces, other alphabets); -M: a rename is one record, whatever diff.renames says.
-  const out = (await wt.run(["diff", "--numstat", "-z", "-M", `${main}...HEAD`])).out;
   const files: string[] = [];
   let lines = 0;
-  for (const c of numstat(out)) {
+  for (const c of diff ?? (await branchDiff(wt, main))) {
     const outside = c.paths.filter((p) => !p.startsWith("intent/"));
     if (!outside.length) continue;
     lines += c.lines;

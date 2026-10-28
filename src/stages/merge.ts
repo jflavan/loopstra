@@ -7,7 +7,7 @@ import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
 import { changeGates, humanGates, type Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain, type SyncOutcome } from "../remote";
-import { changedFiles, riskEvidence, riskNote, riskySet, scoreRisk, type Risk, type RiskSource } from "../risk";
+import { branchDiff, changedFiles, filesOf, riskEvidence, riskNote, riskySet, scoreRisk, type BranchDiff, type Risk, type RiskSource } from "../risk";
 import { STANDARDS_DIR, type Applying } from "../standards";
 import { errorText } from "../shell";
 import { andList } from "../text";
@@ -157,21 +157,22 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
         // The standards' checks run in it after the tests, and a failing one is fixed the same way.
         const tested = await testLoop(ctx, "merge-test", extra);
+        // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back,
+        // whatever the outcome: the merge checks never keep them, so a file rewritten on every run
+        // cannot start one review round after another, and no later rebase (a retry's, say) or merge
+        // meets them unsaved. The build's own runs keep a reformat (review start commits it), so it is
+        // reviewed. New files were removed after each run.
+        const rewritten = await wt.changedTrackedFiles();
+        if (rewritten.length) {
+          await wt.putBack(rewritten);
+          ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `left out files the checks' commands rewrote: ${rewritten.join(", ")}` });
+        }
         if (!tested.ok && tested.check) {
           // The tests passed in the last run (the checks run after them); the check's own row fails.
           toolFailed = tested;
           return { result: "pass", evidence: "the tests pass; a standard's check does not" };
         }
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
-        // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back: the
-        // merge checks never keep them, so a file rewritten on every run cannot start one review round
-        // after another, and no later rebase or merge meets them unsaved. The build's own runs keep a
-        // reformat (review start commits it), so it is reviewed. New files were removed after each run.
-        const rewritten = await wt.changedTrackedFiles();
-        if (rewritten.length) {
-          await wt.putBack(rewritten);
-          ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `left out files the checks' commands rewrote: ${rewritten.join(", ")}` });
-        }
         const changed = (await wt.headSha()) !== before;
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
       },
@@ -216,8 +217,11 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
  */
 async function passMergeGate(ctx: StepContext): Promise<StepResult> {
   const hasRemote = (await ctx.git.remoteName()) !== null;
-  const applyingNow = await recordStandards(ctx);
-  const risk = await riskOf(ctx, applyingNow);
+  // The branch's diff, read at most once for this pass (the standards and the risk both use it), and only when one needs it.
+  let diff: Promise<BranchDiff> | null = null;
+  const diffOnce = (): Promise<BranchDiff> => (diff ??= branchDiff(new Git(ctx.worktreeDir), ctx.cfg.main_branch));
+  const applyingNow = await recordStandards(ctx, diffOnce);
+  const risk = await riskOf(ctx, applyingNow, diffOnce);
   const own = ctx.cfg.gates.merge.human === "none" && risk?.risky ? ctx.cfg.gates.merge.risky.human : undefined;
   const fields = own ? { set: { merge_gate: own } } : { remove: ["merge_gate" as const] };
   // The note says why when the change's own gate brings in the person.
@@ -242,9 +246,9 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
  * STANDARDS_APPLIED marker; nothing is written (and nothing read from the diff) in a repository
  * without standards. The list is empty then.
  */
-async function recordStandards(ctx: StepContext): Promise<Applying[]> {
+async function recordStandards(ctx: StepContext, diff: () => Promise<BranchDiff>): Promise<Applying[]> {
   if (!(await ctx.standards()).standards.length) return [];
-  const list = (await stageStandards(ctx, await changedFiles(new Git(ctx.worktreeDir), ctx.cfg.main_branch))).list;
+  const list = (await stageStandards(ctx, filesOf(await diff()))).list;
   writeMarker(ctx, STANDARDS_APPLIED, JSON.stringify({
     commit: await ctx.readCommit(),
     applying: list.map((a) => ({ name: a.standard.name, why: a.why, files: a.files })),
@@ -259,14 +263,16 @@ async function recordStandards(ctx: StepContext): Promise<Applying[]> {
  * merge gate's risk row; null, with no row, when the config names nothing risky and no standard
  * needs a person, or already has a person on the merge gate (risk would change nothing, so it is
  * neither scored nor shown). A standard with needs_person counts as patterns beside risky.paths:
- * its applies_to, or every file without one.
+ * its applies_to when they matched, every file when it applies to every change or a person added it.
  */
-async function riskOf(ctx: StepContext, applyingNow: Applying[]): Promise<Risk | null> {
+async function riskOf(ctx: StepContext, applyingNow: Applying[], diff: () => Promise<BranchDiff>): Promise<Risk | null> {
   const extra: RiskSource[] = applyingNow
     .filter((a) => a.standard.needsPerson)
-    .map((a) => ({ patterns: a.standard.appliesTo ?? ["**"], standard: { title: a.standard.title, path: a.standard.path } }));
+    // Only a standard whose own patterns matched is scoped by them; one for every change, or one a
+    // person added to this change (its patterns matched nothing), covers every file.
+    .map((a) => ({ patterns: a.why === "files" && a.standard.appliesTo ? a.standard.appliesTo : ["**"], standard: { title: a.standard.title, path: a.standard.path } }));
   if ((!riskySet(ctx.cfg) && !extra.length) || ctx.cfg.gates.merge.human !== "none") return null;
-  const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg, extra);
+  const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg, extra, await diff());
   ctx.trace.gate(ctx.slug, "merge", "risk", risk.risky ? "waiting" : "pass", riskEvidence(risk));
   return risk;
 }
