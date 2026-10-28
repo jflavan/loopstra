@@ -9,6 +9,7 @@ import { SESSION_LIMIT_NOTE } from "./phases";
 import { TOO_MANY_NOTE } from "./questions";
 import { CHECKS_KEPT_TIMING_OUT_NOTE, TESTS_KEPT_FAILING_NOTE, VERIFY_STILL_FAILED_NOTE } from "./stages/build";
 import { PR_CHECKS_FAILED_NOTE, PR_CLOSED_NOTE, REVIEWS_USED_UP, UPDATE_FAILED_NOTE } from "./stages/merge";
+import { riskySet } from "./risk";
 import { REVIEW_STILL_FOUND_NOTE } from "./stages/review";
 import { PR_CHECKS_NOTE } from "./stages/shared";
 import { UNMET_NOTE } from "./stages/verify";
@@ -317,6 +318,7 @@ const REVIEW_BLOCKS = 2;
 const BUDGET_BLOCKS = 1;
 const LONG_WAIT_MS = DAY_MS;
 const QUIET_GATE_RUNS = 5;
+const RISKY_MERGES = 1;
 
 const money = (usd: number) => `$${usd.toFixed(2)}`;
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -360,8 +362,10 @@ export function suggestions(f: RetroFacts, cfg: Config): string[] {
     if (runs < QUIET_GATE_RUNS || checks.some((g) => g.passed < g.runs)) continue;
     out.push(`Changes waited ${duration(w.medianMs)} at the median in ${w.at}, and the ${gate} gate's automatic checks passed all ${runs} times: the person on it may not be needed (gates.${gate}.human: none).`);
   }
-  // Two more rules come with the settings they name, once those exist:
-  // - risky changes: gates.merge.human none, nothing set under gates.merge.risky, f.merged >= 1;
+  if (cfg.gates.merge.human === "none" && !riskySet(cfg) && f.merged >= RISKY_MERGES) {
+    out.push(`${count(f.merged, "change")} merged with nobody looking, and no file is set to need a person: set gates.merge.risky.paths (loopstra setup github suggests some) so changes to CI, dependencies or migrations wait for a person.`);
+  }
+  // One more rule comes with the setting it names, once it exists:
   // - acceptance tests: stages.build.acceptance_tests off, f.blocks.unmet >= 1.
   return out;
 }

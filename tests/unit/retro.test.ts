@@ -258,6 +258,16 @@ describe("suggestions", () => {
     expect(say()).toEqual([]);
   });
 
+  test("risky changes: a merge with nobody on the gate and no risky files set suggests setting them", () => {
+    const merged = [mv("a", ago(2), "merge-review", "merged")];
+    expect(say({ moves: merged })).toEqual([
+      "1 change merged with nobody looking, and no file is set to need a person: set gates.merge.risky.paths (loopstra setup github suggests some) so changes to CI, dependencies or migrations wait for a person.",
+    ]);
+    expect(say({ moves: merged, cfg: cfgOf("gates:\n  merge:\n    risky:\n      paths: [\".github/**\"]\n") })).toEqual([]);
+    expect(say({ moves: merged, cfg: cfgOf("gates:\n  merge:\n    risky:\n      lines: 500\n") })).toEqual([]);
+    expect(say({ moves: merged, cfg: cfgOf("gates:\n  merge:\n    human: status\n") })).toEqual([]);
+  });
+
   test("waits: a person's gate with a median wait over a day, whose automatic checks all passed at least 5 times, may not need the person", () => {
     const merge = cfgOf("gates:\n  merge:\n    human: status\n");
     const waits = (hours: number) => [mv("a", ago(5), "reviewing", "merge-review", MERGE_WAIT_NOTE), mv("a", ago(5, hours), "merge-review", "merge-approved")];
@@ -318,6 +328,7 @@ describe("retroText", () => {
       "",
       "Suggestions",
       "- 1 step hit the session spending limit of $2.00: raise claude.max_budget_usd with loopstra setup budgets.",
+      "- 1 change merged with nobody looking, and no file is set to need a person: set gates.merge.risky.paths (loopstra setup github suggests some) so changes to CI, dependencies or migrations wait for a person.",
       "",
     ].join("\n"));
   });
