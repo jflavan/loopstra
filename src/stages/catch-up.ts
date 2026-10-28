@@ -10,8 +10,14 @@ import { artifacts, bullets, CATCHING_UP, restoreCatchUp } from "./shared";
 export const RESOLUTIONS = "resolutions";
 /** Run-folder marker: the latest resolution, as the reviewer reads it (`{{resolution}}`). Cleared when a review passes, and by a new build. */
 export const RESOLUTION = "resolution.md";
-/** Run-folder marker: when the latest resolution was made (an ISO time). An approval on GitHub from before it does not count (see freshApproval). */
+/**
+ * Run-folder marker: a resolution this build made, for the approval on GitHub: PUSH_PENDING until the
+ * pull request's branch has it, then when it was pushed (an ISO time). An approval from before that
+ * does not count (see freshApproval in merge.ts).
+ */
 export const RESOLVED_AT = "resolved-at";
+/** RESOLVED_AT while the resolution is not on GitHub yet. */
+export const PUSH_PENDING = "pending";
 
 /** Every conflict section a prompt shows, at most this many lines per file. */
 const LINES_PER_FILE = 200;
@@ -23,7 +29,8 @@ const CONTEXT = 3;
 const MARKER = /^(<{7}|\|{7}|>{7})( |$)/m;
 
 export const CONFLICT_NOTE = "The change overlaps with other recent changes, and resolving the conflict automatically did not work. Nothing was merged. The details are in conflict.md. An engineer needs to look at it.";
-const USED_UP_NOTE = "The change overlaps with other recent changes, and it has already been brought up to date as many times as allowed. Nothing was merged. An engineer needs to look at it.";
+const USED_UP_NOTE = "The change overlaps with other recent changes, and it has already been brought up to date as many times as allowed. Nothing was merged. The details are in conflict.md. An engineer needs to look at it.";
+const OFF_NOTE = "The change overlaps with other recent changes, and resolving conflicts automatically is turned off (stages.review.max_resolutions is 0). Nothing was merged. The details are in conflict.md. An engineer needs to look at it.";
 
 /** How the branch was brought up to date: it had main already, it rebased cleanly, or conflicts were resolved. */
 export type CatchUpOutcome = "current" | "rebased" | "resolved";
@@ -64,8 +71,11 @@ export async function catchUp(ctx: StepContext): Promise<{ ok: true; outcome: Ca
   if (await ctx.git.isAncestor(main, ctx.branch)) return { ok: true, outcome: "current", files: [] };
   const wt = new Git(ctx.worktreeDir);
   if (await wt.rebaseOnto(main)) return { ok: true, outcome: "rebased", files: [] };
-  if (resolutionsUsed(ctx) >= ctx.cfg.stages.review.max_resolutions) {
-    return { ok: false, note: USED_UP_NOTE, detail: `rebase of ${ctx.branch} onto ${main} hit conflicts; ${resolutionsUsed(ctx)} of ${ctx.cfg.stages.review.max_resolutions} resolutions used` };
+  const max = ctx.cfg.stages.review.max_resolutions;
+  if (resolutionsUsed(ctx) >= max) {
+    const reason = max === 0 ? "resolving conflicts automatically is turned off" : `this build has already had ${max} conflict resolutions`;
+    const files = await conflictingFiles(ctx.git, main, ctx.branch);
+    return { ...(await failed(ctx, null, files, "", reason)), note: max === 0 ? OFF_NOTE : USED_UP_NOTE };
   }
   return resolveConflicts(ctx, wt);
 }
@@ -88,7 +98,8 @@ async function resolveConflicts(ctx: StepContext, wt: Git): Promise<{ ok: true; 
       const merged = await wt.run([...RUNTIME_COMMIT_CONFIG, "-c", "merge.conflictStyle=diff3", "merge", "--no-verify", "-q", "--squash", old], true);
       const files = await wt.unmergedFiles();
       if (merged.code !== 0 && !files.length) throw new Error(`merge --squash of ${old} onto ${main}: ${(merged.err || merged.out).trim()}`);
-      if (!files.length) await wt.runtime("commit", ["-q", "-m", message]);
+      // Allowed empty: main may already have everything the change did.
+      if (!files.length) await wt.runtime("commit", ["-q", "--allow-empty", "-m", message]);
       ctx.trace.event(ctx.slug, "command", { command: "catch up", main, files, note: files.length ? "the change was squashed onto main, and conflicts are left for the resolve session" : "the change was squashed onto main without conflicts" });
       return { ok: true as const, files };
     });
@@ -99,6 +110,9 @@ async function resolveConflicts(ctx: StepContext, wt: Git): Promise<{ ok: true; 
     }
     const files = squashed.files;
     const conflicts = await conflictsText(ctx, wt, base, files);
+    // git leaves main's copy of a binary file with no markers, so a resolution could keep it unseen: a person chooses.
+    const binary = files.filter((f) => isBinary(join(ctx.worktreeDir, f)));
+    if (binary.length) return await failed(ctx, old, files, conflicts, `both sides changed ${binary.join(", ")}, which ${binary.length === 1 ? "is a binary file" : "are binary files"} a person needs to choose between`);
     const a = await artifacts(ctx);
     const session = await agentPhase(ctx, {
       name: "resolve", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -112,17 +126,21 @@ async function resolveConflicts(ctx: StepContext, wt: Git): Promise<{ ok: true; 
     const marked = files.filter((f) => hasMarkers(join(ctx.worktreeDir, f)));
     if (marked.length) return await failed(ctx, old, files, conflicts, `conflict markers were left in ${marked.join(", ")}`, summary);
     const saved = await codePhase(ctx, "save-resolution", async () => {
+      // New files are the output of commands the session ran (a coverage folder, a test report), as
+      // after the test loop's runs: the change's own new files are already in the index.
+      await wt.run(["clean", "-f", "-d", "-q"], true);
       await wt.run(["add", "-A"]);
       const left = await wt.unmergedFiles();
       if (left.length) throw new Error(`still unmerged: ${left.join(", ")}`);
-      await wt.runtime("commit", ["-q", "-m", message]);
+      // Allowed empty: the resolution may keep main's side of everything (main already did what the change did).
+      await wt.runtime("commit", ["-q", "--allow-empty", "-m", message]);
       return { ok: true as const };
     });
     if (!saved.ok) return await failed(ctx, old, files, conflicts, saved.detail, summary);
     clearMarker(ctx, CATCHING_UP);
     const sha = (await ctx.git.run(["rev-parse", "--short", main])).out.trim();
     writeMarker(ctx, RESOLUTION, resolutionRecord(main, sha, files, summary, conflicts));
-    writeMarker(ctx, RESOLVED_AT, new Date().toISOString());
+    writeMarker(ctx, RESOLVED_AT, PUSH_PENDING);
     ctx.trace.event(ctx.slug, "command", { command: "catch up", main, files, note: `conflicts with ${main} were resolved; the resolution is tested and reviewed before it merges` });
     return { ok: true, outcome: "resolved", files };
   } finally {
@@ -143,6 +161,18 @@ async function squashMessage(ctx: StepContext, wt: Git, base: string): Promise<s
     bullets(subjects),
     ...(authors.length ? ["", ...authors.map((a) => `Co-authored-by: ${a}`)] : []),
   ].join("\n");
+}
+
+/** True when the file looks binary (a NUL byte in its first 8000 bytes, as git judges). */
+function isBinary(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try { return readFileSync(path).subarray(0, 8000).includes(0); } catch { return false; }
+}
+
+/** The files that conflict merging `branch` into `into` (git 2.38+), for conflict.md when no resolution is tried; none when git cannot say. */
+async function conflictingFiles(git: Git, into: string, branch: string): Promise<string[]> {
+  const r = await git.run(["merge-tree", "--write-tree", "--name-only", "--no-messages", into, branch], true);
+  return r.code === 1 ? r.out.split("\n").slice(1).map((l) => l.trim()).filter(Boolean) : [];
 }
 
 /** True when the file has a conflict marker line (a missing file has none: deleting it is a resolution). */
@@ -228,7 +258,7 @@ function resolutionRecord(main: string, sha: string, files: string[], summary: s
  * A resolution that did not work: the branch goes back to where it was, conflict.md records what
  * happened (written on main beside review.md), and the failure says so in plain words.
  */
-async function failed(ctx: StepContext, old: string, files: string[], conflicts: string, reason: string, summary = ""): Promise<Failure> {
+async function failed(ctx: StepContext, old: string | null, files: string[], conflicts: string, reason: string, summary = ""): Promise<Failure> {
   await restoreCatchUp(ctx);
   ctx.trace.event(ctx.slug, "command", { command: "catch up", files, note: `the conflicts with ${ctx.cfg.main_branch} were not resolved: ${reason}`, head: old });
   const record = [

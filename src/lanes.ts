@@ -220,11 +220,6 @@ export function release(slug: string): void {
   }
 }
 
-/** True while a change is claimed (its step runs). */
-export function isClaimed(slug: string): boolean {
-  return claimed.has(slug);
-}
-
 /** How many claimed changes there are besides this one. */
 export function othersRunning(slug: string): number {
   return claimed.size - (claimed.has(slug) ? 1 : 0);

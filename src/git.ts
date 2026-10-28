@@ -515,7 +515,7 @@ export class Git {
    * (`git merge-tree --write-tree`). Null when git cannot say: before git 2.38, or no common history.
    */
   async mergesCleanly(into: string, branch: string): Promise<boolean | null> {
-    const r = await this.run(["merge-tree", "--write-tree", "--quiet", into, branch], true);
+    const r = await this.run(["merge-tree", "--write-tree", "--no-messages", "--name-only", into, branch], true);
     return r.code === 0 ? true : r.code === 1 ? false : null;
   }
 

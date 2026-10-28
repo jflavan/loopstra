@@ -1,4 +1,4 @@
-import { block, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { modelFor } from "../config";
 import { passes, runJudge } from "../judges";
@@ -9,6 +9,16 @@ import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, 
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
+
+/**
+ * Brings the branch up to date with main (see catchUp), and runs the test loop on a resolution, so
+ * whoever reviews it next reads tested code. A failure to block with.
+ */
+export async function catchUpTested(ctx: StepContext): Promise<{ ok: true } | Failure> {
+  const up = await catchUp(ctx);
+  if (!up.ok) return up;
+  return up.outcome === "resolved" ? testLoop(ctx, "resolve-test") : { ok: true };
+}
 
 /**
  * Stage 5 review rounds, run by the merge step for reviewing (see runMergeStep): review, and on
@@ -37,12 +47,8 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     // resolved, and tested before anyone reviews it. Records alone leave the branch (and the early
     // review kept for its commit) as they are; the merge checks bring those in.
     if (await outOfDate(ctx.git, ctx.cfg.main_branch, ctx.branch)) {
-      const up = await catchUp(ctx);
+      const up = await catchUpTested(ctx);
       if (!up.ok) return block(ctx, up.note, up);
-      if (up.outcome === "resolved") {
-        const tested = await testLoop(ctx, "resolve-test");
-        if (!tested.ok) return block(ctx, tested.note, tested);
-      }
     }
     const before = await runHookCommands(ctx, "before", "review", ctx.worktreeDir);
     if (!before.ok) return before;

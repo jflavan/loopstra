@@ -56,7 +56,7 @@ those three call sites (`projectCommand` and `runHookCommands`, plus `tracedSess
 | Variable | Value | When |
 |---|---|---|
 | `LOOPSTRA_SLOT` | as today (`slotEnv`) | the change is claimed |
-| `TMPDIR`, `TMP`, `TEMP` | `.loopstra/tmp/<slug>/` (created on first use) | the change is claimed |
+| `TMPDIR`, `TMP`, `TEMP` | `<system temp>/loopstra-<8 hex of the repo path>/s<slot>/` (created on first use; short, for Unix socket paths) | the change is claimed |
 | `LOOPSTRA_PORT_BASE`, `LOOPSTRA_PORT_COUNT` | the first port and the size of the change's block | `speed.ports_per_change` > 0 and the change is claimed |
 | `XDG_CACHE_HOME`, `npm_config_cache`, `BUN_INSTALL_CACHE_DIR`, `YARN_CACHE_FOLDER`, `PIP_CACHE_DIR`, `GOCACHE` | folders under `.loopstra/cache/slot-<n>/` | `speed.own_caches: true` and the change is claimed |
 
@@ -188,8 +188,14 @@ The result: `{ ok: true, outcome: "current" | "rebased" | "resolved" } | Failure
   (as `anotherRound`, counted through `roundsAllowed`) and its status goes to `reviewing`. The review
   rounds and then the merge checks run, and it comes back to `merge-review`.
 - **Approvals on GitHub:** with `merge.human: pr`, an approval from before the latest resolution
-  (run-folder marker `resolved-at`) does not count: only one whose `submittedAt` (from gh's
-  `latestReviews`, of someone with a say) is newer merges it. GitHub keeps an approval through a
+  reached GitHub does not count. The run-folder marker `resolved-at` is `pending` until the push
+  that carries the resolution, then that push's time; only an approval whose `submittedAt` (from
+  gh's `latestReviews`, of someone with a say) is newer merges it, and the wait says why.
+- **Pull requests waiting for a person:** before resolving, the watcher syncs main and takes
+  commits a person added to the pull request (`upToDate`, under the merge lock), so the resolution
+  includes them.
+- **Binary conflicts** block before the session runs (git leaves main's copy with no markers).
+  New files the session's commands wrote are removed before saving; commits may be empty. GitHub keeps an approval through a
   push unless the repository dismisses stale ones, and the resolution is code the person has not
   seen. `PrInfo` gains `approvedAt`.
 - **What the reviewer sees:** the resolution's record (run-folder marker `resolution.md`) goes

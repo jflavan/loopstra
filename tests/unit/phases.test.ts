@@ -14,6 +14,7 @@ import { claim, onCheckout, oneMerge, realPathKey, release } from "../../src/lan
 import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, setEnv, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
+import { tempRoot } from "../../src/resources";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -326,7 +327,7 @@ describe("agentPhase failures", () => {
       const built = (await Bun.file(argsFile).json()).env;
       expect(built.LOOPSTRA_SLOT).toBe("0");
       // The change's own temp folder and ports reach it too (see src/resources.ts).
-      expect(built.TMPDIR).toBe(join(repo.path, ".loopstra", "tmp", ctx.slug));
+      expect(built.TMPDIR).toBe(join(tempRoot(repo.path), "s0"));
       expect(Number(built.LOOPSTRA_PORT_BASE)).toBeGreaterThanOrEqual(20000);
       await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
       const read = (await Bun.file(argsFile).json()).env;
@@ -334,7 +335,7 @@ describe("agentPhase failures", () => {
       expect(read.LOOPSTRA_PORT_BASE).toBeNull();
       expect((await projectCommand(ctx, printSlot, repo.path)).lastLine).toBe("slot=0");
       const printTemp = `bun -e "console.log('tmp=' + process.env.TMPDIR + ' ports=' + process.env.LOOPSTRA_PORT_BASE)"`;
-      expect((await projectCommand(ctx, printTemp, repo.path)).lastLine).toBe(`tmp=${join(repo.path, ".loopstra", "tmp", ctx.slug)} ports=${built.LOOPSTRA_PORT_BASE}`);
+      expect((await projectCommand(ctx, printTemp, repo.path)).lastLine).toBe(`tmp=${join(tempRoot(repo.path), "s0")} ports=${built.LOOPSTRA_PORT_BASE}`);
     } finally {
       release(ctx.slug);
     }

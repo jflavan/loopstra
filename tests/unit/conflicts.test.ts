@@ -187,6 +187,57 @@ describe("the merge checks resolve a conflict with main", () => {
     }
   }, 60_000);
 
+  test("a resolution that keeps main's side of the conflict is saved, and output files the session's commands left are not", async () => {
+    const { repo, ctx, trace } = await copy("reviewed");
+    try {
+      await mainMoves(repo.path);
+      const fixture = resolveFixture(MAINS, true).replace(
+        '{"type":"result"',
+        `${JSON.stringify({ type: "fake_action", write: { path: "coverage/lcov.info", content: "TN:\n" } })}\n{"type":"result"`,
+      );
+      // Main's version of the conflicted file is kept; the change's other files stay.
+      const { result } = await withResolve({ resolve: fixture }, () => catchUp(ctx));
+      expect(result).toMatchObject({ ok: true, outcome: "resolved" });
+      const git = new Git(repo.path);
+      expect(await branchFile(repo.path, "src/add.ts")).toBe(MAINS);
+      expect((await git.run(["cat-file", "-e", "intent/add-numbers:coverage/lcov.info"], true)).code).not.toBe(0);
+      expect(await new Git(ctx.worktreeDir).isDirty()).toBe(false);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
+  test("a binary file both sides changed is left to a person", async () => {
+    const { repo, ctx, trace } = await copy("reviewed");
+    try {
+      const wt = new Git(ctx.worktreeDir);
+      writeFileSync(join(ctx.worktreeDir, "logo.bin"), Buffer.from([0, 1, 2, 3]));
+      await wt.commitAll("a logo");
+      writeFileSync(join(repo.path, "logo.bin"), Buffer.from([0, 9, 9, 9]));
+      await new Git(repo.path).commitAll("other-change: another logo");
+      const { result } = await withResolve({ resolve: resolveFixture(null, true) }, () => catchUp(ctx));
+      expect(result).toMatchObject({ ok: false, note: CONFLICT_NOTE });
+      expect(phaseNames(trace)).not.toContain("resolve");
+      expect((await new Git(repo.path).run(["show", "main:intent/add-numbers/conflict.md"])).out).toContain("logo.bin, which is a binary file a person needs to choose between");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
+  test("with resolution turned off (max_resolutions: 0), a conflict blocks with conflict.md naming the files", async () => {
+    const { repo, ctx, trace } = await copy("reviewed");
+    try {
+      await mainMoves(repo.path);
+      const off = { ...ctx.cfg, stages: { ...ctx.cfg.stages, review: { ...ctx.cfg.stages.review, max_resolutions: 0 } } };
+      const r = await catchUp(Object.assign(Object.create(Object.getPrototypeOf(ctx) as object) as StepContext, ctx, { cfg: off }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.note).toContain("turned off");
+      expect((await new Git(repo.path).run(["show", "main:intent/add-numbers/conflict.md"])).out).toContain("src/add.ts");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  }, 60_000);
+
   test("with the resolutions used up, the change blocks without a resolve session", async () => {
     const { repo, ctx, trace } = await copy("reviewed");
     try {

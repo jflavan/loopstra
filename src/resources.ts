@@ -4,16 +4,22 @@
  * slot's own tool caches. Every project command, hook command and session that may run commands
  * gets them through changeEnv. A change that is not claimed (main's health check) gets none.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config";
-import { isClaimed, onRelease, slotEnv } from "./lanes";
+import { onRelease, slotEnv } from "./lanes";
 import { loopstraDir } from "./paths";
 
-/** The folder of every change's temp folder, `.loopstra/tmp/`. */
+/**
+ * The folder of this repository's temp folders: `loopstra-<8 hex of its path>` in the system's temp
+ * folder, not under the repository, whose path can be long: a Unix socket's path (which tools make
+ * under TMPDIR) may be at most about 104 bytes.
+ */
 export function tempRoot(root: string): string {
-  return join(loopstraDir(root), "tmp");
+  return join(tmpdir(), `loopstra-${createHash("sha256").update(root).digest("hex").slice(0, 8)}`);
 }
 
 /** The folder of each slot's caches, `.loopstra/cache/`. */
@@ -24,7 +30,7 @@ function cacheRoot(root: string): string {
 /** How many blocks of ports are tried before a change goes without (each try binds every port of the block). */
 const PORT_TRIES = 50;
 
-/** Each claimed change's temp folder, removed when its step releases it. */
+/** Each claimed change's temp folder (named by its slot, which is short), removed when its step releases it. */
 const temps = new Map<string, string>();
 /** Each claimed change's port block (its first port), or null when none was free; a promise while it is looked for. */
 const ports = new Map<string, Promise<number | null>>();
@@ -50,7 +56,7 @@ const CACHE_VARS: ReadonlyArray<[string, string]> = [
 
 /**
  * The environment a claimed change's commands and command-running sessions get (on top of
- * LOOPSTRA_SLUG): LOOPSTRA_SLOT; TMPDIR, TMP and TEMP set to `.loopstra/tmp/<slug>/`;
+ * LOOPSTRA_SLUG): LOOPSTRA_SLOT; TMPDIR, TMP and TEMP set to its own folder (see tempRoot, one per slot);
  * LOOPSTRA_PORT_BASE and LOOPSTRA_PORT_COUNT when speed.ports_per_change is above 0 and a block of
  * ports is free; and with speed.own_caches, the CACHE_VARS under `.loopstra/cache/slot-<n>/`. The
  * same for the rest of the step. Empty for a change that is not claimed.
@@ -59,7 +65,7 @@ export async function changeEnv(on: { root: string; cfg: Config; slug: string })
   const slot = slotEnv(on.slug).LOOPSTRA_SLOT;
   if (slot === undefined) return {};
   const env: Record<string, string> = { LOOPSTRA_SLOT: slot };
-  const temp = tempFolder(on.root, on.slug);
+  const temp = tempFolder(on.root, on.slug, slot);
   Object.assign(env, { TMPDIR: temp, TMP: temp, TEMP: temp });
   const count = on.cfg.speed.ports_per_change;
   if (count > 0) {
@@ -76,11 +82,11 @@ export async function changeEnv(on: { root: string; cfg: Config; slug: string })
   return env;
 }
 
-/** The change's temp folder, made on first use. */
-function tempFolder(root: string, slug: string): string {
+/** The change's temp folder, made on first use: `s<slot>`, which no other running change has. */
+function tempFolder(root: string, slug: string, slot: string): string {
   let dir = temps.get(slug);
   if (!dir) {
-    dir = join(tempRoot(root), slug);
+    dir = join(tempRoot(root), `s${slot}`);
     temps.set(slug, dir);
   }
   mkdirSync(dir, { recursive: true });
@@ -133,14 +139,16 @@ function bindable(port: number): Promise<boolean> {
 }
 
 /**
- * Removes the temp folders of changes that are not claimed: a step that crashed, or a loop that was
- * killed, left them. Best effort; run at a tick's start.
+ * Removes this repository's temp folders that no running change has: a step that crashed, or a loop
+ * that was killed, left them. Best effort; run at a tick's start.
  */
 export function sweepTempFolders(root: string): void {
   let names: string[];
   try { names = readdirSync(tempRoot(root)); } catch { return; }
+  const inUse = new Set(temps.values());
   for (const name of names) {
-    if (isClaimed(name)) continue;
-    try { rmSync(join(tempRoot(root), name), { recursive: true, force: true }); } catch { /* the next tick tries again */ }
+    const dir = join(tempRoot(root), name);
+    if (inUse.has(dir)) continue;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next tick tries again */ }
   }
 }

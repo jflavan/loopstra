@@ -11,8 +11,8 @@ import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
-import { catchUp, outOfDate, RESOLVED_AT, roundsAllowed } from "./catch-up";
-import { REVIEW_PASSED, runReviewRounds } from "./review";
+import { catchUp, outOfDate, PUSH_PENDING, RESOLVED_AT, roundsAllowed } from "./catch-up";
+import { catchUpTested, REVIEW_PASSED, runReviewRounds } from "./review";
 import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
@@ -204,6 +204,8 @@ async function openPullRequest(ctx: StepContext, newReview: boolean): Promise<{ 
     writeMarker(ctx, PR_LEASE, head);
     clearMarker(ctx, PR_PUSHING);
     writeMarker(ctx, PR_PUSHED, new Date().toISOString());
+    // A resolution is on GitHub from now: only an approval given after this covers it (see freshApproval).
+    if (readMarker(ctx, RESOLVED_AT)?.trim() === PUSH_PENDING) writeMarker(ctx, RESOLVED_AT, new Date().toISOString());
     const created = !pr;
     if (!pr) {
       const dir = `intent/${ctx.slug}`;
@@ -392,7 +394,15 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   // merge.human pr: approved on GitHub, or a person set merge-approved on the status line. An
   // approval from before a conflict resolution approved other code (see freshApproval).
   const approved = pr.approved && freshApproval(ctx, pr);
-  if (ctx.cfg.gates.merge.human === "pr" && !approved && status !== "merge-approved") return keepCurrentWhileWatching(ctx);
+  if (ctx.cfg.gates.merge.human === "pr" && !approved && status !== "merge-approved") {
+    if (pr.approved) {
+      // Approved on GitHub, but before a conflict resolution: say why it waits, or it would look stuck.
+      if (onceMarker(ctx, STALE_APPROVAL)) ctx.trace.event(ctx.slug, "command", { command: "merge", waiting: STALE_APPROVAL_TEXT, pr: pr.number });
+      waits(STALE_APPROVAL_TEXT);
+    } else clearMarker(ctx, STALE_APPROVAL);
+    return keepCurrentWhileWatching(ctx);
+  }
+  clearMarker(ctx, STALE_APPROVAL);
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
   if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", approved ? "approved on GitHub" : "merge-approved on the status line");
   // At every speed.max_parallel_changes: the watcher runs beside the lanes even at one, so another
@@ -645,9 +655,19 @@ export const CAUGHT_UP_NOTE = "Other work merged into main meanwhile conflicted 
  * it is behind), and when git cannot say (before git 2.38): the merge checks resolve it later.
  */
 export async function conflictsWhileWaiting(git: Git, main: string, branch: string): Promise<boolean> {
-  if (!(await git.branchExists(branch)) || !(await outOfDate(git, main, branch))) return false;
-  return (await git.mergesCleanly(main, branch)) === false;
+  const [at, head] = [await git.commitOf(main), await git.commitOf(`refs/heads/${branch}`)];
+  if (at === null || head === null) return false;
+  // Asked every tick and every look of the watcher: worked out again only once either side moved.
+  const where = `${git.cwd}\0${branch}`;
+  const known = conflictsSeen.get(where);
+  if (known?.at === at && known.head === head) return known.conflicts;
+  const conflicts = (await outOfDate(git, main, branch)) && (await git.mergesCleanly(main, branch)) === false;
+  conflictsSeen.set(where, { at, head, conflicts });
+  return conflicts;
 }
+
+/** What conflictsWhileWaiting last found for each repository and branch, with main's commit and the branch's then. */
+const conflictsSeen = new Map<string, { at: string; head: string; conflicts: boolean }>();
 
 /**
  * Keeps a change that waits for a person at the merge gate mergeable (see conflictsWhileWaiting):
@@ -665,12 +685,8 @@ async function keepCurrent(ctx: StepContext): Promise<StepResult | null> {
     const kept = await saveWork(ctx, wt, KEEP_UNFINISHED);
     if (!kept.ok) return block(ctx, kept.note, kept);
   }
-  const up = await catchUp(ctx);
+  const up = await catchUpTested(ctx);
   if (!up.ok) return block(ctx, up.note, up);
-  if (up.outcome === "resolved") {
-    const tested = await testLoop(ctx, "resolve-test");
-    if (!tested.ok) return block(ctx, tested.note, tested);
-  }
   const again = await anotherRound(ctx);
   if (again !== REVIEW_AGAIN) return again;
   await setStatus(ctx, "reviewing", CAUGHT_UP_NOTE);
@@ -683,19 +699,40 @@ async function keepCurrent(ctx: StepContext): Promise<StepResult | null> {
  * run commands, counting this one (as mergeWhenUpToDate); otherwise a later look does it.
  */
 async function keepCurrentWhileWatching(ctx: StepContext): Promise<StepResult> {
-  if (othersRunningCommands(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return { ok: true, waiting: true };
-  return (await keepCurrent(ctx)) ?? { ok: true, waiting: true };
+  const waiting: StepResult = { ok: true, waiting: true };
+  if (othersRunningCommands(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return waiting;
+  if (!(await conflictsWhileWaiting(ctx.git, ctx.cfg.main_branch, ctx.branch))) return waiting;
+  // What would merge on GitHub first, as mergeWhenUpToDate does: main as it is there, and commits a
+  // person added to the pull request, so the resolution starts from them and its push goes over them.
+  const seen = await oneMergeAtATime(ctx, async () => {
+    await syncMain(ctx.root, ctx.cfg, ctx.trace);
+    return upToDate(ctx);
+  });
+  if (typeof seen !== "string") return block(ctx, seen.note, { ...seen, retryFrom: mergeRetry(ctx) });
+  if (seen === "both changed") return block(ctx, PR_BRANCH_MOVED_NOTE, { detail: `${ctx.branch} here and on GitHub each have commits the other lacks`, retryFrom: mergeRetry(ctx) });
+  if (seen === "unreachable") return waiting;
+  return (await keepCurrent(ctx)) ?? waiting;
 }
+
+/** Run-folder marker: the pull request's approval on GitHub came before a conflict resolution (traced once). */
+const STALE_APPROVAL = "stale-approval";
+/** Why a pull request approved before a conflict resolution waits, for PR_WAIT. */
+export const STALE_APPROVAL_TEXT = "It was approved on GitHub before conflicts with main were resolved; approve the pull request again to merge the resolved code.";
 
 /**
  * True when an approval on GitHub covers the code as it is: there was no conflict resolution in this
- * build, or a person approved after the latest one (RESOLVED_AT). GitHub keeps an approval through a
- * push unless the repository dismisses stale ones, and the resolution is code they have not seen.
+ * build, or a person approved after the latest one reached GitHub (RESOLVED_AT). Not while the
+ * resolution is still waiting to be pushed. GitHub keeps an approval through a push unless the
+ * repository dismisses stale ones, and the resolution is code they have not seen.
  */
 function freshApproval(ctx: StepContext, pr: PrInfo): boolean {
-  const resolved = Date.parse(readMarker(ctx, RESOLVED_AT) ?? "");
-  if (!Number.isFinite(resolved)) return true;
-  return pr.approvedAt !== null && Date.parse(pr.approvedAt) > resolved;
+  const marker = readMarker(ctx, RESOLVED_AT)?.trim();
+  if (marker === undefined) return true;
+  if (marker === PUSH_PENDING) return false;
+  const pushed = Date.parse(marker);
+  // A marker that cannot be read says nothing: as before resolutions, GitHub's approval stands.
+  if (!Number.isFinite(pushed)) return true;
+  return pr.approvedAt !== null && Date.parse(pr.approvedAt) > pushed;
 }
 
 /** The merge gate sent the change back for one more review round (the round marker names it). */

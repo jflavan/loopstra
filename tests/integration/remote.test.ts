@@ -9,7 +9,7 @@ import { runStepGuarded, tick } from "../../src/scheduler";
 import { renderStatus } from "../../src/commands/status";
 import { runDir } from "../../src/paths";
 import { SYNC_TEXT } from "../../src/remote";
-import { GITHUB_MERGING, MERGED_NOT_HERE, READY_BEHIND, RECORDING_FAILED } from "../../src/stages/merge";
+import { GITHUB_MERGING, MERGED_NOT_HERE, READY_BEHIND, RECORDING_FAILED, STALE_APPROVAL_TEXT } from "../../src/stages/merge";
 import { PR_CHECKS_NOTE, PR_WAIT } from "../../src/stages/shared";
 import { resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
@@ -37,6 +37,14 @@ describe("the loop with a GitHub remote", () => {
         // A person approved it already, and someone else adds src/add.ts on GitHub's main meanwhile.
         const approvedBefore = { author: { login: "ann" }, authorAssociation: "MEMBER", state: "APPROVED", submittedAt: new Date(Date.now() - 60_000).toISOString() };
         await s.setPr({ checks: "pass" });
+        // A person adds a commit to the pull request too: the resolution starts from it, and it keeps their credit.
+        const person = await elsewhere(s.remote);
+        await run(["git", "checkout", "-q", "-b", BRANCH, `origin/${BRANCH}`], person.path);
+        await Bun.write(join(person.path, "NOTES.md"), "from a person\n");
+        await run(["git", "add", "-A"], person.path);
+        await run(["git", "commit", "-q", "-m", "docs: a note"], person.path);
+        await run(["git", "push", "-q", "origin", BRANCH], person.path);
+        person.cleanup();
         const other = await elsewhere(s.remote);
         await Bun.write(join(other.path, "src", "add.ts"), "// added on main by a person\nexport const ZERO = 0;\n");
         await run(["git", "add", "-A"], other.path);
@@ -49,12 +57,15 @@ describe("the loop with a GitHub remote", () => {
         expect((await intentOf(s.repo)).status).toBe("merge-review");
         expect(await headOn(s.remote)).not.toBe(firstHead);
         expect((await run(["git", "show", `${BRANCH}:src/add.ts`], s.remote)).out).toBe(resolved);
+        expect((await run(["git", "show", `${BRANCH}:NOTES.md`], s.remote)).out).toBe("from a person\n");
+        expect((await run(["git", "log", "--format=%B", `main..${BRANCH}`], s.remote)).out).toContain("Co-authored-by: Person <person@example.com>");
         // The approval from before the resolution does not cover it.
         const raw = await Bun.file(s.env.LOOPSTRA_FAKE_GH_STATE).json();
         Object.assign(raw.prs[BRANCH], { reviewDecision: "APPROVED", latestReviews: [approvedBefore], checks: "pass" });
         await Bun.write(s.env.LOOPSTRA_FAKE_GH_STATE, JSON.stringify(raw));
         await tick(s.repo);
         expect((await intentOf(s.repo)).status).toBe("merge-review");
+        expect(readFileSync(join(runDir(s.repo, SLUG), PR_WAIT), "utf8")).toBe(STALE_APPROVAL_TEXT);
         // A newer one does.
         await s.setPr({ latestReviews: [{ ...approvedBefore, submittedAt: new Date(Date.now() + 1000).toISOString() }] } as never);
         await tick(s.repo);

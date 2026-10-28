@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigSchema, type Config } from "../../src/config";
 import { claim, release } from "../../src/lanes";
@@ -11,15 +12,19 @@ let dirs: Array<{ cleanup: () => void }> = [];
 let servers: Server[] = [];
 afterEach(() => {
   for (const s of ["a", "b", "c"]) release(s);
+  for (const r of roots) rmSync(tempRoot(r), { recursive: true, force: true });
+  roots = [];
   for (const s of servers) s.close();
   for (const d of dirs) d.cleanup();
   servers = [];
   dirs = [];
 });
 
+let roots: string[] = [];
 function root(): string {
   const d = tempDir();
   dirs.push(d);
+  roots.push(d.path);
   return d.path;
 }
 
@@ -55,7 +60,9 @@ describe("changeEnv", () => {
     const cfg = config({ ports_from: from, ports_per_change: 5 });
     claim("a");
     const env = await changeEnv({ root: r, cfg, slug: "a" });
-    const temp = join(tempRoot(r), "a");
+    const temp = join(tempRoot(r), "s0");
+    // Short, whatever the repository's path: tools make Unix sockets under TMPDIR.
+    expect(temp.startsWith(tmpdir())).toBe(true);
     expect(env).toEqual({
       LOOPSTRA_SLOT: "0", TMPDIR: temp, TMP: temp, TEMP: temp,
       LOOPSTRA_PORT_BASE: String(from), LOOPSTRA_PORT_COUNT: "5",
@@ -120,12 +127,12 @@ describe("changeEnv", () => {
 describe("sweepTempFolders", () => {
   test("removes the temp folders of changes that are not claimed and keeps a running change's", async () => {
     const r = root();
-    mkdirSync(join(tempRoot(r), "left-behind"), { recursive: true });
+    mkdirSync(join(tempRoot(r), "s7"), { recursive: true });
     claim("a");
     await changeEnv({ root: r, cfg: config({ ports_per_change: 0 }), slug: "a" });
     sweepTempFolders(r);
-    expect(existsSync(join(tempRoot(r), "left-behind"))).toBe(false);
-    expect(existsSync(join(tempRoot(r), "a"))).toBe(true);
+    expect(existsSync(join(tempRoot(r), "s7"))).toBe(false);
+    expect(existsSync(join(tempRoot(r), "s0"))).toBe(true);
   });
 
   test("does nothing when there is no temp folder yet", () => {

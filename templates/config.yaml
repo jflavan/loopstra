@@ -91,7 +91,7 @@ stages:
 # gets LOOPSTRA_SLUG and LOOPSTRA_SLOT (0, 1, ...: no two changes running at once share one), so it
 # can pick its own database and Docker project names. More changes at once also
 # spend the daily budget and the subscription's usage limits faster.
-# Each running change also gets its own TMPDIR (.loopstra/tmp/<slug>), and ports_per_change ports
+# Each running change also gets its own TMPDIR (in the system's temp folder), and ports_per_change ports
 # no other running change has, checked free: LOOPSTRA_PORT_BASE up to LOOPSTRA_PORT_BASE +
 # LOOPSTRA_PORT_COUNT - 1 (blocks start at ports_from; 0 ports: none). own_caches gives each slot
 # its own tool caches (XDG_CACHE_HOME, npm, bun, yarn, pip, go), kept warm between changes.
