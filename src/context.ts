@@ -616,6 +616,25 @@ export function clearSession(ctx: StepContext, key: string): void {
   writeMarker(ctx, SESSIONS, JSON.stringify(all, null, 2));
 }
 
+/**
+ * Run-folder marker: the acceptance test files this build's acceptance step wrote from Done when, as a
+ * JSON list of paths in the repository. Its being there means the step ran for this build; a new build
+ * clears it (see runBuildStep).
+ */
+export const ACCEPTANCE = "acceptance";
+
+const AcceptanceList = z.array(z.string());
+
+/** The acceptance test files the build's sessions may not edit (see ACCEPTANCE); none when there is no readable marker. */
+export function acceptanceFiles(ctx: StepContext): string[] {
+  try {
+    const list = AcceptanceList.safeParse(JSON.parse(readMarker(ctx, ACCEPTANCE) ?? "[]"));
+    return list.success ? list.data : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Run-folder file: the note a person sent the change back with, for the next writing or build session (see sentBackNote). */
 export const SENT_BACK = "sent-back.md";
 

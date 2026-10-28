@@ -19,7 +19,7 @@
 // $LOOPSTRA_FAKE_CALLS, when set, gets one line of args per call.
 // A sequence: $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>-<n>.jsonl is used for the n-th call of that phase
 // (counted in <dir>/.count-<phase>), before <phase>.jsonl. $LOOPSTRA_FAKE_PROMPTS, when set, gets
-// each prompt as one JSON line ({phase, args, prompt, cwd}).
+// each prompt as one JSON line ({phase, args, prompt, cwd, acceptance}: acceptance is $LOOPSTRA_ACCEPTANCE).
 // One model (the --model argument): before everything above, $LOOPSTRA_FAKE_FIXTURE_DIR/<phase>@<model>-<n>.jsonl
 // (counted per model in <dir>/.count-<phase>@<model>), then <phase>@<model>.jsonl. Two sessions of one phase
 // that start together race on the plain sequence's counter, so a test that runs both judges uses these.
@@ -131,13 +131,14 @@ if (process.env.LOOPSTRA_FAKE_ARGS) {
     LOOPSTRA_BASE: process.env.LOOPSTRA_BASE ?? null,
     LOOPSTRA_SLOT: process.env.LOOPSTRA_SLOT ?? null,
     LOOPSTRA_PROTECTED_LOG: process.env.LOOPSTRA_PROTECTED_LOG ?? null,
+    LOOPSTRA_ACCEPTANCE: process.env.LOOPSTRA_ACCEPTANCE ?? null,
     GIT_OPTIONAL_LOCKS: process.env.GIT_OPTIONAL_LOCKS ?? null,
     CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD ?? null,
   } }));
 }
 if (process.env.LOOPSTRA_FAKE_CALLS) appendFileSync(process.env.LOOPSTRA_FAKE_CALLS, JSON.stringify(args) + "\n");
 
-if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt, cwd: process.cwd() }) + "\n");
+if (process.env.LOOPSTRA_FAKE_PROMPTS) appendFileSync(process.env.LOOPSTRA_FAKE_PROMPTS, JSON.stringify({ phase, args, prompt, cwd: process.cwd(), acceptance: process.env.LOOPSTRA_ACCEPTANCE ?? null }) + "\n");
 
 /** Counts one more call of `name` in <dir>/.count-<name> and gives the count. */
 async function nextCall(dir: string, name: string): Promise<number> {
