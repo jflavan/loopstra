@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeArtifact, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { onCheckout } from "../lanes";
@@ -11,7 +11,8 @@ import { runDir } from "../paths";
 import { isRiskNote } from "../risk";
 import { errorText } from "../shell";
 import { applying, renderStandards, type Applying, type Excepted, type Standard, type StandardsRead } from "../standards";
-import { scopeOf } from "../standards-record";
+import { approvedRecord, exceptionsToApprove, scopeOf, STANDARDS_RECORD } from "../standards-record";
+import { localDate } from "../text";
 
 /**
  * Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the
@@ -94,6 +95,22 @@ export async function stageStandards(ctx: StepContext, files: string[] | null): 
   const labels = list.flatMap((a) => a.standard.rules.map((r) => r.label)).filter((l) => !allowed.has(l));
   return { read, list, scoped, excepted, text: renderStandards(list, { scoped, excepted }), labels };
 }
+
+/**
+ * Records the exceptions the spec or plan asks for that the record does not have yet, as approved by
+ * `who`: the step after an approval made by a status edit, which no request recorded, calls it as it
+ * starts. Writes standards.md only when something is new, and never in a repository without standards.
+ */
+export async function recordApprovals(ctx: StepContext, gate: "spec" | "plan", who: { by: string; via: string }): Promise<void> {
+  if (!(await ctx.standards()).standards.length) return;
+  const asks = exceptionsToApprove((await readArtifact(ctx, `${gate}.md`)) ?? "", gate, ctx.standardsRecord());
+  if (!asks.length) return;
+  await writeArtifact(ctx, STANDARDS_RECORD, approvedRecord(ctx.slug, await readArtifact(ctx, STANDARDS_RECORD), gate, asks, who, localDate()));
+  ctx.trace.gate(ctx.slug, gate, "exception", "pass", asks.map((b) => b.label).join(", "));
+}
+
+/** Who approved by editing the status line, as the record says it. */
+export const BY_STATUS_EDIT = { by: "a status edit", via: "intent.md" };
 
 /** The commit message for edits nobody reviewed, kept on the branch so the next review sees them. */
 export const KEEP_UNFINISHED = "chore: keep unfinished changes";

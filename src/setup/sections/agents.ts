@@ -5,8 +5,7 @@ import { cloneSource, copyItem, ITEM_NAME, listLibrary, newAgentFile, scanFolder
 import { BUILTIN_AGENTS, CHAT_STEPS, CONTINUES_BUILD, once, TEAM_NAME, TEAM_WAYS, toolRuleProblem, type TeamWay } from "../../agents";
 import { MCP_RULE, MCP_RULE_TEXT, type Config, type StepAgents } from "../../config";
 import { STEP_KEYS, STEPS, type StepKey } from "../../models";
-import { localDate } from "../../signals";
-import { andList, printable } from "../../text";
+import { andList, localDate, printable } from "../../text";
 import type { ConfigDocument } from "../document";
 import type { Section, SetupContext } from "../types";
 import { modelName } from "./models";

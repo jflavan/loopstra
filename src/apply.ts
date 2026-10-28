@@ -14,7 +14,8 @@ import { recordNotYet, StopRequested, stopRequested } from "./stop";
 import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
-import { oneLine } from "./text";
+import { localDate, oneLine } from "./text";
+import { approvedRecord, exceptionsToApprove, parseRecord, STANDARDS_RECORD } from "./standards-record";
 import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
@@ -595,6 +596,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   if (problem || !to) return refuse(trace, req, was, problem ?? `${req.slug} cannot do that now.`);
   const note = noteFor(req);
   let refused = null as Status | null;
+  let excepted: string[] = [];
   if (!done) {
     await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async (draft) => {
       const fresh = await readIntent(root, req.slug);
@@ -602,6 +604,7 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
         refused = fresh.file.frontmatter.status;
         return false;
       }
+      excepted = approveExceptions(req, draft);
       if (req.kind === "send-back") writeRecord(req.slug, { kind: "sent-back", who: req.byName, via: req.via, text: req.note.trim(), at: new Date() }, draft);
       // The send back's note no longer stands: said in the record every work session reads.
       if (undoesSendBack(req)) writeRecord(req.slug, { kind: "took-back", who: req.byName, via: req.via, at: new Date() }, draft);
@@ -616,10 +619,33 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     after += followUp(trace, req, lastTry, "Its note for the next session could not be kept; an engineer can find why in the trace.", () => writeSentBack(root, req.slug, kept));
   }
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
+  const gate = EXCEPTION_GATE[req.expect];
+  if (gate && excepted.length) trace.gate(req.slug, gate, "exception", "pass", excepted.join(", "));
   trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
   traced(trace, req.slug, req, "applied", { from: req.expect, to, what: doneWords(req) });
   if (req.kind === "undo") after += followUp(trace, req, lastTry, "The note it was sent back with could not be dropped, so the next session may still read it; an engineer can find why in the trace.", () => dropSentBack(root, req.slug));
   return { ok: true, status: to, text: resultText(req, req.slug, to) + after };
+}
+
+/** The review statuses whose approval allows the exceptions their artifact asks for, and that artifact's gate. */
+const EXCEPTION_GATE: Partial<Record<Status, "spec" | "plan">> = { "spec-review": "spec", "plan-review": "plan" };
+
+/**
+ * Approving a spec or plan allows every exception it asks for: those the change's standards.md does
+ * not have yet are written into it, in the approval's draft, so they land in the same record. Who is
+ * the request's person; where is "the console" for the console, else where the request says. Gives
+ * the labels written.
+ */
+function approveExceptions(req: StatusRequest, draft: RecordDraft): string[] {
+  const gate = EXCEPTION_GATE[req.expect];
+  if (req.kind !== "approve" || !gate) return [];
+  const rel = (name: string) => `intent/${req.slug}/${name}`;
+  const text = draft.read(rel(STANDARDS_RECORD));
+  const asks = exceptionsToApprove(draft.read(rel(`${gate}.md`)) ?? "", gate, parseRecord(text));
+  if (!asks.length) return [];
+  const who = { by: oneLine(req.byName, 80), via: req.transport === CONSOLE ? "the console" : oneLine(req.via, 40) };
+  draft.write(rel(STANDARDS_RECORD), approvedRecord(req.slug, text, gate, asks, who, localDate()));
+  return asks.map((b) => b.label);
 }
 
 /**

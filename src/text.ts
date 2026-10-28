@@ -39,3 +39,9 @@ export function splitFrontmatter(text: string): { front: Record<string, unknown>
   if (typeof v === "object" && !Array.isArray(v)) return { front: v as Record<string, unknown>, body };
   return { front: {}, body, problem: "not YAML keys and values" };
 }
+
+/** Today's date in the machine's own time zone, as YYYY-MM-DD. */
+export function localDate(d = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}

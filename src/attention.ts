@@ -8,8 +8,9 @@ import { changeGates, dependencyWait, hasQuestion, heldNote, humanGates, orderQu
 import { Git } from "./git";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
-import { parseRecord, STANDARDS_RECORD } from "./standards-record";
+import { exceptionsToApprove, parseRecord, STANDARDS_RECORD } from "./standards-record";
 import { readStandards, standardsStopText } from "./standards";
+import { andList } from "./text";
 import { humanNote, prWait } from "./stages/shared";
 import type { Trace } from "./trace";
 
@@ -103,7 +104,7 @@ export async function attention(root: string, config: Config | { problem: string
   scan ??= await scanRepo(root);
   const intents = orderQueue(scan.intents);
   const items: AttentionItem[] = [];
-  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string, key?: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what, ...(key ? { key } : {}) });
+  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string, key?: string, label = ATTENTION_LABEL[kind]) => items.push({ kind, label, slug, title, what, ...(key ? { key } : {}) });
 
   // A person paused the loop: nothing new starts until they resume it. Titled apart from an outage's
   // pause, so the two are two items; worded for a loop that is stopped as much as one running.
@@ -171,7 +172,18 @@ export async function attention(root: string, config: Config | { problem: string
       continue;
     }
     const gate = REVIEW_GATE[fm.status]!;
-    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]));
+    // A spec or plan asking for exceptions says which rules in its label.
+    const asks = gate === "spec" || gate === "plan" ? exceptionsWaiting(i.dir, gate) : [];
+    const label = asks.length ? `${ATTENTION_LABEL.waiting}: ${asks.length > 1 ? "exceptions" : "exception"} to ${andList(asks)}` : undefined;
+    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]), undefined, label);
   }
   return items;
+}
+
+/** The rules whose exceptions a change's spec or plan asks a person to allow (see exceptionsToApprove), read from its folder. */
+function exceptionsWaiting(dir: string, gate: "spec" | "plan"): string[] {
+  const read = (name: string): string | null => {
+    try { return readFileSync(join(dir, name), "utf8"); } catch { return null; }
+  };
+  return exceptionsToApprove(read(`${gate}.md`) ?? "", gate, parseRecord(read(STANDARDS_RECORD))).map((b) => b.label);
 }

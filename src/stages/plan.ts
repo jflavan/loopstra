@@ -8,7 +8,7 @@ import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
 import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
-import { codeDiffers, stageStandards, takeKept, type Artifacts, type Kept } from "./shared";
+import { BY_STATUS_EDIT, codeDiffers, recordApprovals, stageStandards, takeKept, type Artifacts, type Kept } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
@@ -45,9 +45,12 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
 
 /**
  * The plan half of Stage 3. spec-approved/planning: plan and the plan gate's checks in one step.
- * plan-review means the checks passed and a person is deciding; it never advances here.
+ * plan-review means the checks passed and a person is deciding; it never advances here. Starting
+ * from spec-approved, the spec's exceptions not recorded yet are recorded as a status edit's approval.
  */
-export function runPlanStep(ctx: StepContext): Promise<StepResult> {
+export async function runPlanStep(ctx: StepContext): Promise<StepResult> {
+  // A spec approved by a status edit: its exceptions are recorded as approved before the plan is written.
+  if (ctx.intent.file.frontmatter.status === PLAN.entry) await recordApprovals(ctx, "spec", BY_STATUS_EDIT);
   return runArtifactStep(ctx, PLAN);
 }
 

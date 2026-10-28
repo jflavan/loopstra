@@ -1,4 +1,4 @@
-import { RULE_LABEL, STANDARD_NAME, type Scope } from "./standards";
+import { readStandardsSection, RULE_LABEL, STANDARD_NAME, type Scope, type SectionBullet } from "./standards";
 
 /** The file in a change's folder that holds what people decided about its standards. */
 export const STANDARDS_RECORD = "standards.md";
@@ -70,4 +70,66 @@ export function renderRecord(slug: string, r: ChangeStandards): string | null {
 /** The record as a scope, for `applying`. */
 export function scopeOf(r: ChangeStandards): Scope {
   return { added: r.added.map((d) => d.name), removed: r.removed.map((d) => d.name) };
+}
+
+type Gate = "spec" | "plan";
+
+/** Who approved and from where, as the record words it: "J." and "the console", or "a status edit" and "intent.md". */
+interface Approver { by: string; via: string }
+
+/** True when the record has the exception approved: the same rule with the same reason (at either gate). A reworded reason is a new exception. */
+const approved = (r: ChangeStandards, label: string, reason: string): boolean => r.exceptions.some((e) => e.label === label && oneLine(e.reason) === oneLine(reason));
+
+/**
+ * The exceptions a spec's or plan's Standards section asks for that the record has not approved yet:
+ * one approved at the spec and repeated in the plan for the same rule with the same reason needs no
+ * second approval. The gate (which artifact this is) does not change what counts as approved.
+ */
+export function exceptionsToApprove(artifact: string, _gate: Gate, r: ChangeStandards): SectionBullet[] {
+  const out: SectionBullet[] = [];
+  for (const b of readStandardsSection(artifact) ?? []) {
+    if (b.kind !== "exception" || approved(r, b.label, b.text) || out.some((o) => o.label === b.label && oneLine(o.text) === oneLine(b.text))) continue;
+    out.push(b);
+  }
+  return out;
+}
+
+/** The note of a gate that waits for a person to allow its exceptions; `titles` gives each rule's standard's title. */
+export function exceptionNote(gate: Gate, bullets: SectionBullet[], titles: ReadonlyMap<string, string>): string {
+  const one = (b: SectionBullet): string => {
+    const title = titles.get(b.label);
+    return `${b.label}${title ? ` (${title})` : ""}: ${oneLine(b.text).replace(/[.\s]+$/, "")}`;
+  };
+  const many = bullets.length > 1;
+  const asks = many
+    ? `exceptions to ${bullets.slice(0, -1).map(one).join("; to ")}; and to ${one(bullets[bullets.length - 1]!)}`
+    : `an exception to ${bullets.map(one).join("")}`;
+  const it = many ? "them" : "it";
+  return `The ${gate} asks for ${asks}. Read ${gate}.md. To allow ${it}, set status to ${gate}-approved; to have the ${gate} written again without ${it}, send it back with a note.`;
+}
+
+/** The record with `bullets` approved at `gate` by `who` on `date` (YYYY-MM-DD); one approved already is not added again. */
+export function withApprovals(r: ChangeStandards, gate: Gate, bullets: SectionBullet[], who: Approver, date: string): ChangeStandards {
+  const exceptions = [...r.exceptions];
+  for (const b of bullets) {
+    if (approved({ ...r, exceptions }, b.label, b.text)) continue;
+    exceptions.push({ label: b.label, gate, reason: oneLine(b.text), by: who.by, via: who.via, date });
+  }
+  return { ...r, exceptions };
+}
+
+/**
+ * The record's file, `text` (null for none), once `bullets` are approved (see withApprovals). A record
+ * that reads is written again whole; one with lines that do not read (a person's, listed under Needs
+ * attention for them to fix) is kept as it is, with the approvals added at its end.
+ */
+export function approvedRecord(slug: string, text: string | null, gate: Gate, bullets: SectionBullet[], who: Approver, date: string): string {
+  const r = parseRecord(text);
+  const next = withApprovals(r, gate, bullets, who, date);
+  if (!r.problems.length || text === null) return renderRecord(slug, next) ?? "";
+  const lines = next.exceptions.slice(r.exceptions.length).map(exception).join("\n");
+  const body = text.replace(/\s*$/, "\n");
+  const headings = body.split(/\r?\n/).filter((l) => /^#{1,2}\s/.test(l));
+  const last = headings[headings.length - 1] ?? "";
+  return SECTIONS.exceptions.test(last.trimEnd()) ? `${body}${lines}\n` : `${body}\n## Exceptions approved\n${lines}\n`;
 }

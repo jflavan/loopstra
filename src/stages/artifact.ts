@@ -3,13 +3,14 @@ import { block, clearMarker, onceMarker, readArtifact, readMarker, SENT_BACK, se
 import type { Envelope } from "../envelopes";
 import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
-import type { Status } from "../intents";
+import { changeGates, humanGates, type Frontmatter, type Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
 import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
 import { checkStandardsSection, readStandardsSection } from "../standards";
+import { exceptionNote, exceptionsToApprove } from "../standards-record";
 import { artifacts, bullets, humanNote, runHookCommands, type Artifacts, type StageStandards } from "./shared";
 
 /**
@@ -100,7 +101,8 @@ export async function runArtifactStep<W extends Writer, J extends Judge>(ctx: St
     if (!written.ok) return written;
     return settle(ctx, s);
   }
-  if (status === s.review && ctx.cfg.gates[s.gate].human === "none") return settle(ctx, s);
+  // A change's own spec_gate or plan_gate (an exception waits for a person) keeps it waiting too.
+  if (status === s.review && changeGates(humanGates(ctx.cfg), ctx.intent.file.frontmatter)[s.gate] === "none") return settle(ctx, s);
   return { ok: true };
 }
 
@@ -169,8 +171,14 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // The gate's result is recorded first, then the work beside the judge is waited for: a stop or a
       // crash meanwhile loses only that work (the next stage then does it as usual) and the comparison.
       try {
-        if (human === "none") await setStatus(ctx, s.approved);
-        else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human));
+        const exceptions = await exceptionsAsked(ctx, s);
+        // Exceptions to allow bring a person onto a gate the config left to nobody, in the same record;
+        // any other pass takes off one an earlier pass wrote.
+        const field = `${s.gate}_gate` as const satisfies keyof Frontmatter;
+        const fields = exceptions && human === "none" ? { set: { [field]: "status" as const } } : { remove: [field] };
+        if (exceptions) await setStatus(ctx, s.review, exceptions, {}, fields);
+        else if (human === "none") await setStatus(ctx, s.approved, "", {}, fields);
+        else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human), {}, fields);
       } catch (e) {
         await callOff(pending);
         throw e;
@@ -194,6 +202,21 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     const again = await write(ctx, s, findings);
     if (!again.ok) return again;
   }
+}
+
+/**
+ * The note for a passing artifact that asks for exceptions to rules a person has not allowed yet for
+ * this change (see exceptionsToApprove); null when it asks for none, or there are no standards.
+ */
+async function exceptionsAsked<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>): Promise<string | null> {
+  if (!s.standards) return null;
+  // A repository without standards has no rule to except (it reads as before standards existed).
+  const read = await ctx.standards();
+  if (!read.standards.length) return null;
+  const asks = exceptionsToApprove((await readArtifact(ctx, s.artifact)) ?? "", s.gate, ctx.standardsRecord());
+  if (!asks.length) return null;
+  const titles = new Map(read.standards.flatMap((st) => st.rules.map((r) => [r.label, st.title] as const)));
+  return exceptionNote(s.gate, asks, titles);
 }
 
 /**

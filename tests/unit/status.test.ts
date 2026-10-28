@@ -343,4 +343,53 @@ describe("attention and standards", () => {
       t.cleanup();
     }
   });
+
+  test("a change waiting on an exception is labelled with the rule", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, "# SOC 2\n\n## Rules\n- SEC-1: Secrets stay out of the repo.\n- ARCH-1: Billing goes through the gateway.\n");
+      await intent(t.path, "a", "status: plan-review\nplan_gate: status\nnote: The plan asks for an exception.");
+      await Bun.write(join(t.path, "intent", "a", "plan.md"), "# Plan\n\n## Standards\n- SEC-1: kept\n- ARCH-1: exception: billing reads the orders table\n");
+      await intent(t.path, "b", "status: plan-review\nplan_gate: status");
+      await Bun.write(join(t.path, "intent", "b", "plan.md"), "# Plan\n\n## Standards\n- ARCH-1: exception: billing reads the orders table\n");
+      await Bun.write(join(t.path, "intent", "b", "standards.md"), "# Standards decisions for b\n\n## Exceptions approved\n- ARCH-1 at the spec: billing reads the orders table (J., from the console, 2026-10-28)\n");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = (await attention(t.path, await loadConfig(t.path), trace)).filter((i) => i.kind === "waiting");
+        expect(items.map((i) => [i.slug, i.label, i.what])).toEqual([
+          ["a", "Waiting for you: exception to ARCH-1", "The plan asks for an exception."],
+          ["b", "Waiting for you", "Read plan.md. When you are happy with it, change the status line to plan-approved. To stop this change, set it to closed."],
+        ]);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a standard named in a change's record and then deleted from main is listed, not dropped", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, "# SOC 2\n\n## Rules\n- SEC-1: Secrets stay out of the repo.\n");
+      await Bun.write(join(t.path, "loopstra", "standards", "payments.md"), "# Payments\n\n## Rules\n- PAY-1: Card data goes through the vault.\n");
+      await intent(t.path, "a", "status: building");
+      await Bun.write(join(t.path, "intent", "a", "standards.md"), "# Standards decisions for a\n\n## Added\n- payments: card data passes through (J., from the console, 2026-10-28)\n");
+      await new Git(t.path).commitAll("payments");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const listed = async () => (await attention(t.path, await loadConfig(t.path), trace)).filter((i) => i.kind === "standards").map((i) => i.what);
+        expect(await listed()).toEqual([]);
+        await new Git(t.path).run(["rm", "-q", "loopstra/standards/payments.md"]);
+        await new Git(t.path).commitAll("drop payments");
+        expect(await listed()).toEqual(["standards.md names payments, which is not a standard on main."]);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
 });

@@ -459,6 +459,84 @@ describe("plan stage with standards", () => {
     s.trace.close(); s.repo.cleanup();
   });
 
+  /** As planned, with `files` written into the change's folder (and committed) first, and more config. */
+  async function plannedWith(plan: string, files: Record<string, string>, config = "") {
+    const dir = fixtureDir({ plan });
+    try {
+      return await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const s = await specApproved(NO_AHEAD + config);
+        await withStandards(s.repo.path);
+        for (const [name, text] of Object.entries(files)) await Bun.write(join(s.repo.path, "intent", "add-numbers", name), text);
+        await new Git(s.repo.path).commitAll("files");
+        await s.ctx.dropSnapshot();
+        await s.ctx.reload();
+        await runPlanStep(s.ctx);
+        return s;
+      });
+    } finally {
+      dir.cleanup();
+    }
+  }
+
+  const today = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const READS = "billing reads the orders table until it is migrated";
+  const EXCEPTED = `- SEC-1: ok\\n- ARCH-1: exception: ${READS}\\n- ARCH-2: ok`;
+  const recordOf = (reason: string) => `# Standards decisions for add-numbers\n\n## Exceptions approved\n- ARCH-1 at the spec: ${reason} (J., from the console, 2026-10-28)\n`;
+  const record = (s: { repo: { path: string } }) => readFileSync(join(s.repo.path, "intent", "add-numbers", "standards.md"), "utf8");
+
+  test("the plan repeating an exception approved at the spec goes straight to plan-approved", async () => {
+    const s = await plannedWith(planWith(BILLING, EXCEPTED), { "standards.md": recordOf(READS) });
+    const fm = (await readIntent(s.repo.path, "add-numbers")).file.frontmatter;
+    expect(fm.status).toBe("plan-approved");
+    expect(fm.plan_gate).toBeUndefined();
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a new or reworded exception in the plan waits in plan-review with its own plan_gate", async () => {
+    const cases: Record<string, string>[] = [{}, { "standards.md": recordOf("billing reads the orders table") }];
+    for (const files of cases) {
+      const s = await plannedWith(planWith(BILLING, EXCEPTED), files);
+      const fm = (await readIntent(s.repo.path, "add-numbers")).file.frontmatter;
+      expect(fm).toMatchObject({ status: "plan-review", plan_gate: "status" });
+      expect(fm.note).toBe(`The plan asks for an exception to ARCH-1 (Service architecture): ${READS}. Read plan.md. To allow it, set status to plan-approved; to have the plan written again without it, send it back with a note.`);
+      s.trace.close(); s.repo.cleanup();
+    }
+  });
+
+  test("with a person on the plan gate, a plan with an exception waits with the exception's note and no plan_gate", async () => {
+    const s = await plannedWith(planWith(BILLING, EXCEPTED), {}, HUMAN_PLAN);
+    const fm = (await readIntent(s.repo.path, "add-numbers")).file.frontmatter;
+    expect(fm.status).toBe("plan-review");
+    expect(fm.plan_gate).toBeUndefined();
+    expect(fm.note).toStartWith("The plan asks for an exception to ARCH-1 (Service architecture)");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a spec approved by a status edit has its exceptions recorded as the plan step starts", async () => {
+    const spec = `# Spec\n\n## Summary\ns\n\n## Standards\n- ARCH-1: exception: ${READS}\n`;
+    const s = await plannedWith(planWith(BILLING, EXCEPTED), { "spec.md": spec });
+    expect(record(s)).toBe(`# Standards decisions for add-numbers\n\n## Exceptions approved\n- ARCH-1 at the spec: ${READS} (a status edit, from intent.md, ${today()})\n`);
+    // The plan repeats it: approved already.
+    expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a record naming a standard no longer on main does not stop the step", async () => {
+    const s = await plannedWith(planWith(BILLING, "- SEC-1: ok\\n- ARCH-1: ok\\n- ARCH-2: ok"), { "standards.md": "# Standards decisions for add-numbers\n\n## Added\n- payments: card data (J., from the console, 2026-10-28)\n" });
+    expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a spec approved by a status edit with nothing new writes no record", async () => {
+    const s = await plannedWith(planWith(BILLING, "- SEC-1: ok\\n- ARCH-1: ok\\n- ARCH-2: ok"), { "spec.md": "# Spec\n\n## Summary\ns\n\n## Standards\n- SEC-1: kept\n" });
+    expect(existsSync(join(s.repo.path, "intent", "add-numbers", "standards.md"))).toBe(false);
+    expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+    s.trace.close(); s.repo.cleanup();
+  });
+
   /** A design step with standards, its plan written ahead kept (default config); `between` runs before the plan step. */
   async function aheadWith(between: (repo: string) => Promise<void>) {
     const dir = fixtureDir({ design: fixture("design").replace("## Areas of concern\\nNone.\\n", "## Areas of concern\\nNone.\\n\\n## Standards\\nNone."), plan: planWith("- docs/x.md (new)", "- SEC-1: ok") });

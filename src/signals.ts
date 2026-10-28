@@ -7,7 +7,7 @@ import { loopstraDir } from "./paths";
 import { projectCommand } from "./phases";
 import { errorText } from "./shell";
 import { StopRequested } from "./stop";
-import { andList } from "./text";
+import { andList, localDate } from "./text";
 import type { Trace } from "./trace";
 
 type HealthResult = "pass" | "fail" | "error";
@@ -102,12 +102,6 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   }
   if (result === "fail" && baseline?.result === "pass") await openFailureIntent(root, cfg.main_branch, trace, afterSlugs, output);
   return result;
-}
-
-/** Today's date in the machine's own time zone, as YYYY-MM-DD. */
-export function localDate(d = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** `after the change "a" merged`, `after the changes "a" and "b" merged`, or `on the main branch`. */

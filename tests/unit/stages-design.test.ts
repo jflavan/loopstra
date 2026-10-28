@@ -774,6 +774,58 @@ describe("design stage with standards", () => {
     }
   });
 
+  test("a spec with an exception waits for a person in spec-review, though nobody is on the spec gate", async () => {
+    const dir = fixtureDir({ design: designWith("- SEC-1: exception: the debug log stays until the audit") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          await runDesignStep(ctx);
+          let fm = (await readIntent(repo.path, "add-numbers")).file.frontmatter;
+          expect(fm).toMatchObject({ status: "spec-review", spec_gate: "status" });
+          expect(fm.note).toBe("The spec asks for an exception to SEC-1 (Security): the debug log stays until the audit. Read spec.md. To allow it, set status to spec-approved; to have the spec written again without it, send it back with a note.");
+          expect(readFileSync(join(repo.path, "intent", "add-numbers", "intent.md"), "utf8")).toContain("\nspec_gate: status\n");
+          // Stepped again, it is not settled as a review with nobody on the gate.
+          const phases = phaseNames(trace).length;
+          await ctx.reload();
+          await runDesignStep(ctx);
+          fm = (await readIntent(repo.path, "add-numbers")).file.frontmatter;
+          expect(fm.status).toBe("spec-review");
+          expect(phaseNames(trace).length).toBe(phases);
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("a spec_gate left from an earlier pass is removed when the spec passes without an exception to approve", async () => {
+    const dir = fixtureDir({ design: designWith("None.") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          const file = join(repo.path, "intent", "add-numbers", "intent.md");
+          writeFileSync(file, readFileSync(file, "utf8").replace("status: accepted", "status: accepted\nspec_gate: status"));
+          await new Git(repo.path).commitAll("gate");
+          await ctx.reload();
+          await runDesignStep(ctx);
+          const fm = (await readIntent(repo.path, "add-numbers")).file.frontmatter;
+          expect(fm.status).toBe("spec-approved");
+          expect(fm.spec_gate).toBeUndefined();
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
   test("a repository without standards has no standards check", async () => {
     const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
     try {

@@ -983,6 +983,76 @@ describe("applying requests", () => {
   });
 });
 
+describe("approving exceptions", () => {
+  const PLAN = "# Plan\n\n## Standards\n- SEC-1: exception: the debug log stays until the audit\n- ARCH-1: exception: billing reads the orders table\n";
+  const SPEC_APPROVED = "- ARCH-1 at the spec: billing reads the orders table (M., from a status edit, 2026-10-27)";
+  const waiting = INTENT("plan-review", "x").replace("status: plan-review\n", "status: plan-review\nplan_gate: status\n");
+
+  async function repoWith(files: Record<string, string>) {
+    const r = await chatRepo({ intents: { a: waiting } });
+    for (const [name, text] of Object.entries(files)) await Bun.write(join(r.root, "intent", "a", name), text);
+    await new Git(r.root).commitAll("artifacts");
+    return r;
+  }
+
+  test("approving the plan records its new exceptions, with the request's person and from the console, in the same commit", async () => {
+    const r = await repoWith({ "plan.md": PLAN, "standards.md": `# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n` });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, status: "plan-approved" });
+      const today = new Date();
+      const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      expect(readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8")).toBe(`# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n- SEC-1 at the plan: the debug log stays until the audit (John, from the console, ${date})\n`);
+      const shown = (await run(["git", "show", "--stat", "--format=%s", "HEAD"], r.root)).out;
+      expect(shown).toContain("plan approved by John from the dashboard");
+      expect(shown).toContain("intent/a/standards.md");
+      expect(shown).toContain("intent/a/intent.md");
+      const trace = Trace.open(r.root);
+      expect(trace.gates("a").map((g) => `${g.gate}:${g.check}:${g.result}:${g.evidence}`)).toEqual(["plan:exception:pass:SEC-1"]);
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("from chat the record names where the person was; with nothing new, no record is written", async () => {
+    const r = await repoWith({ "plan.md": PLAN });
+    try {
+      submitRequest(r.root, { by: "U1", byName: "Ann", via: "Slack", transport: "slack", thread: "t", kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      const text = readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8");
+      expect(text).toContain("- SEC-1 at the plan: the debug log stays until the audit (Ann, from Slack, ");
+      expect(text).toContain("- ARCH-1 at the plan: billing reads the orders table (Ann, from Slack, ");
+    } finally {
+      r.cleanup();
+    }
+    const plain = await repoWith({ "plan.md": "# Plan\n\n## Standards\nNone.\n" });
+    try {
+      submitRequest(plain.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(plain.root);
+      expect((await readIntent(plain.root, "a")).file.frontmatter.status).toBe("plan-approved");
+      expect(existsSync(join(plain.root, "intent", "a", "standards.md"))).toBe(false);
+      const trace = Trace.open(plain.root);
+      expect(trace.gates("a")).toEqual([]);
+      trace.close();
+    } finally {
+      plain.cleanup();
+    }
+  });
+
+  test("a change waiting on its own plan_gate can be approved though nobody is on the config's gate", async () => {
+    const r = await repoWith({ "plan.md": PLAN });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+    } finally {
+      r.cleanup();
+    }
+  });
+});
+
 describe("settings requests", () => {
   const CONFIG = "loopstra/config.yaml";
   const STALE = "The settings changed since the page read them (in a terminal, or another tab), so nothing changed. The page shows them as they are now.";

@@ -7,11 +7,13 @@ import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
 import { RESOLUTION, RESOLUTIONS, RESOLVED_AT } from "./catch-up";
-import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { artifacts, bullets, buildSession, BY_STATUS_EDIT, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, recordApprovals, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") {
+    // A plan approved by a status edit: its exceptions are recorded as approved before the build.
+    if (ctx.intent.file.frontmatter.status === "plan-approved") await recordApprovals(ctx, "plan", BY_STATUS_EDIT);
     // A new build writes its own acceptance tests; one resumed after a stop keeps what it wrote.
     clearMarker(ctx, ACCEPTANCE);
     await setStatus(ctx, "building");

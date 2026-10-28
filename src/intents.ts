@@ -23,6 +23,9 @@ export type Priority = (typeof PRIORITIES)[number];
 /** A plain-language field that non-technical editors often leave blank, yielding YAML null. */
 const blankableString = z.string().nullable().transform((v) => v ?? "").default("");
 
+/** A runtime-managed choice: blank (YAML null or spaces) reads as absent. */
+const blankAbsent = (v: unknown): unknown => (v === null || (typeof v === "string" && v.trim() === "") ? undefined : v);
+
 export const Frontmatter = z.object({
   status: z.enum(STATUSES).default("draft"),
   /** Optional: absent means the owner did not state one; the queue treats that as normal. Blank reads as absent. */
@@ -53,7 +56,14 @@ export const Frontmatter = z.object({
    * when the change is risky (see src/risk.ts), removed when it is not. A person who deletes the line
    * takes the change back to the config's gate. Blank reads as absent.
    */
-  merge_gate: z.preprocess((v) => (v === null || (typeof v === "string" && v.trim() === "") ? undefined : v), z.enum(["pr", "status"], { error: "must be pr or status, or the line removed" }).optional()),
+  merge_gate: z.preprocess(blankAbsent, z.enum(["pr", "status"], { error: "must be pr or status, or the line removed" }).optional()),
+  /**
+   * A person decides the spec, or the plan, when the config has nobody there: written by the runtime
+   * when the spec or plan asks for an exception to a rule not approved yet (see exceptionsToApprove in
+   * src/standards-record.ts), removed at its next pass without one. Works as merge_gate does.
+   */
+  spec_gate: z.preprocess(blankAbsent, z.enum(["status"], { error: "must be status, or the line removed" }).optional()),
+  plan_gate: z.preprocess(blankAbsent, z.enum(["status"], { error: "must be status, or the line removed" }).optional()),
 }).strict();
 export type Frontmatter = z.infer<typeof Frontmatter>;
 
@@ -142,7 +152,7 @@ export function parseSections(body: string): Record<string, string> {
 }
 
 /** Runtime-managed fields that get no line while blank. */
-const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question", "merge_gate"]);
+const BLANK_LEFT_OUT: ReadonlySet<string> = new Set(["hold", "question", "merge_gate", "spec_gate", "plan_gate"]);
 
 export function serializeIntentFile(file: IntentFile): string {
   const crlf = file.body.includes("\r\n");
@@ -442,10 +452,16 @@ export const REVIEW_GATE: Partial<Record<Status, keyof HumanGates>> = {
 
 /**
  * The gates of one change: the config's, with a person on the merge gate when the config has nobody
- * there and the change's merge_gate names one (a risky change). merge_gate never takes a person off.
+ * there and the change's merge_gate names one (a risky change), and on the spec or plan gate when its
+ * spec_gate or plan_gate does (an exception to a rule waits for a person). They never take a person off.
  */
-export function changeGates(human: HumanGates, fm: Pick<Frontmatter, "merge_gate">): HumanGates {
-  return human.merge === "none" && fm.merge_gate ? { ...human, merge: fm.merge_gate } : human;
+export function changeGates(human: HumanGates, fm: Pick<Frontmatter, "merge_gate" | "spec_gate" | "plan_gate">): HumanGates {
+  return {
+    ...human,
+    spec: human.spec === "none" && fm.spec_gate ? fm.spec_gate : human.spec,
+    plan: human.plan === "none" && fm.plan_gate ? fm.plan_gate : human.plan,
+    merge: human.merge === "none" && fm.merge_gate ? fm.merge_gate : human.merge,
+  };
 }
 
 /**

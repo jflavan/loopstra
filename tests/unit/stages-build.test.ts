@@ -81,6 +81,24 @@ describe("build stage", () => {
     }
   });
 
+  test("a plan approved by a status edit has its exceptions recorded as the build starts", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      mkdirSync(join(repo.path, "loopstra", "standards"), { recursive: true });
+      await Bun.write(join(repo.path, "loopstra", "standards", "security.md"), "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n");
+      await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), `${PLAN}\n## Standards\n- SEC-1: exception: the debug log stays until the audit\n`);
+      await new Git(repo.path).commitAll("standards");
+      await ctx.reload();
+      await runBuildStep(ctx);
+      const d = new Date();
+      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      expect(await Bun.file(join(repo.path, "intent", "add-numbers", "standards.md")).text()).toBe(`# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the debug log stays until the audit (a status edit, from intent.md, ${date})\n`);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("a repository's older build.md without {{feedback}} still gives the session the note", async () => {
     const { repo, ctx, trace } = await planned({ test: "echo ok" });
     try {
