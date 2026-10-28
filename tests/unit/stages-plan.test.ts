@@ -380,3 +380,111 @@ describe("cheaper judges on the plan challenge", () => {
     }
   });
 });
+
+describe("plan stage with standards", () => {
+  const NO_AHEAD = "speed:\n  plan_ahead: false\n";
+  const SECURITY = "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n";
+  const ARCH = "---\napplies_to:\n  - services/billing/**\n---\n# Service architecture\n\n## Rules\n- ARCH-1: billing goes through the gateway\n- ARCH-2: no direct table reads\n";
+  /** The plan fixture, listing `files` and with `section` as its Standards section (JSON-escaped newlines). */
+  const planWith = (files: string, section: string) => fixture("plan")
+    .replace("- src/add.ts (new)\\n- tests/add.test.ts (new)", files)
+    .replace("covering add(1, 2).\\n", `covering add(1, 2).\\n\\n## Standards\\n${section}\\n`);
+  const gates = (trace: Trace) => trace.gates("add-numbers").map((g) => `${g.check}:${g.result}:${g.evidence}`);
+
+  async function withStandards(repo: string): Promise<void> {
+    mkdirSync(join(repo, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(repo, "loopstra", "standards", "security.md"), SECURITY);
+    await Bun.write(join(repo, "loopstra", "standards", "architecture.md"), ARCH);
+    await new Git(repo).commitAll("standards");
+  }
+
+  async function planned(plan: string, extra: Record<string, string> = {}) {
+    const dir = fixtureDir({ plan, ...extra });
+    try {
+      return await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const s = await specApproved(NO_AHEAD);
+        await withStandards(s.repo.path);
+        await s.ctx.dropSnapshot();
+        await s.ctx.reload();
+        await runPlanStep(s.ctx);
+        return s;
+      });
+    } finally {
+      dir.cleanup();
+    }
+  }
+
+  const BILLING = "- services/billing/api.ts (new)";
+
+  test("the plan's scoped standards come from its file list", async () => {
+    const some = await planned(planWith(BILLING, "- SEC-1: not logged, Proof 1"));
+    expect(gates(some.trace)[2]).toBe("standards:fail:missing ARCH-1, ARCH-2");
+    some.trace.close(); some.repo.cleanup();
+    const full = await planned(planWith(BILLING, "- SEC-1: ok, Proof 1\\n- ARCH-1: ok\\n- ARCH-2: does not apply: no reads"));
+    expect(gates(full.trace)[2]).toBe("standards:pass:all 3 rules addressed");
+    expect((await readIntent(full.repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
+    full.trace.close(); full.repo.cleanup();
+    const docs = await planned(planWith("- docs/x.md (new)", "- SEC-1: not logged, Proof 1"));
+    expect(gates(docs.trace)[2]).toBe("standards:pass:all 1 rules addressed");
+    docs.trace.close(); docs.repo.cleanup();
+  });
+
+  test("a plan missing a rule that applies fails with the missing label", async () => {
+    const s = await planned(planWith(BILLING, "- SEC-1: ok\\n- ARCH-1: ok"));
+    expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+    expect(gates(s.trace)[2]).toBe("standards:fail:missing ARCH-2");
+    expect(phaseNames(s.trace)).toEqual(["plan", "plan"]);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a concern with standard and blocking fails the gate, with the label in the evidence", async () => {
+    const reject = fixture("plan-challenge-reject").replace('"blocking":true', '"blocking":true,"standard":"ARCH-2"');
+    const s = await planned(planWith(BILLING, "- SEC-1: ok\\n- ARCH-1: ok\\n- ARCH-2: ok"), { "plan-challenge-1": reject });
+    expect(gates(s.trace)).toContain("plan-challenge:fail:ARCH-2: Proof does not cover add(1, 2).");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("the writer sees the spec view and the challenger the plan's view", async () => {
+    const s = await planned(planWith(BILLING, "- SEC-1: ok\\n- ARCH-1: ok\\n- ARCH-2: ok"));
+    const prompt = async (name: string) => {
+      const p = s.trace.phases("add-numbers").find((x) => x.name === name)!;
+      return Bun.file(join(s.ctx.runDir, "phases", `${p.seq}-${name}`, "prompt.md")).text();
+    };
+    const writer = await prompt("plan");
+    expect(writer).toContain("Add `## Standards` after Proof.");
+    expect(writer).toContain("These apply only to"); // ARCH is scoped, listed apart
+    const challenger = await prompt("plan-challenge");
+    expect(challenger).toContain("Check the plan against the standards below.");
+    expect(challenger).not.toContain("These apply only to");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  /** A design step with standards, its plan written ahead kept (default config); `between` runs before the plan step. */
+  async function aheadWith(between: (repo: string) => Promise<void>) {
+    const dir = fixtureDir({ design: fixture("design").replace("## Areas of concern\\nNone.\\n", "## Areas of concern\\nNone.\\n\\n## Standards\\nNone."), plan: planWith("- docs/x.md (new)", "- SEC-1: ok") });
+    try {
+      return await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const s = await designed("", withStandards);
+        await between(s.repo.path);
+        await s.ctx.dropSnapshot();
+        await s.ctx.reload();
+        await runPlanStep(s.ctx);
+        return s;
+      });
+    } finally {
+      dir.cleanup();
+    }
+  }
+
+  test("plan-ahead is still used when the standards did not change", async () => {
+    const s = await aheadWith(async () => {});
+    expect(planAheadNotes(s.trace).at(-1)).toBe(USES);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("plan-ahead's key changes when standards change", async () => {
+    const s = await aheadWith(async (repo) => commitFile(repo, "loopstra/standards/security.md", `${SECURITY}- SEC-2: tokens expire\n`));
+    expect(planAheadNotes(s.trace).at(-1)).toBe(`not used: ${ASKED_ELSE}`);
+    s.trace.close(); s.repo.cleanup();
+  });
+});

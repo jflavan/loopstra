@@ -8,7 +8,7 @@ import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
 import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
-import { codeDiffers, takeKept, type Artifacts, type Kept } from "./shared";
+import { codeDiffers, stageStandards, takeKept, type Artifacts, type Kept } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
@@ -28,10 +28,15 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
       return r.ok ? { result: "pass", evidence: `${files.length} files listed` } : { result: "fail", evidence: r.problems.join("; ") };
     },
   }],
+  // The writer has no file list yet and sees the spec's view; the gate and the challenger see the
+  // standards that apply to the files the plan lists (null Files section: the headings check reports it).
+  standards: (ctx, a, view) => stageStandards(ctx, view === "write" ? null : (parsePlanFiles(a.plan) ?? []).map((f) => f.path)),
+  coversAll: true,
   judge: {
     name: "plan-challenge", who: "challenger",
     vars: (a) => ({ spec: a.spec, plan: a.plan }),
-    findings: (e) => e.concerns.filter((c) => c.blocking).map((c) => c.concern),
+    // A concern on a rule of a standard starts with its label.
+    findings: (e) => e.concerns.filter((c) => c.blocking).map((c) => `${c.standard ? `${c.standard}: ` : ""}${c.concern}`),
   },
   rewritingNote: "The first plan did not pass its automatic check, so it is being written again.",
   // A decision for a person rather than a retry: two ways on.
@@ -103,7 +108,7 @@ async function plansAhead(ctx: StepContext): Promise<boolean> {
  */
 async function planAheadRun(ctx: StepContext, a: Artifacts): Promise<string | null> {
   // An early- row, as for all work run alongside: its failures are not the change's (see EARLY).
-  const phase = { ...writerPhase(ctx, PLAN, a, ""), traceName: `${EARLY}plan` }; // the trace name is not part of the prompt
+  const phase = { ...writerPhase(ctx, PLAN, a, "", await stageStandards(ctx, null)), traceName: `${EARLY}plan` }; // the trace name is not part of the prompt
   // Keyed on the prompt the plan was written on: a retry's is rendered again, with what people told the crashed attempt.
   let sent = await phasePrompt(ctx, phase);
   const r = await agentPhase(ctx, phase, renderedThen(sent, async () => {

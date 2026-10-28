@@ -53,7 +53,7 @@ export const Envelopes = {
   }),
   "plan-challenge": base.extend({
     approved: z.boolean(),
-    concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean() })),
+    concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean(), standard: z.string().optional() })),
   }),
   /**
    * Tests written from the owner's Done when list before the build: each test by the criterion it covers

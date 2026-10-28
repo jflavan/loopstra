@@ -59,9 +59,12 @@ export interface ArtifactStage<W extends Writer, J extends Judge> {
   /**
    * The standards the artifact is held to (see stageStandards). write and checks ask once per
    * artifact: the writer and the judge get them as {{standards}}, and the gate gets a `standards`
-   * check when there are any. A stage without it sees no standards.
+   * check when there are any. A stage without it sees no standards. `view` says who asks: the
+   * writing session ("write", before the artifact exists) or the gate ("check", on the artifact).
    */
-  standards?: (ctx: StepContext, a: Artifacts) => Promise<StageStandards>;
+  standards?: (ctx: StepContext, a: Artifacts, view: "write" | "check") => Promise<StageStandards>;
+  /** The gate's `standards` check wants a bullet for every rule that applies (the plan's), not only for the rules the artifact names (the spec's). */
+  coversAll?: boolean;
   /** The agent judge: its phase, prompt variables, what it found, and what the evidence calls it. */
   judge: { name: J; vars: (a: Artifacts) => PromptVars; findings: (e: Envelope<J>) => string[]; who: string };
   /** Work for the next stage, run alongside the judge and kept only if the whole gate passes (design: planAhead in plan.ts). */
@@ -118,7 +121,7 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   const sentBack = sentBackNote(ctx);
   const all = [sentBack, findings].filter(Boolean).join("\n\n");
   const a = await artifacts(ctx);
-  const phase = writerPhase(ctx, s, a, all, await s.standards?.(ctx, a));
+  const phase = writerPhase(ctx, s, a, all, await s.standards?.(ctx, a, "write"));
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent;
   // a retry renders it again (see renderedThen). The note reaches the session even through an older
   // prompt file without {{findings}}.
@@ -259,7 +262,7 @@ async function aheadNow<W extends Writer, J extends Judge>(ctx: StepContext, s: 
 async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, pending: Pending): Promise<Check<JudgePayload>[]> {
   const a = await artifacts(ctx);
   const text = (await readArtifact(ctx, s.artifact)) ?? "";
-  const standards = await s.standards?.(ctx, a);
+  const standards = await s.standards?.(ctx, a, "check");
   const list: Check<JudgePayload>[] = [
     {
       name: "headings",
@@ -270,7 +273,7 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     },
     ...(s.checks?.(ctx, a) ?? []),
     // Only when the session was given standards: a change with every standard removed has none to cover.
-    ...(standards?.text ? [standardsCheck(text, standards)] : []),
+    ...(standards?.text ? [standardsCheck(text, standards, s.coversAll === true)] : []),
   ];
   if (!ctx.cfg.gates[s.gate].agent) return list;
   list.push({
@@ -310,16 +313,16 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
 }
 
 /**
- * The gate's `standards` check of the spec: it has a Standards section, and every label there is a
+ * The gate's `standards` check: the artifact has a Standards section, and every label there is a
  * rule of a standard on main. The spec covers only the rules its design decides something about, so
- * none is required; the plan (which knows the files) covers every rule that applies.
+ * none is required; the plan (which knows the files, `coversAll`) covers every rule that applies.
  */
-function standardsCheck(text: string, standards: StageStandards): Check<JudgePayload> {
+function standardsCheck(text: string, standards: StageStandards, coversAll: boolean): Check<JudgePayload> {
   return {
     name: "standards",
     run: async () => {
       const known = new Set(standards.read.standards.flatMap((st) => st.rules.map((r) => r.label)));
-      const r = checkStandardsSection(readStandardsSection(text), [], known);
+      const r = checkStandardsSection(readStandardsSection(text), coversAll ? standards.labels : [], known);
       return { result: r.ok ? "pass" : "fail", evidence: r.evidence };
     },
   };

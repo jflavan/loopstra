@@ -20,6 +20,20 @@ export const STANDARDS_INSTRUCTIONS: Partial<Record<PhaseName, string>> = {
     "",
     "Standards, like Design and Affected code, is a section for engineers and may be technical.",
   ].join("\n"),
+  plan: [
+    "Add `## Standards` after Proof. Write one bullet for every rule below that applies. A standard marked as applying only to certain files applies when your Files that change lists a file its patterns match, so cover its rules too. Use one of three forms:",
+    "- `- LABEL: how the plan keeps it, and which item under Proof shows it`",
+    "- `- LABEL: does not apply: why`",
+    "- `- LABEL: exception: why`",
+    "A person decides whether an exception is allowed. A rule you cannot keep without an exception is not yours to skip.",
+  ].join("\n"),
+  "plan-challenge": [
+    "Check the plan against the standards below.",
+    "   - Check each bullet of the plan's Standards section against its Order of work and Proof. Is the claim borne out?",
+    "   - Is each \"does not apply\" sound? A rule that does apply, set aside as not applying, is a concern with `blocking` true.",
+    "   - Does the plan break any rule that applies, or claim something the Order of work does not carry out? That is a concern with `blocking` true. Set `standard` to the rule's label.",
+    "   - An exception is not yours to grant or refuse. Check that its reason is stated and that the plan does what it says. Whether the exception is acceptable is a person's call.",
+  ].join("\n"),
 };
 
 /** The standards as a phase's prompt gets them: the heading, the phase's instructions, then the standards. "" when there are none. */
