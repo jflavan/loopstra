@@ -17,7 +17,7 @@ import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { localDate, oneLine } from "./text";
 import { addedApprovals, approvedRecord, exceptionsToApprove, parseRecord, revokedRecord, scopedRecord, scopeReverses, scopeStands, STANDARDS_RECORD, type ApprovedException } from "./standards-record";
-import { readStandards } from "./standards";
+import { parseStandards, problemText, readStandards, standardsFilesAt, STANDARDS_DIR } from "./standards";
 import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
@@ -473,10 +473,11 @@ async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: Age
   const what = oneLine(req.what, 200);
   const saved = () => done("applied", true, `Saved: ${what}.`);
   const notSaved = (problem: string) => done("refused", false, `That change was not saved: ${problem}`, { problem });
+  const standardsPrefix = `${STANDARDS_DIR}/`;
   const writes: { path: string; content: string | null; given: string }[] = [];
   for (const w of req.writes) {
     const path = repoPath(w.path);
-    if (!path || path === CONFIG_REL) return notSaved(`${oneLine(w.path, 80)} is not a file the page can write (only under .claude/agents/ and .claude/skills/).`);
+    if (!path || path === CONFIG_REL) return notSaved(`${oneLine(w.path, 80)} is not a file the page can write (only under .claude/agents/, .claude/skills/ and loopstra/standards/).`);
     if (writes.some((x) => x.path === path)) return notSaved(`${path} is written twice.`);
     writes.push({ path, content: w.content, given: w.path });
   }
@@ -485,7 +486,11 @@ async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: Age
   let stale = false;
   let refusal: string | null = null;
   const git = new Git(root);
-  await commitRecord(root, main, SETTINGS_SLUG, `${what} by ${byWhom(req)}`, async (draft) => {
+  // A request of standard files only is worded as what it does to them; any other keeps its own words.
+  const words = writes.every((w) => w.path.startsWith(standardsPrefix))
+    ? `standards: ${writes.map((w) => `${w.content === null ? "remove" : "edit"} ${w.path.slice(standardsPrefix.length)}`).join(", ")}`
+    : what;
+  await commitRecord(root, main, SETTINGS_SLUG, `${words} by ${byWhom(req)}`, async (draft) => {
     const paths = writes.map((w) => w.path);
     for (const p of paths) {
       try { checkedPath(root, { path: p }); } catch (e) { refusal = e instanceof Error ? e.message : String(e); return false; }
@@ -504,6 +509,16 @@ async function applyAgentFiles(root: string, cfg: Config, trace: Trace, req: Age
     }
     for (const w of writes) {
       if (fileVersion(draft.read(w.path)) !== (req.base[w.given] ?? req.base[w.path] ?? "")) { stale = true; return false; }
+    }
+    const standards = writes.filter((w) => w.path.startsWith(standardsPrefix));
+    if (standards.length) {
+      // Main's standards with this request's writes and removals: they must still read, as a set.
+      const parent = await git.commitOf(`refs/heads/${main}`);
+      if (!parent) throw new Error(`there is no branch ${main} to read the standards from`);
+      const files = new Map((await standardsFilesAt(git, parent)).files.map((f) => [f.path, f.text]));
+      for (const w of standards) { if (w.content === null) files.delete(w.path); else files.set(w.path, w.content); }
+      const problems = parseStandards([...files].map(([path, text]) => ({ path, text }))).problems;
+      if (problems.length) { refusal = problems.map(problemText).join(" "); return false; }
     }
     for (const w of writes) { if (w.content === null) draft.remove(w.path); else draft.write(w.path, w.content); }
     return true;

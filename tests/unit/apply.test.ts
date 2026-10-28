@@ -1435,6 +1435,128 @@ describe("agent-files requests", () => {
   });
 });
 
+describe("agent-files requests for standards", () => {
+  const ARCH = "loopstra/standards/architecture.md";
+  const NAMING = "loopstra/standards/naming.md";
+  const text = (label: string) => `# Architecture\n\nWhy.\n\n## Rules\n- ${label}: One rule.\n`;
+  const files = (root: string, writes: { path: string; content: string | null }[], base: Record<string, string>) =>
+    submitRequest(root, { ...by, kind: "agent-files", what: "standards", writes, base });
+  const commit = async (root: string, path: string, content: string) => {
+    mkdirSync(join(root, "loopstra/standards"), { recursive: true });
+    writeFileSync(join(root, path), content);
+    await new Git(root).commitAll("a standard");
+  };
+  const count = async (root: string) => Number((await run(["git", "rev-list", "--count", "HEAD"], root)).out.trim());
+
+  test("a valid standard lands, worded as an edit of the file", async () => {
+    const r = await chatRepo();
+    try {
+      const q = files(r.root, [{ path: ARCH, content: text("ARCH-1") }], { [ARCH]: "absent" });
+      expect(await apply(r.root)).toBe(1);
+      expect(await lastCommit(r.root)).toContain("loopstra(_settings): standards: edit architecture.md by John from the dashboard");
+      expect(readFileSync(join(r.root, ARCH), "utf8")).toBe(text("ARCH-1"));
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a removal is worded as a removal, and several files are listed", async () => {
+    const r = await chatRepo();
+    try {
+      await commit(r.root, ARCH, text("ARCH-1"));
+      files(r.root, [{ path: ARCH, content: null }, { path: NAMING, content: text("NAME-1") }], { [ARCH]: fileVersion(text("ARCH-1")), [NAMING]: "absent" });
+      await apply(r.root);
+      expect(await lastCommit(r.root)).toContain("standards: remove architecture.md, edit naming.md by John from the dashboard");
+      expect(existsSync(join(r.root, ARCH))).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("one that would not read is refused with the problem, nothing committed", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await count(r.root);
+      const q = files(r.root, [{ path: ARCH, content: "# Architecture\n" + "\n## Rules\n- bad label: x\n" }], { [ARCH]: "absent" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining(`That change was not saved: ${ARCH} cannot be read: `) });
+      expect(existsSync(join(r.root, ARCH))).toBe(false);
+      expect(await count(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a label another file already uses is refused", async () => {
+    const r = await chatRepo();
+    try {
+      await commit(r.root, NAMING, text("SAME-1"));
+      const commits = await count(r.root);
+      const q = files(r.root, [{ path: ARCH, content: text("SAME-1") }], { [ARCH]: "absent" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("the label SAME-1") });
+      expect(await count(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a stale base is refused", async () => {
+    const r = await chatRepo();
+    try {
+      await commit(r.root, ARCH, text("ARCH-1"));
+      const commits = await count(r.root);
+      const q = files(r.root, [{ path: ARCH, content: text("ARCH-2") }], { [ARCH]: "absent" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: STALE_SETTINGS });
+      expect(await count(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a file with uncommitted changes is refused", async () => {
+    const r = await chatRepo();
+    try {
+      await commit(r.root, ARCH, text("ARCH-1"));
+      writeFileSync(join(r.root, ARCH), text("MINE-1"));
+      const q = files(r.root, [{ path: ARCH, content: text("ARCH-2") }], { [ARCH]: fileVersion(text("MINE-1")) });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("not committed") });
+      expect(readFileSync(join(r.root, ARCH), "utf8")).toBe(text("MINE-1"));
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("subfolders and .. are refused", async () => {
+    const r = await chatRepo();
+    try {
+      const commits = await count(r.root);
+      const a = files(r.root, [{ path: "loopstra/standards/../x", content: "x" }], {});
+      const b = files(r.root, [{ path: "loopstra/standards/a/b.md", content: "x" }], {});
+      await apply(r.root);
+      for (const q of [a, b]) expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: expect.stringContaining("That change was not saved:") });
+      expect(await count(r.root)).toBe(commits);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("removing the file that holds a clashing label is allowed", async () => {
+    const r = await chatRepo();
+    try {
+      await commit(r.root, ARCH, text("ARCH-1"));
+      const q = files(r.root, [{ path: ARCH, content: null }], { [ARCH]: fileVersion(text("ARCH-1")) });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true });
+    } finally {
+      r.cleanup();
+    }
+  });
+});
+
 describe("the applier", () => {
   test("once armed, it applies a request within a couple of seconds and stops cleanly", async () => {
     const r = await chatRepo({ intents: { a: INTENT("building", "x") } });

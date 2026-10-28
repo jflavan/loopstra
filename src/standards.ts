@@ -224,8 +224,8 @@ export function standardToForm(s: Standard): StandardForm {
   };
 }
 
-/** Reads the standards as they are in a commit: only what is committed, never the checkout's edits. None there gives an empty read. */
-export async function readStandards(git: Git, commit: string): Promise<StandardsRead> {
+/** The files in the standards folder as they are in a commit (only what is committed), and the folders found there. */
+export async function standardsFilesAt(git: Git, commit: string): Promise<{ files: { path: string; text: string }[]; folders: string[] }> {
   // A missing folder lists nothing (exit 0); any failure is real and throws, so a step never runs on fewer rules than main has.
   const listed = await git.run(["ls-tree", "-z", commit, "--", `${STANDARDS_DIR}/`]);
   const files: { path: string; text: string }[] = [];
@@ -237,6 +237,12 @@ export async function readStandards(git: Git, commit: string): Promise<Standards
     if (type !== "blob") { folders.push(path); continue; }
     files.push({ path, text: (await git.run(["cat-file", "blob", `${commit}:${path}`])).out });
   }
+  return { files, folders };
+}
+
+/** Reads the standards as they are in a commit: only what is committed, never the checkout's edits. None there gives an empty read. */
+export async function readStandards(git: Git, commit: string): Promise<StandardsRead> {
+  const { files, folders } = await standardsFilesAt(git, commit);
   const read = parseStandards(files);
   read.ignored.push(...folders);
   return read;

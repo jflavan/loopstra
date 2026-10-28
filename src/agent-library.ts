@@ -5,6 +5,7 @@ import { stringify } from "yaml";
 import { enabledPlugins } from "./agent-files";
 import { readText } from "./fsutil";
 import { errorText } from "./shell";
+import { STANDARD_NAME } from "./standards";
 import { printable, splitFrontmatter } from "./text";
 
 /** A skill or an agent that can be put in the repository's `.claude/`. */
@@ -276,20 +277,26 @@ export function newAgentFile(o: { name: string; description: string; prompt: str
   return { path: `.claude/agents/${o.name}.md`, content: `---\n${stringify(front)}---\n${o.prompt}\n` };
 }
 
-/** The normalized repo-relative path when it lies inside `.claude/agents/` or `.claude/skills/`, else null. */
+/**
+ * The normalized repo-relative path when it lies inside `.claude/agents/` or `.claude/skills/`, or is
+ * exactly `loopstra/standards/<name>.md` (a standard's name, no subfolder), else null.
+ */
 export function repoPath(p: string): string | null {
   const n = posix.normalize(p.replaceAll("\\", "/"));
-  return /^\.claude\/(agents|skills)\/[^/]/.test(n) && !n.split("/").includes("..") ? n : null;
+  if (n.split("/").includes("..")) return null;
+  if (/^\.claude\/(agents|skills)\/[^/]/.test(n)) return n;
+  const standard = /^loopstra\/standards\/([^/]+)\.md$/.exec(n);
+  return standard && STANDARD_NAME.test(standard[1] ?? "") ? n : null;
 }
 
 /**
- * The normalized repo-relative path of a file to write. Throws when it is outside .claude/agents/ and
- * .claude/skills/, or when `.claude`, a folder below it or the file itself is a link already (a write
+ * The normalized repo-relative path of a file to write. Throws when it is outside .claude/agents/,
+ * .claude/skills/ and loopstra/standards/, or when `.claude`, a folder below it or the file itself is a link already (a write
  * or removal would follow it out of the repo).
  */
 export function checkedPath(root: string, file: { path: string }): string {
   const path = repoPath(file.path);
-  if (!path) throw new Error(`${file.path} is not a place Loopstra writes: only under .claude/agents/ and .claude/skills/.`);
+  if (!path) throw new Error(`${file.path} is not a place Loopstra writes: only under .claude/agents/, .claude/skills/ and loopstra/standards/.`);
   const parts = path.split("/");
   for (let i = 1; i <= parts.length; i++) {
     const shown = parts.slice(0, i).join("/");

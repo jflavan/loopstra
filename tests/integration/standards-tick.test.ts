@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
+import { fileVersion } from "../../src/settings";
+import { CONSOLE, submitRequest } from "../../src/requests";
 import { preflight, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { setupRepo } from "../helpers";
@@ -38,6 +40,23 @@ describe("standards that cannot be read stop the loop", () => {
       await commitStandard(repo.path, GOOD);
       const next = await tick(repo.path);
       expect(next.picked).toBe(SLUG);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("an agent-files request fixing the file is applied by the tick, which then picks the waiting change", async () => {
+    const { repo, trace } = await setupRepo("accepted");
+    try {
+      await commitStandard(repo.path, BAD);
+      const path = "loopstra/standards/bad.md";
+      submitRequest(repo.path, { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "", kind: "agent-files", what: "fix bad", writes: [{ path, content: GOOD }], base: { [path]: fileVersion(BAD) } });
+      // Requests apply before the standards are read: the fix lands in this tick, which is then not stopped.
+      const first = await tick(repo.path);
+      expect(first.paused ?? null).toBeNull();
+      expect((await new Git(repo.path).run(["log", "--format=%s"])).out).toContain("standards: edit bad.md by John from the dashboard");
+      expect(first.picked).toBe(SLUG);
     } finally {
       trace.close();
       repo.cleanup();
