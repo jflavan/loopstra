@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { DraftCheck, ExceptionRow, StandardForm } from "../../src/console/types";
 import { parseRoute, routePath } from "../../src/ui/router";
-import { canSave, EXAMPLES, fieldProblems, filterExceptions, removeText, saveNotice, scopeLine } from "../../src/ui/standards";
-import { formToMarkdown, parseStandard, RULE_LABEL } from "../../src/standards";
+import { canSave, EXAMPLES, fieldProblems, filterExceptions, isStandardName, opensAsMarkdown, removeText, saveNotice, scopeLine, takenNames } from "../../src/ui/standards";
+import { formToMarkdown, parseStandard, RULE_LABEL, STANDARD_NAME } from "../../src/standards";
 
 const form = (over: Partial<StandardForm> = {}): StandardForm => ({
   name: "architecture", title: "Architecture", patterns: [], needsPerson: false, check: "", context: "",
@@ -42,8 +42,19 @@ describe("the standard editor's field problems", () => {
     expect(fieldProblems(form({ rules: [] }), []).rules).toBe("Add at least one rule.");
   });
 
-  test("a new standard may not take the name of one main has", () => {
-    expect(fieldProblems(form(), [], ["architecture"]).name).toBe("There is already a standard called architecture: pick another name, or edit that one.");
+  test("names are judged as the server judges them", () => {
+    for (const name of ["a", "security", "soc2", "a-b-c", "A", "a--b", "-a", "a-", "a b", "a_b", "", "a/b"]) {
+      expect({ name, ok: isStandardName(name) }).toEqual({ name, ok: STANDARD_NAME.test(name) });
+    }
+  });
+
+  test("a new standard may not take the name of a file main has: a standard, one that cannot be read, or one that is ignored", () => {
+    expect(fieldProblems(form(), [], ["architecture"]).name).toBe("There is already a file loopstra/standards/architecture.md: pick another name.");
+    expect(takenNames({
+      standards: [{ name: "security" }],
+      problems: ["loopstra/standards/broken.md cannot be read: it has no title (start the text with `# Title`).", "loopstra/config.yaml does not load: x"],
+      ignored: ["loopstra/standards/notes.txt", "loopstra/standards/odd.md", "loopstra/standards/Caps.md"],
+    })).toEqual(["security", "broken", "odd"]);
   });
 
   test("a server problem about a pattern lands on the patterns field, a label's on its rule row, a check's on the check", () => {
@@ -94,6 +105,20 @@ describe("saving a standard", () => {
     expect(soc2.patterns).toEqual(["services/**", "infra/**"]);
     expect(soc2.check).toContain("$LOOPSTRA_BASE");
     expect(EXAMPLES[0]!.form.patterns).toEqual([]);
+  });
+});
+
+describe("opening a standard of main's", () => {
+  test("it opens as a form only when the form writes the file as it is, so no text outside the form's parts is lost unasked", () => {
+    const text = "# Architecture\n\n## Rules\n- ARCH-1: Services talk over HTTP.\n";
+    expect(opensAsMarkdown(text, text)).toBe(false);
+    // Only line endings and the end of the file differ: nothing is lost.
+    expect(opensAsMarkdown(text.replace(/\n/g, "\r\n"), text)).toBe(false);
+    expect(opensAsMarkdown(`${text}\n\n`, text)).toBe(false);
+    expect(opensAsMarkdown(`${text}\n## Notes\nMore.\n`, text)).toBe(true);
+    expect(opensAsMarkdown(`---\napplies_to:\n  - src/**\n---\n${text}`, `---\napplies_to: ["src/**"]\n---\n${text}`)).toBe(true);
+    // A file the server could not read into a form.
+    expect(opensAsMarkdown(text, null)).toBe(true);
   });
 });
 

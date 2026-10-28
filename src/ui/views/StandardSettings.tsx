@@ -5,7 +5,7 @@ import { stripFrontmatter } from "../markdown";
 import { Link } from "../parts/Link";
 import { Markdown } from "../parts/Markdown";
 import { post, sendAgentFiles } from "../requests";
-import { BLANK, canSave, EXAMPLES, fieldProblems, isStandardName, removeText, saveNotice, scopeLine } from "../standards";
+import { BLANK, canSave, EXAMPLES, fieldProblems, isStandardName, opensAsMarkdown, removeText, saveNotice, scopeLine, takenNames } from "../standards";
 import type { Submit } from "./AgentSettings";
 
 /*
@@ -27,8 +27,10 @@ interface Props {
 /** Writes a standard's file (null removes it) over the version the page read; `after` hears whether the loop saved it. */
 type Write = (name: string, text: string | null, base: string, after: (ok: boolean) => void) => void;
 
-/** What the editor is open on: a standard of main's, or a new one from a form (`n` starts it afresh each time). */
-type Opened = { row: StandardRow; n: number } | { start: StandardForm; n: number };
+/** What the editor opens on: a standard of main's, or a new one from a form. */
+type Target = { row: StandardRow } | { start: StandardForm };
+/** What the editor is open on (`n` starts it afresh each time). */
+type Opened = Target & { n: number };
 
 const CHECK_MS = 400;
 const keyOf = (name: string) => `standard:${name}`;
@@ -36,13 +38,31 @@ const keyOf = (name: string) => `standard:${name}`;
 export function StandardSettings(p: Props) {
   const [opened, setOpened] = useState<Opened | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  // Another editor asked for while this one has changes not saved: it opens once the person says to drop them.
+  const [asking, setAsking] = useState<Target | null>(null);
+  const dirty = useRef(false);
   const v = p.view;
   if (!v) return <><h2>Standards</h2><p class="muted">{p.failed ? "The standards could not be read." : "Loading…"}</p></>;
   const write: Write = (name, text, base, after) => void p.submit(keyOf(name), (done) => sendAgentFiles({ op: "standard", name, text, base }, done), after);
-  const open = (o: { row: StandardRow } | { start: StandardForm }) => setOpened({ ...o, n: (opened?.n ?? 0) + 1 });
+  const go = (o: Target | null) => {
+    dirty.current = false;
+    setAsking(null);
+    setOpened(o && { ...o, n: (opened?.n ?? 0) + 1 });
+  };
+  const open = (o: Target) => { if (opened && dirty.current) setAsking(o); else go(o); };
+  const titleOf = (o: Target) => ("row" in o ? o.row.path : o.start.title || "a blank standard");
   const editor = (o: Opened) => (
-    <Editor key={o.n} row={"row" in o ? o.row : null} start={"start" in o ? o.start : null} taken={"row" in o ? [] : v.standards.map((s) => s.name)}
-      locked={p.locked} wait={p.wait} write={write} close={() => setOpened(null)} />
+    <>
+      {asking && (
+        <div class="control-form" role="group" aria-label="Confirm dropping changes">
+          <span>Drop the changes not saved to {"row" in o ? o.row.path : "the new standard"}, and open {titleOf(asking)}?</span>
+          <button type="button" class="btn danger" onClick={() => go(asking)}>Drop them</button>
+          <button type="button" class="btn" onClick={() => setAsking(null)}>Keep editing</button>
+        </div>
+      )}
+      <Editor key={o.n} row={"row" in o ? o.row : null} start={"start" in o ? o.start : null} taken={"row" in o ? [] : takenNames(v)}
+        locked={p.locked} wait={p.wait} write={write} dirty={dirty} close={() => go(null)} />
+    </>
   );
   const notes = [
     ...v.problems,
@@ -100,11 +120,12 @@ const Problem = ({ text }: { text: string | undefined }) => (text ? <span class=
  * One standard, as a form or as its whole file. Each edit is checked by the server after a pause
  * (the file both ways, the problems, the patterns' matches); Save waits for a check with no problems.
  */
-function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken: string[]; locked: boolean; wait: Props["wait"]; write: Write; close: () => void }) {
+function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken: string[]; locked: boolean; wait: Props["wait"]; write: Write; dirty: { current: boolean }; close: () => void }) {
   const [name, setName] = useState(p.row?.name ?? p.start?.name ?? "");
   const [mode, setMode] = useState<"form" | "md">("form");
-  // An edit opens on main's file: the first check reads it into the form.
   const [form, setForm] = useState<StandardForm | null>(p.start);
+  // An edit opens on main's file, read once into a form; see the first effect.
+  const [opening, setOpening] = useState(p.row !== null);
   const [text, setText] = useState(p.row?.text ?? "");
   // The server's answer, with the draft it is about: it counts only while the draft is still that one.
   const [checked, setChecked] = useState<{ key: string; c: DraftChecked } | null>(null);
@@ -113,12 +134,32 @@ function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken:
   const [dirty, setDirty] = useState(false);
   const [rewrites, setRewrites] = useState(false);
   const asked = useRef(0);
+  useEffect(() => { p.dirty.current = dirty; }, [dirty]);
+  // Main's file is read into a form, and the form written back: it opens as the form only when that gives
+  // the file as it is, and otherwise as Markdown, so text outside the form's parts is never dropped unasked.
+  useEffect(() => {
+    const row = p.row;
+    if (!row) return;
+    let alive = true;
+    void (async () => {
+      const read = await post("/api/standards/check", { name: row.name, text: row.text });
+      const f = read.ok ? (read.data as unknown as DraftChecked).form : null;
+      const back = f ? await post("/api/standards/check", { name: row.name, form: f }) : null;
+      if (!alive) return;
+      if (!read.ok) setRefused(read.error);
+      if (f && !opensAsMarkdown(row.text, back?.ok ? (back.data as unknown as DraftChecked).text : null)) setForm(f);
+      else { setRewrites(f !== null); setMode("md"); }
+      setOpening(false);
+    })();
+    return () => { alive = false; };
+  }, []);
   const draft = mode === "form" && form ? { name, form: { ...form, name } } : { name, text };
   const draftKey = JSON.stringify(draft);
   const check = checked?.key === draftKey ? checked.c : null;
   useEffect(() => {
     // Any answer still on its way is for an older draft.
     const n = ++asked.current;
+    if (opening) return;
     setRefused(null);
     if (!isStandardName(name)) return;
     const t = setTimeout(() => void post("/api/standards/check", draft).then((r) => {
@@ -126,14 +167,10 @@ function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken:
       if (!r.ok) { setRefused(r.error); return; }
       const c = r.data as unknown as DraftChecked;
       setChecked({ key: draftKey, c });
-      if (!form && c.form) setForm(c.form);
-      if (mode !== "form") return;
-      // A file the form would rewrite opens as Markdown, so text outside the form's parts is not lost unasked.
-      if (p.row && !dirty && form && c.text !== p.row.text) { setRewrites(true); setMode("md"); setText(p.row.text); }
-      else setText(c.text);
+      if (mode === "form") setText(c.text);
     }), checked ? CHECK_MS : 0);
     return () => clearTimeout(t);
-  }, [draftKey]);
+  }, [draftKey, opening]);
 
   const shown = mode === "form" ? form : check?.form ?? null;
   const probs = form ? fieldProblems({ ...form, name }, check?.problems ?? [], p.taken) : {};
@@ -150,16 +187,16 @@ function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken:
           {mode === "form" ? "Edit as Markdown" : "Edit as a form"}
         </button>
       </div>
-      <label>Name <input type="text" value={name} disabled={!!p.row} placeholder="security" autocomplete="off" spellcheck={false} onInput={(e) => setName(e.currentTarget.value.trim())} /></label>
+      <label>Name <input type="text" value={name} disabled={!!p.row} placeholder="security" autocomplete="off" spellcheck={false} onInput={(e) => { setDirty(true); setName(e.currentTarget.value.trim()); }} /></label>
       <Problem text={nameProblem} />
-      {mode === "md" ? (
+      {opening ? <p class="muted">Reading the file…</p> : mode === "md" ? (
         <>
           {rewrites && <p class="muted">This file is not written the way the form writes it, so it opens as Markdown. The form would rewrite it, and drop any text outside the title, the context and the rules.</p>}
           <label>The file <textarea class="std-md" value={text} spellcheck={false} onInput={(e) => { setDirty(true); setText(e.currentTarget.value); }} /></label>
           {check && check.problems.length > 0 && <ul class="agent-problems std-problem">{check.problems.map((x, i) => <li key={i}>{x.text}.</li>)}</ul>}
           <details class="folded" open><summary>Preview</summary><Markdown text={stripFrontmatter(text)} /></details>
         </>
-      ) : !form ? <p class="muted">Reading the file…</p> : (
+      ) : !form ? null : (
         <>
           <label>Title <input type="text" value={form.title} placeholder="Service architecture" onInput={(e) => set({ title: e.currentTarget.value })} /></label>
           <Problem text={probs.title} />
@@ -188,7 +225,7 @@ function Editor(p: { row: StandardRow | null; start: StandardForm | null; taken:
           <label class="agent-check"><input type="checkbox" checked={form.needsPerson} onChange={(e) => set({ needsPerson: e.currentTarget.checked })} /> Needs a person before merging</label>
           <label>Tool check <input type="text" value={form.check} placeholder='gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"' spellcheck={false} autocomplete="off" onInput={(e) => set({ check: e.currentTarget.value })} /></label>
           <Problem text={probs.check} />
-          {form.check.trim() && <TryIt draft={draft} ready={check !== null && !check.problems.length} use={(c) => set({ check: c })} />}
+          {form.check.trim() && <TryIt key={form.check} draft={draft} ready={check !== null && !check.problems.length} use={(c) => set({ check: c })} />}
           <fieldset class="std-set">
             <legend>Rules</legend>
             {form.rules.map((r, i) => (

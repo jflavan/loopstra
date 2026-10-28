@@ -1,5 +1,5 @@
 import { STANDARD_EXAMPLES } from "../standard-examples";
-import type { DraftCheck, ExceptionRow, StandardForm, StandardRow, StandardsProblem } from "../console/types";
+import type { DraftCheck, ExceptionRow, StandardForm, StandardRow, StandardsProblem, StandardsView } from "../console/types";
 
 /*
  * Settings › Standards on the page's side: what the editor says next to each field, when Save is
@@ -29,7 +29,7 @@ export function fieldProblems(f: StandardForm, serverProblems: StandardsProblem[
   const out: Partial<Record<Field, string>> = {};
   const add = (k: Field, text: string) => { out[k] = out[k] ? `${out[k]} ${text}` : text; };
   if (!STANDARD_NAME.test(f.name)) add("name", "A standard's name is lowercase words joined by dashes, like security.");
-  else if (taken.includes(f.name)) add("name", `There is already a standard called ${f.name}: pick another name, or edit that one.`);
+  else if (taken.includes(f.name)) add("name", `There is already a file loopstra/standards/${f.name}.md: pick another name.`);
   if (!f.title.trim()) add("title", "Give the standard a title.");
   if (f.patterns.some((p) => !p.trim())) add("patterns", "A pattern cannot be empty: fill it in or take it out.");
   if (!f.rules.length) add("rules", "Add at least one rule.");
@@ -51,6 +51,23 @@ export function fieldProblems(f: StandardForm, serverProblems: StandardsProblem[
     else if (!(rulesSaid && /^the (rule|Rules section) on line/.test(p.text))) add("file", text);
   }
   return out;
+}
+
+/** The names a new standard may not take: main's standards, files there that cannot be read, and ignored `<name>.md` paths (a folder, say). */
+export function takenNames(v: { standards: Pick<StandardRow, "name">[]; problems: StandardsView["problems"]; ignored: StandardsView["ignored"] }): string[] {
+  const named = (t: string) => /^loopstra\/standards\/([^/\s]+)\.md(?:\s|$)/.exec(t)?.[1];
+  const names = [...v.standards.map((s) => s.name), ...[...v.problems, ...v.ignored].map(named).filter((n): n is string => !!n && isStandardName(n))];
+  return [...new Set(names)];
+}
+
+/**
+ * Whether a standard of main's opens as Markdown: when the server, given the form it read from the
+ * file, writes something else (`formText`; null when it read no form), since the form keeps only the
+ * title, the patterns, the check, the context and the rules. Line endings and the file's end do not count.
+ */
+export function opensAsMarkdown(fileText: string, formText: string | null): boolean {
+  const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
+  return formText === null || norm(fileText) !== norm(formText);
 }
 
 /** Save is offered only for a form the page finds nothing wrong with and that the server has checked, as it stands, with no problems. */
