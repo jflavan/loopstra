@@ -7,11 +7,13 @@ import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
 import { RESOLUTION, RESOLUTIONS, RESOLVED_AT } from "./catch-up";
-import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { artifacts, bullets, buildSession, BY_STATUS_EDIT, checkCommands, MERGING, planFiles, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, recordApprovals, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, stageStandards, TESTED, testedMarker, testResult, toolCheckEnv, type ToolCheck } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (ctx.intent.file.frontmatter.status !== "building") {
+    // A plan approved by a status edit: its exceptions are recorded as approved before the build.
+    if (ctx.intent.file.frontmatter.status === "plan-approved") await recordApprovals(ctx, "plan", BY_STATUS_EDIT);
     // A new build writes its own acceptance tests; one resumed after a stop keeps what it wrote.
     clearMarker(ctx, ACCEPTANCE);
     await setStatus(ctx, "building");
@@ -57,9 +59,11 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   }
 
   const feedback = readMarker(ctx, SENT_BACK)?.trim() ?? "";
+  // The build, and the reconcile of its plan, may run the checks of the plan's standards.
+  const commands = await checkCommands(ctx, a.plan);
   const phase: AgentPhaseSpec & { name: "build" } = {
-    name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback }, skills: stage.skills,
+    name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands,
+    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback, standards: (await stageStandards(ctx, planFiles(a.plan))).text }, skills: stage.skills,
   };
   // The note reaches the session even through an older build.md without {{feedback}}.
   const build = await agentPhase(ctx, phase, () => phasePrompt(ctx, phase, { variable: "feedback", note: feedback, text: `A person's notes on an earlier build of this change; address each one:\n\n${feedback}` }));
@@ -89,7 +93,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (!drift.ok) return block(ctx, "The change could not be compared with its plan. An engineer needs to look at it.", { detail: drift.detail });
   if (drift.extra.length) {
     const rec = await buildSession(ctx, {
-      name: "reconcile", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "reconcile", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands,
       vars: { plan, findings: bullets(drift.extra) },
     });
     if (!rec.ok) return block(ctx, rec.note);
@@ -115,7 +119,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   if (verified.passed && early) keepEarlyReview(ctx, early);
   if (!verified.passed) {
     const fix = await buildSession(ctx, {
-      name: "fix", traceName: "fix-after-verify", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "fix", traceName: "fix-after-verify", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands: await checkCommands(ctx, plan),
       vars: { failure_output: `${VERIFY_FAILED}\n${verified.observations}`, test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return block(ctx, fix.note);
@@ -159,16 +163,26 @@ async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
 export const TESTS_KEPT_FAILING_NOTE = "The tests kept failing after several attempts to fix them. An engineer needs to look at the change.";
 export const CHECKS_KEPT_TIMING_OUT_NOTE = "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it.";
 
+/**
+ * The owner's note when a standard's check still fails after every fix allowed. A check that does
+ * not use LOOPSTRA_BASE may be failing on what main already has, so the note says where to look.
+ */
+function checkKeptFailingNote(check: ToolCheck, fixes: number): string {
+  const note = `The change does not pass the automatic check of the standard ${check.title} (${check.path}), even after ${fixes} ${fixes === 1 ? "try" : "tries"} to fix it. The details are in the trace. An engineer can fix it on the branch and retry the change, or close it.`;
+  return check.command.includes("LOOPSTRA_BASE") ? note : `${note} If main fails this check too, the problem may not be this change's; see loopstra setup --check.`;
+}
+
 /** The owner's note when the verifier still finds the change does not work after its round of fixes. */
 export const VERIFY_STILL_FAILED_NOTE = "The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.";
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
 const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
 
-/** What fix is told about a failed project command: which one, and the end of its output. */
-function failureOutput(f: CommandResult): string {
+/** What fix is told about a failed project command: which one (and the standard, for a tool check), and the end of its output. */
+function failureOutput(f: CommandResult, check: ToolCheck | null): string {
   const how = f.timedOut ? "ran past its time limit and was stopped" : "failed";
-  return `The command \`${f.command}\` ${how}. The end of its output:\n\n${f.output.slice(-8000)}`;
+  const whose = check ? ` It is the automatic check of the standard ${check.title} (${check.path}).` : "";
+  return `The command \`${f.command}\` ${how}.${whose} The end of its output:\n\n${f.output.slice(-8000)}`;
 }
 
 type Verified = { ok: true; passed: boolean; observations: string } | Failure;
@@ -185,18 +199,19 @@ async function verifyChange(ctx: StepContext, spec: string, plan: string, traceN
 }
 
 /**
- * Test, lint, and build commands in the worktree; on failure, a fix in the build session and
- * again, up to `max_fix_loops` fixes. Phases are `<prefix>-1`, `fix-1`, `<prefix>-2`, ... Used after
- * build, after a verify fix, after a review revision, and after a rebase before merge.
- * Returns a failure for the caller to record; it never blocks by itself.
+ * Test, lint, and build commands in the worktree, then the tool checks `extra` (the merge checks'
+ * standards' checks; see toolCheckEnv); on failure, a fix in the build session and again, up to
+ * `max_fix_loops` fixes. Phases are `<prefix>-1`, `fix-1`, `<prefix>-2`, ... Used after build, after
+ * a verify fix, after a review revision, and after a rebase before merge. Returns a failure for the
+ * caller to record, with the tool check that kept failing if it was one; it never blocks by itself.
  */
-export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: true } | Failure> {
+export async function testLoop(ctx: StepContext, prefix: string, extra: ToolCheck[] = []): Promise<{ ok: true } | (Failure & { check?: ToolCheck })> {
   const max = ctx.cfg.stages.build.max_fix_loops;
   const wt = new Git(ctx.worktreeDir);
   for (let i = 1; ; i++) {
-    let failure: CommandResult | null;
+    let failed: Failed;
     try {
-      failure = await runChecks(ctx, `${prefix}-${i}`);
+      failed = await runChecks(ctx, `${prefix}-${i}`, extra);
     } finally {
       // New files are the commands' output (a coverage folder, a junit xml): every caller commits its
       // work before the loop, and each fix is committed below. Removed, so neither a fix's commit nor a
@@ -204,18 +219,22 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       // the run short.
       await removeNewFiles(ctx, wt);
     }
-    if (!failure) {
+    if (!failed) {
       // The merge checks need not run them again on the same code (see checkMerge).
-      writeMarker(ctx, TESTED, testedMarker(ctx, await wt.headSha()));
+      writeMarker(ctx, TESTED, testedMarker(ctx, await wt.headSha(), extra));
       return { ok: true };
     }
+    const { result: failure, check } = failed;
     if (i > max) {
-      const note = failure.timedOut ? CHECKS_KEPT_TIMING_OUT_NOTE : TESTS_KEPT_FAILING_NOTE;
-      return { ok: false, note, detail: `${failure.command} still failing after ${max} fix attempts: ${failure.lastLine}` };
+      const detail = `${failure.command} still failing after ${max} fix attempts: ${failure.lastLine}`;
+      if (check) return { ok: false, note: checkKeptFailingNote(check, max), detail, check };
+      return { ok: false, note: failure.timedOut ? CHECKS_KEPT_TIMING_OUT_NOTE : TESTS_KEPT_FAILING_NOTE, detail };
     }
+    // The fix may run the checks of the plan's standards, and those that run here.
+    const commands = [...new Set([...(await checkCommands(ctx, (await artifacts(ctx)).currentPlan)), ...extra.map((c) => c.command)])];
     const fix = await buildSession(ctx, {
-      name: "fix", traceName: `fix-${i}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-      vars: { failure_output: failureOutput(failure), test_command: ctx.cfg.commands.test },
+      name: "fix", traceName: `fix-${i}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands,
+      vars: { failure_output: failureOutput(failure, check), test_command: ctx.cfg.commands.test },
     });
     if (!fix.ok) return { ok: false, note: fix.note, detail: `fix-${i} failed: ${fix.reason}` };
     const saved = await saveWork(ctx, wt, fix.envelope.commit_message || `loopstra(${ctx.slug}): fix`);
@@ -239,26 +258,45 @@ async function removeNewFiles(ctx: StepContext, wt: Git): Promise<void> {
   if (r.code !== 0) ctx.trace.event(ctx.slug, "error", { where: "clean", error: (r.err || r.out || `exit ${r.code}`).trim(), note: "new files the commands wrote were not removed; the next fix's commit may include them" });
 }
 
+/** The first command of a run that failed, and the tool check it is, if one; null when all passed. */
+type Failed = { result: CommandResult; check: ToolCheck | null } | null;
+
 /**
- * Runs test, lint, build in the worktree: in order, stopping at the first failure, or with
- * `speed.parallel_checks` all at once. Returns the first failure in that order, or null when all
- * pass. The phase is recorded as failed when a command fails.
+ * Runs test, lint, build in the worktree, then, once they all passed, the tool checks `extra` with
+ * their environment (see toolCheckEnv): in order, stopping at the first failure, or with
+ * `speed.parallel_checks` each of the two groups all at once. Returns the first failure in that
+ * order, or null when all pass. The phase is recorded as failed when a command fails.
  */
-async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandResult | null> {
-  const cmds = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
-  let failed = null as CommandResult | null;
+async function runChecks(ctx: StepContext, phaseName: string, extra: ToolCheck[]): Promise<Failed> {
+  const configured = [ctx.cfg.commands.test, ctx.cfg.commands.lint, ctx.cfg.commands.build].filter((c): c is string => !!c);
+  let failed = null as Failed;
   const r = await codePhase(ctx, phaseName, async (seq) => {
+    // Read each run: the base moves when the branch is brought up to date with main.
+    const env = extra.length ? await toolCheckEnv(ctx, new Git(ctx.worktreeDir)) : undefined;
+    type Cmd = { command: string; check: ToolCheck | null };
+    const groups: Cmd[][] = [configured.map((command) => ({ command, check: null })), extra.map((check) => ({ command: check.command, check }))];
+    const cmds = groups.flat();
+    const run = (c: Cmd, signal?: AbortSignal) => projectCommand(ctx, c.command, ctx.worktreeDir, { seq, signal, ...(c.check ? { env } : {}) });
     const results: CommandResult[] = [];
-    if (ctx.cfg.speed.parallel_checks) {
+    // A group's results go to `results` in order, ending at its first failure.
+    const runGroup = async (group: Cmd[]): Promise<void> => {
+      if (!ctx.cfg.speed.parallel_checks) {
+        for (const c of group) {
+          const res = await run(c);
+          results.push(res);
+          if (res.code !== 0) return;
+        }
+        return;
+      }
       // All at once, read in order: once one fails (or throws), every one before it has ended, so it
       // is the failure to report, and those still running are cancelled.
       const cancel = new AbortController();
-      const runs = cmds.map((cmd) => projectCommand(ctx, cmd, ctx.worktreeDir, { seq, signal: cancel.signal }));
-      for (const run of runs) run.catch(() => {}); // each is read below; one may reject before it is reached
+      const runs = group.map((c) => run(c, cancel.signal));
+      for (const pending of runs) pending.catch(() => {}); // each is read below; one may reject before it is reached
       let thrown: { error: unknown } | null = null;
-      for (const run of runs) {
+      for (const pending of runs) {
         try {
-          const res = await run;
+          const res = await pending;
           results.push(res);
           if (res.code !== 0) break;
         } catch (error) {
@@ -273,20 +311,20 @@ async function runChecks(ctx: StepContext, phaseName: string): Promise<CommandRe
       const stop = settled.find((s) => s.status === "rejected" && s.reason instanceof StopRequested);
       if (stop) throw (stop as PromiseRejectedResult).reason;
       if (thrown) throw thrown.error;
-    } else {
-      for (const cmd of cmds) {
-        const res = await projectCommand(ctx, cmd, ctx.worktreeDir, { seq });
-        results.push(res);
-        if (res.code !== 0) break;
-      }
+    };
+    // The standards' checks run only on code whose tests pass, as the spec has it, in parallel too.
+    for (const group of groups) {
+      await runGroup(group);
+      if (results.some((x) => x.code !== 0)) break;
     }
-    const res = results.find((x) => x.code !== 0);
-    if (res) {
-      failed = res;
+    const at = results.findIndex((x) => x.code !== 0);
+    if (at >= 0) {
+      const res = results[at]!;
+      failed = { result: res, check: cmds[at]!.check };
       throw new Error(`${res.command} exited ${res.code}: ${res.lastLine}`);
     }
     return { ok: true as const };
   });
   if (r.ok) return null;
-  return failed ?? { command: "checks", code: 1, output: r.detail, lastLine: r.detail, durationMs: 0, timedOut: false };
+  return failed ?? { result: { command: "checks", code: 1, output: r.detail, lastLine: r.detail, durationMs: 0, timedOut: false }, check: null };
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import type { ChangeDetail, DiffView, PhaseView, Stage } from "../../console/types";
+import type { ChangeDetail, ChangeSummary, DiffView, PhaseView, Stage } from "../../console/types";
 import { clock, duration, stepWord, usd } from "../format";
 import { barGeometry, codeKey, detailKey } from "../change-key";
 import { stripFrontmatter } from "../markdown";
@@ -7,6 +7,8 @@ import { Actions } from "../parts/Actions";
 import { Diff } from "../parts/Diff";
 import { Link } from "../parts/Link";
 import { Markdown } from "../parts/Markdown";
+import { StandardsPanel } from "../parts/StandardsPanel";
+import { panelShown } from "../standards";
 import { TABS, type Tab } from "../router";
 import { changes, getJson, HttpError, now, openDrawer, running } from "../store";
 import { COLUMNS } from "./Changes";
@@ -68,7 +70,7 @@ export function Change({ slug, tab }: { slug: string; tab: Tab }) {
       <nav class="tabs" aria-label="Parts of this change">
         {TABS.map((t) => <Link key={t} href={t === "overview" ? `/c/${slug}` : `/c/${slug}/${t}`} class={`tab${t === tab ? " on" : ""}`} current={t === tab}>{TAB_LABEL[t]}</Link>)}
       </nav>
-      {tab === "overview" && <Overview d={d} />}
+      {tab === "overview" && <Overview d={d} change={summary ?? d} />}
       {tab === "documents" && <Documents d={d} />}
       {tab === "timeline" && <Timeline d={d} />}
       {tab === "code" && <Code slug={slug} reload={codeKey(summary, runningSeqs)} />}
@@ -99,7 +101,7 @@ function useText(url: string | null, version: string | null): string | null {
   return text;
 }
 
-function Overview({ d }: { d: ChangeDetail }) {
+function Overview({ d, change }: { d: ChangeDetail; change: ChangeSummary }) {
   const intent = useText(`/docs/${d.slug}/intent.md`, d.since);
   return (
     <div class="stack">
@@ -112,6 +114,7 @@ function Overview({ d }: { d: ChangeDetail }) {
       {d.waiting && <span class="badge warn">{d.waiting}</span>}
       {d.shownNote && <div class="panel"><h2>Note</h2><Markdown text={d.shownNote} /></div>}
       <div class="panel">{intent === null ? <p class="muted">Loading the intent…</p> : <Markdown text={stripFrontmatter(intent)} />}</div>
+      {d.standards && panelShown(d.status) && <StandardsPanel d={d} change={change} />}
     </div>
   );
 }

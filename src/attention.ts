@@ -1,16 +1,24 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { ghProblem, GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
 import { changeGates, dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
+import { Git } from "./git";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
+import { exceptionsToApprove, parseRecord, STANDARDS_RECORD } from "./standards-record";
+import { branchStandards, hasStandardFiles, standardsStopText } from "./standards";
+import { errorText } from "./shell";
+import { StopRequested } from "./stop";
+import { andList } from "./text";
 import { humanNote, prWait } from "./stages/shared";
 import type { Trace } from "./trace";
 
 /** One thing a person should do or know. The same list in `loopstra status` and the dashboard. */
 export interface AttentionItem {
-  kind: "paused" | "health" | "sync" | "config" | "blocked" | "held" | "question" | "unreadable" | "waiting";
+  kind: "paused" | "health" | "sync" | "config" | "standards" | "blocked" | "held" | "question" | "unreadable" | "waiting";
   /** The kind in plain words, e.g. "Blocked" or "Waiting for you". */
   label: string;
   /** The change it is about; null for the repository as a whole. */
@@ -23,7 +31,7 @@ export interface AttentionItem {
 }
 
 const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
-  paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings",
+  paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings", standards: "Standards",
   blocked: "Blocked", held: "Held", question: "Has a question", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
 
@@ -66,6 +74,36 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
 };
 
 /**
+ * Standards that cannot be read, live from main's commit (never from the trace, so a fix clears it at
+ * once), then the unreadable lines of an open change's standards.md. One read of main per call.
+ * True when main has standards (files in the folder, read or not).
+ */
+async function addStandards(root: string, cfg: Config, intents: Scan["intents"], add: (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => void): Promise<boolean> {
+  let on;
+  try {
+    on = await branchStandards(new Git(root), cfg.main_branch);
+  } catch (e) {
+    // git failed (a broken repository, a timeout): one item says so, and the rest of the list stands.
+    if (e instanceof StopRequested) throw e;
+    add("standards", null, "Standards", `The standards on ${cfg.main_branch} could not be read: ${(errorText(e).split("\n")[0] ?? "").replace(/[.\s]+$/, "")}.`);
+    return false;
+  }
+  if (!on) return false;
+  const { read } = on;
+  const stop = standardsStopText(read.problems);
+  if (stop) add("standards", null, "Standards", stop);
+  const known = new Set(read.standards.map((s) => s.name));
+  for (const i of intents) {
+    const s = i.file.frontmatter.status;
+    if (s === "done" || s === "closed") continue;
+    const file = join(i.dir, STANDARDS_RECORD);
+    if (!existsSync(file)) continue;
+    for (const problem of parseRecord(readFileSync(file, "utf8"), known).problems) add("standards", i.slug, i.file.title || i.slug, problem);
+  }
+  return hasStandardFiles(read);
+}
+
+/**
  * Everything that needs a person, most pressing first: a pause, a red main, main out of step with
  * GitHub, a config problem, blocked changes, held changes, unreadable intents, then changes waiting for a person
  * (drafts, and reviews with a person on the gate). `config` is the loaded config, or the problem
@@ -77,7 +115,7 @@ export async function attention(root: string, config: Config | { problem: string
   scan ??= await scanRepo(root);
   const intents = orderQueue(scan.intents);
   const items: AttentionItem[] = [];
-  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string, key?: string) => items.push({ kind, label: ATTENTION_LABEL[kind], slug, title, what, ...(key ? { key } : {}) });
+  const add = (kind: AttentionItem["kind"], slug: string | null, title: string, what: string, key?: string, label = ATTENTION_LABEL[kind]) => items.push({ kind, label, slug, title, what, ...(key ? { key } : {}) });
 
   // A person paused the loop: nothing new starts until they resume it. Titled apart from an outage's
   // pause, so the two are two items; worded for a loop that is stopped as much as one running.
@@ -102,6 +140,8 @@ export async function attention(root: string, config: Config | { problem: string
     add("sync", null, "Not answering", `GitHub hasn't answered for 15 minutes: ${ghProblem(trace.lastSignal(GITHUB_SIGNAL)!.output)}`);
   }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);
+
+  const standards = cfg ? await addStandards(root, cfg, intents, add) : false;
 
   for (const i of intents) {
     if (i.file.frontmatter.status === "blocked") {
@@ -143,7 +183,18 @@ export async function attention(root: string, config: Config | { problem: string
       continue;
     }
     const gate = REVIEW_GATE[fm.status]!;
-    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]));
+    // A spec or plan asking for exceptions says which rules in its label.
+    const asks = standards && (gate === "spec" || gate === "plan") ? exceptionsWaiting(i.dir, gate) : [];
+    const label = asks.length ? `${ATTENTION_LABEL.waiting}: ${asks.length > 1 ? "exceptions" : "exception"} to ${andList(asks)}` : undefined;
+    add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]), undefined, label);
   }
   return items;
+}
+
+/** The rules whose exceptions a change's spec or plan asks a person to allow (see exceptionsToApprove), read from its folder. */
+function exceptionsWaiting(dir: string, gate: "spec" | "plan"): string[] {
+  const read = (name: string): string | null => {
+    try { return readFileSync(join(dir, name), "utf8"); } catch { return null; }
+  };
+  return exceptionsToApprove(read(`${gate}.md`) ?? "", parseRecord(read(STANDARDS_RECORD))).map((b) => b.label);
 }

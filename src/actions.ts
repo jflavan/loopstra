@@ -11,7 +11,7 @@ import type { Trace } from "./trace";
 export const CHANGE_ACTIONS = ["approve", "send-back", "retry", "close", "priority", "hold", "release", "answer"] as const;
 
 /** Every kind of request the loop applies: start, chat's written intents (`new`), the actions on a change, undo, and a change of a setting. */
-export const REQUEST_KINDS = ["accept", "new", ...CHANGE_ACTIONS, "undo", "settings", "agent-files"] as const;
+export const REQUEST_KINDS = ["accept", "new", ...CHANGE_ACTIONS, "undo", "settings", "agent-files", "standards-scope"] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 /** True when a value read from a request is a status. */

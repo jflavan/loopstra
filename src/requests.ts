@@ -68,6 +68,8 @@ const RequestSchema = z.discriminatedUnion("kind", [
   base.extend({ kind: z.literal("priority"), slug, expect: status, priority: z.enum(PRIORITIES).nullable() }),
   base.extend({ kind: z.literal("hold"), slug, expect: status, reason: z.string().default("") }),
   base.extend({ kind: z.literal("release"), slug, expect: status }),
+  /** Adds a standard to one change or removes it from it (see applyStandardsScope); a removal needs its note. `name` is a standard on main. */
+  base.extend({ kind: z.literal("standards-scope"), slug, expect: status, action: z.enum(["add", "remove"]), name: z.string(), note: z.string().default("") }),
   /**
    * Answers the change's waiting question (see src/questions.ts); on any open change whose question is open.
    * `question`: when the question the person answered was asked (its `at` in question.json); the loop

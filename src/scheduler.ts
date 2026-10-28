@@ -15,6 +15,7 @@ import { errorText, timerMs } from "./shell";
 import { changeGates, checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
+import { branchStandards, problemText, standardsStopText } from "./standards";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
@@ -163,6 +164,15 @@ export async function tick(root: string): Promise<TickResult> {
     const pause = activePause(root);
     if (pause) {
       out.paused = pause.reason;
+      return out;
+    }
+
+    // A standard on main that cannot be read: the rules are unknown, so no step starts (never "no rules").
+    // Requests, syncing, signals and the queue above keep working. A git failure here throws, like any other.
+    const unreadable = (await branchStandards(new Git(root), cfg.main_branch))?.read.problems ?? [];
+    if (unreadable.length) {
+      out.paused = standardsStopText(unreadable) ?? "";
+      trace.eventOnChange("_loop", "error", '"where":"standards"', { where: "standards", problems: unreadable.map(problemText) }, "problems");
       return out;
     }
 
@@ -965,6 +975,23 @@ export async function preflight(root: string, env: Record<string, string | undef
     if (!(await gh.signedIn())) return "GitHub CLI is installed but not signed in. Run gh auth login, then start again.";
   }
   return null;
+}
+
+/**
+ * What `start` warns of before the loop begins, without refusing: a standard on main that cannot be
+ * read (the sentence each tick pauses with). The loop still starts, because it is what applies a
+ * fix sent from the console; its ticks keep requests working and start no step until main reads.
+ * Null when the standards read, or when main or the config cannot be read (the loop reports that).
+ */
+export async function startWarning(root: string): Promise<string | null> {
+  try {
+    const cfg = await loadConfig(root);
+    const on = await branchStandards(new Git(root), cfg.main_branch);
+    return on ? standardsStopText(on.read.problems) : null;
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    return null;
+  }
 }
 
 /** Waits up to `ms`, or until a stop is requested or `until` settles. Leaves no timer behind. */

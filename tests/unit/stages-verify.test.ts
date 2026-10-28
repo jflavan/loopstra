@@ -1,15 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeMarker } from "../../src/context";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
 import { claim, release } from "../../src/lanes";
-import { NEEDS_PERSON_DONE_NOTE, runVerifyStep } from "../../src/stages/verify";
+import { NEEDS_PERSON_DONE_NOTE, runVerifyStep, STANDARDS_UNMET_NOTE, UNMET_NOTE } from "../../src/stages/verify";
+import { readOutcomeStandards, STANDARDS_APPLIED } from "../../src/standards";
 import { AssistantUnavailable } from "../../src/stop";
 import type { PhaseRow, Trace } from "../../src/trace";
-import { setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
+import { fixture, fixtureDir, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 
 async function merged(opts: { config?: string; doneCheck?: string; commands?: Record<string, string> } = {}) {
   const s = await setupRepo("merged", { config: opts.config, commands: opts.commands });
@@ -382,5 +383,130 @@ describe("verify stage", () => {
     expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
     expect(trace.phases("add-numbers")).toHaveLength(0);
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("verify stage with standards", () => {
+  const SOC2 = "# SOC 2\n\n## Rules\n- SOC-1: changes are reviewed\n";
+  const SECRETS = "---\napplies_to:\n  - src/**\ncheck: \"true\"\n---\n# Secrets\n\n## Rules\n- SEC-1: no secrets in logs\n- SEC-2: tokens expire\n";
+  const EXCEPTION = "# Standards decisions for add-numbers\n\n## Added\n- docs: the guide changes too (J., from the console, 2026-10-28)\n\n## Exceptions approved\n- SEC-2 at the plan: tokens are issued elsewhere (J., from the console, 2026-10-28)\n";
+  const DOCS = "---\napplies_to:\n  - docs/**\n---\n# Docs\n\n## Rules\n- DOC-1: the guide stays current\n";
+
+  /** The done-check fixture, answering Done when and with these rules judged. */
+  const judged = (rules: Array<[string, string, string]>, criterion: "met" | "unmet" = "met") => fixture("done-check")
+    .replace('"result":"met"', `"result":"${criterion}"`)
+    .replace('"outcome_markdown"', `"standards":${JSON.stringify(rules.map(([label, result, evidence]) => ({ label, result, evidence })))},"outcome_markdown"`);
+
+  async function done(rules: Array<[string, string, string]>, o: { config?: string; criterion?: "met" | "unmet"; record?: string; marker?: object | null; plan?: string; standards?: Record<string, string> } = {}) {
+    const dir = fixtureDir({ "done-check": judged(rules, o.criterion) });
+    return withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+      const s = await merged({ config: o.config });
+      mkdirSync(join(s.repo.path, "loopstra", "standards"), { recursive: true });
+      for (const [name, text] of Object.entries(o.standards ?? { soc2: SOC2, secrets: SECRETS })) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+      if (o.plan) await Bun.write(join(s.repo.path, "intent", "add-numbers", "plan.md"), o.plan);
+      if (o.record) await Bun.write(join(s.repo.path, "intent", "add-numbers", "standards.md"), o.record);
+      await new Git(s.repo.path).commitAll("standards");
+      await s.ctx.reload();
+      if (o.marker !== null) writeMarker(s.ctx, STANDARDS_APPLIED, JSON.stringify(o.marker ?? { commit: "x", applying: [{ name: "soc2", why: "every", files: [] }, { name: "secrets", why: "files", files: ["src/add.ts"] }] }));
+      s.trace.gate("add-numbers", "merge", "check:secrets", "pass", "ok");
+      await runVerifyStep(s.ctx);
+      dir.cleanup();
+      return s;
+    });
+  }
+  const note = async (repo: string) => (await readIntent(repo, "add-numbers")).file.frontmatter.note;
+
+  test("outcome.md has the runtime's Standards section", async () => {
+    const s = await done([["SOC-1", "met", "the pull request was reviewed"], ["SEC-1", "met", "no log line prints a token"]], { record: EXCEPTION, standards: { soc2: SOC2, secrets: SECRETS, docs: DOCS } });
+    const outcome = await outcomeOf(s.repo.path);
+    const sha = (await s.ctx.readCommit()).slice(0, 7);
+    const section = outcome.slice(outcome.indexOf("## Standards"));
+    expect(section).toBe([
+      "## Standards",
+      `The engineering rules this change was checked against (the standards as of commit ${sha}):`,
+      "",
+      "- SOC-1 (SOC 2): met: the pull request was reviewed",
+      "- SEC-1 (Secrets): met: no log line prints a token",
+      "- SEC-2 (Secrets): exception, approved by J. at the plan: tokens are issued elsewhere",
+      "- Check of Secrets: passed at merge",
+      "- Docs was added to this change by J.: the guide changes too",
+      "",
+    ].join("\n"));
+    // The owner's sections come first, and the lines read back.
+    expect(outcome.indexOf("## Evidence")).toBeLessThan(outcome.indexOf("## Standards"));
+    expect(readOutcomeStandards(outcome).map((l) => `${l.label}:${l.result}`)).toEqual(["SOC-1:met", "SEC-1:met", "SEC-2:exception"]);
+    expect(s.trace.lastGate("add-numbers", "done", "standards")).toMatchObject({ result: "pass" });
+    expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("done");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a rule the judge leaves out is needs-person, not judged; a label that did not apply is ignored; no marker falls back to the plan's files", async () => {
+    const s = await done([["SOC-1", "met", "reviewed"], ["NOPE-1", "unmet", "not a rule here"]], { marker: null, plan: "# Plan\n\n## Files that change\n- src/add.ts (new)\n\n## Order of work\n1. Go.\n" });
+    const outcome = await outcomeOf(s.repo.path);
+    // The plan lists src/add.ts, so Secrets applies by the fallback.
+    expect(outcome).toContain("- SEC-1 (Secrets): needs-person: not judged");
+    expect(outcome).not.toContain("NOPE-1 (");
+    expect(outcome).toContain("## For a person to confirm\n- SEC-1 not judged\n- SEC-2 not judged");
+    expect(await note(s.repo.path)).toBe(NEEDS_PERSON_DONE_NOTE);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("an unmet rule blocks, with the standards-only note", async () => {
+    const s = await done([["SOC-1", "met", "reviewed"], ["SEC-1", "unmet", "a log line prints a token"], ["SEC-2", "met", "expiry is set"]]);
+    const i = await readIntent(s.repo.path, "add-numbers");
+    expect(i.file.frontmatter.status).toBe("blocked");
+    expect(i.file.frontmatter.note).toBe(STANDARDS_UNMET_NOTE);
+    expect(STANDARDS_UNMET_NOTE).toBe("The change merged, but the final check found engineering rules it does not keep. The details are in outcome.md. An engineer should decide whether to open a follow-up change, then set this one to done or closed.");
+    expect(await outcomeOf(s.repo.path)).toContain("- SEC-1 (Secrets): unmet: a log line prints a token");
+    expect(s.trace.lastGate("add-numbers", "done", "standards")).toMatchObject({ result: "fail" });
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("an unmet rule and an unmet criterion block with the existing note, naming the rules", async () => {
+    const s = await done([["SOC-1", "unmet", "no review"], ["SEC-1", "met", "x"], ["SEC-2", "met", "y"]], { criterion: "unmet" });
+    expect(await note(s.repo.path)).toBe(UNMET_NOTE.replace("Done when criteria that", "Done when criteria and engineering rules that"));
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a rule judged with no evidence gets a line that still reads back", async () => {
+    const s = await done([["SOC-1", "met", "  "], ["SEC-1", "met", "x"], ["SEC-2", "met", "y"]]);
+    const outcome = await outcomeOf(s.repo.path);
+    expect(outcome).toContain("- SOC-1 (SOC 2): met: no detail given\n");
+    expect(readOutcomeStandards(outcome).find((l) => l.label === "SOC-1")).toEqual({ label: "SOC-1", title: "SOC 2", result: "met", evidence: "no detail given" });
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a needs-person rule goes under For a person to confirm with its label", async () => {
+    const s = await done([["SOC-1", "needs-person", "the alert exists in the monitoring system"], ["SEC-1", "met", "x"], ["SEC-2", "met", "y"]]);
+    const outcome = await outcomeOf(s.repo.path);
+    expect(outcome).toContain("## For a person to confirm\n- SOC-1 the alert exists in the monitoring system\n");
+    expect(outcome).toContain("- SOC-1 (SOC 2): needs-person: the alert exists in the monitoring system");
+    expect(await note(s.repo.path)).toBe(NEEDS_PERSON_DONE_NOTE);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("gates.done.agent: false lists the rules as not checked automatically", async () => {
+    const s = await done([], { config: "gates:\n  done:\n    agent: false\n" });
+    const outcome = await outcomeOf(s.repo.path);
+    expect(outcome).toContain("- SOC-1 (SOC 2): not checked automatically\n- SEC-1 (Secrets): not checked automatically\n- SEC-2 (Secrets): not checked automatically\n- Check of Secrets: passed at merge\n");
+    expect(readOutcomeStandards(outcome).map((l) => l.result)).toEqual(["not-checked", "not-checked", "not-checked"]);
+    expect(s.trace.phases("add-numbers").some((p) => p.name === "done-check")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("the done-check is given the applying standards with the instructions; a repository without standards is told nothing", async () => {
+    const s = await done([["SOC-1", "met", "x"], ["SEC-1", "met", "x"], ["SEC-2", "met", "x"]], { marker: { commit: "x", applying: [{ name: "soc2", why: "every", files: [] }] } });
+    const p = s.trace.phases("add-numbers").find((x) => x.name === "done-check")!;
+    const prompt = await promptOf(s.ctx.runDir, p);
+    expect(prompt).toContain("Standards this repository holds every change to:");
+    expect(prompt).toContain("`standards`");
+    expect(prompt).toContain("SOC-1");
+    expect(prompt).not.toContain("SEC-1");
+    s.trace.close(); s.repo.cleanup();
+    const plain = await merged();
+    await runVerifyStep(plain.ctx);
+    expect(await outcomeOf(plain.repo.path)).not.toContain("## Standards");
+    expect(plain.trace.gates("add-numbers").map((g) => g.gate)).toEqual(["done"]);
+    plain.trace.close(); plain.repo.cleanup();
   });
 });

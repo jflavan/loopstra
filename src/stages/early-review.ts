@@ -8,7 +8,8 @@ import { loopstraDir } from "../paths";
 import { phaseModel, phasePrompt, type AgentPhaseSpec } from "../phases";
 import { errorText } from "../shell";
 import { EARLY } from "../trace";
-import { takeKept, testResult } from "./shared";
+import { changedFiles } from "../risk";
+import { stageStandards, takeKept, testResult } from "./shared";
 
 /**
  * Run-folder file: a review that ran alongside the verifier (see reviewAhead), with a key for what
@@ -19,9 +20,10 @@ export const EARLY_REVIEW = "review.early";
 /** A round's review session. The early review asks the same, so round 1 can use it. */
 export async function reviewPhase(ctx: StepContext, round: number, spec: string, plan: string): Promise<AgentPhaseSpec & { name: "review" }> {
   const stage = ctx.cfg.stages.review;
+  const wt = new Git(ctx.worktreeDir);
   return {
     name: "review", traceName: `review-${round}`, permissionMode: "default", tools: "read+git", cwd: ctx.worktreeDir,
-    vars: { spec, plan, test_result: await testResult(ctx, new Git(ctx.worktreeDir)), resolution: readMarker(ctx, RESOLUTION) ?? "" }, skills: stage.skills,
+    vars: { spec, plan, test_result: await testResult(ctx, wt), resolution: readMarker(ctx, RESOLUTION) ?? "", standards: (await stageStandards(ctx, await changedFiles(wt, ctx.cfg.main_branch))).text }, skills: stage.skills,
   };
 }
 

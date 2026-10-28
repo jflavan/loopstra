@@ -58,7 +58,7 @@ async function withConsole(fn: (base: string, hub: Hub) => Promise<void>, hubOpt
 describe("the console's server", () => {
   test("serves the page on every screen's path, with the scripts and styles it names", async () => {
     await withConsole(async (base) => {
-      for (const path of ["/", "/inbox", "/changes", "/activity", "/agents", "/spend", "/c/one", "/c/one/code", "/s/one/1"]) {
+      for (const path of ["/", "/inbox", "/changes", "/activity", "/agents", "/spend", "/settings", "/settings/exceptions", "/c/one", "/c/one/code", "/s/one/1"]) {
         const r = await fetch(base + path);
         expect({ path, status: r.status }).toEqual({ path, status: 200 });
         expect(r.headers.get("content-type")).toContain("text/html");

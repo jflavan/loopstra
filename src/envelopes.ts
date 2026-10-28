@@ -10,12 +10,16 @@ const finding = z.object({
   file: z.string(),
   line: z.number().int().nonnegative(),
   finding: z.string(),
+  /** The label of the rule of a standard the finding is about, when it is about one. */
+  standard: z.string().optional(),
 });
 
 const requirement = z.object({
   requirement: z.string(),
   met: z.boolean(),
   evidence: z.string(),
+  /** The label of the rule of a standard the finding is about, when it is about one. */
+  standard: z.string().optional(),
 });
 
 /** A question for a person (only when the decision is theirs and there is no sensible default). Optional: absent means none. */
@@ -51,7 +55,7 @@ export const Envelopes = {
   }),
   "plan-challenge": base.extend({
     approved: z.boolean(),
-    concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean() })),
+    concerns: z.array(z.object({ concern: z.string(), blocking: z.boolean(), standard: z.string().optional() })),
   }),
   /**
    * Tests written from the owner's Done when list before the build: each test by the criterion it covers
@@ -85,6 +89,8 @@ export const Envelopes = {
     /** One item per Done when criterion. needs-person: it cannot be judged from the repository. */
     evidence: z.array(z.object({ criterion: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })),
     outcome_markdown: z.string(),
+    /** One item per rule of the standards that apply, but those under an approved exception. Absent: every rule that applied is listed as not judged (needs a person). */
+    standards: z.array(z.object({ label: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })).optional(),
   }),
   lessons: base.extend({
     lessons: z.array(z.string()),

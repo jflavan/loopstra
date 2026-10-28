@@ -9,7 +9,7 @@ A product owner writes a plain-language `intent/<slug>/intent.md` and sets its s
 
 There are two audiences and two surfaces:
 
-- **Engineers** configure the machinery once: test command, gates, prompts, limits. All of it is in `loopstra/config.yaml`, plus any prompt they customize in `loopstra/prompts/`.
+- **Engineers** configure the machinery once: test command, gates, prompts, limits. All of it is in `loopstra/config.yaml`, plus any prompt they customize in `loopstra/prompts/`, and, if they want them, the rules every change is held to in `loopstra/standards/` (see Standards).
 - **Product owners** only write plain markdown (the intent) and a status line, or talk to the orchestrator in chat. Notes addressed to them are plain sentences with retry advice, never commands, branch names or raw output.
 
 ## Requirements
@@ -36,7 +36,7 @@ loopstra --version
 ```
 cd your-repo
 loopstra init                 # writes loopstra/config.yaml, the stamp, the owner's guide and the skill
-loopstra setup                # budgets, commands, gates, GitHub, chat, models, agents (init offers it at the end)
+loopstra setup                # budgets, commands, gates, GitHub, chat, models, agents, standards (init offers it at the end)
 git add -A && git commit -m "Set up Loopstra"
 loopstra start                # runs the loop; watch it with loopstra status or loopstra ui
 ```
@@ -91,7 +91,7 @@ It writes no prompts, no hook and no `.claude/settings.json`: the prompts and th
 
 Then:
 
-1. Run `loopstra setup`. In a terminal, `init` offers it at the end ("Walk through the settings now?"). It goes through every setting, one section at a time (budgets, commands, gates, GitHub, chat, models, agents), showing the current value and a suggestion: Enter takes the suggestion, and `-` leaves an optional answer empty. A command left out with `-` stays out: its `# install:` line stays, and later runs do not suggest the detected command again. It saves `loopstra/config.yaml` once, at the end, keeping its comments; if you quit (Ctrl-D) or the result would not load, it saves nothing. Then it checks what it can for the sections it ran, all at the same time: that `claude` is installed, that `commands.test` passes on main (in a throwaway checkout, after `commands.install`; a program that is not installed fails, naming it), with a git remote, that it answers and `gh` is signed in (every change then goes through a pull request), that the Slack and Discord tokens work, and that every agent the steps name is in place. The agents section can also add skills and agents to the repository: from this machine's own, from a git repository or folder (copied as data, never run), or a new agent written from a short form. Those files are written after the config saves, only under `.claude/agents` and `.claude/skills`; setup never commits them, so commit them with the config. What is not ok is listed under "To fix", with the `loopstra setup <section>` to run again; it never undoes the save.
+1. Run `loopstra setup`. In a terminal, `init` offers it at the end ("Walk through the settings now?"). It goes through every setting, one section at a time (budgets, commands, gates, GitHub, chat, models, agents, standards), showing the current value and a suggestion: Enter takes the suggestion, and `-` leaves an optional answer empty. A command left out with `-` stays out: its `# install:` line stays, and later runs do not suggest the detected command again. It saves `loopstra/config.yaml` once, at the end, keeping its comments; if you quit (Ctrl-D) or the result would not load, it saves nothing. Then it checks what it can for the sections it ran, all at the same time: that `claude` is installed, that `commands.test` passes on main (in a throwaway checkout, after `commands.install`; a program that is not installed fails, naming it), with a git remote, that it answers and `gh` is signed in (every change then goes through a pull request), that the Slack and Discord tokens work, that every agent the steps name is in place, and, when main has standards, that they read and that each one's tool check passes on main (see Standards). The agents section can also add skills and agents to the repository: from this machine's own, from a git repository or folder (copied as data, never run), or a new agent written from a short form. Those files are written after the config saves, only under `.claude/agents` and `.claude/skills` (and `loopstra/standards/`, from the standards section); setup never commits them, so commit them with the config. What is not ok is listed under "To fix", with the `loopstra setup <section>` to run again; it never undoes the save.
 2. Commit everything `init` wrote, with the config as setup left it, on that branch. The loop works in its own checkouts, which only see what is committed, and `loopstra start` refuses until the config, the stamp and any prompt override (the `.md` files in `loopstra/prompts/`; anything else there is passed over) are committed. Commit the config again whenever setup changes it.
 3. Start the loop with `loopstra start` (see Run).
 
@@ -171,7 +171,7 @@ loopstra retro          # how the loop did over the last 7 days, and what to cha
 
 The loop line reads Running, Paused, Stopping, Stopped, "Stopped — it did not shut down cleanly" (the loop process is gone: killed or crashed; start it again), or "Not responding" (the process is there but has not checked in: hung, or the machine slept).
 
-Under it, `status` prints a "Needs attention" block, or "Nothing needs you right now.": a pause, failing tests on main (before main has ever passed, that they have not passed yet), main out of step with GitHub, GitHub not answering about pull requests for 15 minutes while a change waits on its pull request (gh signed out, say, or a token GitHub no longer takes; until it answers again, or no change waits on one), a settings problem, blocked changes, unreadable intents, and changes waiting for a person (drafts, and reviews with a person on the gate). The console's inbox shows the same list, labelled "Blocked" or "Waiting for you". Long notes wrap to the terminal's width.
+Under it, `status` prints a "Needs attention" block, or "Nothing needs you right now.": a pause, failing tests on main (before main has ever passed, that they have not passed yet), main out of step with GitHub, GitHub not answering about pull requests for 15 minutes while a change waits on its pull request (gh signed out, say, or a token GitHub no longer takes; until it answers again, or no change waits on one), a settings problem, a standard on main that cannot be read and lines of a change's `standards.md` that do not read (see Standards), blocked changes, unreadable intents, and changes waiting for a person (drafts, reviews with a person on the gate, and a spec or plan whose exception to a standard waits for a person: "Waiting for you: exception to ARCH-1"). The console's inbox shows the same list, labelled "Blocked" or "Waiting for you". Long notes wrap to the terminal's width.
 
 The console is one local web app that updates live over one stream from the server (Spend and the chat drawer refresh on their own; about 35 KB of script):
 
@@ -244,6 +244,7 @@ The `status` and `note` lines at the top of `intent.md` say what to do; `intent/
 - `spec-review`, `plan-review`: the automatic checks passed and a gate is set to wait for a person. Read `spec.md` or `plan.md`, then set `spec-approved` or `plan-approved`, or say what is wrong in the note and set the earlier status. Stepping a review status never advances it.
 - `merge-review`: checks passed and the change is waiting to go into the main code. Follow the note: with nobody on the merge gate it waits for the checks on GitHub (nothing to do; it merges once they pass, even while another change is being worked on, within about `poll_seconds`); with `pr`, approve the pull request on GitHub; with `status`, read `review.md` and set `merge-approved`. If other work merged meanwhile conflicts with it, it goes back to `reviewing` on its own ("Other work merged into main meanwhile conflicted with this change…") and comes back to you once the resolution is tested and reviewed; with `pr`, approve it again, since an approval from before the resolution does not count.
 - `merge_gate: pr` or `merge_gate: status` beside `merge-review`: the change is risky (it touches files named under `gates.merge.risky`, or is larger than its `lines`), so it waits for a person even with nobody on the merge gate. Its note names up to three of the files. With `pr`, approve the pull request on GitHub (without a remote, there is none: set `merge-approved`); with `status`, read `review.md` and set `merge-approved`. Loopstra writes the line, and removes it, each time the change passes its merge checks; deleting it by hand takes the change back to the config's merge gate.
+- `spec_gate: status` or `plan_gate: status` beside `spec-review` or `plan-review`: the spec or plan asks for an exception to a rule of the repository's standards, which only a person can allow, so it waits even with nobody on that gate. Its note names the rules and the reasons. Set `spec-approved` or `plan-approved` to allow them, or send it back with a note to have it written again without them. Loopstra writes the line, and removes it at the next pass that asks for none. Deleting it by hand does not allow the exception: the spec or plan is checked again and waits again (see Standards).
 - `merged`: the change is in the main code.
 - `verifying`: with a person on the done gate, look at the result and set `done`.
 - `question: open`: an agent asked you something, and the change waits for your answer, whatever its status. See Steering.
@@ -359,7 +360,7 @@ Each step is one session, with its own prompt (see Prompts), model (see Models f
 | `orchestrator` | chat | talks with you (see Chat) | read |
 | `write-intent` | chat | writes an agreed brief up as intents | read |
 
-"Run the project's commands" means the configured test, lint, build, run and install commands; build sessions also get `claude.allowed_tools`.
+"Run the project's commands" means the configured test, lint, build, run and install commands; build sessions also get `claude.allowed_tools`, and the tool checks of the standards that apply (see Standards). With standards, `design`, `spec-check`, `plan`, `plan-challenge`, `build`, `resolve`, `review` and `done-check` are also given the standards that apply, with what to do with them.
 
 ### Gates
 
@@ -381,10 +382,10 @@ The spec gate is drawn; the plan gate has the same shape. The merge and done gat
 
 | Gate | Its checks | A person can be | When it fails |
 | --- | --- | --- | --- |
-| `spec` | the required headings; the `spec-check` judge | `none` or `status` | written again once with the findings, then blocked |
-| `plan` | the required headings; every file it lists exists or is new; the `plan-challenge` judge | `none` or `status` | written again once with the findings, then blocked |
-| `merge` | the branch is up to date with `main`, the tests pass, and the newest review has no important findings | `none`, `status` or `pr` | fixes the checks had to make go back to review; anything else blocks |
-| `done` | the `done-check` judge, against "Done when" | `none` or `status` | unmet criteria block, and `outcome.md` lists them |
+| `spec` | the required headings; with standards, a Standards section that names only real rules; the `spec-check` judge | `none` or `status` | written again once with the findings, then blocked |
+| `plan` | the required headings; every file it lists exists or is new; with standards, a Standards section that covers every rule that applies; the `plan-challenge` judge | `none` or `status` | written again once with the findings, then blocked |
+| `merge` | with standards, the change does not edit them; the branch is up to date with `main`, the tests pass, then the tool checks of the standards that apply, and the newest review has no important findings | `none`, `status` or `pr` | fixes the checks had to make go back to review; anything else blocks |
+| `done` | the `done-check` judge, against "Done when" and each rule of the standards that applied | `none` or `status` | unmet criteria or rules block, and `outcome.md` lists them |
 
 ### Build and review
 
@@ -409,7 +410,7 @@ flowchart LR
 
 Every loop has a limit: `stages.build.max_fix_loops` (3) fixes while the tests fail, one fix when `verify` fails, `stages.review.max_rounds` (2) revisions after review, and `stages.review.max_resolutions` (3) conflict resolutions per build (each adds a review round of its own, on top of `max_rounds`). Past a limit the change is blocked, and its note says so. `reconcile`, `fix` and `revise` continue the build's own session, so they know what the build did. With `speed.overlap_judges`, round 1's review runs beside `verify` on the same commit, and is used only if verify passes.
 
-**Merge checks** bring the branch up to date with `main` (resolving conflicts; see below), make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), and read the newest review. Files changed in the change's worktree and not committed (a review `after` command, or a `lint --fix` in the build's own test runs, that rewrote them) are committed to the branch and reviewed once more first, so a formatting fix still reaches review. What the merge checks' own commands rewrite in tracked files (a `lint --fix`, a report with a timestamp) is put back, never kept, so it cannot start one review round after another; fixes the checks commit are reviewed once more. A review `after` command that changes the same files again right after they were kept blocks the change with a note naming them. New files the test, lint and build commands write (a coverage folder, a test report) are removed after each run, during the build as well; a fix session that runs the tests itself can still leave one, and the fix's commit takes it, so list such outputs in `.gitignore`.
+**Merge checks** first refuse a change that edits `loopstra/standards/` (see Standards), then bring the branch up to date with `main` (resolving conflicts; see below), make sure the tests pass (not run again when they already passed on the same code, since `main` only gained records), run the tool checks of the standards that apply, and read the newest review. Files changed in the change's worktree and not committed (a review `after` command, or a `lint --fix` in the build's own test runs, that rewrote them) are committed to the branch and reviewed once more first, so a formatting fix still reaches review. What the merge checks' own commands rewrite in tracked files (a `lint --fix`, a report with a timestamp) is put back, never kept, so it cannot start one review round after another; fixes the checks commit are reviewed once more. A review `after` command that changes the same files again right after they were kept blocks the change with a note naming them. New files the test, lint and build commands write (a coverage folder, a test report) are removed after each run, during the build as well; a fix session that runs the tests itself can still leave one, and the fix's commit takes it, so list such outputs in `.gitignore`.
 
 **Conflicts with main.** When the branch no longer applies cleanly to `main` (another change merged into the same lines), Loopstra resolves it rather than blocking. It happens in three places: when review starts and `main` has gained code since the build; in the merge checks; and while the change waits for a person at the merge gate (status `merge-review`, or a pull request waiting for approval), as soon as it no longer merges cleanly (with git 2.38 or later; older git leaves it to the merge checks). A branch that only falls behind without a conflict is left alone until the merge checks. The change's commits are squashed into one on top of `main`, so every conflict is met once, against the final code, and the `resolve` step (`strong` by default) resolves them in the change's worktree: it sees both changes' intent (this change's spec and plan, and the specs of the changes merged on `main` that touched the same files) and each conflict with both sides. The squashed commit lists the commits it replaces, with a `Co-authored-by` line for each person whose commits were among them. A resolution is then tested, and reviewed in one more round whose prompt shows the conflicts as they were and what the agent kept (`{{resolution}}` in `review.md`; a repository's own copy without it gets it added at the end). A change waiting for a person goes back to `reviewing` and returns to them afterwards; with `merge.human: pr`, only an approval given after the resolution reached GitHub counts, and the pull request's wait says so ("It was approved on GitHub before conflicts with main were resolved; approve the pull request again…"). Before resolving a change that waits as a pull request, `main` is synced and commits a person added to the pull request are taken into the branch, so the resolution starts from what would merge. A binary file both sides changed is left to a person, and new files the session's own commands wrote (a coverage folder) are not kept. If the agent cannot resolve it safely, leaves conflict markers, or the change has used its `stages.review.max_resolutions` (3; 0 turns resolution off), the branch is left exactly as it was and the change is blocked: "The change overlaps with other recent changes, and resolving the conflict automatically did not work. … The details are in conflict.md." `conflict.md`, beside `review.md`, lists the files, the conflicts with both sides, the commits involved and why it stopped. A stop, an outage or a crash part-way puts the branch back where it was; a resolution cut short does not count against the limit. Without a remote, the merge checks run under the merge lock, so a resolution there holds up other changes' merges while it runs, as a fix in the merge checks does.
 
@@ -451,11 +452,11 @@ A change that edits those files takes effect once it is merged. The limits: a `C
 - **More than one change at a time** (`speed.max_parallel_changes` above 1): each tick runs a step for up to that many changes at once, each in its own worktree, and waits for all of them before the next tick. Fewer run when what is left of the day's budget covers fewer whole sessions (`claude.max_budget_usd`); the trace says so. Loopstra's own writes to the main checkout (its records, moving `main`, a local merge) go one at a time, and nothing slower waits with them: checking out a change's worktree and talking to GitHub happen beside them. Changes merge one at a time: without GitHub, a change that merges after another is brought up to date and tested again first; with GitHub, a pull request that another change's merge left out of date is brought up to date and waits for GitHub's checks again. Where the two changed the same lines, the conflict is resolved, tested and reviewed (see Conflicts with main). A change whose plan lists a file another change in progress also lists (in its plan, or in the files its build added to the plan) waits until that change has merged, and `queue.md` says so ("Waits for add-numbers to be merged first, because both change the same files."), so the two do not clash when they merge. That wait holds at one change at a time too, since a pull request can wait to merge while the one lane works on the next change. The loop line names every change being worked on ("working on add-numbers and say-goodbye").
 - **Chat** is a separate process (`loopstra chat`, or the console). It never runs a stage or writes the main checkout: what it needs there (starting a draft, acting on a change, or adding written intents when there is no remote) it leaves as a request in `.loopstra/requests/`, as the console does, and the loop applies it at the start of a tick and every 2 seconds beside the running steps.
 
-The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`, packaging and `loopstra upgrade` in `docs/superpowers/specs/2026-10-18-packaging-upgrade-design.md`, agents for each step in `docs/superpowers/specs/2026-10-26-agent-setup-design.md`, and per-change resources and conflict resolution in `docs/superpowers/specs/2026-10-27-conflict-free-concurrency-design.md`; `docs/decisions.md` records why.
+The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, with chat in `docs/superpowers/specs/2026-10-01-orchestrator-chat-design.md`, more than one change at a time in `docs/superpowers/specs/2026-10-16-parallel-changes-design.md`, how `main` is synced, pull requests are watched, sessions read `main` and the checkout is locked in `docs/superpowers/specs/2026-10-16-simpler-core-design.md`, packaging and `loopstra upgrade` in `docs/superpowers/specs/2026-10-18-packaging-upgrade-design.md`, agents for each step in `docs/superpowers/specs/2026-10-26-agent-setup-design.md`, per-change resources and conflict resolution in `docs/superpowers/specs/2026-10-27-conflict-free-concurrency-design.md`, and standards in `docs/superpowers/specs/2026-10-28-standards-design.md`; `docs/decisions.md` records why.
 
 ## Configuration
 
-`loopstra/config.yaml` is commented and validated on load with plain error messages; unknown keys are errors. It is re-read every tick, so edits take effect without a restart. Only `commands.test` is required. It sets:
+`loopstra/config.yaml` is commented and validated on load with plain error messages; unknown keys are errors. It is re-read every tick, so edits take effect without a restart. Only `commands.test` is required. The standards, the rules every change is held to, are not in it: they are files of their own beside it, in `loopstra/standards/`, read from `main`'s commits (see Standards). It sets:
 
 - `main_branch`, `poll_seconds`
 - `commands`: test (required), install, lint, build, run
@@ -467,7 +468,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 - `signals`: how often main's health check runs
 - `chat`: the orchestrator's model (`model`), the model of the write-up (`steps.write-intent`), optional spending limits (`max_budget_usd_per_day`, `max_budget_usd_per_session`), and the Slack and Discord bots under `transports` (see Chat)
 
-`loopstra setup` asks about the commands, spending limits, gates (and whether to write acceptance tests, suggesting yes when the file does not say), merging, chat, models (the four names, each stage's model, and, if you say yes, a model for each of its steps) and agents (each step's agent, subagents, teams, skills, tools and MCP tools, for all steps or one step); edit the file by hand for the rest (`poll_seconds`, `allowed_tools`, stage skills and commands, speed, signals). During onboarding the `loopstra` skill lists the MCP tools its own session has, says which only read and which change things, and has you enter the ones you pick in `loopstra setup agents`.
+`loopstra setup` asks about the commands, spending limits, gates (and whether to write acceptance tests, suggesting yes when the file does not say), merging, chat, models (the four names, each stage's model, and, if you say yes, a model for each of its steps), agents (each step's agent, subagents, teams, skills, tools and MCP tools, for all steps or one step) and standards (see Standards); edit the file by hand for the rest (`poll_seconds`, `allowed_tools`, stage skills and commands, speed, signals). During onboarding the `loopstra` skill lists the MCP tools its own session has, says which only read and which change things, and has you enter the ones you pick in `loopstra setup agents`.
 
 **Models for each step.** The four names are `cheap`, `default`, `strong` and `max`. Each stage has a model, and so does chat; a step can have its own under `stages.<stage>.steps.<key>` (or `chat.steps.write-intent`), set to one of the four names. A step with none of its own runs on its default below. Nothing is put on `max` by a default: only a person does that.
 
@@ -493,7 +494,7 @@ The full design is in `docs/superpowers/specs/2026-09-28-loopstra-design.md`, wi
 
 Change them in `loopstra setup models` (it asks the four names, then each stage's model, then "Choose models for <stage>'s steps one by one? (y/N)"; answer `auto` for a step to remove its own setting, since `default` is a model's name), or on the console's Settings page (`/settings`). Each change on that page saves on its own, as a `settings` request that the loop commits as `loopstra(_settings): <path> → <value> by <who> from the dashboard`. It applies to sessions that start after it is saved; model settings are read fresh before each session, so a running one is not disturbed. One change is made at a time, and it is refused if the file changed since the page read it, or if `loopstra/config.yaml` has uncommitted edits in the main checkout. When the loop is not running, the change waits ("Saved when the loop next runs.") and can be cancelled. *Last ran on* shows the model each name actually ran on, so a moved alias is visible. `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL` still apply to the aliases. A name Claude Code does not accept fails the step with reason `model` (not an outage, so it is not retried): "`strong` is `opuss`, which Claude Code does not accept as a model (step spec-check). Change it in Settings or `loopstra setup models`, then retry." In chat, that sentence is the reply. A cheaper judge (`speed.cheap_judges`) never stands in for a judge put on `max`. Fix, reconcile and revise resume the build's session even when their model differs from the build's; the first turn on the new model is not cached.
 
-The Settings page also has an **Agents** part; see Agents for each step.
+The Settings page also has an **Agents** part (see Agents for each step) and a **Standards** part (see Standards).
 
 **Budgets.** No spending limit is set by default: on a subscription the dollar figures are only an estimate, and `timeout_minutes` already ends a stuck session. Set limits with `loopstra setup budgets`, as minutes (`30m`, `2h`, turned into dollars at $0.20 a minute unless you give another rate in that run) or dollars (`$6`); `none` removes one, and amounts are shown with two decimals. Its check uses the same rate and warns when `claude.max_budget_usd` runs out before `timeout_minutes`, when a session limit is above its day limit, or when `chat.max_budget_usd_per_day` is set without `chat.max_budget_usd_per_session`. A config from the old template (every limit there is `5` or `2` as it wrote them, and no `claude.max_budget_usd_per_day`) shows them as old defaults, and Enter, or `--defaults`, removes them; any other mix counts as chosen and is kept.
 
@@ -546,6 +547,206 @@ The step's agent hands work on with Claude Code's Agent tool. Claude Code's own 
 
 **Adding agents and skills.** `loopstra setup agents` can add them from this machine's own, from a git repository or folder, or as a new agent written from a short form (see Set up a repo). The console's Settings page has an **Agents** part: each step's agent, subagents, skills and teams, the tools, and the repository's agents and skills (copy one from this machine, fetch from a git repository, write a new one, edit or remove one). The console never writes the repository itself: a config change is a `settings` request (`agents.*` paths), and a file change is an `agent-files` request, both applied by the loop. The loop refuses a file change when its target has uncommitted changes in the main checkout, goes through a link, is outside `.claude/agents` and `.claude/skills`, or changed since the page read it. Fetching from a git repository runs on the server, in a temporary folder removed afterwards. One write is pending at a time across the page.
 
+## Standards
+
+A team can write down the rules every change must keep (its architecture, its security rules, the technical controls of a compliance framework such as SOC 2) as Markdown files in `loopstra/standards/`. Each change is then checked against the ones that apply to it at the spec, at the plan, in review, at the merge and after the merge, and it leaves a record, per rule, of how it kept it. Only a person can let a change off a rule. All of it is optional: a repository without `loopstra/standards/` runs exactly as before, with the same prompts, headings and gate rows. Write them by hand, with `loopstra setup standards`, on the console's Settings page, or with the `loopstra` skill, which can draft them from the team's own material (see Onboarding below).
+
+**A standard** is one file, `loopstra/standards/<name>.md`, its name lowercase words joined by dashes, like an intent's slug:
+
+```markdown
+---
+applies_to: ["services/billing/**", "lib/payments/**"]
+needs_person: true
+check: semgrep scan --error --config semgrep/payments.yml --baseline-commit "$LOOPSTRA_BASE"
+---
+# Payments data
+
+Why these rules exist, links to the design records in docs/adr/, examples of the right way.
+Sessions are given the whole file, so this text is context, not decoration.
+
+## Rules
+- PAY-1: Card numbers never reach our database or our logs. Only the payment
+  processor's token is stored.
+- PAY-2: Every refund is written to the audit log, with who asked for it.
+```
+
+- **The front matter is optional**, and an unknown key in it is an error.
+  - `applies_to`: glob patterns on repository paths with `/`, as in `gates.merge.risky.paths` (a bare name matches only at the top). The standard then applies only to a change that touches a matching file. Without it, it applies to every change.
+  - `needs_person: true` makes a change it applies to wait for a person before it merges (see At the merge). The default is `false`.
+  - `check`: a command that exits 0 when the code keeps the rules a tool can check (a secret scanner, semgrep rules, a layering checker). It runs in the merge checks of every change the standard applies to.
+- **The title**, the first `# ` heading, is required.
+- **The rules**, under `## Rules`, are required: at least one, each a bullet `- LABEL: text`, with indented lines that follow continuing it. A rule label starts with a capital letter and has up to 32 letters, digits, `.`, `_` and `-`, ending in a letter or digit (`ARCH-1`, `SOC2-CC6.1`, `SEC_3`). Use the team's own scheme; no two rules may share a label, across all the files. Specs, plans, review findings and outcomes point at a rule by its label.
+- **Everything else is free text.** Sessions read it; Loopstra does not parse it.
+
+Any other file in the folder (a `.txt`, a subfolder, a name with capitals) is ignored, and `loopstra standards` lists it as ignored. Standards are read with git from `main`'s commit, the same commit each step's Claude setup comes from, once per step, so all its sessions and checks use one version. Uncommitted edits in the main checkout are not in force until they are committed, and a change that edits `loopstra/standards/` on its branch cannot change the rules its own steps are judged by (and is blocked anyway; see At the merge).
+
+**Which standards apply** is a fact about files, never an agent's judgment, except at the spec, where no file list exists yet:
+
+| When | The files | What applies |
+| --- | --- | --- |
+| spec | none yet | every standard without `applies_to`; the scoped ones are shown apart, with their patterns, and the designer judges which its design touches |
+| plan, build, resolve | the plan's Files that change | every standard without `applies_to`, and each one whose patterns match a listed file |
+| review, merge | the branch's diff against `main` outside `intent/` (both names of a renamed file) | the same, on the diff |
+| done | the set the merge gate recorded (or, for a change it never recorded, the plan's Files that change) | that set |
+
+A standard that applies is used whole: every rule in it applies. A person can add a standard to one change or remove it (see Changing a change's standards): an added one applies at every step from then on, whatever the files, and a removed one at none.
+
+### At each gate
+
+The steps that write or judge (`design`, `spec-check`, `plan`, `plan-challenge`, `build`, `resolve`, `review` and `done-check`) get each standard that applies, whole, under a line saying why ("Applies because the change touches services/billing/api.ts."), with any rule under an approved exception listed with its reason, and a few lines on what that step does with them. The shipped prompts are not changed: the text goes at the end of the prompt, under "Standards this repository holds every change to:", and only when the change has standards to show. A repository's own copy of a prompt can place `{{standards}}` itself. `fix`, `reconcile` and `revise` continue the build's session, which already has them; `acceptance` writes tests from Done when and gets none.
+
+- **The spec** gets a `## Standards` section after Areas of concern, for engineers. It lists only the rules its design decides something about, `- LABEL: how the design keeps it`, and each rule it cannot keep, `- LABEL: exception: why`; "None." when there are none. The spec gate gets a code check, `standards`: the section is there, and every label in it is a real rule's ("3 rules addressed, 1 exception", "no rule called SEC-9"). `spec-check` checks each claim against the design, and a rule the design breaks without asking for an exception is a finding, with the rule's label first: "SEC-3: the design logs the request body, which holds card numbers". A failure takes the usual path: written again once with the findings, then blocked.
+- **The plan** gets a `## Standards` section after Proof, with a bullet for every rule that applies, its scoped standards included: `- LABEL: how the plan keeps it, and which item under Proof shows it`, `- LABEL: does not apply: why`, or `- LABEL: exception: why`. The plan gate's `standards` check, after its `files` check and on the files it read, wants every one of them and no label that is not a rule's ("all 14 rules addressed", "missing SEC-2, SEC-4; no rule called SEC-9"). `plan-challenge` raises a blocking concern for a "does not apply" that is not sound, a broken rule, or a claim the Order of work does not carry out.
+- **The build and the resolve** are told to keep every rule, and to ask a question rather than break one. Build, fix, reconcile, revise and resolve may run the `check` of each standard that applies, as they may the configured commands. A check is not run in the build's own test runs: it runs once, in the merge checks.
+- **Review**: a change that breaks a rule is an important finding, with the rule's label. `review.md` then ends with a "Findings against the standards" section the runtime writes, one line each: `- important · SEC-3 · src/pay.ts:42: the handler logs the card number`. `REVIEW.md`'s shipped template has a Standards line too, for a review of the repository outside the loop.
+
+### At the merge
+
+- **Standards untouched.** The first merge check, `standards-untouched`, blocks a change whose diff touches anything under `loopstra/standards/`, before anything is spent on it: "This change edits the repository's standards (loopstra/standards/soc2.md), which only a person may change. An engineer can take that edit out of the change's branch and retry the change, or close it." A person at the merge gate cannot approve it instead: a standards edit hidden in a feature is what that person is least likely to read.
+- **Tool checks.** In the merge checks, after the test, lint and build commands pass (with `speed.parallel_checks` too: the configured commands start together, then the checks start together once those passed), each standard that applies to the diff and has a `check` runs it in the change's worktree. It gets the project commands' environment (`LOOPSTRA_SLUG`, `LOOPSTRA_SLOT`, the change's temp folder and ports) and `LOOPSTRA_BASE`, the commit where the branch left `main` (the merge base, read again each run, so it follows `main` as the branch is brought up to date). A check that fails is handled like a failing test: its output goes to a fix session, which is told whose check it is, within `stages.build.max_fix_loops`, and fixes then go back to review. Past that it blocks: "The change does not pass the automatic check of the standard Secrets (loopstra/standards/secrets.md), even after 3 tries to fix it. The details are in the trace. An engineer can fix it on the branch and retry the change, or close it." A check that passed on the same code is not run again. When standards with a check apply, the merge checks run the tests once more even when the build tested the same commit, since the build never ran the checks. The command is read from `main`'s commit, so a branch cannot change it; a check that runs a script from the repository runs the branch's copy of that script, so a reviewer should read changes to such scripts.
+- **Needs a person.** A standard with `needs_person: true` that applies to the diff makes the change risky, as a file under `gates.merge.risky.paths` does, and the same rule holds: with nobody on the merge gate it waits in `merge-review` for `risky.human`, with `merge_gate:` written; with a person there, that person decides as before. The note names the standard: "This change falls under the standard Payments data (loopstra/standards/payments.md), which is set to need a person before merging: it touches services/billing/api.ts." One without `applies_to` makes every change wait, and so does one a person added to the change (see Changing a change's standards), whatever files the change touches.
+- **The record.** The merge gate's trace gets a `standards` row naming the standards that applied and their rule labels, and a `check:<name>` row for each tool check.
+
+### After the merge
+
+The `done-check` judges each rule of the standards that applied, except those under an approved exception, as it judges the Done when criteria: `met` only with evidence from the repository (a tool check that passed at merge counts for the rules it covers), `unmet`, or `needs-person` for what the repository cannot show. A rule it leaves out is for a person ("not judged"). The runtime, not the agent, then appends a section to `outcome.md`, after the owner's, in a fixed format a script can read (shortened here):
+
+```markdown
+## Standards
+The engineering rules this change was checked against (the standards as of commit 3f9c2ab):
+
+- SOC2-CC6.1 (SOC 2 technical controls): met: the refund handler checks the caller's role (services/billing/refund.ts)
+- SOC2-CC7.2 (SOC 2 technical controls): needs-person: the audit log entries reach the log store
+- ARCH-1 (Architecture): exception, approved by J. at the plan: billing keeps reading the legacy orders table until it is migrated (ADR-12)
+- Check of SOC 2 technical controls: passed at merge
+- Payments data was added to this change by J.: card data passes through the shared lib the patterns miss
+```
+
+An unmet rule blocks the change, as an unmet criterion does: "The change merged, but the final check found engineering rules it does not keep. The details are in outcome.md. An engineer should decide whether to open a follow-up change, then set this one to done or closed." (With unmet criteria too, the usual note says "Done when criteria and engineering rules".) `needs-person` rules go under "For a person to confirm", with their labels, and never hold the change up. With `gates.done.agent: false` no rule is judged, and each is listed as "not checked automatically". The commit named is the one the done step read the standards from, so a past "SEC-4: met" always means SEC-4 as it was worded then.
+
+### Exceptions
+
+A spec or plan can say a rule cannot be kept for this change: `- ARCH-1: exception: billing keeps reading the legacy orders table until it is migrated (ADR-12)`. No agent can grant it; the judges only check that the reason is stated and the design or plan does what it says.
+
+- **It waits for a person.** When a spec or plan passes its checks and asks for an exception this change does not have yet, it goes to `spec-review` or `plan-review`, even with nobody on that gate: Loopstra then writes `spec_gate: status` or `plan_gate: status` in `intent.md`, in the same record. The note says what is asked: "The plan asks for an exception to ARCH-1 (Architecture): billing keeps reading the legacy orders table until it is migrated. Read plan.md. To allow it, set status to plan-approved; to have the plan written again without it, send it back with a note." `status`, the inbox and chat show it as "Waiting for you: exception to ARCH-1".
+- **Who approves.** Whoever can approve a spec or plan today: by setting `spec-approved` or `plan-approved`, with Approve in the console (on the change page, "Allow the exception and approve the plan"), or from chat. Approving allows every exception that spec or plan asks for. The approval is written into the change's `standards.md`, with who, from where and when: in the same record as the approval when it came as a request, and as "a status edit" when the next step starts, for one made by hand. The trace gets an `exception` row with the labels. An exception allowed at the spec and repeated in the plan, for the same rule with the same reason, needs no second approval; a new one, or a reworded reason, does.
+- **Taking it back.** Undo on the toast of that approval takes the exceptions out of the record again, and they wait for a person again. Deleting the `spec_gate:` or `plan_gate:` line does not approve anything: the spec or plan is checked again and waits again.
+- **Afterwards.** Later steps are told which rules are under an approved exception and why, so a breach within it is not a finding, and the done-check does not judge it. The build cannot ask for an exception itself: when the plan would make it break a rule, it asks a question.
+
+### Changing a change's standards
+
+A person can add a standard to one change (a case the patterns miss) or remove one from it (a wrong match), with a note, which removing requires. From the change's page in the console (Add a standard… and Remove…), or by editing the change's `standards.md` by hand; not from chat. It can be done at any status before `done` and applies from the next step on: an added standard is checked by every step after that (one added after the plan was approved is checked in review, by the merge checks and by the done-check, but the plan does not cover it), and a removed one stops applying, its tool check and `needs_person` included. The console's request (`standards-scope`) is committed as one record, `loopstra(billing-refunds): standard payments added by J. from the dashboard`; the latest decision about a standard replaces an earlier one. The trace gets a row for it, and the outcome's Standards section lists it.
+
+**The record.** `intent/<slug>/standards.md` holds what people decided about standards for one change. The runtime writes it, only when there is something to record:
+
+```markdown
+# Standards decisions for billing-refunds
+
+## Added
+- payments: card data passes through the shared lib the patterns miss (J., from the console, 2026-10-28)
+
+## Removed
+- architecture: prototype behind a flag, see ADR-14 (M., from the console, 2026-10-28)
+
+## Exceptions approved
+- ARCH-1 at the plan: billing keeps reading the legacy orders table until it is migrated (ADR-12) (J., from the console, 2026-10-28)
+```
+
+The loop reads Added and Removed to work out what applies, and Exceptions approved to know which exceptions need no second approval. A person may edit it; their edit wins. A line that does not read, or names a standard `main` does not have, is listed under Needs attention and not applied until it is fixed.
+
+### When a standard cannot be read
+
+A broken standard never means no standards. A file with no title, no rules, a bullet without a valid label, a label used twice, a pattern that is not a glob, or front matter that does not parse, is treated like a config that does not load:
+
+- The loop starts no step for any change while it is so. Requests, the sync of `main`, the health check and `queue.md` go on, so a fix saved from the console's Standards page lands and the loop goes on in the same tick; a fix committed by hand counts from the next tick. It is traced once while it stays the same.
+- `loopstra status` and the console show it under Needs attention, labelled Standards: "loopstra/standards/soc2.md cannot be read: the rule on line 14 has no rule label (write it as `- LABEL: text`). Fix it on main and commit; until then no change moves on."
+- `loopstra start` prints the same sentence as a warning and starts anyway: the running loop is what applies a fix saved from the console. `loopstra setup --check` lists each problem under "To fix" and exits 1.
+- A step that finds one at its own commit (`main` moved since the tick read it) ends without blaming the change, which keeps its status and runs again.
+
+### Commands
+
+```
+loopstra standards          # each standard on main: title, scope with how many files match, whether it needs a person, its check, its rule labels
+loopstra setup standards    # add, edit or remove standards, then check them
+loopstra setup --check      # with the other checks: every standard reads, and each tool check passes on main
+```
+
+`loopstra standards` reads the files from `main`'s last commit, needs no Claude and changes nothing. It names each problem in a file that cannot be read and each file it ignores, says when the main checkout has uncommitted edits in `loopstra/standards/` that are not in force yet, says when a `needs_person` standard without `applies_to` makes every change wait, and warns when the standards together are over 40 KB (every standard that applies goes into every prompt that uses them whole; scope some or shorten them). It exits 0 either way: validating is `loopstra setup --check`'s job.
+
+`loopstra setup standards` runs on its own, or in the full walk-through after a yes to "Set up standards, rules every change is checked against, now? (y/N)". It lists the standards on `main` and their problems, then asks what to do: add, edit, remove, or done. Add starts from a blank standard or from one of the two examples below. It asks the file name (add only), the title, the files it applies to (comma-separated patterns, `-` for every change, answered with how many files on `main` they match), whether a change under it needs a person before it merges, and the tool check: the suggestion is the first of `gitleaks`, `semgrep`, `trivy` and `checkov` found on PATH, in a form that fails on findings and, for the first two, looks only at what a change adds (`gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"`, `semgrep scan --error --baseline-commit "$LOOPSTRA_BASE"`, `trivy fs --exit-code 1 .`, `checkov -d . --quiet`). Then the rules: it lists them, asks "Rules to remove (labels, comma-separated)", then "Add a rule as LABEL: text (Enter when done)", one at a time, refusing a label already used and naming the rule that has it; to reword a rule, remove it and add it again with the same label. Edit only works on a file written the way its questions write it: one with more (text before the title, a section after the rules, front matter written another way) is left as it is, with a sentence saying to edit it by hand or in the console as Markdown, since the questions would drop that text. An edit that changes no answer writes nothing. The context text is not asked: write it in the file, which is plain Markdown to edit at any time. The files are written with the rest of setup, once, at the end, and if the standards would not read together, nothing is saved. Then it checks that every standard reads, and tries each tool check (the committed ones, and those this run added or changed) on `main` in a throwaway checkout, after `commands.install`, with `LOOPSTRA_BASE` set to `main`'s commit, within `claude.timeout_minutes`. Like the rest of setup it does not commit: commit `loopstra/standards/` on `main`. `loopstra setup --defaults` adds no standards, and `loopstra setup --check` with no section named checks them with the rest.
+
+### In the console
+
+**Settings › Standards**, the third part of the Settings page, after Models and Agents:
+
+- **At the top**, what is wrong: files that cannot be read, with each problem; files with edits in the main checkout that are not committed, so not in force; files the folder ignores; lines of an open change's `standards.md` that do not read; and a tool check that runs a program this machine does not have.
+- **The list**: each standard's title and file, whether it needs a person, its scope ("Every change", or its patterns with how many files on `main` they match now), its tool check, how many rules it has, and how many changes in progress it applies to. Edit, and Remove, which first names the changes in progress it applies to.
+- **New standard**: blank, or from one of the two examples below.
+- **The editor** is a form: the name (set once, for a new standard), the title, the patterns (each with how many files on `main` it matches, and a few of them), "Needs a person before merging", the tool check with **Try it on main**, the rules as label and text rows, and the context text. A label that is not valid or is used twice, or a pattern that is not a glob, shows by its field as you type. **Edit as Markdown** shows the whole file, with the same problems and a preview; a file not written the way the form writes it opens as Markdown, since the form would drop text outside the title, the context and the rules. **Save** is offered only when the file would read together with `main`'s other standards, so the console cannot put an unreadable standard on `main`. Saving a standard that changes in progress are held to says so: "billing-refunds and csv-export are in progress under this standard; their next steps use the new rules."
+- **Try it on main** runs the standard's check in a throwaway checkout of `main`'s last commit, as setup does, and shows whether it passed, how long it took and the end of its output. It writes nothing to the repository.
+- **Exceptions granted** (`/settings/exceptions`, linked from the part) lists every exception approved, across all changes, read from their `standards.md`: the rule and its standard, the change, the reason, who, from where, when, and at which gate, filtered by standard and by rule, each linked to its change. "Changes to scope" lists the standards added to or removed from a change, the same way.
+
+A standard is saved as an `agent-files` request, which now also takes `loopstra/standards/<name>.md`, and the loop commits it: `loopstra(_settings): standards: edit architecture.md by J. from the dashboard`. The loop refuses it, with nothing committed, when the file has uncommitted changes in the main checkout, when it changed since the page read it, or when `main`'s standards would not read with it.
+
+**The change page** has a **Standards** panel when the repository has standards, until the change is done or closed. It lists each standard that applies and why ("It applies to every change.", "The change touches services/billing/api.ts.", "Added by J."), and under each rule what the spec and the plan said about it, the review's findings that name it, and its result after the merge, with the standard's tool check row. An exception waiting for a person comes first, with its rule, its reason and where it is asked, and two buttons: "Allow the exception and approve the plan" (or the spec), and "Send back" with a note. **Add a standard…** and **Remove…** open a dialog that names the standard and asks for the note (required to remove); after the plan is approved, adding one says "The plan does not cover it; review, the merge checks and the final check will."
+
+### Checks that fail on main
+
+A tool that scans the whole repository fails on what is already on `main` (an old secret in the history, existing code a new semgrep rule flags), so every change under the standard would fail its merge check for something it did not do, and its fix session would be sent after code outside the change. Only the tool knows which of its findings are new, so Loopstra does not try to tell them apart. Instead:
+
+- Every check gets `LOOPSTRA_BASE`. Use a form that reports only what a change adds, as setup's suggestions, the examples below and the `loopstra` skill do: `gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"`, `semgrep scan --error --baseline-commit "$LOOPSTRA_BASE"`.
+- `loopstra setup`, `setup --check`, the console's Try it on main and the `loopstra` skill run each check on `main`'s last commit, with `LOOPSTRA_BASE` set to that commit. One that fails there says so: "The check of Secrets fails on main already, so every change under it would fail it too. Use a form that looks only at what a change adds (with $LOOPSTRA_BASE), or fix main first." Setup lists it under "To fix"; the console also offers the base-aware form of a `gitleaks` or `semgrep` command, with Use it.
+- When a change blocks on a check that does not use `LOOPSTRA_BASE`, its note adds: "If main fails this check too, the problem may not be this change's; see loopstra setup --check."
+
+`loopstra start` does not run the checks, which would hold up every start.
+
+### Onboarding
+
+The `loopstra` skill's Onboard list has a step for standards, offered after the agents. In a Claude Code session with an engineer it asks what governs the code (an architecture team's principles, design records, a compliance framework, security policies) and where each lives, reads what is there (design records, `CLAUDE.md`, `.claude/rules`, `REVIEW.md`, `CODEOWNERS`, lint and layering configs, the CI's scanners, the code's layout), and proposes one standard per subject, each shown in full: rules stated against the repository's real code, labels in the team's own scheme, patterns from the actual layout, `needs_person` where the team already wants a named person, and a base-aware `check` wherever a tool can enforce a rule. Conventions and how-tos go to `CLAUDE.md` or `.claude/rules` instead, and controls that are not about code are said to be outside Loopstra. Once the engineer agrees, it writes the files in the main checkout and runs `loopstra setup --check`; the engineer commits them. It never commits, never grants an exception and never changes a change's standards. It is not a session of the loop, and nothing it writes is in force until that commit.
+
+### Two examples
+
+These are the examples `loopstra setup standards` and the console's New standard start from. An architecture standard, for every change, `loopstra/standards/architecture.md`:
+
+```markdown
+# Architecture
+
+How the code is laid out, and why. Link the design records in docs/adr/ and show examples of the right way: sessions are given the whole file.
+
+## Rules
+- ARCH-1: Modules use each other only through what they export. No module reaches into another's internals or its database tables.
+- ARCH-2: New persistent data goes through the repository layer, never straight from a handler to the database.
+- ARCH-3: A change to how the system is laid out comes with a design record in docs/adr/.
+```
+
+SOC 2 technical controls, for the services and the infrastructure, `loopstra/standards/soc2.md`, with a secret scanner over what a change adds:
+
+```markdown
+---
+applies_to: ["services/**", "infra/**"]
+check: gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"
+---
+# SOC 2 technical controls
+
+The controls our SOC 2 report relies on, as far as code can keep them. The check scans only what a change adds for secrets.
+
+## Rules
+- SOC2-CC6.1: Every endpoint that reads or changes customer data checks who is calling and that their role allows it.
+- SOC2-CC7.2: Access to customer data is written to the audit log: who, what and when.
+- SOC2-CC6.7: Data is encrypted in transit (TLS) and at rest.
+- SOC2-CC6.8: No secrets or personal data in logs, error messages or source code.
+- SOC2-C1.2: Customer data is kept and deleted on the schedule in the data retention policy.
+```
+
+Write them in your own words, against your own code. Loopstra ships no library of standards.
+
+### What standards are not
+
+- **Loopstra does not make an application compliant with anything.** SOC 2 is an auditor's opinion of an organisation's controls over a period. Standards let a team state the technical controls it wants in the code and get evidence that each change kept them; access reviews, vendor management, incident response and the rest of a framework stay outside.
+- **What the records are, for a change-management control** (SOC 2's CC8.1 asks for evidence that each change was designed, reviewed, tested and approved against policy): the intent is the request; `spec.md` and `plan.md` are the design, with their Standards sections; `review.md` is the review, with findings that name the rule; the merge checks are the tests, with each tool check; `outcome.md` is the evidence, rule by rule, naming the standards' commit; `standards.md` holds the exceptions and scope changes, with who allowed them; and the pull request's approval, with `gates.merge.human: pr`, is the approval. All of these are in git. The trace in `.loopstra/` stays on the machine that ran the loop and is not kept anywhere else.
+- **Standards are not `.claude/rules`.** Rules there are guidance Claude Code loads into sessions; standards are what the gates check, with labels and a record. Keep conventions in the first and the must-haves in the second, and point one at the other if you like.
+- **No session of the loop changes them.** A person changes them on `main`: by hand, on the console's Standards page, or with `loopstra setup standards`. Chat neither edits them nor changes which apply to a change, and the orchestrator is not told them: product owners never need to know they exist.
+
 ## Prompts
 
 Every phase's prompt, chat's `orchestrator.md` and `write-intent.md` included, ships with Loopstra. A repository has none of its own until you customize one:
@@ -557,7 +758,7 @@ loopstra customize review   # copy the shipped review prompt to loopstra/prompts
 
 `customize <prompt>` copies the shipped prompt into `loopstra/prompts/` and records it in `loopstra/stamp.json`. Edit it and commit both; the loop uses it from then on. A phase reads `loopstra/prompts/<name>.md` when the repository has one, else the shipped prompt. `loopstra upgrade` merges what changes in the shipped prompt into your copy (see Upgrade). To go back to the shipped prompt, delete your copy and commit that; the next upgrade drops it from the stamp, and `customize` can make it again later. `customize` refuses a prompt the repository already has its own copy of; in a repository set up by an older Loopstra it says to run `loopstra upgrade` first, and when `loopstra/stamp.json` cannot be read (merge conflict markers, say) it says to fix and commit it first.
 
-**The test-protection hook** stops fix sessions editing tests to make them pass. It knows a test by its folder (`tests/`, `Tests/`, `__tests__/`, `spec/`, a .NET `App.Tests/`, `App.Tests.Unit/` or `App.UnitTests/`) or its name (`a.test.ts`, `a.spec.ts`, `add_test.go`, `calc_test.py`, `test_calc.py`, `calc_test.rb`, `calc_spec.rb`, `calc_test.exs`, `calc_test.cc`, `CalcTests.cs`, `CalcTest.java`, `CalcTests.swift`). A source file whose name only mentions a test (`ab-test.ts`, `self-test.ts`, `openapi-spec.yaml`, `ABTest.java`) is not one. Tests the change itself added or changed on its branch stay editable; when a fix is refused an edit, the block note names the file. The hook comes with every session Loopstra starts for a change: it is passed to `claude` with `--settings` and runs from the installed package (`bun "<package>/templates/hooks/loopstra-protect-tests.ts"`). It also keeps acceptance tests in place: the `acceptance` session may edit only tests and test fixtures (by the same folders and names), and build, fix, reconcile and revise may not edit the acceptance test files, which reach it in `LOOPSTRA_ACCEPTANCE`. It does nothing in other sessions, and nothing is written into the repository's `.claude/`. Claude Code runs it through its own shell (Git Bash on Windows), so `bun` must be on the PATH Claude Code sees.
+**The test-protection hook** stops fix sessions editing tests to make them pass. It knows a test by its folder (`tests/`, `Tests/`, `__tests__/`, `spec/`, a .NET `App.Tests/`, `App.Tests.Unit/` or `App.UnitTests/`) or its name (`a.test.ts`, `a.spec.ts`, `add_test.go`, `calc_test.py`, `test_calc.py`, `calc_test.rb`, `calc_spec.rb`, `calc_test.exs`, `calc_test.cc`, `CalcTests.cs`, `CalcTest.java`, `CalcTests.swift`). A source file whose name only mentions a test (`ab-test.ts`, `self-test.ts`, `openapi-spec.yaml`, `ABTest.java`) is not one. Tests the change itself added or changed on its branch stay editable; when a fix is refused an edit, the block note names the file. The hook comes with every session Loopstra starts for a change: it is passed to `claude` with `--settings` and runs from the installed package (`bun "<package>/templates/hooks/loopstra-protect-tests.ts"`). It also keeps acceptance tests in place: the `acceptance` session may edit only tests and test fixtures (by the same folders and names), and build, fix, reconcile and revise may not edit the acceptance test files, which reach it in `LOOPSTRA_ACCEPTANCE`. And it keeps the loop off the repository's standards: acceptance, build, fix, reconcile, revise and resolve may not edit anything under `loopstra/standards/` ("the repository's standards (loopstra/standards/) are changed by a person on main, never by the loop's sessions"); the merge checks block a change whose diff does anyway (see Standards). It does nothing in other sessions, and nothing is written into the repository's `.claude/`. Claude Code runs it through its own shell (Git Bash on Windows), so `bun` must be on the PATH Claude Code sees.
 
 ## Upgrade
 

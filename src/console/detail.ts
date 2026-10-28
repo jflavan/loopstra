@@ -5,12 +5,14 @@ import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
+import { errorText } from "../shell";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
 import { runsDir } from "../paths";
+import { changeStandards } from "./standards";
 import { changeSummary, loopNow, runningRows, totalsIn } from "./model";
-import type { AgentSetupView, ChangeDetail, PhaseView, SpendView } from "./types";
+import type { AgentSetupView, ChangeDetail, ChangeStandardsView, PhaseView, SpendView } from "./types";
 
 /** One change with everything its page shows, or null when there is no such change. */
 export async function changeDetail(root: string, trace: Trace, slug: string, now: Date = new Date()): Promise<ChangeDetail | null> {
@@ -44,7 +46,20 @@ export async function changeDetail(root: string, trace: Trace, slug: string, now
     documents: ARTIFACTS.filter((a) => i.artifacts.has(a)).map((a) => ({ name: a, url: `/docs/${slug}/${a}` })),
     phases,
     gates: trace.gates(slug),
+    ...(await standardsPanel(root, trace, slug)),
   };
+}
+
+/** The change's standards panel, as a field to spread; nothing when it cannot be read or the repository has no standards. */
+async function standardsPanel(root: string, trace: Trace, slug: string): Promise<{ standards?: ChangeStandardsView }> {
+  try {
+    const standards = await changeStandards(root, trace, slug);
+    return standards ? { standards } : {};
+  } catch (e) {
+    console.error(`loopstra ui: a change's standards could not be read: ${errorText(e).replace(/\s+/g, " ")}`);
+    // The page's other parts still show; Needs attention names an unreadable standards folder.
+    return {};
+  }
 }
 
 /** A recorded `agent_setup` payload as the page shows it; null when there is none. Each field is read defensively. */

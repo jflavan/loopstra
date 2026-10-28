@@ -7,14 +7,16 @@ import { onCheckout, oneMerge, othersRunningCommands } from "../lanes";
 import { changeGates, humanGates, type Status } from "../intents";
 import { codePhase } from "../phases";
 import { deleteRemoteBranch, moveMain, pushBranch, shareMain, syncMain, type SyncOutcome } from "../remote";
-import { riskEvidence, riskNote, riskySet, scoreRisk, type Risk } from "../risk";
+import { branchDiff, changedFiles, filesOf, riskEvidence, riskNote, riskySet, scoreRisk, type BranchDiff, type Risk, type RiskSource } from "../risk";
+import { STANDARDS_APPLIED, STANDARDS_DIR, type AppliedRecord, type Applying } from "../standards";
 import { errorText } from "../shell";
+import { andList } from "../text";
 import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
 import { catchUp, outOfDate, PUSH_PENDING, RESOLVED_AT, roundsAllowed } from "./catch-up";
 import { catchUpTested, REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
+import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, stageStandards, toolChecks, writeRound, type ToolCheck } from "./shared";
 
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
 export const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
@@ -91,14 +93,40 @@ type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fai
 
 /**
  * The merge gate's automated checks, run in the worktree: the branch is brought up to date with
- * main (rebase), the test loop passes (it may commit fixes), and the newest review had no
- * important findings. Each check is recorded as a gate row.
+ * main (rebase), the test loop passes (it may commit fixes) with the checks of the standards that
+ * apply to the diff after the tests, and the newest review had no important findings. Each check
+ * is recorded as a gate row, and each standard's check as one of its own (`check:<name>`).
  */
 async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
   // A failing check hands back the failure to record; the tests check says whether it committed fixes.
+  const prefix = `${STANDARDS_DIR}/`;
+  const changedNow = await changedFiles(wt, main);
+  const touched = changedNow.filter((f) => f.startsWith(prefix));
+  const list = andList(touched);
+  const hasStandards = (await ctx.standards()).standards.length > 0;
+  // The standards' checks, in the standards' order, each with its standard's name for its row.
+  const tools = hasStandards
+    ? (await stageStandards(ctx, changedNow)).list.flatMap((a) => toolChecks([a]).map((check) => ({ name: a.standard.name, check })))
+    : [];
+  const extra = tools.map((t) => t.check);
+  // What the tests check found for the tool checks: they passed on this code before, or this one kept failing.
+  let toolsSkipped = false;
+  let toolFailed: (Failure & { check?: ToolCheck }) | null = null;
   const checks: Check<Failure | { ok: true; changed: boolean }>[] = [
+    // First, so nothing is spent on a change that cannot merge. Only a person edits the standards.
+    // A repository without standards, and a diff that leaves the folder alone, gets no row for it.
+    ...(touched.length || hasStandards ? [{
+      name: "standards-untouched",
+      run: async (): ReturnType<Check<Failure | { ok: true; changed: boolean }>["run"]> => touched.length
+        ? {
+          result: "fail",
+          evidence: `edits ${list}`,
+          payload: { ok: false, note: `This change edits the repository's standards (${touched.join(", ")}), which only a person may change. An engineer can take that edit out of the change's branch and retry the change, or close it.`, detail: `the diff against ${main} touches ${list}` },
+        }
+        : { result: "pass", evidence: `nothing under ${prefix}` },
+    }] : []),
     {
       name: "up-to-date",
       run: async () => {
@@ -116,25 +144,42 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         const before = await wt.headSha();
         // Already tested: the same commit, or one that differs only in records under intent/ (a
         // rebase that brought in main's bookkeeping). Running the tests again would prove nothing new.
-        if (await alreadyTested(ctx, wt)) {
+        if (await alreadyTested(ctx, wt, extra)) {
+          toolsSkipped = true;
           return { result: "pass", evidence: "the tests already passed on this code; only records under intent/ changed since" };
         }
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
-        const tested = await testLoop(ctx, "merge-test");
-        if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
-        // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back: the
-        // merge checks never keep them, so a file rewritten on every run cannot start one review round
-        // after another, and no later rebase or merge meets them unsaved. The build's own runs keep a
-        // reformat (review start commits it), so it is reviewed. New files were removed after each run.
+        // The standards' checks run in it after the tests, and a failing one is fixed the same way.
+        const tested = await testLoop(ctx, "merge-test", extra);
+        // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back,
+        // whatever the outcome: the merge checks never keep them, so a file rewritten on every run
+        // cannot start one review round after another, and no later rebase (a retry's, say) or merge
+        // meets them unsaved. The build's own runs keep a reformat (review start commits it), so it is
+        // reviewed. New files were removed after each run.
         const rewritten = await wt.changedTrackedFiles();
         if (rewritten.length) {
           await wt.putBack(rewritten);
           ctx.trace.event(ctx.slug, "command", { command: "merge checks", note: `left out files the checks' commands rewrote: ${rewritten.join(", ")}` });
         }
+        if (!tested.ok && tested.check) {
+          // The tests passed in the last run (the checks run after them); the check's own row fails.
+          toolFailed = tested;
+          return { result: "pass", evidence: "the tests pass; a standard's check does not" };
+        }
+        if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
         const changed = (await wt.headSha()) !== before;
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
       },
     },
+    ...tools.map(({ name, check }): Check<Failure | { ok: true; changed: boolean }> => ({
+      name: `check:${name}`,
+      run: async () => {
+        if (toolsSkipped) return { result: "pass", evidence: "already passed on this code" };
+        const failed = toolFailed;
+        if (failed?.check === check) return { result: "fail", evidence: failed.detail, payload: { ok: false, note: failed.note, detail: failed.detail } };
+        return { result: "pass", evidence: `\`${check.command}\` exits 0` };
+      },
+    })),
     {
       name: "findings",
       run: async () => {
@@ -166,7 +211,11 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
  */
 async function passMergeGate(ctx: StepContext): Promise<StepResult> {
   const hasRemote = (await ctx.git.remoteName()) !== null;
-  const risk = await riskOf(ctx);
+  // The branch's diff, read at most once for this pass (the standards and the risk both use it), and only when one needs it.
+  let diff: Promise<BranchDiff> | null = null;
+  const diffOnce = (): Promise<BranchDiff> => (diff ??= branchDiff(new Git(ctx.worktreeDir), ctx.cfg.main_branch));
+  const applyingNow = await recordStandards(ctx, diffOnce);
+  const risk = await riskOf(ctx, applyingNow, diffOnce);
   const own = ctx.cfg.gates.merge.human === "none" && risk?.risky ? ctx.cfg.gates.merge.risky.human : undefined;
   const fields = own ? { set: { merge_gate: own } } : { remove: ["merge_gate" as const] };
   // The note says why when the change's own gate brings in the person.
@@ -187,13 +236,38 @@ async function passMergeGate(ctx: StepContext): Promise<StepResult> {
 }
 
 /**
- * Scores the change's branch in its worktree against main (see scoreRisk) and records it as the
- * merge gate's risk row; null, with no row, when the config names nothing risky, or already has a
- * person on the merge gate (risk would change nothing, so it is neither scored nor shown).
+ * The standards that apply to the change's diff, recorded as the `standards` gate row and the
+ * STANDARDS_APPLIED marker; nothing is written (and nothing read from the diff) in a repository
+ * without standards. The list is empty then.
  */
-async function riskOf(ctx: StepContext): Promise<Risk | null> {
-  if (!riskySet(ctx.cfg) || ctx.cfg.gates.merge.human !== "none") return null;
-  const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg);
+async function recordStandards(ctx: StepContext, diff: () => Promise<BranchDiff>): Promise<Applying[]> {
+  if (!(await ctx.standards()).standards.length) return [];
+  const list = (await stageStandards(ctx, filesOf(await diff()))).list;
+  const marker: AppliedRecord = {
+    commit: await ctx.readCommit(),
+    applying: list.map((a) => ({ name: a.standard.name, why: a.why, files: a.files })),
+  };
+  writeMarker(ctx, STANDARDS_APPLIED, JSON.stringify(marker, null, 2));
+  const named = list.map((a) => `${a.standard.title} (${a.standard.rules.map((r) => r.label).join(", ")})`);
+  ctx.trace.gate(ctx.slug, "merge", "standards", "pass", named.length ? `applying ${named.join("; ")}` : "no standard applies to this change");
+  return list;
+}
+
+/**
+ * Scores the change's branch in its worktree against main (see scoreRisk) and records it as the
+ * merge gate's risk row; null, with no row, when the config names nothing risky and no standard
+ * needs a person, or already has a person on the merge gate (risk would change nothing, so it is
+ * neither scored nor shown). A standard with needs_person counts as patterns beside risky.paths:
+ * its applies_to when they matched, every file when it applies to every change or a person added it.
+ */
+async function riskOf(ctx: StepContext, applyingNow: Applying[], diff: () => Promise<BranchDiff>): Promise<Risk | null> {
+  const extra: RiskSource[] = applyingNow
+    .filter((a) => a.standard.needsPerson)
+    // Only a standard whose own patterns matched is scoped by them; one for every change, or one a
+    // person added to this change (its patterns matched nothing), covers every file.
+    .map((a) => ({ patterns: a.why === "files" && a.standard.appliesTo ? a.standard.appliesTo : ["**"], standard: { title: a.standard.title, path: a.standard.path } }));
+  if ((!riskySet(ctx.cfg) && !extra.length) || ctx.cfg.gates.merge.human !== "none") return null;
+  const risk = await scoreRisk(new Git(ctx.worktreeDir), ctx.cfg.main_branch, ctx.cfg, extra, await diff());
   ctx.trace.gate(ctx.slug, "merge", "risk", risk.risky ? "waiting" : "pass", riskEvidence(risk));
   return risk;
 }

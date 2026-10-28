@@ -151,6 +151,22 @@ describe("scan and queue", () => {
     expect(renderQueue([gated("pr")], [], nobody)).toMatch(/## Needs a person[\s\S]*\| x \|/);
   });
 
+  test("a change's spec_gate and plan_gate put a person on that gate when the config has nobody there", () => {
+    const base = { slug: "x", dir: "", file: { frontmatter: { status: "plan-review", priority: "normal", author: "", opened: "", note: "", hold: "", question: "" }, title: "x", body: "", sections: {} }, artifacts: new Set<string>() } as unknown as Intent;
+    const at = (status: string, fields: Record<string, string>): Intent => ({ ...base, file: { ...base.file, frontmatter: { ...base.file.frontmatter, status, ...fields } } } as Intent);
+    const nobody = humanGates(null);
+    expect(changeGates(nobody, at("plan-review", { plan_gate: "status" }).file.frontmatter)).toEqual({ ...nobody, plan: "status" });
+    expect(changeGates(nobody, at("spec-review", { spec_gate: "status" }).file.frontmatter)).toEqual({ ...nobody, spec: "status" });
+    // Never takes a person off, nor changes the config's own.
+    const pr = { ...nobody, plan: "pr" } as const;
+    expect(changeGates(pr, at("plan-review", { plan_gate: "status" }).file.frontmatter)).toEqual(pr);
+    expect(waitsForPerson(at("plan-review", { plan_gate: "status" }), nobody)).toBe(true);
+    expect(waitsForPerson(at("spec-review", { spec_gate: "status" }), nobody)).toBe(true);
+    expect(waitsForPerson(at("plan-review", { spec_gate: "status" }), nobody)).toBe(false);
+    expect(isRunnable(at("plan-review", { plan_gate: "status" }), nobody)).toBe(false);
+    expect(isRunnable(at("plan-review", {}), nobody)).toBe(true);
+  });
+
   test("writeIntent updates status and note and readIntent sees it", async () => {
     const t = tempDir();
     await mk(t.path, "w", "status: accepted");

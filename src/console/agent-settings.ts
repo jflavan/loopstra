@@ -11,8 +11,8 @@ import { readText } from "../fsutil";
 import { CONSOLE, submitRequest } from "../requests";
 import { CONFIG_REL, fileVersion, STALE_SETTINGS, UNCOMMITTED_FILES } from "../settings";
 import { modelName } from "../setup/sections/models";
-import { localDate } from "../signals";
-import { andList, printable } from "../text";
+import { STANDARD_NAME, STANDARDS_DIR } from "../standards";
+import { andList, localDate, printable } from "../text";
 import { loopNow } from "./model";
 import { json, refuse } from "./routes";
 import { readConfig } from "./settings";
@@ -214,8 +214,15 @@ function parseOp(b: Record<string, unknown>): AgentFilesOp | string {
       if (bad) return bad;
       return base ? { op: "remove", kind, name: name!, base } : `Say which version of the ${kind} the page read.`;
     }
+    case "standard": {
+      const name = str(b.name, MAX_NAME);
+      if (!name || !STANDARD_NAME.test(name)) return "A standard's name is lowercase words joined by dashes, like security.";
+      const text = b.text === null ? null : str(b.text, MAX_BYTES);
+      if (b.text !== null && !text?.trim()) return "Say the standard's text, or null to remove it.";
+      return base ? { op: "standard", name, text, base } : "Say which version of the standard the page read.";
+    }
     default:
-      return "Say copy, fetch, new, edit or remove.";
+      return "Say copy, fetch, new, edit, remove or standard.";
   }
 }
 
@@ -339,6 +346,14 @@ async function build(root: string, cfg: Config, op: AgentFilesOp): Promise<Built
       if (versionNow(root, main) !== op.base) return STALE;
       const writes = files.map((path) => ({ path, content: null }));
       return { what: whatOf("remove", op.kind, [op.name], writes), writes, seen: { [main]: op.base } };
+    }
+    case "standard": {
+      // The loop checks again that main's standards still read with it, and refuses the whole request if not.
+      const path = `${STANDARDS_DIR}/${op.name}.md`;
+      const now = versionNow(root, path);
+      if (op.text === null && now === "absent") return { refused: `There is no standard ${op.name} in the repo.`, status: 404 };
+      if (now !== op.base) return STALE;
+      return { what: `${op.text === null ? "remove" : "edit"} ${path}`, writes: [{ path, content: op.text }], seen: { [path]: op.base } };
     }
   }
 }

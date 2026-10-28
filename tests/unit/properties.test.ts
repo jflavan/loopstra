@@ -6,6 +6,7 @@ import { nextVersion } from "../../scripts/release";
 import { parsePlanFiles } from "../../src/checks";
 import { parseArgs } from "../../src/commands/args";
 import { parseIntentFile, PRIORITIES, serializeIntentFile, STATUSES } from "../../src/intents";
+import { parseStandard, RULE_LABEL } from "../../src/standards";
 import { diffCounts, parseDiff } from "../../src/ui/diff";
 import { parseRoute, routePath, TABS, type Route } from "../../src/ui/router";
 
@@ -147,5 +148,22 @@ describe("the console's addresses", () => {
       const r = parseRoute(`/${parts.join("/")}`);
       expect(parseRoute(routePath(r))).toEqual(r);
     }));
+  });
+});
+
+describe("standard files", () => {
+  test("rules rendered as a list parse back to the same labels and texts", () => {
+    const label = fc.stringMatching(/^[A-Z]([A-Za-z0-9._-]{0,30}[A-Za-z0-9])?$/);
+    const text = fc.stringMatching(/^[A-Za-z0-9]([A-Za-z0-9 ,.;()-]{0,40}[A-Za-z0-9.])?$/);
+    fc.assert(fc.property(
+      fc.uniqueArray(fc.record({ label, text }), { minLength: 1, maxLength: 6, selector: (r) => r.label }),
+      (rules) => {
+        expect(rules.every((r) => RULE_LABEL.test(r.label))).toBe(true);
+        const file = `# Title\n\nContext.\n\n## Rules\n${rules.map((r) => `- ${r.label}: ${r.text}`).join("\n")}\n`;
+        const parsed = parseStandard("x", file);
+        expect(parsed.ok).toBe(true);
+        if (parsed.ok) expect(parsed.standard.rules.map(({ label, text }) => ({ label, text }))).toEqual(rules);
+      },
+    ));
   });
 });

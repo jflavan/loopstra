@@ -122,6 +122,16 @@ test("cloneSource refuses option-like and unknown URLs, and clones a file:// rep
   expect(await cloneSource("https://127.0.0.1:1/nope.git")).toHaveProperty("refused");
 });
 
+test("repoPath accepts exactly loopstra/standards/<name>.md", () => {
+  expect(repoPath("loopstra/standards/architecture.md")).toBe("loopstra/standards/architecture.md");
+  expect(repoPath("loopstra/standards/../x")).toBeNull();
+  expect(repoPath("loopstra/standards/../x.md")).toBeNull();
+  expect(repoPath("loopstra/standards/a/b.md")).toBeNull();
+  expect(repoPath("loopstra/standards/Bad_Name.md")).toBeNull();
+  expect(repoPath("loopstra/standards/.md")).toBeNull();
+  expect(repoPath("loopstra/standards/a.txt")).toBeNull();
+});
+
 test("repoPath keeps writes inside .claude/agents and .claude/skills", () => {
   expect(repoPath(".claude/skills/a/SKILL.md")).toBe(".claude/skills/a/SKILL.md");
   expect(repoPath(".claude/agents/../settings.json")).toBeNull();

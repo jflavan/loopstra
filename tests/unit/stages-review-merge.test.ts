@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { FAKE_CLAUDE_ENV } from "../../src/claude";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Git, GitTimeout } from "../../src/git";
 import { StopRequested } from "../../src/stop";
@@ -8,11 +8,12 @@ import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { cleanupChange, DIRTY_ROOT_NOTE, fixesNotMerged, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
+import { STANDARDS_APPLIED } from "../../src/standards";
 import { MERGE_WAIT_NOTE } from "../../src/stages/shared";
 import type { PrInfo } from "../../src/github";
 import type { StepContext } from "../../src/context";
 import type { Trace } from "../../src/trace";
-import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, withEnv, writeIntentOnDisk } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, fixture, fixtureDir, lastCommit, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
 import { oneMerge } from "../../src/lanes";
@@ -256,6 +257,334 @@ describe("review", () => {
     expect(i.file.frontmatter.note).toContain("plan-approved");
     expect(i.file.frontmatter.note).not.toContain("intent/");
     trace.close(); repo.cleanup();
+  });
+});
+
+describe("review with standards", () => {
+  const SECURITY = "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n- SEC-3: card numbers are never logged\n";
+  const SRC_ONLY = "---\napplies_to:\n  - src/**\n---\n# Source layout\n\n## Rules\n- SRC-1: code lives under src\n";
+  const DOCS_ONLY = "---\napplies_to:\n  - docs/**\n---\n# Docs\n\n## Rules\n- DOC-1: docs have a title\n";
+  const EXCEPTION = "# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the audit log keeps one token (M., from a status edit, 2026-10-27)\n";
+
+  /** A built change whose main has standards (and the record of an exception), reviewed with the finding fixture. */
+  async function withStandards(finding: boolean) {
+    const s = await built(ONE_ROUND);
+    mkdirSync(join(s.repo.path, "loopstra", "standards"), { recursive: true });
+    for (const [name, text] of [["security", SECURITY], ["layout", SRC_ONLY], ["docs", DOCS_ONLY]] as const) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+    await Bun.write(join(s.repo.path, "intent", "add-numbers", "standards.md"), EXCEPTION);
+    await Bun.write(join(s.repo.path, "loopstra", "prompts", "review.md"), `{{spec}} FIXTURE:${finding ? "review-standard" : "review"}`);
+    await new Git(s.repo.path).commitAll("standards");
+    await s.ctx.reload();
+    rmSync(join(s.ctx.runDir, EARLY_REVIEW), { force: true });
+    return s;
+  }
+  const reviewPrompt = async (s: Awaited<ReturnType<typeof withStandards>>) => {
+    const p = s.trace.phases("add-numbers").find((x) => x.name === "review-1")!;
+    return Bun.file(join(s.ctx.runDir, "phases", `${p.seq}-review-1`, "prompt.md")).text();
+  };
+
+  test("the reviewer is given the standards that apply to the diff, the excepted rules, and the instruction", async () => {
+    const s = await withStandards(false);
+    await runMergeStep(s.ctx);
+    const prompt = await reviewPrompt(s);
+    expect(prompt).toContain("Standards this repository holds every change to:");
+    expect(prompt).toContain("A change that breaks a rule below is an important finding; set `standard` to the rule's label.");
+    expect(prompt).toContain("SEC-3");
+    expect(prompt).toContain("SRC-1");
+    expect(prompt).not.toContain("DOC-1");
+    expect(prompt).toContain("Rules under an approved exception:\n- SEC-1: the audit log keeps one token");
+    expect(prompt).toContain("a breach within an approved exception is not a finding");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a finding that names a rule is important, and review.md lists it under Findings against the standards", async () => {
+    const s = await withStandards(true);
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "review")).toEqual(["findings:fail", "findings:fail"]);
+    const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+    expect(md).toContain("## Findings\n- important src/add.ts:1 logs the card number");
+    expect(md.endsWith("\n## Findings against the standards\n- important · SEC-3 · src/add.ts:1: logs the card number\n")).toBe(true);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a finding written over several lines stays on one line under Findings against the standards", async () => {
+    const wrapped = fixture("review-standard").replace('"finding":"logs the card number"', '"finding":"logs the\\n  card   number"');
+    const dir = fixtureDir({ "review-1": wrapped, "review-2": wrapped, "review-3": wrapped });
+    try {
+      const s = await withStandards(true);
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => runMergeStep(s.ctx));
+      const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+      expect(md.endsWith("\n## Findings against the standards\n- important · SEC-3 · src/add.ts:1: logs the card number\n")).toBe(true);
+      s.trace.close(); s.repo.cleanup();
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("review.md is as the reviewer wrote it when no finding names a rule", async () => {
+    const s = await withStandards(false);
+    await runMergeStep(s.ctx);
+    const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+    expect(md).not.toContain("Findings against the standards");
+    s.trace.close(); s.repo.cleanup();
+  });
+});
+
+describe("merge with standards", () => {
+  const SOC2 = "# SOC 2\n\n## Rules\n- SOC-1: changes are reviewed\n";
+  const PAYMENTS = "---\napplies_to:\n  - src/**\nneeds_person: true\n---\n# Payments data\n\n## Rules\n- PAY-1: card numbers are never stored\n";
+  const EVERY = "---\nneeds_person: true\n---\n# Everything\n\n## Rules\n- ALL-1: be careful\n";
+
+  /** A built change (nobody on the merge gate unless `config` says so) whose main has `files` under loopstra/standards/. */
+  async function withStandards(files: Record<string, string>, config = "") {
+    const s = config ? await builtWith(config) : await built();
+    mkdirSync(join(s.repo.path, "loopstra", "standards"), { recursive: true });
+    for (const [name, text] of Object.entries(files)) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+    await new Git(s.repo.path).commitAll("standards");
+    await s.ctx.reload();
+    return s;
+  }
+
+  test("a diff touching loopstra/standards/ blocks, before anything else is checked", async () => {
+    const s = await withStandards({ soc2: SOC2 });
+    const wt = new Git(s.ctx.worktreeDir);
+    mkdirSync(join(s.ctx.worktreeDir, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(s.ctx.worktreeDir, "loopstra", "standards", "extra.md"), SOC2.replace("SOC-1", "SOC-9"));
+    await wt.commitAll("edit a standard");
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter.status).toBe("blocked");
+    expect(s.ctx.intent.file.frontmatter.note).toStartWith("This change edits the repository's standards (loopstra/standards/extra.md), which only a person may change. An engineer can take that edit out of the change's branch and retry the change, or close it.");
+    expect(gateRows(s.trace, "merge")).toEqual(["standards-untouched:fail"]);
+    expect(s.trace.lastGate("add-numbers", "merge", "standards-untouched")?.evidence).toContain("loopstra/standards/extra.md");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a diff touching the folder blocks even when main has no standards yet", async () => {
+    const s = await built();
+    mkdirSync(join(s.ctx.worktreeDir, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(s.ctx.worktreeDir, "loopstra", "standards", "new.md"), SOC2);
+    await new Git(s.ctx.worktreeDir).commitAll("add a standard");
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "merge")).toEqual(["standards-untouched:fail"]);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a needs_person standard makes the change wait, and the note names it", async () => {
+    const s = await withStandards({ payments: PAYMENTS });
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    const fm = s.ctx.intent.file.frontmatter;
+    expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(fm.note).toBe("This change falls under the standard Payments data (loopstra/standards/payments.md), which is set to need a person before merging: it touches src/add.ts. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.");
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")?.result).toBe("waiting");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a person already on the gate is unchanged: no risk row, no merge_gate", async () => {
+    const s = await withStandards({ payments: PAYMENTS }, PERSON_MERGES.replace("status", "pr"));
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter.merge_gate).toBeUndefined();
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")).toBeNull();
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a scoped needs_person standard a person added to the change makes it wait, though no file matches", async () => {
+    const billing = PAYMENTS.replace("src/**", "services/billing/**");
+    const s = await withStandards({ payments: billing });
+    await Bun.write(join(s.repo.path, "intent", "add-numbers", "standards.md"), "# Standards decisions for add-numbers\n\n## Added\n- payments: it takes card numbers (J., from the console, 2026-10-28)\n");
+    await new Git(s.repo.path).commitAll("add payments");
+    await s.ctx.reload();
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    const fm = s.ctx.intent.file.frontmatter;
+    expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(fm.note).toContain("falls under the standard Payments data (loopstra/standards/payments.md)");
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")?.result).toBe("waiting");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a needs_person standard without applies_to makes every change wait", async () => {
+    const s = await withStandards({ everything: EVERY });
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(s.ctx.intent.file.frontmatter.note).toContain("falls under the standard Everything");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("the merge gate records standards.applied and a standards row", async () => {
+    const s = await withStandards({ soc2: SOC2, payments: PAYMENTS.replace("needs_person: true", "needs_person: false") });
+    await runMergeStep(s.ctx);
+    const marker = JSON.parse(await Bun.file(join(s.ctx.runDir, STANDARDS_APPLIED)).text());
+    expect(marker.commit).toMatch(/^[0-9a-f]{40,64}$/);
+    expect(marker.applying).toEqual([
+      { name: "payments", why: "files", files: expect.arrayContaining(["src/add.ts"]) },
+      { name: "soc2", why: "every", files: [] },
+    ]);
+    expect(s.trace.lastGate("add-numbers", "merge", "standards")).toMatchObject({ result: "pass", evidence: "applying Payments data (PAY-1); SOC 2 (SOC-1)" });
+    expect(await status(s.repo.path)).toBe("merged");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a repository without standards writes no row and no marker", async () => {
+    const s = await built();
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+    expect(existsSync(join(s.ctx.runDir, STANDARDS_APPLIED))).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+});
+
+describe("tool checks at merge", () => {
+  /** A standard for every change, titled `title`, whose check is `command`. */
+  const withCheck = (command: string, title = "Fixed") => `---\ncheck: ${JSON.stringify(command)}\n---\n# ${title}\n\n## Rules\n- FIX-1: the change is fixed\n`;
+  /** Passes once the change has a FIXED file (the fix-writes-fixed fixture commits one). */
+  const FIXED_CHECK = `bun -e "process.exit(require('fs').existsSync('FIXED') ? 0 : 1)"`;
+  const SOC2 = "# SOC 2\n\n## Rules\n- SOC-1: changes are reviewed\n";
+
+  /** A built change (nobody on the merge gate unless `config` says so) whose main has these standards. */
+  async function withStandards(files: Record<string, string>, config = "") {
+    const s = config ? await builtWith(config) : await built();
+    for (const [name, text] of Object.entries(files)) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+    await new Git(s.repo.path).commitAll("standards");
+    await s.ctx.reload();
+    return s;
+  }
+
+  const ran = (trace: Trace, command: string) => trace.events("add-numbers").filter((e) => e.type === "command" && JSON.parse(e.payload).command === command).length;
+  const promptOf = (s: { ctx: StepContext; trace: Trace }, name: string) => {
+    const p = s.trace.phases("add-numbers").filter((x) => x.name === name).at(-1)!;
+    return Bun.file(join(s.ctx.runDir, "phases", `${p.seq}-${name}`, "prompt.md")).text();
+  };
+
+  test("a failing check goes to a fix, then to review; the judges hear the tests passed, and a check that passed is not run again", async () => {
+    const s = await withStandards({ fixed: withCheck(FIXED_CHECK) });
+    await usePrompt(s.repo.path, "fix", "{{failure_output}} commands={{commands}} FIXTURE:fix-writes-fixed");
+    await s.ctx.reload();
+    // Nobody on the merge gate: the step reviews the fix and merges in the same run.
+    await runMergeStep(s.ctx);
+    expect(phaseNames(s.trace).slice(phaseNames(s.trace).indexOf("review-1") + 1)).toEqual(["merge-test-1", "fix-1", "merge-test-2", "review-2", "merge"]);
+    const fix = await promptOf(s, "fix-1");
+    expect(fix).toContain(`The command \`${FIXED_CHECK}\` failed. It is the automatic check of the standard Fixed (loopstra/standards/fixed.md).`);
+    // The fix session may run the check itself.
+    expect(fix.slice(fix.indexOf("commands="))).toContain(`\`${FIXED_CHECK}\``);
+    // The review of the fix is told the tests passed on it.
+    expect(await promptOf(s, "review-2")).toContain("The test command passed after the latest change.");
+    // The first merge checks found the fix; the second, on the same code, did not run the check again.
+    expect(gateRows(s.trace, "merge")).toEqual([
+      "standards-untouched:pass", "up-to-date:pass", "tests:pass", "check:fixed:pass", "findings:pass",
+      "standards-untouched:pass", "up-to-date:pass", "tests:pass", "check:fixed:pass", "findings:pass", "standards:pass",
+    ]);
+    const rows = s.trace.gates("add-numbers").filter((g) => g.check === "check:fixed").map((g) => g.evidence);
+    expect(rows).toEqual([`\`${FIXED_CHECK}\` exits 0`, "already passed on this code"]);
+    expect(ran(s.trace, FIXED_CHECK)).toBe(2);
+    expect(await status(s.repo.path)).toBe("merged");
+    expect(await onMain(s.repo.path, "FIXED")).toBe(true);
+    s.trace.close(); s.repo.cleanup();
+  }, 60_000);
+
+  test("a check that passed is not run again on the same code, and its row is written again", async () => {
+    const s = await withStandards({ fixed: withCheck("echo checked") }, PERSON_MERGES);
+    await runMergeStep(s.ctx);
+    expect(await status(s.repo.path)).toBe("merge-review");
+    await personSets(s.ctx, "merge-approved");
+    await runMergeStep(s.ctx);
+    expect(await status(s.repo.path)).toBe("merged");
+    expect(ran(s.trace, "echo checked")).toBe(1);
+    const rows = s.trace.gates("add-numbers").filter((g) => g.check === "check:fixed").map((g) => [g.result, g.evidence]);
+    expect(rows).toEqual([["pass", "`echo checked` exits 0"], ["pass", "already passed on this code"]]);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  for (const [command, hint] of [["exit 1", true], [`echo "$LOOPSTRA_BASE" && exit 1`, false]] as const) {
+    test(`past the fix budget it blocks naming the standard${hint ? ", with the main hint for a check without LOOPSTRA_BASE" : ""}`, async () => {
+      const s = await withStandards({ secrets: withCheck(command, "Secrets") }, "stages:\n  build:\n    max_fix_loops: 1\n");
+      await runMergeStep(s.ctx);
+      const fm = (await readIntent(s.repo.path, "add-numbers")).file.frontmatter;
+      expect(fm.status).toBe("blocked");
+      const note = "The change does not pass the automatic check of the standard Secrets (loopstra/standards/secrets.md), even after 1 try to fix it. The details are in the trace. An engineer can fix it on the branch and retry the change, or close it.";
+      const main = " If main fails this check too, the problem may not be this change's; see loopstra setup --check.";
+      expect(fm.note).toStartWith(hint ? `${note}${main}` : note);
+      if (!hint) expect(fm.note).not.toContain("If main fails");
+      expect(gateRows(s.trace, "merge")).toEqual(["standards-untouched:pass", "up-to-date:pass", "tests:pass", "check:secrets:fail"]);
+      expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+      s.trace.close(); s.repo.cleanup();
+    });
+  }
+
+  test("with speed.parallel_checks the standards' checks start after the configured commands passed", async () => {
+    const s = await withStandards({ linted: withCheck(`bun -e "process.exit(require('fs').existsSync('linted') ? 0 : 1)"`, "Linted") }, "speed:\n  parallel_checks: true\nstages:\n  build:\n    max_fix_loops: 1\n");
+    s.trace.close();
+    const lint = join(s.repo.path, "slow-lint.ts");
+    await Bun.write(lint, `import { writeFileSync } from "node:fs";\nawait Bun.sleep(500);\nwriteFileSync("linted", "");\n`);
+    const config = await Bun.file(configPath(s.repo.path)).text();
+    await Bun.write(configPath(s.repo.path), config.replace("commands:\n", `commands:\n  lint: bun "${lint.replace(/\\/g, "/")}"\n`));
+    await new Git(s.repo.path).commitAll("a slow lint");
+    const { ctx, trace } = await openRepo(s.repo.path);
+    await runMergeStep(ctx);
+    expect(await status(s.repo.path)).toBe("merged");
+    expect(phaseNames(trace)).not.toContain("fix-1");
+    expect(trace.lastGate("add-numbers", "merge", "check:linted")?.result).toBe("pass");
+    trace.close(); s.repo.cleanup();
+  });
+
+  test("a check that keeps failing still puts back the files a lint command rewrote", async () => {
+    const s = await withStandards({ secrets: withCheck("exit 1", "Secrets") }, "stages:\n  build:\n    max_fix_loops: 1\n");
+    s.trace.close();
+    const fmt = join(s.repo.path, "fmt.ts");
+    await Bun.write(fmt, `import { writeFileSync } from "node:fs";\nwriteFileSync("src/add.ts", "export const formatted = 1;\\n");\n`);
+    const config = await Bun.file(configPath(s.repo.path)).text();
+    await Bun.write(configPath(s.repo.path), config.replace("commands:\n", `commands:\n  lint: bun "${fmt.replace(/\\/g, "/")}"\n`));
+    await new Git(s.repo.path).commitAll("a formatter");
+    const { ctx, trace } = await openRepo(s.repo.path);
+    expect(ctx.cfg.commands.lint).toContain("fmt.ts");
+    await runMergeStep(ctx);
+    expect(await status(s.repo.path)).toBe("blocked");
+    expect(gateRows(trace, "merge")).toEqual(["standards-untouched:pass", "up-to-date:pass", "tests:pass", "check:secrets:fail"]);
+    expect(await new Git(ctx.worktreeDir).changedTrackedFiles()).toEqual([]);
+    trace.close(); s.repo.cleanup();
+  });
+
+  test("the check sees LOOPSTRA_BASE as a commit: the merge base, after main moved on", async () => {
+    const dir = tempDir("loopstra-base-");
+    const script = join(dir.path, "record.ts").replaceAll("\\", "/");
+    const bases = join(dir.path, "bases");
+    writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(bases)}, JSON.stringify({ base: process.env.LOOPSTRA_BASE ?? null, slug: process.env.LOOPSTRA_SLUG ?? null }) + "\\n");\n`);
+    const check = `bun -e "process.exit(/^[0-9a-f]{40,64}$/.test(process.env.LOOPSTRA_BASE ?? '') ? 0 : 1)" && bun "${script}"`;
+    const s = await withStandards({ base: withCheck(check) });
+    try {
+      // main moves on past the branch (the standards commit, and another change).
+      await Bun.write(join(s.repo.path, "src", "other.ts"), "export const OTHER = 1;\n");
+      await new Git(s.repo.path).commitAll("other-change: on main");
+      const moved = await s.ctx.git.headSha();
+      await s.ctx.reload();
+      await runMergeStep(s.ctx);
+      expect(await status(s.repo.path)).toBe("merged");
+      const seen = readFileSync(bases, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { base: string; slug: string });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.base).toMatch(/^[0-9a-f]{40,64}$/);
+      expect(seen[0]!.slug).toBe("add-numbers");
+      // The commit the branch was rebased onto: main after it moved on.
+      expect(await s.ctx.git.isAncestor(moved, seen[0]!.base)).toBe(true);
+      expect(await s.ctx.git.isAncestor(seen[0]!.base, "main")).toBe(true);
+      expect(s.trace.lastGate("add-numbers", "merge", "check:base")?.result).toBe("pass");
+    } finally {
+      s.trace.close(); s.repo.cleanup(); dir.cleanup();
+    }
+  });
+
+  test("standards without checks leave the tested marker and the rows as they were", async () => {
+    const s = await withStandards({ soc2: SOC2 }, PERSON_MERGES);
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "merge").filter((r) => !r.startsWith("standards"))).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+    const head = (await new Git(s.ctx.worktreeDir).run(["rev-parse", "HEAD"])).out.trim();
+    expect(await Bun.file(join(s.ctx.runDir, "tested")).text()).toBe(`${head}\nbun test\n\n`);
+    s.trace.close(); s.repo.cleanup();
   });
 });
 

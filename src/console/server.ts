@@ -10,6 +10,7 @@ import { streamAgents } from "./agents";
 import { changeDetail, spendView } from "./detail";
 import { changeDiff } from "./diff";
 import { settingsView } from "./settings";
+import { checkDraft, exceptionsView, scopeAction, standardsView, tryCheck } from "./standards";
 import { resolveDocument, resolveRunFile } from "./files";
 import { Hub, type Send } from "./hub";
 import { decode, json, jsonWrite, NO_STORE, ownSite, plain, refuse } from "./routes";
@@ -34,6 +35,8 @@ type Timeouts = { timeout(req: Request, seconds: number): void };
  * server and the page wrongly says the change has no branch.
  */
 export const JSON_IDLE_SECONDS = 60;
+/** No idle limit for a check tried on main: it is bounded by claude.timeout_minutes, which may be longer than a request may idle (Bun allows 255 s). */
+const TRY_IDLE_SECONDS = 0;
 
 /**
  * The console on 127.0.0.1. Bun bundles the page once at start and serves it and its chunks itself,
@@ -51,12 +54,12 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     development: false,
     // Bun drops the connection of a request whose body is bigger, before reading it into memory.
     maxRequestBodySize: MAX_BODY_BYTES,
-    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/settings": page, "/c/*": page, "/s/*": page },
+    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/settings": page, "/settings/exceptions": page, "/c/*": page, "/s/*": page },
     async fetch(req, server) {
       const url = new URL(req.url);
       if (!LOCAL_HOSTS.has(url.hostname)) return plain("Forbidden", 403);
       if (url.pathname === "/api/chat" && opts.chat) return opts.chat.handle(req, url);
-      const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url)) ?? (await agentFiles(root, hub, req, url, server));
+      const written = (await writes(root, hub, req, url)) ?? (await steerRoutes(root, hub, req, url)) ?? (await agentFiles(root, hub, req, url, server)) ?? (await standardsWrites(root, hub, req, url, server));
       if (written) return written;
       if (req.method !== "GET" && req.method !== "HEAD") return plain("Read only", 405);
       return (await read(root, hub, req, url, server)) ?? plain("Not found", 404);
@@ -84,6 +87,21 @@ async function agentFiles(root: string, hub: Hub, req: Request, url: URL, server
 }
 
 /**
+ * `/api/standards/check`, `/try` and `/scope`. Only `/try` runs a command (in a throwaway checkout,
+ * as long as the config's claude timeout allows), so only it has no idle limit. Null for any other path.
+ */
+async function standardsWrites(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
+  const handler = { "/api/standards/check": checkDraft, "/api/standards/try": tryCheck, "/api/standards/scope": scopeAction }[url.pathname];
+  if (!handler) return null;
+  server.timeout(req, url.pathname === "/api/standards/try" ? TRY_IDLE_SECONDS : JSON_IDLE_SECONDS);
+  return jsonWrite(req, url, async (body) => {
+    const answer = await handler(root, body);
+    if (url.pathname === "/api/standards/scope") hub.poke();
+    return answer;
+  });
+}
+
+/**
  * The data routes: `/api/stream`, `/api/agents/stream`, `/api/agents` and `/api/agents/source`, `/api/changes/<slug>` and its `/diff`, `/api/sessions/<slug>/<seq>/stream`,
  * `/api/events`, `/api/spend`, `/api/settings`, run files under `/files/`, a change's documents under `/docs/`. Null: not found.
  * Exported so a test can pass a fake `Timeouts`.
@@ -103,6 +121,14 @@ export async function read(root: string, hub: Hub, req: Request, url: URL, serve
   if (path === "/api/agents") {
     server.timeout(req, JSON_IDLE_SECONDS);
     return json(await agentsView(root));
+  }
+  if (path === "/api/standards") {
+    server.timeout(req, JSON_IDLE_SECONDS);
+    return json(await standardsView(root));
+  }
+  if (path === "/api/standards/exceptions") {
+    server.timeout(req, JSON_IDLE_SECONDS);
+    return json(await exceptionsView(root));
   }
   if (path === "/api/agents/source") {
     // It clones: only the page's own GET may start one (a HEAD, or another site's link or image, may not).

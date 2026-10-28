@@ -2,17 +2,25 @@
 // Claude Code PreToolUse hook that keeps Loopstra's sessions off the tests they must not change:
 // - the acceptance step writes only tests and test fixtures;
 // - build, fix, reconcile and revise may not edit the acceptance tests ($LOOPSTRA_ACCEPTANCE, a JSON list);
-// - fix may not edit test files, except tests the change added or changed on its branch.
+// - fix may not edit test files, except tests the change added or changed on its branch;
+// - no session may edit loopstra/standards/, which only a person changes on main (resolve gets that rule alone).
 // Input: JSON on stdin with tool_name and tool_input. Exit 2 blocks the action and sends stderr to Claude.
 import { appendFileSync } from "node:fs";
+import { posix } from "node:path";
 // The test rules, from the installed package beside this hook.
 import { isAcceptancePath, isTestPath } from "../../src/test-paths";
 const input = JSON.parse(await Bun.stdin.text()) as { tool_name?: string; tool_input?: { file_path?: string; path?: string } };
 const phase = process.env.LOOPSTRA_PHASE ?? "";
+// The phases the hook guards: the writing phases, and resolve (which takes the standards rule only).
+const GUARDED = new Set(["acceptance", "build", "fix", "reconcile", "revise", "resolve"]);
 // The phases that change the code, and so may not change the tests written from Done when.
 const EDITS_CODE = new Set(["build", "fix", "reconcile", "revise"]);
-if (phase !== "acceptance" && !EDITS_CODE.has(phase)) process.exit(0);
-const slashes = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+if (!GUARDED.has(phase)) process.exit(0);
+// Forward slashes, and `.` and `..` segments resolved, so `src/../loopstra/standards/x.md` is the file it names.
+const slashes = (p: string) => {
+  const forward = p.replace(/\\/g, "/");
+  return (forward ? posix.normalize(forward) : forward).replace(/\/+$/, "");
+};
 // The path is judged inside the project, so a project that itself sits under a tests/ folder is not all tests.
 // Claude Code sets CLAUDE_PROJECT_DIR; without it the hook runs in the project, so the working folder stands in.
 const root = slashes(process.env.CLAUDE_PROJECT_DIR || process.cwd());
@@ -20,6 +28,13 @@ const caseless = process.platform === "win32" || process.platform === "darwin";
 const same = (a: string) => (caseless ? a.toLowerCase() : a);
 let path = slashes(input.tool_input?.file_path ?? input.tool_input?.path ?? "");
 if (root && same(path).startsWith(`${same(root)}/`)) path = path.slice(root.length + 1);
+// The standards rule comes first. Its refusal is not logged: a standard is never a protected test.
+const STANDARDS = same("loopstra/standards");
+if (same(path) === STANDARDS || same(path).startsWith(`${STANDARDS}/`)) {
+  console.error(`Loopstra: the repository's standards (loopstra/standards/) are changed by a person on main, never by the loop's sessions (${path}).`);
+  process.exit(2);
+}
+if (phase === "resolve") process.exit(0);
 const isTest = isTestPath(path);
 if (phase === "acceptance") {
   if (isAcceptancePath(path)) process.exit(0);

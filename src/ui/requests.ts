@@ -66,7 +66,7 @@ export function nextPoll(asked: number): number | null {
 interface Done { state: "done"; ok: boolean; text: string; status: string | null }
 
 /** Posts JSON to the console; gives the reply, or the plain words of why it failed. */
-async function post(url: string, body: unknown): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
+export async function post(url: string, body: unknown): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const data = await r.json().catch(() => ({})) as Record<string, unknown>;
@@ -245,4 +245,9 @@ export async function listSource(url: string): Promise<SourceItems> {
 /** Takes a setting change back while the loop has not claimed it; true when it was (nothing changed). */
 export function cancelSetting(id: string): Promise<boolean> {
   return cancel(id);
+}
+
+/** Adds a standard to one change or removes it (`POST /api/standards/scope`) and follows the loop's answer to `onDone`. */
+export function sendScope(body: { slug: string; action: "add" | "remove"; name: string; note: string }, onDone: (d: { ok: boolean; text: string }) => void): Promise<Sent> {
+  return sendFollowed("/api/standards/scope", body, onDone);
 }

@@ -1,11 +1,13 @@
+import { oneLine } from "../text";
 import { block, clearMarker, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
+import type { Envelope } from "../envelopes";
 import { Git } from "../git";
 import { modelFor } from "../config";
 import { passes, runJudge } from "../judges";
 import { testLoop } from "./build";
 import { catchUp, outOfDate, RESOLUTION, roundsAllowed } from "./catch-up";
 import { reviewPhase, reviewPrompt, takeEarlyReview } from "./early-review";
-import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
+import { artifacts, bullets, buildSession, checkCommands, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
@@ -21,6 +23,19 @@ export async function catchUpTested(ctx: StepContext): Promise<{ ok: true } | Fa
   const up = await catchUp(ctx);
   if (!up.ok) return up;
   return up.outcome === "resolved" ? testLoop(ctx, "resolve-test") : { ok: true };
+}
+
+/**
+ * The reviewer's review.md, and after it the findings that name a rule of a standard, one line each:
+ * "- important · SEC-3 · src/pay.ts:42: text" (severity, rule, file:line, with :0 for a whole file).
+ * Nothing is added when no finding names a rule.
+ */
+function withStandardsFindings(e: Envelope<"review">): string {
+  const named = e.findings.flatMap((f) => (f.standard ? [{ ...f, standard: f.standard }] : []));
+  if (!named.length) return e.review_markdown;
+  // One line each, however the reviewer wrapped it: the console reads the section line by line.
+  const lines = named.map((f) => `- ${f.severity} · ${f.standard} · ${f.file}:${f.line}: ${oneLine(f.finding)}`);
+  return `${e.review_markdown.trimEnd()}\n\n## Findings against the standards\n${lines.join("\n")}\n`;
 }
 
 /**
@@ -65,11 +80,11 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await runJudge(ctx, phase, { prompt });
     if (!review.ok) return block(ctx, review.note);
     // review.md, the gate row and the findings all come from the review that decided.
-    await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
+    await writeArtifact(ctx, "review.md", withStandardsFindings(review.envelope));
 
     // The runtime decides: the change passes when there are no important findings. The
     // reviewer's own approved flag is kept in the trace only.
-    const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.finding}`);
+    const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.standard ? `(${f.standard}) ` : ""}${f.finding}`);
     const pass = passes("review", review.envelope);
     const by = review.decidedBy === "cheap" ? `; decided by the cheaper judge (${modelFor(ctx.cfg, "default")})` : "";
     const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}${by}`;
@@ -86,8 +101,9 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
       clearMarker(ctx, REVIEW_ROUND);
       return block(ctx, REVIEW_STILL_FOUND_NOTE, { detail: { rounds: round, important } });
     }
+    // It may run the checks of the standards that apply to the diff, those the reviewer was given.
     const revise = await buildSession(ctx, {
-      name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands: await checkCommands(ctx),
       vars: { findings: bullets(important), test_command: ctx.cfg.commands.test },
     });
     if (!revise.ok) return block(ctx, revise.note);

@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync } from "node:fs"
 import { join } from "node:path";
 import { configPath, loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
-import { localDate, mainHealthDue, markHealthPending, runMainHealth } from "../../src/signals";
+import { mainHealthDue, markHealthPending, runMainHealth } from "../../src/signals";
+import { localDate } from "../../src/text";
 import { Trace } from "../../src/trace";
 import { tempGitRepo } from "../helpers";
 

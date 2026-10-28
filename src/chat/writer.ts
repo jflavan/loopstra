@@ -5,7 +5,7 @@ import { missingSections, parseIntentFile, scanRepo, SLUG, type Status } from ".
 import { badModelNote, stepModel } from "../models";
 import { templatePath } from "../package";
 import { errorText } from "../shell";
-import { localDate } from "../signals";
+import { localDate } from "../text";
 import type { Trace } from "../trace";
 import { chatTemplate, MIN_SESSION_USD, renderChatPrompt, runChatAgent } from "./agents";
 import { WriterResult, type DraftIntent, type Handoff } from "./schemas";

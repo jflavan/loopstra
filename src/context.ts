@@ -10,7 +10,9 @@ import { effectivePriority, parseIntentFile, readIntent, writeChangeFile, writeI
 import { RecordDraft, type DraftChange } from "./record-draft";
 import { errorCode, errorText } from "./shell";
 import { withModels } from "./models";
-import { RecordRaced, RecordUnsettled, throwIfStopping } from "./stop";
+import { readStandards, problemText, type StandardsRead } from "./standards";
+import { parseRecord, STANDARDS_RECORD, type ChangeStandards } from "./standards-record";
+import { RecordRaced, RecordUnsettled, StandardsUnreadable, throwIfStopping } from "./stop";
 import type { Trace } from "./trace";
 
 /** The folder that holds each change's snapshot of main (see StepContext.snapshot). */
@@ -25,6 +27,8 @@ export class StepContext {
   readonly git: Git;
   /** The commit this step's read-only sessions read, once asked for (see readCommit). */
   private reading: Promise<string> | null = null;
+  /** The standards at readCommit, once asked for (see standards). */
+  private standardsRead: Promise<StandardsRead> | null = null;
   /** The step's snapshot, once asked for (see snapshot). */
   private made: Promise<string> | null = null;
   /** The kinds of phase (see phaseKind) whose first session of the step has started: only that one may resume an answered question (see answerFor). */
@@ -96,6 +100,29 @@ export class StepContext {
   }
 
   /**
+   * The repository's standards at readCommit, read once per step so all its sessions and checks use
+   * one version. Throws StandardsUnreadable when a file cannot be read: the step never runs without
+   * the rules.
+   */
+  standards(): Promise<StandardsRead> {
+    if (!this.standardsRead) {
+      const p = this.readCommit().then((sha) => readStandards(this.git, sha)).then((r) => {
+        if (r.problems.length) throw new StandardsUnreadable(r.problems.map(problemText).join(" "));
+        return r;
+      });
+      p.catch(() => { if (this.standardsRead === p) this.standardsRead = null; });
+      this.standardsRead = p;
+    }
+    return this.standardsRead;
+  }
+
+  /** What people decided about this change's standards: its standards.md as on disk now. Lines that name a standard are not checked here (the caller has the standards). */
+  standardsRecord(): ChangeStandards {
+    const file = join(this.intent.dir, STANDARDS_RECORD);
+    return parseRecord(existsSync(file) ? readFileSync(file, "utf8") : null);
+  }
+
+  /**
    * Where the step's read-only sessions run: a detached worktree of readCommit
    * (`.loopstra/snapshots/<slug>`), made the first time a session asks, so none sees the main
    * checkout's uncommitted files or main moving. Removed when the step ends (see dropSnapshot).
@@ -115,6 +142,7 @@ export class StepContext {
     const made = this.made;
     this.made = null;
     this.reading = null;
+    this.standardsRead = null;
     if (!made) return;
     const dir = await made.catch(() => null);
     if (dir) await removeWorktree(this.git, dir, { cleanup: true });

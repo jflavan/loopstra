@@ -6,7 +6,7 @@ import { GitHub } from "../../src/github";
 import { agentPhase } from "../../src/phases";
 import { runCommand } from "../../src/shell";
 import { GitTimeout, passOn } from "../../src/git";
-import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, onStopSignal, RecordRaced, RecordUnsettled, requestStop, resetStop, STOP_SIGNALS, stopPromise, stopRequested, StopRequested } from "../../src/stop";
+import { AssistantUnavailable, installStopSignals, LoopBudgetReached, notTheStepsFault, onStopSignal, RecordRaced, RecordUnsettled, requestStop, resetStop, STOP_SIGNALS, StandardsUnreadable, stopPromise, stopRequested, StopRequested } from "../../src/stop";
 import { FAKE_CLAUDE as FAKE, setupRepo, tempDir } from "../helpers";
 
 const FAKE_GH = fileURLToPath(new URL("../fake-gh/gh.ts", import.meta.url));
@@ -106,7 +106,7 @@ describe("stop", () => {
 
 describe("not the step's fault", () => {
   test("a stop, an unavailable assistant, and the loop's used-up day; nothing else", () => {
-    for (const e of [new StopRequested(), new AssistantUnavailable("down"), new LoopBudgetReached(), new RecordRaced("x"), new RecordUnsettled()]) expect(notTheStepsFault(e)).toBe(true);
+    for (const e of [new StopRequested(), new AssistantUnavailable("down"), new LoopBudgetReached(), new RecordRaced("x"), new RecordUnsettled(), new StandardsUnreadable("x")]) expect(notTheStepsFault(e)).toBe(true);
     for (const e of [new Error("x"), new GitTimeout(["status"], 1000), "text", null]) expect(notTheStepsFault(e)).toBe(false);
   });
 

@@ -422,3 +422,42 @@ export async function runCommand(command: string, cwd: string, opts: RunCommandO
     timedOut: r.timedOut,
   };
 }
+
+/**
+ * The programs a command line runs: the first word of each command in a chain (`a && b`, `a; b`,
+ * `a | b`), after any leading `VAR=value` words, without quotes. Nothing inside quotes splits it,
+ * and neither does the & of a redirect (`2>&1`, `&>`).
+ */
+export function programsIn(command: string): string[] {
+  const parts: string[] = [];
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === "\\" && quote !== "'") { i++; continue; }
+    if (quote) { if (ch === quote) quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    const redirect = ch === "&" && (/[<>]/.test(command[i - 1] ?? "") || command[i + 1] === ">");
+    if (!/[;|&()\n]/.test(ch) || redirect) continue;
+    parts.push(command.slice(start, i));
+    start = i + 1;
+  }
+  parts.push(command.slice(start));
+  return parts.flatMap((part) => {
+    const words = part.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    const word = words.find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    const program = word?.replace(/^["']|["']$/g, "");
+    return program ? [program] : [];
+  });
+}
+
+/**
+ * The first program in the command line that the shell said it could not find (bun, sh, bash, zsh,
+ * cmd and PowerShell each word it their own way), or undefined.
+ */
+export function missingProgram(command: string, output: string): string | undefined {
+  return programsIn(command).find((program) => {
+    const p = program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`command not found: ${p}(?!\\S)|${p}: (?:command )?not found|${p}'? is not recognized as|${p}: No such file or directory`).test(output);
+  });
+}

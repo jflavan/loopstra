@@ -8,6 +8,7 @@ import { errorText, within } from "../shell";
 import { ConfigDocument } from "./document";
 import { DefaultsPrompt, SetupStopped, StreamPrompt, type Prompt } from "./prompt";
 import { SECTIONS } from "./sections";
+import { standards } from "./sections/standards";
 import type { Check, Section, SetupContext } from "./types";
 
 export const NEEDS_TERMINAL = "loopstra setup asks questions: run it in a terminal, or use --defaults (take every suggestion) or --check (only check).";
@@ -118,7 +119,7 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
     return 1;
   }
   const env = o.env ?? process.env;
-  if (o.check) return checkOnly(root, sections, env, out, o.checkMs);
+  if (o.check) return checkOnly(root, sections, !!o.section, env, out, o.checkMs);
   if (!o.defaults && !(o.interactive ?? process.stdin.isTTY)) { out(NEEDS_TERMINAL); return 1; }
 
   let doc: ConfigDocument;
@@ -155,18 +156,23 @@ async function runSetup(root: string, o: SetupOptions): Promise<number> {
     saved = doc.save();
     const written = ctx.files.length ? writeFiles(root, ctx.files) : [];
     if (saved) out("\nSaved loopstra/config.yaml. Commit it on the main branch so every checkout uses it.");
-    if (written.length) out(`${saved ? "" : "\n"}Wrote ${written.length} file${written.length === 1 ? "" : "s"} under .claude/: ${written.join(", ")}. Commit them with loopstra/config.yaml on the main branch.`);
+    if (written.length) out(`${saved ? "" : "\n"}Wrote ${written.length} file${written.length === 1 ? "" : "s"}${written.every((p) => p.startsWith(".claude/")) ? " under .claude/" : ""}: ${written.join(", ")}. Commit them with loopstra/config.yaml on the main branch.`);
     else if (!saved) out("\nNo changes.");
   } catch (e) {
     // The files are written after the save, so a failure there leaves the config saved.
     out(saved ? `\nSaved loopstra/config.yaml, but ${errorText(e)}` : `\nNot saved: ${errorText(e)}`);
     return 1;
   }
-  report(await runChecks(sections, ctx, cfg, o.checkMs), out);
+  report(await runChecks(withStandards(sections, !!o.section), ctx, cfg, o.checkMs), out);
   return 0;
 }
 
-async function checkOnly(root: string, sections: Section[], env: SetupContext["env"], out: (line: string) => void, checkMs?: number): Promise<number> {
+/** The sections to check: the standards' checks join whenever no section is named and none of them is the standards section. */
+function withStandards(sections: Section[], named: boolean): Section[] {
+  return named || sections.includes(standards) ? sections : [...sections, standards];
+}
+
+async function checkOnly(root: string, sections: Section[], named: boolean, env: SetupContext["env"], out: (line: string) => void, checkMs?: number): Promise<number> {
   let doc: ConfigDocument;
   let cfg: Config;
   try {
@@ -174,7 +180,8 @@ async function checkOnly(root: string, sections: Section[], env: SetupContext["e
     cfg = doc.validate();
   } catch (e) { out(errorText(e)); return 1; }
   out("loopstra/config.yaml loads.");
-  const checks = await runChecks(sections, { root, doc, ask: new DefaultsPrompt(() => {}), env, files: [], only: false }, cfg, checkMs);
+  // The standards are checked whenever no section is named: they belong to no section of their own.
+  const checks = await runChecks(withStandards(sections, named), { root, doc, ask: new DefaultsPrompt(() => {}), env, files: [], only: false }, cfg, checkMs);
   report(checks, out);
   return checks.some((c) => c.level === "fail") ? 1 : 0;
 }

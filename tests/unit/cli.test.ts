@@ -14,7 +14,7 @@ describe("the command line outside a set-up repo", () => {
   test("status, tail, ui, judges, retro, upgrade, and customize say the folder is not set up, and create nothing", async () => {
     const t = tempDir();
     try {
-      for (const cmd of ["status", "tail", "ui", "judges", "retro", "upgrade", "customize"]) {
+      for (const cmd of ["status", "tail", "ui", "judges", "standards", "retro", "upgrade", "customize"]) {
         const r = await run([process.execPath, CLI, cmd], t.path);
         expect({ cmd, code: r.code, said: (r.out + r.err).trim() }).toEqual({ cmd, code: 1, said: NOT_SET_UP });
       }
@@ -97,8 +97,8 @@ describe("the command line outside a set-up repo", () => {
       for (const flag of ["--help", "-h"]) {
         const r = await run([process.execPath, CLI, "setup", flag], t.path);
         expect({ flag, code: r.code }).toEqual({ flag, code: 0 });
-        expect(r.out).toStartWith("Usage: loopstra setup [section] [--defaults | --check]\n\nSections:\n  budgets   Budgets\n");
-        expect(r.out).toContain("  models    Models\n");
+        expect(r.out).toStartWith("Usage: loopstra setup [section] [--defaults | --check]\n\nSections:\n  budgets    Budgets\n");
+        expect(r.out).toContain("  models     Models\n");
       }
       expect(readdirSync(t.path)).toEqual([]);
     } finally {

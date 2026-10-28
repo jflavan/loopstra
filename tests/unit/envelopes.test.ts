@@ -80,3 +80,21 @@ describe("jsonSchemaOf", () => {
     walk(s);
   });
 });
+
+describe("done-check standards", () => {
+  test("an envelope without standards still parses", () => {
+    const r = Envelopes["done-check"].parse({ status: "success", summary: "ok", evidence: [], outcome_markdown: "# Outcome" });
+    expect(r.standards).toBeUndefined();
+  });
+
+  test("standards is optional in the done-check JSON schema", () => {
+    expect(jsonSchemaFor("done-check").properties).toHaveProperty("standards");
+    expect(jsonSchemaFor("done-check").required).not.toContain("standards");
+  });
+
+  test("each rule is judged met, unmet or needs-person with evidence", () => {
+    const r = Envelopes["done-check"].parse({ status: "success", summary: "ok", evidence: [], outcome_markdown: "", standards: [{ label: "SEC-1", result: "needs-person", evidence: "in monitoring" }] });
+    expect(r.standards?.[0]).toEqual({ label: "SEC-1", result: "needs-person", evidence: "in monitoring" });
+    expect(Envelopes["done-check"].safeParse({ status: "success", summary: "", evidence: [], outcome_markdown: "", standards: [{ label: "A", result: "maybe", evidence: "" }] }).success).toBe(false);
+  });
+});

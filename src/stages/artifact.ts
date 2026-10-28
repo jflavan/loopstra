@@ -3,13 +3,15 @@ import { block, clearMarker, onceMarker, readArtifact, readMarker, SENT_BACK, se
 import type { Envelope } from "../envelopes";
 import { modelFor } from "../config";
 import { evaluateGate, type Check, type GateOutcome } from "../gates";
-import type { Status } from "../intents";
+import { changeGates, humanGates, type Frontmatter, type Status } from "../intents";
 import { judgeFirst, passes, type JudgeResult } from "../judges";
 import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
-import { artifacts, bullets, humanNote, runHookCommands, type Artifacts } from "./shared";
+import { checkStandardsSection, readStandardsSection } from "../standards";
+import { exceptionNote, exceptionsToApprove } from "../standards-record";
+import { artifacts, bullets, humanNote, runHookCommands, type Artifacts, type StageStandards } from "./shared";
 
 /**
  * Design and plan are mirror images: an agent writes an artifact (spec.md, plan.md), and the gate's
@@ -55,6 +57,15 @@ export interface ArtifactStage<W extends Writer, J extends Judge> {
   headings: string[];
   /** Checks of the stage's own, run between the headings and the judge. */
   checks?: (ctx: StepContext, a: Artifacts) => Check[];
+  /**
+   * The standards the artifact is held to (see stageStandards). write and checks ask once per
+   * artifact: the writer and the judge get them as {{standards}}, and the gate gets a `standards`
+   * check when there are any. A stage without it sees no standards. `view` says who asks: the
+   * writing session ("write", before the artifact exists) or the gate ("check", on the artifact).
+   */
+  standards?: (ctx: StepContext, a: Artifacts, view: "write" | "check") => Promise<StageStandards>;
+  /** The gate's `standards` check wants a bullet for every rule that applies (the plan's), not only for the rules the artifact names (the spec's). */
+  coversAll?: boolean;
   /** The agent judge: its phase, prompt variables, what it found, and what the evidence calls it. */
   judge: { name: J; vars: (a: Artifacts) => PromptVars; findings: (e: Envelope<J>) => string[]; who: string };
   /** Work for the next stage, run alongside the judge and kept only if the whole gate passes (design: planAhead in plan.ts). */
@@ -90,7 +101,8 @@ export async function runArtifactStep<W extends Writer, J extends Judge>(ctx: St
     if (!written.ok) return written;
     return settle(ctx, s);
   }
-  if (status === s.review && ctx.cfg.gates[s.gate].human === "none") return settle(ctx, s);
+  // A change's own spec_gate or plan_gate (an exception waits for a person) keeps it waiting too.
+  if (status === s.review && changeGates(humanGates(ctx.cfg), ctx.intent.file.frontmatter)[s.gate] === "none") return settle(ctx, s);
   return { ok: true };
 }
 
@@ -98,10 +110,11 @@ export async function runArtifactStep<W extends Writer, J extends Judge>(ctx: St
  * The writing session, told the findings of a failed check ("" at first). Work written ahead for this
  * stage builds its session here too, so it asks exactly what the writing session would.
  */
-export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, a: Artifacts, findings: string): AgentPhaseSpec & { name: W } {
+export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, a: Artifacts, findings: string, standards?: StageStandards): AgentPhaseSpec & { name: W } {
   const cfg = ctx.cfg.stages[s.stage];
+  const vars = standards ? { ...s.vars(a, findings), standards: standards.text } : s.vars(a, findings);
   // Read-only sessions in plan mode: it returns the structured output normally (verified live).
-  return { name: s.stage, permissionMode: "plan", tools: "read", vars: s.vars(a, findings), skills: cfg.skills };
+  return { name: s.stage, permissionMode: "plan", tools: "read", vars, skills: cfg.skills };
 }
 
 /** One writing session (or an answer written earlier, see take): the artifact is written, then the after commands run. */
@@ -109,7 +122,8 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   // A person's note from sending the change back comes first; the check's findings (a rewrite) after it.
   const sentBack = sentBackNote(ctx);
   const all = [sentBack, findings].filter(Boolean).join("\n\n");
-  const phase = writerPhase(ctx, s, await artifacts(ctx), all);
+  const a = await artifacts(ctx);
+  const phase = writerPhase(ctx, s, a, all, await s.standards?.(ctx, a, "write"));
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent;
   // a retry renders it again (see renderedThen). The note reaches the session even through an older
   // prompt file without {{findings}}.
@@ -157,8 +171,15 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // The gate's result is recorded first, then the work beside the judge is waited for: a stop or a
       // crash meanwhile loses only that work (the next stage then does it as usual) and the comparison.
       try {
-        if (human === "none") await setStatus(ctx, s.approved);
-        else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human));
+        const exceptions = await exceptionsAsked(ctx, s);
+        // Exceptions to allow bring a person onto a gate the config left to nobody, in the same record;
+        // any other pass takes off one an earlier pass wrote. `human` is the config's gate, not
+        // changeGates: the field is decided afresh at each pass, never kept because it was set.
+        const field = `${s.gate}_gate` as const satisfies keyof Frontmatter;
+        const fields = exceptions && human === "none" ? { set: { [field]: "status" as const } } : { remove: [field] };
+        if (exceptions) await setStatus(ctx, s.review, exceptions, {}, fields);
+        else if (human === "none") await setStatus(ctx, s.approved, "", {}, fields);
+        else await setStatus(ctx, s.review, humanNote(s.artifact, s.approved, human), {}, fields);
       } catch (e) {
         await callOff(pending);
         throw e;
@@ -182,6 +203,21 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     const again = await write(ctx, s, findings);
     if (!again.ok) return again;
   }
+}
+
+/**
+ * The note for a passing artifact that asks for exceptions to rules a person has not allowed yet for
+ * this change (see exceptionsToApprove); null when it asks for none, or there are no standards.
+ */
+async function exceptionsAsked<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>): Promise<string | null> {
+  if (!s.standards) return null;
+  // A repository without standards has no rule to except (it reads as before standards existed).
+  const read = await ctx.standards();
+  if (!read.standards.length) return null;
+  const asks = exceptionsToApprove((await readArtifact(ctx, s.artifact)) ?? "", ctx.standardsRecord());
+  if (!asks.length) return null;
+  const titles = new Map(read.standards.flatMap((st) => st.rules.map((r) => [r.label, st.title] as const)));
+  return exceptionNote(s.gate, asks, titles);
 }
 
 /**
@@ -250,6 +286,7 @@ async function aheadNow<W extends Writer, J extends Judge>(ctx: StepContext, s: 
 async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, pending: Pending): Promise<Check<JudgePayload>[]> {
   const a = await artifacts(ctx);
   const text = (await readArtifact(ctx, s.artifact)) ?? "";
+  const standards = await s.standards?.(ctx, a, "check");
   const list: Check<JudgePayload>[] = [
     {
       name: "headings",
@@ -259,6 +296,8 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       },
     },
     ...(s.checks?.(ctx, a) ?? []),
+    // Only when the session was given standards: a change with every standard removed has none to cover.
+    ...(standards?.text ? [standardsCheck(text, standards, s.coversAll === true)] : []),
   ];
   if (!ctx.cfg.gates[s.gate].agent) return list;
   list.push({
@@ -271,7 +310,8 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // Beside that work, a cheaper judge in shadow needs room for a third session. The strong judge's
       // verdict comes back without waiting for the cheaper one, so a rejection calls the work off at once.
       const judge = async () => {
-        const j = await judgeFirst(ctx, { name: s.judge.name, permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
+        const vars = standards ? { ...s.judge.vars(a), standards: standards.text } : s.judge.vars(a);
+        const j = await judgeFirst(ctx, { name: s.judge.name, permissionMode: "default", tools: "read", vars }, work ? { alongside: 1 } : {});
         pending.comparison = j;
         return j.result;
       };
@@ -294,4 +334,20 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     },
   });
   return list;
+}
+
+/**
+ * The gate's `standards` check: the artifact has a Standards section, and every label there is a
+ * rule of a standard on main. The spec covers only the rules its design decides something about, so
+ * none is required; the plan (which knows the files, `coversAll`) covers every rule that applies.
+ */
+function standardsCheck(text: string, standards: StageStandards, coversAll: boolean): Check<JudgePayload> {
+  return {
+    name: "standards",
+    run: async () => {
+      const known = new Set(standards.read.standards.flatMap((st) => st.rules.map((r) => r.label)));
+      const r = checkStandardsSection(readStandardsSection(text), coversAll ? standards.labels : [], known);
+      return { result: r.ok ? "pass" : "fail", evidence: r.evidence };
+    },
+  };
 }

@@ -4,15 +4,16 @@ Loopstra is an unattended development loop on top of the Claude Code CLI. Code o
 
 ## Layers
 
-About 165 modules under `src/`, in eight layers. A module imports only from its own layer or the ones below it. There is no runtime import cycle, and every exported name is imported somewhere: `bun run deadcode` fails otherwise.
+About 190 modules under `src/`, in eight layers. A module imports only from its own layer or the ones below it. There is no runtime import cycle, and every exported name is imported somewhere: `bun run deadcode` fails otherwise.
 
 1. **Foundations**, which import no other Loopstra module.
    - `text.ts`, `ids.ts`, `paths.ts` and `fsutil.ts` hold small helpers: `writeFileAtomic`, and `readJsonAs`, which reads a file through a zod schema.
    - `stop.ts` holds the stop request and the errors that end a step without being its fault (`notTheStepsFault`).
    - `lanes.ts` holds the in-process locks, which are keyed, re-entrant and checked for order, and the claims on changes.
    - `envelopes.ts` holds the zod schemas of what each agent phase answers.
+   - `standard-examples.ts` holds the two example standards that `loopstra setup standards` and the console's New standard start from, as plain strings, so the page can import them.
 2. **Processes and git.**
-   - `shell.ts`: `spawnBounded` gives every child a deadline, kills its whole tree, and cleans its environment of a git hook's repository variables.
+   - `shell.ts`: `spawnBounded` gives every child a deadline, kills its whole tree, and cleans its environment of a git hook's repository variables. `programsIn` and `missingProgram` name the programs a command line runs and the one the shell could not find.
    - `git.ts`: `Git`, with every call bounded and taking the checkout or remote lock its subcommand needs, plus the plumbing records use (`commitFiles`, `moveRef`).
    - `github.ts`: the `gh` CLI.
 3. **State on disk**, each read through a schema.
@@ -24,12 +25,16 @@ About 165 modules under `src/`, in eight layers. A module imports only from its 
    - `stamp.ts` holds what an upgrade knows.
    - `risk.ts` scores a change's diff against `gates.merge.risky` (`scoreRisk`), for the merge gate.
    - `agents.ts` resolves a step's agent setup from the config (`resolveSetup`) and holds its rules: which steps are read-only, which git a step may never get, and which steps run as the build's agent.
+   - `standards.ts` reads the standard files in `loopstra/standards/` from a commit of main (`readStandards`, every problem with its file and line), works out which apply to a change's files (`applying`), renders them for the prompts (`renderStandards`), reads and checks a spec's or plan's Standards section (`readStandardsSection`, `checkStandardsSection`), and reads an outcome's back (`readOutcomeStandards`).
+   - `standards-record.ts` reads and writes a change's `intent/<slug>/standards.md` (standards added and removed, exceptions approved), and finds the exceptions a spec or plan asks for that nobody has allowed yet (`exceptionsToApprove`).
+   - `standards-check.ts` runs a command once in a throwaway checkout of main's last commit (`runOnMain`, which setup's `commands.test` check uses too), and a standard's tool check that way with `LOOPSTRA_BASE` set (`checkOnMain`).
 4. **Records.**
    - `record-draft.ts` holds `RecordDraft`.
-   - `context.ts` holds `StepContext` and `commitRecord`, the one way anything is written to main, with `settleRecord` and `landed` (see Records).
+   - `context.ts` holds `StepContext` and `commitRecord`, the one way anything is written to main, with `settleRecord` and `landed` (see Records). A step reads the standards once, at its commit of main (`StepContext.standards`), and throws `StandardsUnreadable` when one cannot be read.
 5. **Sessions.**
    - `claude.ts` runs one CLI session: `runSession`, and `classify`, which reads how it ended.
    - `prompts.ts` renders the prompts.
+   - `standards-prompt.ts` holds what each phase is told to do with the standards (`STANDARDS_INSTRUCTIONS`), which `phasePrompt` adds only when the change has standards to show.
    - `sessions.ts` traces each session.
    - `phases.ts` holds `agentPhase` and `codePhase`, plus `alongside`, for work that runs beside another phase.
    - `judges.ts` holds the cheaper first-pass judges.
@@ -44,11 +49,11 @@ About 165 modules under `src/`, in eight layers. A module imports only from its 
    - `signals.ts` checks main's health.
    - `remote.ts` syncs main and moves it in one step.
 8. **Surfaces.**
-   - `cli.ts` and `commands/*` are the command line.
-   - `console/*` is the local server, with JSON and SSE.
-   - `ui/*` is the Preact page.
+   - `cli.ts` and `commands/*` are the command line; `commands/standards.ts` is `loopstra standards`.
+   - `console/*` is the local server, with JSON and SSE. `console/standards.ts` serves Settings › Standards, a draft's check, Try it on main, the exceptions granted, a change's Standards panel, and the `standards-scope` request.
+   - `ui/*` is the Preact page. `ui/views/StandardSettings.tsx`, `ui/views/Exceptions.tsx` and `ui/parts/StandardsPanel.tsx` are the standards' views, and `ui/standards.ts` what they say and check as a person types.
    - `chat/*` is the orchestrator, its writer, and the terminal, console, Slack and Discord transports.
-   - `setup/*` is `loopstra setup`.
+   - `setup/*` is `loopstra setup`; `setup/sections/standards.ts` is its standards section, and `setup/standards-checks.ts` the standards' checks, which `--check` runs with the rest.
    - `upgrade/*` is `loopstra upgrade`.
 
 Good places to start reading are `scheduler.ts`'s `tick` for the loop, and `context.ts`'s `commitRecord` for how anything reaches main.
@@ -90,7 +95,7 @@ These came out of the hardening pass (#47 and the reviews after it). The reasons
 
 `bun run check` runs the typecheck, the lint, the dead-code gate and the suite, in that order. CI runs it on Ubuntu, macOS and three Windows jobs, and adds a coverage gate of at least 80% and the security scans.
 
-- **About 100 test files.** Unit tests sit in `tests/unit/`; `tests/integration/` runs whole ticks in throwaway git repositories.
+- **About 130 test files.** Unit tests sit in `tests/unit/`; `tests/integration/` runs whole ticks in throwaway git repositories.
 - **No real Claude or GitHub.**
   - A fake `claude` (`tests/fake-claude/`) answers each phase from fixtures, and can be slow, hang or fail on cue.
   - A fake `gh` (`tests/fake-gh/`) uses a bare repository as the remote.

@@ -9,7 +9,6 @@ import { badModelNote, stepModel } from "../models";
 import { Git } from "../git";
 import { heartbeatState, readHeartbeat, readLoopHold, readPause } from "../heartbeat";
 import { changeExists, humanGates, isHeld, parseIntentFile, plainStatus, readIntent, SLUG, type Frontmatter, type Status } from "../intents";
-import { localDate } from "../signals";
 import { errorText } from "../shell";
 import { StopRequested } from "../stop";
 import { Trace } from "../trace";
@@ -20,7 +19,7 @@ import { handOff, type HandoffOutcome } from "./publish";
 import { submitRequest, type RequestBody } from "../requests";
 import { readQuestion } from "../questions";
 import { OrchestratorTurn, type Handoff, type ProposedAction } from "./schemas";
-import { oneLine } from "../text";
+import { localDate, oneLine } from "../text";
 import { StateFileUnavailable } from "./statefile";
 import { ThreadStore, threadKey, type ThreadState } from "./threads";
 

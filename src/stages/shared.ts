@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { parsePlanFiles } from "../checks";
+import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeArtifact, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
 import { onCheckout } from "../lanes";
@@ -8,8 +9,11 @@ import { changeEnv } from "../resources";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { WATCHING_PR, type Intent, type Status } from "../intents";
 import { runDir } from "../paths";
-import { isRiskNote } from "../risk";
+import { changedFiles, isRiskNote } from "../risk";
 import { errorText } from "../shell";
+import { applying, renderStandards, type Applying, type Excepted, type Standard, type StandardsRead } from "../standards";
+import { approvedRecord, exceptionsToApprove, scopeOf, STANDARDS_RECORD } from "../standards-record";
+import { localDate } from "../text";
 
 /**
  * Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the
@@ -65,6 +69,55 @@ export async function artifacts(ctx: StepContext): Promise<Artifacts> {
   };
 }
 
+/** The paths of the plan's Files that change; none when it lists none. */
+export function planFiles(plan: string): string[] {
+  return parsePlanFiles(plan)?.map((f) => f.path) ?? [];
+}
+
+/**
+ * The standards a stage holds its artifact to: `list` applies, `scoped` (the spec's view only) applies
+ * only once the change touches its files, and `excepted` are the rules a person allowed this change
+ * not to keep. `text` is the `standards` prompt variable, "" when the repository has none. `labels`:
+ * every rule of `list`, but the excepted ones.
+ */
+export interface StageStandards { read: StandardsRead; list: Applying[]; scoped: Standard[]; excepted: Excepted[]; text: string; labels: string[] }
+
+/**
+ * The standards for this step, as main has them at the step's commit (see StepContext.standards, which
+ * throws StandardsUnreadable), with what people added to the change, removed from it and excepted.
+ * `files` null is the spec's view: the files are not known yet, so the standards for every change and
+ * those added apply, and the scoped ones are listed apart. Given the files (the plan's), it is the
+ * plan's view: a scoped standard applies when one of them matches.
+ */
+export async function stageStandards(ctx: StepContext, files: string[] | null): Promise<StageStandards> {
+  const read = await ctx.standards();
+  const record = ctx.standardsRecord();
+  const scope = scopeOf(record);
+  const list = applying(read.standards, files ?? [], scope);
+  const listed = new Set(list.map((a) => a.standard.name));
+  const scoped = files === null ? read.standards.filter((s) => s.appliesTo && !listed.has(s.name) && !scope.removed.includes(s.name)) : [];
+  const excepted = record.exceptions.map((e) => ({ label: e.label, reason: e.reason }));
+  const allowed = new Set(excepted.map((e) => e.label));
+  const labels = list.flatMap((a) => a.standard.rules.map((r) => r.label)).filter((l) => !allowed.has(l));
+  return { read, list, scoped, excepted, text: renderStandards(list, { scoped, excepted }), labels };
+}
+
+/**
+ * Records the exceptions the spec or plan asks for that the record does not have yet, as approved by
+ * `who`: the step after an approval made by a status edit, which no request recorded, calls it as it
+ * starts. Writes standards.md only when something is new, and never in a repository without standards.
+ */
+export async function recordApprovals(ctx: StepContext, gate: "spec" | "plan", who: { by: string; via: string }): Promise<void> {
+  if (!(await ctx.standards()).standards.length) return;
+  const asks = exceptionsToApprove((await readArtifact(ctx, `${gate}.md`)) ?? "", ctx.standardsRecord());
+  if (!asks.length) return;
+  await writeArtifact(ctx, STANDARDS_RECORD, approvedRecord(ctx.slug, await readArtifact(ctx, STANDARDS_RECORD), gate, asks, who, localDate()));
+  ctx.trace.gate(ctx.slug, gate, "exception", "pass", asks.map((b) => b.label).join(", "));
+}
+
+/** Who approved by editing the status line, as the record says it. */
+export const BY_STATUS_EDIT = { by: "a status edit", via: "intent.md" };
+
 /** The commit message for edits nobody reviewed, kept on the branch so the next review sees them. */
 export const KEEP_UNFINISHED = "chore: keep unfinished changes";
 
@@ -111,29 +164,68 @@ export async function buildSession<N extends Continuation>(ctx: StepContext, spe
  */
 export const REVIEW_ROUND = "review-round";
 
-/** Run-folder marker: the branch commit on which the test commands last passed, and those commands. */
-export const TESTED = "tested";
+/** A standard's check, run after the tests in the merge checks (see testLoop): its command, and the standard it is from. */
+export interface ToolCheck { command: string; title: string; path: string }
 
-/** The TESTED marker's content: the commit, then the commands that passed on it (a changed command must run again). */
-export function testedMarker(ctx: StepContext, sha: string): string {
-  const { test, lint, build } = ctx.cfg.commands;
-  return [sha, test, lint ?? "", build ?? ""].join("\n");
-}
-
-/** The commit the current test commands last passed on, or null. */
-function lastTested(ctx: StepContext): string | null {
-  const marker = readMarker(ctx, TESTED);
-  const sha = marker?.split("\n")[0];
-  return sha && marker === testedMarker(ctx, sha) ? sha : null;
+/** The checks of these standards, in their order: one for each that has a `check`. */
+export function toolChecks(list: Applying[]): ToolCheck[] {
+  return list.flatMap((a) => (a.standard.check ? [{ command: a.standard.check, title: a.standard.title, path: a.standard.path }] : []));
 }
 
 /**
- * The current test commands already passed on the worktree's commit: the same commit, or one that
- * differs only in records under intent/ (a rebase that brought in main's bookkeeping).
+ * The standards' checks a build session may run, as it may the configured commands: those of the
+ * standards that apply to the files of `plan` (main's plan, or the one reconciled for this build),
+ * or, given no plan, to the branch's diff against main. None in a repository without standards.
  */
-export async function alreadyTested(ctx: StepContext, wt: Git): Promise<boolean> {
-  const passedAt = lastTested(ctx);
+export async function checkCommands(ctx: StepContext, plan?: string): Promise<string[]> {
+  if (!(await ctx.standards()).standards.length) return [];
+  const files = plan === undefined ? await changedFiles(new Git(ctx.worktreeDir), ctx.cfg.main_branch) : planFiles(plan);
+  return toolChecks((await stageStandards(ctx, files)).list).map((c) => c.command);
+}
+
+/**
+ * The environment a tool check runs with: the project's commands' (LOOPSTRA_SLUG and the change's
+ * own resources, see changeEnv), and LOOPSTRA_BASE, the commit where the branch in `wt` and main
+ * part: the merge base, read now, so it follows main as the branch is brought up to date.
+ */
+export async function toolCheckEnv(ctx: StepContext, wt: Git): Promise<Record<string, string>> {
+  const base = (await wt.run(["merge-base", ctx.cfg.main_branch, "HEAD"])).out.trim();
+  return { LOOPSTRA_SLUG: ctx.slug, ...(await changeEnv(ctx)), LOOPSTRA_BASE: base };
+}
+
+/** Run-folder marker: the branch commit on which the test commands last passed, and those commands. */
+export const TESTED = "tested";
+
+/**
+ * The TESTED marker's content: the commit, then the commands that passed on it (a changed command
+ * must run again), then the tool checks that ran with them, if any. Without them it is what it was
+ * before standards, so a commit the build tested is not "already tested" for merge checks that have them.
+ */
+export function testedMarker(ctx: StepContext, sha: string, extra: ToolCheck[] = []): string {
+  const { test, lint, build } = ctx.cfg.commands;
+  return [sha, test, lint ?? "", build ?? "", ...extra.map((c) => c.command)].join("\n");
+}
+
+/**
+ * The commit the current test commands, and the tool checks `extra`, last passed on, or null.
+ * `orMore`: a run that had tool checks beside these counts too (its tests passed all the same).
+ */
+function lastTested(ctx: StepContext, extra: ToolCheck[], orMore = false): string | null {
+  const marker = readMarker(ctx, TESTED);
+  const sha = marker?.split("\n")[0];
+  if (!marker || !sha) return null;
+  const want = testedMarker(ctx, sha, extra);
+  return marker === want || (orMore && marker.startsWith(`${want}\n`)) ? sha : null;
+}
+
+/** True when the worktree's commit is `passedAt`, or differs from it only in records under intent/ (a rebase that brought in main's bookkeeping). */
+async function sameCode(wt: Git, passedAt: string | null): Promise<boolean> {
   return !!passedAt && (await wt.run(["diff", "--quiet", passedAt, "HEAD", "--", ".", ":(exclude)intent"], true)).code === 0;
+}
+
+/** The current test commands, with the tool checks `extra`, already passed on the worktree's code (see sameCode). */
+export async function alreadyTested(ctx: StepContext, wt: Git, extra: ToolCheck[] = []): Promise<boolean> {
+  return sameCode(wt, lastTested(ctx, extra));
 }
 
 /** An answer kept by work run ahead (see reviewAhead, planAhead): what it was asked (`key`), its report, and the whole file. */
@@ -173,7 +265,8 @@ const TESTS_NOT_RUN = "The tests have not run on the latest change yet; the runt
  * A failing run never reaches a judge (the test loop fixes or blocks first), so it is one of two sentences.
  */
 export async function testResult(ctx: StepContext, wt: Git): Promise<string> {
-  return (await alreadyTested(ctx, wt)) ? TESTS_PASSED : TESTS_NOT_RUN;
+  // A run with tool checks (the merge checks) ran the tests too.
+  return (await sameCode(wt, lastTested(ctx, [], true))) ? TESTS_PASSED : TESTS_NOT_RUN;
 }
 
 /**

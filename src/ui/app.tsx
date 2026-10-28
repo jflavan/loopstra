@@ -19,6 +19,7 @@ import { Change } from "./views/Change";
 import { Changes } from "./views/Changes";
 import { Inbox } from "./views/Inbox";
 import { Live } from "./views/Live";
+import { Exceptions } from "./views/Exceptions";
 import { Session } from "./views/Session";
 import { Spend } from "./views/Spend";
 import { Settings } from "./views/Settings";
@@ -35,6 +36,7 @@ function Screen() {
     case "agents": return <Agents />;
     case "spend": return <Spend />;
     case "settings": return <Settings />;
+    case "exceptions": return <Exceptions />;
     case "missing":
       return (
         <section class="view">

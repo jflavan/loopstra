@@ -15,6 +15,7 @@ import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } fr
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, setEnv, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { tempRoot } from "../../src/resources";
+import { standardsBlock, STANDARDS_HEADING, STANDARDS_INSTRUCTIONS } from "../../src/standards-prompt";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -236,6 +237,28 @@ describe("agentPhase tools and prompt", () => {
     expect(commandsFor(ctx, "build")).toBe("`npm run lint`, `echo ok`, `bun run start`, `bun install`");
     ctx.cfg.claude.allowed_tools = ["Read", "Bash"];
     expect(commandsFor(ctx, "build")).toBe("any command");
+    trace.close(); repo.cleanup();
+  });
+
+  test("build sessions may run the checks of the standards a spec passes, as they may the configured commands", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.claude.allowed_tools = ["Read", "Edit"];
+    const checks = ["gitleaks detect --log-opts=\"$LOOPSTRA_BASE..HEAD\" && semgrep ci", "echo ok"];
+    const tools = toolsFor(ctx, "build", undefined, checks);
+    expect(tools).toEqual(["Read", "Edit", "Bash(echo ok *)", `Bash(${checks[0]} *)`, "Bash(gitleaks detect --log-opts=\"$LOOPSTRA_BASE..HEAD\" *)", "Bash(semgrep ci *)"]);
+    expect(commandsFor(ctx, "build", undefined, checks)).toBe(`\`echo ok\`, \`${checks[0]}\`, \`gitleaks detect --log-opts="$LOOPSTRA_BASE..HEAD"\`, \`semgrep ci\``);
+    // Judges are not given them: only a build session may run them.
+    expect(toolsFor(ctx, "read+commands", undefined, checks)).toEqual(toolsFor(ctx, "read+commands"));
+    // None passed: exactly what it was.
+    expect(toolsFor(ctx, "build", undefined, [])).toEqual(["Read", "Edit", "Bash(echo ok *)"]);
+
+    // The session runner and the prompt both get them from the spec.
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "commands={{commands}}\n");
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "acceptEdits", tools: "build", vars: {}, commands: ["semgrep ci"], env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const recorded = await Bun.file(argsFile).json();
+    expect((recorded.args[recorded.args.indexOf("--allowedTools") + 1] as string).split(",")).toContain("Bash(semgrep ci *)");
+    expect(recorded.prompt).toStartWith("commands=`echo ok`, `semgrep ci`\n");
     trace.close(); repo.cleanup();
   });
 });
@@ -1213,5 +1236,57 @@ describe("a step's agent setup", () => {
       const { allowed } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
       expect(allowed).toEqual(["Read", "Glob", "Grep", "mcp__github", "mcp__docs__guide"]);
     } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("standards in the prompt", () => {
+  const STANDARDS = "### Security (loopstra/standards/security.md)\nApplies to every change.\n\n# Security\n\n## Rules\n- SEC-1: no secrets in logs";
+  const design = { name: "design" as const, model: "default" as const, permissionMode: "default" as const, tools: "read" as const };
+  const prompt = (repo: { path: string }, dir: string) => Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", dir, "prompt.md")).text();
+
+  test("the block is the heading, the phase's instructions, then the standards; nothing without standards", () => {
+    expect(standardsBlock("design", "")).toBe("");
+    const block = standardsBlock("design", STANDARDS);
+    expect(block).toBe(`${STANDARDS_HEADING}\n\n${STANDARDS_INSTRUCTIONS.design}\n\n${STANDARDS}`);
+    expect(block).toContain("Add `## Standards` after Areas of concern");
+    expect(standardsBlock("spec-check", STANDARDS)).toContain("with `standard` set to the rule's label");
+    // A phase with nothing to do with them still gets the standards.
+    expect(standardsBlock("intake", STANDARDS)).toBe(`${STANDARDS_HEADING}\n\n${STANDARDS}`);
+  });
+
+  test("an override without {{standards}} gets them appended", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Write the spec for {{slug}}.\n");
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: STANDARDS } });
+      expect(await prompt(repo, "1-design")).toBe(`Write the spec for x.\n\n${standardsBlock("design", STANDARDS)}\n\n${CONTRACT}\n`);
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: "" } });
+      expect(await prompt(repo, "2-design")).toBe(`Write the spec for x.\n\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("an override with {{standards}} gets them there, not at the end; with none it reads (none)", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Before.\n\n{{standards}}\n\nAfter.\n");
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: STANDARDS } });
+      expect(await prompt(repo, "1-design")).toBe(`Before.\n\n${standardsBlock("design", STANDARDS)}\n\nAfter.\n\n${CONTRACT}\n`);
+      await agentPhase(ctx, { ...design, vars: { intent: "i" } });
+      expect(await prompt(repo, "2-design")).toBe(`Before.\n\n(none)\n\nAfter.\n\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+});
+
+describe("standards instructions for build, resolve and review", () => {
+  test("build and resolve keep the rules or ask; review makes a breach an important finding unless excepted", () => {
+    const keep = "Keep every rule below. If the plan would make you break one, ask a question rather than break it.";
+    expect(STANDARDS_INSTRUCTIONS.build).toBe(keep);
+    expect(STANDARDS_INSTRUCTIONS.resolve).toBe(keep);
+    expect(STANDARDS_INSTRUCTIONS.review).toContain("A change that breaks a rule below is an important finding; set `standard` to the rule's label.");
+    expect(STANDARDS_INSTRUCTIONS.review).toContain("a breach within an approved exception is not a finding");
   });
 });
