@@ -4,7 +4,7 @@ import { clearMarker, readMarker, writeArtifact, writeMarker, type Failure, type
 import { Git, NO_AUTO_MAINTENANCE, passOn, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { errorText } from "../shell";
-import { artifacts, bullets, CATCHING_UP, planFiles, restoreCatchUp, stageStandards } from "./shared";
+import { artifacts, bullets, CATCHING_UP, checkCommands, planFiles, restoreCatchUp, stageStandards } from "./shared";
 
 /** Run-folder marker: how many conflict resolutions this build has tried (see roundsAllowed). A new build clears it. */
 export const RESOLUTIONS = "resolutions";
@@ -114,8 +114,9 @@ async function resolveConflicts(ctx: StepContext, wt: Git): Promise<{ ok: true; 
     const binary = files.filter((f) => isBinary(join(ctx.worktreeDir, f)));
     if (binary.length) return await failed(ctx, old, files, conflicts, `both sides changed ${binary.join(", ")}, which ${binary.length === 1 ? "is a binary file" : "are binary files"} a person needs to choose between`);
     const a = await artifacts(ctx);
+    // The standards of the plan's files, as in its prompt: mid-resolution the branch has no diff of its own to read them from.
     const session = await agentPhase(ctx, {
-      name: "resolve", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "resolve", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands: await checkCommands(ctx, a.currentPlan),
       vars: { spec: a.spec, plan: a.currentPlan, conflicts, test_command: ctx.cfg.commands.test, standards: (await stageStandards(ctx, planFiles(a.currentPlan))).text },
     });
     // Counted once the session has answered: one a stop, an outage or the day's budget cut short is not.

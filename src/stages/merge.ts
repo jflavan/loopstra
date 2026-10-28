@@ -16,7 +16,7 @@ import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
 import { catchUp, outOfDate, PUSH_PENDING, RESOLVED_AT, roundsAllowed } from "./catch-up";
 import { catchUpTested, REVIEW_PASSED, runReviewRounds } from "./review";
-import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, stageStandards, writeRound } from "./shared";
+import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, stageStandards, toolChecks, writeRound, type ToolCheck } from "./shared";
 
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
 export const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
@@ -99,20 +99,31 @@ type MergeVerdict = { result: "pass" } | { result: "changed" } | ({ result: "fai
 
 /**
  * The merge gate's automated checks, run in the worktree: the branch is brought up to date with
- * main (rebase), the test loop passes (it may commit fixes), and the newest review had no
- * important findings. Each check is recorded as a gate row.
+ * main (rebase), the test loop passes (it may commit fixes) with the checks of the standards that
+ * apply to the diff after the tests, and the newest review had no important findings. Each check
+ * is recorded as a gate row, and each standard's check as one of its own (`check:<name>`).
  */
 async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
   const wt = new Git(ctx.worktreeDir);
   const main = ctx.cfg.main_branch;
   // A failing check hands back the failure to record; the tests check says whether it committed fixes.
   const prefix = `${STANDARDS_DIR}/`;
-  const touched = (await changedFiles(wt, main)).filter((f) => f.startsWith(prefix));
+  const changedNow = await changedFiles(wt, main);
+  const touched = changedNow.filter((f) => f.startsWith(prefix));
   const list = andList(touched);
+  const hasStandards = (await ctx.standards()).standards.length > 0;
+  // The standards' checks, in the standards' order, each with its standard's name for its row.
+  const tools = hasStandards
+    ? (await stageStandards(ctx, changedNow)).list.flatMap((a) => toolChecks([a]).map((check) => ({ name: a.standard.name, check })))
+    : [];
+  const extra = tools.map((t) => t.check);
+  // What the tests check found for the tool checks: they passed on this code before, or this one kept failing.
+  let toolsSkipped = false;
+  let toolFailed: (Failure & { check?: ToolCheck }) | null = null;
   const checks: Check<Failure | { ok: true; changed: boolean }>[] = [
     // First, so nothing is spent on a change that cannot merge. Only a person edits the standards.
     // A repository without standards, and a diff that leaves the folder alone, gets no row for it.
-    ...(touched.length || (await ctx.standards()).standards.length ? [{
+    ...(touched.length || hasStandards ? [{
       name: "standards-untouched",
       run: async (): ReturnType<Check<Failure | { ok: true; changed: boolean }>["run"]> => touched.length
         ? {
@@ -139,11 +150,18 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         const before = await wt.headSha();
         // Already tested: the same commit, or one that differs only in records under intent/ (a
         // rebase that brought in main's bookkeeping). Running the tests again would prove nothing new.
-        if (await alreadyTested(ctx, wt)) {
+        if (await alreadyTested(ctx, wt, extra)) {
+          toolsSkipped = true;
           return { result: "pass", evidence: "the tests already passed on this code; only records under intent/ changed since" };
         }
         // After a rebase the tests may need fixing: the same test loop as build, with its fix budget.
-        const tested = await testLoop(ctx, "merge-test");
+        // The standards' checks run in it after the tests, and a failing one is fixed the same way.
+        const tested = await testLoop(ctx, "merge-test", extra);
+        if (!tested.ok && tested.check) {
+          // The tests passed in the last run (the checks run after them); the check's own row fails.
+          toolFailed = tested;
+          return { result: "pass", evidence: "the tests pass; a standard's check does not" };
+        }
         if (!tested.ok) return { result: "fail", evidence: tested.detail, payload: tested };
         // Tracked files the commands rewrote (a lint --fix, a report with a timestamp) are put back: the
         // merge checks never keep them, so a file rewritten on every run cannot start one review round
@@ -158,6 +176,15 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
         return { result: "pass", evidence: changed ? "tests pass after fixes that no review has seen yet" : "all commands exit 0", payload: { ok: true, changed } };
       },
     },
+    ...tools.map(({ name, check }): Check<Failure | { ok: true; changed: boolean }> => ({
+      name: `check:${name}`,
+      run: async () => {
+        if (toolsSkipped) return { result: "pass", evidence: "already passed on this code" };
+        const failed = toolFailed;
+        if (failed?.check === check) return { result: "fail", evidence: failed.detail, payload: { ok: false, note: failed.note, detail: failed.detail } };
+        return { result: "pass", evidence: `\`${check.command}\` exits 0` };
+      },
+    })),
     {
       name: "findings",
       run: async () => {

@@ -11,7 +11,7 @@ import { EARLY_REVIEW } from "../../src/stages/early-review";
 import { CAUGHT_UP_NOTE, conflictsWhileWaiting, runMergeStep } from "../../src/stages/merge";
 import { CATCHING_UP, openBranchWorktree } from "../../src/stages/shared";
 import type { Trace } from "../../src/trace";
-import { copyRepo, FAKE_CLAUDE, fixtureDir, openRepo, setEnv, setupRepo, withEnv, writeIntentOnDisk } from "../helpers";
+import { copyRepo, FAKE_CLAUDE, fixtureDir, openRepo, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 /** A person on the merge gate, and one review round: a resolution's review must not need a second one. */
@@ -79,12 +79,12 @@ async function mainMoves(repo: string, conflicting = true): Promise<void> {
 }
 
 /** Runs the change's steps with these resolve fixtures; the prompts each session got are returned. */
-async function withResolve<T>(fixtures: Record<string, string>, fn: () => Promise<T>): Promise<{ result: T; prompts: Array<{ phase: string; prompt: string }> }> {
+async function withResolve<T>(fixtures: Record<string, string>, fn: () => Promise<T>): Promise<{ result: T; prompts: Array<{ phase: string; prompt: string; args: string[] }> }> {
   const dir = fixtureDir(fixtures);
   const promptsFile = join(dir.path, "prompts.jsonl");
   try {
     const result = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path, LOOPSTRA_FAKE_PROMPTS: promptsFile }, fn);
-    const prompts = existsSync(promptsFile) ? readFileSync(promptsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { phase: string; prompt: string }) : [];
+    const prompts = existsSync(promptsFile) ? readFileSync(promptsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { phase: string; prompt: string; args: string[] }) : [];
     return { result, prompts };
   } finally {
     dir.cleanup();
@@ -127,6 +127,35 @@ describe("the merge checks resolve a conflict with main", () => {
       expect(resolve).not.toContain("DOC-1");
     } finally {
       trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a standard's check sees LOOPSTRA_BASE as the commit the resolution squashed the branch onto", async () => {
+    const { repo, ctx, trace } = await copy("reviewed");
+    const dir = tempDir("loopstra-base-");
+    try {
+      const bases = join(dir.path, "bases");
+      const script = join(dir.path, "record.ts").replaceAll("\\", "/");
+      writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(bases)}, (process.env.LOOPSTRA_BASE ?? "") + "\\n");\n`);
+      const check = `bun -e "process.exit(/^[0-9a-f]{40,64}$/.test(process.env.LOOPSTRA_BASE ?? '') ? 0 : 1)" && bun "${script}"`;
+      await Bun.write(join(repo.path, "loopstra", "standards", "base.md"), `---\ncheck: ${JSON.stringify(check)}\n---\n# Base\n\n## Rules\n- BASE-1: the base is a commit\n`);
+      await new Git(repo.path).commitAll("standards");
+      await mainMoves(repo.path);
+      await personSets(ctx, "merge-approved");
+      const { prompts } = await withResolve({ resolve: resolveFixture(RESOLVED, true) }, () => runMergeStep(ctx));
+      expect((await status(repo.path)).status).toBe("reviewing");
+      // The resolve session may run the check too.
+      const resolve = prompts.find((p) => p.phase === "resolve")!;
+      expect(resolve.prompt).toContain(`\`${check}\``);
+      expect(resolve.args[resolve.args.indexOf("--allowedTools") + 1]).toContain(`Bash(${check} *)`);
+      const seen = readFileSync(bases, "utf8").trim().split("\n");
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatch(/^[0-9a-f]{40,64}$/);
+      // The branch is one commit on top of main as it was when the conflict was resolved: that commit is the base.
+      expect(seen[0]).toBe((await new Git(repo.path).run(["rev-parse", "intent/add-numbers^"])).out.trim());
+      expect(trace.lastGate("add-numbers", "merge", "check:base")?.result).toBe("pass");
+    } finally {
+      trace.close(); repo.cleanup(); dir.cleanup();
     }
   });
 

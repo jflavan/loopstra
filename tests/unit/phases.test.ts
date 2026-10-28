@@ -239,6 +239,28 @@ describe("agentPhase tools and prompt", () => {
     expect(commandsFor(ctx, "build")).toBe("any command");
     trace.close(); repo.cleanup();
   });
+
+  test("build sessions may run the checks of the standards a spec passes, as they may the configured commands", async () => {
+    const { repo, ctx, trace } = await setup();
+    ctx.cfg.claude.allowed_tools = ["Read", "Edit"];
+    const checks = ["gitleaks detect --log-opts=\"$LOOPSTRA_BASE..HEAD\" && semgrep ci", "echo ok"];
+    const tools = toolsFor(ctx, "build", undefined, checks);
+    expect(tools).toEqual(["Read", "Edit", "Bash(echo ok *)", `Bash(${checks[0]} *)`, "Bash(gitleaks detect --log-opts=\"$LOOPSTRA_BASE..HEAD\" *)", "Bash(semgrep ci *)"]);
+    expect(commandsFor(ctx, "build", undefined, checks)).toBe(`\`echo ok\`, \`${checks[0]}\`, \`gitleaks detect --log-opts="$LOOPSTRA_BASE..HEAD"\`, \`semgrep ci\``);
+    // Judges are not given them: only a build session may run them.
+    expect(toolsFor(ctx, "read+commands", undefined, checks)).toEqual(toolsFor(ctx, "read+commands"));
+    // None passed: exactly what it was.
+    expect(toolsFor(ctx, "build", undefined, [])).toEqual(["Read", "Edit", "Bash(echo ok *)"]);
+
+    // The session runner and the prompt both get them from the spec.
+    await Bun.write(join(repo.path, "loopstra", "prompts", "intake.md"), "commands={{commands}}\n");
+    const argsFile = join(repo.path, "args.json");
+    await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "acceptEdits", tools: "build", vars: {}, commands: ["semgrep ci"], env: { LOOPSTRA_FAKE_ARGS: argsFile } });
+    const recorded = await Bun.file(argsFile).json();
+    expect((recorded.args[recorded.args.indexOf("--allowedTools") + 1] as string).split(",")).toContain("Bash(semgrep ci *)");
+    expect(recorded.prompt).toStartWith("commands=`echo ok`, `semgrep ci`\n");
+    trace.close(); repo.cleanup();
+  });
 });
 
 describe("conversation.md in the prompt", () => {

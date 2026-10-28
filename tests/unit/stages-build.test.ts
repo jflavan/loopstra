@@ -106,6 +106,30 @@ describe("build stage", () => {
     }
   });
 
+  test("build sessions may run the checks of the plan's standards, which the build's own test runs do not run; the tested marker is as it was", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      const check = "echo scanned";
+      await Bun.write(join(repo.path, "loopstra", "standards", "layout.md"), `---\napplies_to:\n  - src/**\ncheck: ${check}\n---\n# Source layout\n\n## Rules\n- SRC-1: code lives under src\n`);
+      await Bun.write(join(repo.path, "loopstra", "standards", "docs.md"), "---\napplies_to:\n  - docs/**\ncheck: echo docs\n---\n# Docs\n\n## Rules\n- DOC-1: docs have a title\n");
+      await Bun.write(join(repo.path, "loopstra", "standards", "soc2.md"), "# SOC 2\n\n## Rules\n- SOC-1: changes are reviewed\n");
+      await new Git(repo.path).commitAll("standards");
+      await ctx.reload();
+      await runBuildStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+      const prompt = await promptOf(ctx.runDir, trace, "build");
+      expect(prompt).toContain("`echo ok`");
+      expect(prompt).toContain(`\`${check}\``);
+      expect(prompt).not.toContain("`echo docs`");
+      expect(trace.events("add-numbers").some((e) => e.type === "command" && JSON.parse(e.payload).command === check)).toBe(false);
+      const head = (await new Git(ctx.worktreeDir).run(["rev-parse", "HEAD"])).out.trim();
+      expect(readMarker(ctx, "tested")).toBe(`${head}\necho ok\n\n`);
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("a plan approved by a status edit has its exceptions recorded as the build starts", async () => {
     const { repo, ctx, trace } = await planned({ test: "echo ok" });
     try {

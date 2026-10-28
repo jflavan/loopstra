@@ -59,6 +59,8 @@ export interface AgentPhaseSpec {
   retry?: boolean;
   /** false: getting through does not end an outage pause, since another model may still be out (the cheaper judge). Default true. */
   endsPause?: boolean;
+  /** More commands a build session may run as it may the configured ones: the checks of the standards that apply (see checkCommands). */
+  commands?: string[];
 }
 
 export type AgentPhaseResult<N extends PhaseName> =
@@ -102,15 +104,15 @@ function commandParts(cmd: string): string[] {
 }
 
 /**
- * Tools a session may use without asking: the set's own, then the step's setup's `tools`, then its
- * `mcp_tools` (see stepSetup), each once. Always a fresh array.
+ * Tools a session may use without asking: the set's own (with `commands`, see setTools), then the
+ * step's setup's `tools`, then its `mcp_tools` (see stepSetup), each once. Always a fresh array.
  */
-export function toolsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string[] {
-  return [...new Set([...setTools(ctx, set), ...(setup?.tools ?? []), ...(setup?.mcpTools ?? [])])];
+export function toolsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup, commands: string[] = []): string[] {
+  return [...new Set([...setTools(ctx, set, commands), ...(setup?.tools ?? []), ...(setup?.mcpTools ?? [])])];
 }
 
-/** The tool set's own tools, before the setup's. */
-function setTools(ctx: StepContext, set: ToolSet): string[] {
+/** The tool set's own tools, before the setup's. A build session may also run `commands` (the standards' checks). */
+function setTools(ctx: StepContext, set: ToolSet, commands: string[]): string[] {
   if (set === "read") return [...READ_TOOLS];
   if (set === "read+git") return [...READ_TOOLS, ...GIT_READ];
   const { test, lint, build, run, install } = ctx.cfg.commands;
@@ -119,7 +121,7 @@ function setTools(ctx: StepContext, set: ToolSet): string[] {
   const rules = (cmds: Array<string | undefined>) =>
     cmds.filter((c): c is string => !!c).flatMap((c) => [...new Set([c, ...commandParts(c)])]).map((c) => `Bash(${c} *)`);
   // A build session runs the project's own commands (tests, install) whatever the allow list says.
-  if (set === "build") return [...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install])];
+  if (set === "build") return [...ctx.cfg.claude.allowed_tools, ...rules([test, lint, build, run, install, ...commands])];
   // The install command is not for judges.
   return [...READ_TOOLS, ...rules([test, lint, build, run]), ...GIT_READ];
 }
@@ -129,8 +131,8 @@ function setTools(ctx: StepContext, set: ToolSet): string[] {
  * prompt's `{{commands}}`: "`bun test`, `git diff`" (each with any arguments), "any command" for a
  * bare Bash rule, "none" without Bash.
  */
-export function commandsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup): string {
-  const tools = toolsFor(ctx, set, setup);
+export function commandsFor(ctx: StepContext, set: ToolSet, setup?: AgentSetup, commands: string[] = []): string {
+  const tools = toolsFor(ctx, set, setup, commands);
   if (tools.includes("Bash")) return "any command";
   const cmds = tools.map((t) => /^Bash\((.+?)(?: \*|:\*)?\)$/.exec(t)?.[1]).filter((c): c is string => !!c);
   return cmds.length ? [...new Set(cmds)].map((c) => `\`${c}\``).join(", ") : "none";
@@ -257,7 +259,7 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?
   const { setup } = setupOf(cfg, spec);
   const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
-  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup), ...record, ...spec.vars };
+  const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup, spec.commands), ...record, ...spec.vars };
   // The standards come with what this phase does with them, in place of {{standards}} or at the end.
   // Without standards nothing is added: the prompt is what it was before standards existed.
   const standards = standardsBlock(spec.name, vars.standards ?? "");
@@ -559,7 +561,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
         schema: jsonSchemaFor(spec.name),
         model: model.name,
         permissionMode: spec.permissionMode,
-        allowedTools: toolsFor(ctx, spec.tools, setup),
+        allowedTools: toolsFor(ctx, spec.tools, setup, spec.commands),
         // With the setup's and main's: no edits in main's snapshot when the session may read it as an added dir.
         disallowedTools: [...new Set([...disallowedFor(spec.tools), ...(extra?.deny ?? []), ...(main?.deny ?? [])])],
         // The test-protection hook, from the installed package; it acts only in sessions that write (see the hook).

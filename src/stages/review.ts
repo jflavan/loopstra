@@ -6,7 +6,7 @@ import { passes, runJudge } from "../judges";
 import { testLoop } from "./build";
 import { catchUp, outOfDate, RESOLUTION, roundsAllowed } from "./catch-up";
 import { reviewPhase, reviewPrompt, takeEarlyReview } from "./early-review";
-import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
+import { artifacts, bullets, buildSession, checkCommands, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
@@ -99,8 +99,9 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
       clearMarker(ctx, REVIEW_ROUND);
       return block(ctx, REVIEW_STILL_FOUND_NOTE, { detail: { rounds: round, important } });
     }
+    // It may run the checks of the standards that apply to the diff, those the reviewer was given.
     const revise = await buildSession(ctx, {
-      name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
+      name: "revise", traceName: `revise-${round}`, permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir, commands: await checkCommands(ctx),
       vars: { findings: bullets(important), test_command: ctx.cfg.commands.test },
     });
     if (!revise.ok) return block(ctx, revise.note);
