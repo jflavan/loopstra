@@ -93,7 +93,7 @@ describe("the models section", () => {
       const before = readFileSync(configPath(repo.path), "utf8");
       expect((await askSection(models, repo.path, "defaults")).text).toBe(before);
       const { text } = await askSection(models, repo.path, ["", "", "", "", "", "", "", "", "strong", "", "", "", "", "", "", ""]);
-      expect(text).toBe(before.replace("build: { model: default,", "build: { model: strong,"));
+      expect(text).toBe(before.replace("  build:\n    model: default\n", "  build:\n    model: strong\n"));
     } finally { repo.cleanup(); }
   });
 });

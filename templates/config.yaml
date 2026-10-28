@@ -40,7 +40,13 @@ gates:
 stages:
   design: { model: strong, skills: [], before: [], after: [] }
   plan: { model: strong, skills: [], before: [], after: [] }
-  build: { model: default, skills: [], before: [], after: [], max_fix_loops: 3, acceptance_tests: true }
+  build:
+    model: default
+    skills: []
+    before: []
+    after: []
+    max_fix_loops: 3
+    acceptance_tests: true
   review: { model: strong, skills: [], before: [], after: [], max_rounds: 2 }
   verify: { model: default, skills: [], before: [], after: [] }
 
