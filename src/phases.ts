@@ -12,6 +12,7 @@ import { GitTimeout } from "./git";
 import { acceptanceFiles, CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { promptPath, renderPrompt, type PromptVars } from "./prompts";
+import { standardsBlock } from "./standards-prompt";
 import { issuesText, tracedSession } from "./sessions";
 import { commandTimeoutMs, errorText, runCommand, type CommandResult } from "./shell";
 import { clearPause } from "./heartbeat";
@@ -244,6 +245,8 @@ export type PromptNote = { variable: string; note: string; text: string };
  * The prompt a phase would be sent, or null when neither the repository nor the package has its
  * prompt. A work session (see steerable) gets conversation.md as {{conversation}}; a repository's
  * override that leaves that variable out gets the record at its end instead, when there is one.
+ * `vars.standards` (see stageStandards) arrives as standardsBlock, the same way: the shipped prompts
+ * have no {{standards}}, so with standards it is always added at the end, and without them never.
  * `extra` reaches the prompt the same way (see PromptNote): an override may leave its variable out.
  */
 export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?: PromptNote): Promise<string | null> {
@@ -255,10 +258,15 @@ export async function phasePrompt(ctx: StepContext, spec: AgentPhaseSpec, extra?
   const setupText = setupLines(setup, await describer(ctx, setup));
   const record: PromptVars = steerable(spec.name) ? { conversation: readConversation(ctx.root, ctx.slug) } : {};
   const vars: PromptVars = { slug: ctx.slug, main_branch: ctx.cfg.main_branch, commands: commandsFor(ctx, spec.tools, setup), ...record, ...spec.vars };
+  // The standards come with what this phase does with them, in place of {{standards}} or at the end.
+  // Without standards nothing is added: the prompt is what it was before standards existed.
+  const standards = standardsBlock(spec.name, vars.standards ?? "");
+  if (standards) vars.standards = standards;
   const template = await Bun.file(path).text();
   let rendered = setupText + renderPrompt(template, vars);
   const said = vars.conversation?.trim() ?? "";
   if (said && !template.includes("{{conversation}}")) rendered = `${rendered.trimEnd()}\n\n${CONVERSATION_HEADING}\n\n${said}\n`;
+  if (standards && !template.includes("{{standards}}")) rendered = `${rendered.trimEnd()}\n\n${standards}\n`;
   const contracted = withContract(rendered);
   const prompt = extra?.note && !template.includes(`{{${extra.variable}}}`) ? `${contracted}\n\n${extra.text}\n` : contracted;
   ctx.rememberPrompt(prompt, cfg);

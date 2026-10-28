@@ -15,6 +15,7 @@ import { AssistantUnavailable, QuestionAsked, SessionStopped, StopRequested } fr
 import { Trace } from "../../src/trace";
 import { FAKE_CLAUDE as FAKE, fixture, fixtureDir, setEnv, tempDir, tempGitRepo, TEMPLATES, withEnv } from "../helpers";
 import { tempRoot } from "../../src/resources";
+import { standardsBlock, STANDARDS_HEADING, STANDARDS_INSTRUCTIONS } from "../../src/standards-prompt";
 
 const CONTRACT = CONTRACT_LINES.join("\n\n");
 
@@ -1213,5 +1214,47 @@ describe("a step's agent setup", () => {
       const { allowed } = await recorded(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read" });
       expect(allowed).toEqual(["Read", "Glob", "Grep", "mcp__github", "mcp__docs__guide"]);
     } finally { trace.close(); repo.cleanup(); }
+  });
+});
+
+describe("standards in the prompt", () => {
+  const STANDARDS = "### Security (loopstra/standards/security.md)\nApplies to every change.\n\n# Security\n\n## Rules\n- SEC-1: no secrets in logs";
+  const design = { name: "design" as const, model: "default" as const, permissionMode: "default" as const, tools: "read" as const };
+  const prompt = (repo: { path: string }, dir: string) => Bun.file(join(repo.path, ".loopstra", "runs", "x", "phases", dir, "prompt.md")).text();
+
+  test("the block is the heading, the phase's instructions, then the standards; nothing without standards", () => {
+    expect(standardsBlock("design", "")).toBe("");
+    const block = standardsBlock("design", STANDARDS);
+    expect(block).toBe(`${STANDARDS_HEADING}\n\n${STANDARDS_INSTRUCTIONS.design}\n\n${STANDARDS}`);
+    expect(block).toContain("Add `## Standards` after Areas of concern");
+    expect(standardsBlock("spec-check", STANDARDS)).toContain("with `standard` set to the rule's label");
+    // A phase with nothing to do with them still gets the standards.
+    expect(standardsBlock("intake", STANDARDS)).toBe(`${STANDARDS_HEADING}\n\n${STANDARDS}`);
+  });
+
+  test("an override without {{standards}} gets them appended", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Write the spec for {{slug}}.\n");
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: STANDARDS } });
+      expect(await prompt(repo, "1-design")).toBe(`Write the spec for x.\n\n${standardsBlock("design", STANDARDS)}\n\n${CONTRACT}\n`);
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: "" } });
+      expect(await prompt(repo, "2-design")).toBe(`Write the spec for x.\n\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("an override with {{standards}} gets them there, not at the end; with none it reads (none)", async () => {
+    const { repo, ctx, trace } = await setup();
+    try {
+      await Bun.write(join(repo.path, "loopstra", "prompts", "design.md"), "Before.\n\n{{standards}}\n\nAfter.\n");
+      await agentPhase(ctx, { ...design, vars: { intent: "i", standards: STANDARDS } });
+      expect(await prompt(repo, "1-design")).toBe(`Before.\n\n${standardsBlock("design", STANDARDS)}\n\nAfter.\n\n${CONTRACT}\n`);
+      await agentPhase(ctx, { ...design, vars: { intent: "i" } });
+      expect(await prompt(repo, "2-design")).toBe(`Before.\n\n(none)\n\nAfter.\n\n${CONTRACT}\n`);
+    } finally {
+      trace.close(); repo.cleanup();
+    }
   });
 });

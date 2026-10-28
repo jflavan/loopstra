@@ -10,6 +10,8 @@ import { WATCHING_PR, type Intent, type Status } from "../intents";
 import { runDir } from "../paths";
 import { isRiskNote } from "../risk";
 import { errorText } from "../shell";
+import { applying, renderStandards, type Applying, type Excepted, type Standard, type StandardsRead } from "../standards";
+import { scopeOf } from "../standards-record";
 
 /**
  * Runs a stage's before/after commands as one code phase. Any failure blocks with a plain note; the
@@ -63,6 +65,34 @@ export async function artifacts(ctx: StepContext): Promise<Artifacts> {
     currentPlan: readMarker(ctx, RECONCILED_PLAN) ?? plan,
     review: (await readArtifact(ctx, "review.md")) ?? "",
   };
+}
+
+/**
+ * The standards a stage holds its artifact to: `list` applies, `scoped` (the spec's view only) applies
+ * only once the change touches its files, and `excepted` are the rules a person allowed this change
+ * not to keep. `text` is the `standards` prompt variable, "" when the repository has none. `labels`:
+ * every rule of `list`, but the excepted ones.
+ */
+export interface StageStandards { read: StandardsRead; list: Applying[]; scoped: Standard[]; excepted: Excepted[]; text: string; labels: string[] }
+
+/**
+ * The standards for this step, as main has them at the step's commit (see StepContext.standards, which
+ * throws StandardsUnreadable), with what people added to the change, removed from it and excepted.
+ * `files` null is the spec's view: the files are not known yet, so the standards for every change and
+ * those added apply, and the scoped ones are listed apart. Given the files (the plan's), it is the
+ * plan's view: a scoped standard applies when one of them matches.
+ */
+export async function stageStandards(ctx: StepContext, files: string[] | null): Promise<StageStandards> {
+  const read = await ctx.standards();
+  const record = ctx.standardsRecord();
+  const scope = scopeOf(record);
+  const list = applying(read.standards, files ?? [], scope);
+  const listed = new Set(list.map((a) => a.standard.name));
+  const scoped = files === null ? read.standards.filter((s) => s.appliesTo && !listed.has(s.name) && !scope.removed.includes(s.name)) : [];
+  const excepted = record.exceptions.map((e) => ({ label: e.label, reason: e.reason }));
+  const allowed = new Set(excepted.map((e) => e.label));
+  const labels = list.flatMap((a) => a.standard.rules.map((r) => r.label)).filter((l) => !allowed.has(l));
+  return { read, list, scoped, excepted, text: renderStandards(list, { scoped, excepted }), labels };
 }
 
 /** The commit message for edits nobody reviewed, kept on the branch so the next review sees them. */

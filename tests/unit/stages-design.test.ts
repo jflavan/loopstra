@@ -625,3 +625,163 @@ describe("cheaper judges on the spec check", () => {
     trace.close(); repo.cleanup();
   });
 });
+
+describe("design stage with standards", () => {
+  const NO_AHEAD = "speed:\n  plan_ahead: false\n";
+  const SECURITY = "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n- SEC-3: card numbers are never logged\n";
+  const PAYMENTS = "---\napplies_to:\n  - services/payments/**\n---\n# Payments data\n\n## Rules\n- PAY-1: card data goes through the vault\n";
+  /** The design fixture with `section` as the spec's Standards section (JSON-escaped newlines). */
+  const designWith = (section: string) => fixture("design").replace("## Areas of concern\\nNone.\\n", `## Areas of concern\\nNone.\\n\\n## Standards\\n${section}\\n`);
+
+  async function withStandards(repo: string): Promise<void> {
+    mkdirSync(join(repo, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(repo, "loopstra", "standards", "security.md"), SECURITY);
+    await Bun.write(join(repo, "loopstra", "standards", "payments.md"), PAYMENTS);
+    await new Git(repo).commitAll("standards");
+  }
+
+  const gates = (trace: Trace) => trace.gates("add-numbers").map((g) => `${g.check}:${g.result}:${g.evidence}`);
+  const promptOf = async (trace: Trace, runDir: string, name: string, nth = 0) => {
+    const p = trace.phases("add-numbers").filter((x) => x.name === name)[nth]!;
+    return Bun.file(join(runDir, "phases", `${p.seq}-${name}`, "prompt.md")).text();
+  };
+
+  test("a spec without a Standards section fails the standards check and is written once more", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+    try {
+      await withStandards(repo.path);
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+      expect(phaseNames(trace)).toEqual(["intake", "design", "design"]);
+      expect(gates(trace)).toEqual(["headings:pass:all headings present", "standards:fail:no Standards section", "headings:pass:all headings present", "standards:fail:no Standards section"]);
+      expect(await promptOf(trace, ctx.runDir, "design", 1)).toContain("- no Standards section");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a spec whose Standards section says None. passes", async () => {
+    const dir = fixtureDir({ design: designWith("None.") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          await runDesignStep(ctx);
+          expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+          expect(gates(trace).map((g) => g.split(":").slice(0, 2).join(":"))).toEqual(["headings:pass", "standards:pass", "spec-check:pass"]);
+          expect(gates(trace)[1]).toBe("standards:pass:0 rules addressed");
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("a spec naming a rule no standard has fails with its label", async () => {
+    const dir = fixtureDir({ design: designWith("- SEC-9: kept by the design") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          await runDesignStep(ctx);
+          expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("blocked");
+          expect(gates(trace)[1]).toBe("standards:fail:no rule called SEC-9");
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("a spec-check finding on a rule puts its label first, in the rewrite's findings and the gate's evidence", async () => {
+    const reject = fixture("spec-check-reject").replace(
+      '{"requirement":"add handles negative numbers","met":false,"evidence":"The spec never mentions negative numbers."}',
+      '{"requirement":"the request body is not logged","met":false,"evidence":"the design logs the request body, which holds card numbers","standard":"SEC-3"}',
+    );
+    const dir = fixtureDir({ design: designWith("- SEC-1: nothing is logged"), "spec-check-1": reject });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          await runDesignStep(ctx);
+          expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+          const finding = "SEC-3: the request body is not logged: the design logs the request body, which holds card numbers";
+          expect(gates(trace)).toContain(`spec-check:fail:${finding}`);
+          expect(gates(trace)[1]).toBe("standards:pass:1 rule addressed");
+          expect(await promptOf(trace, ctx.runDir, "design", 1)).toContain(`- ${finding}`);
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("the design and spec-check prompts carry the standards: those for every change, then the scoped ones, then approved exceptions", async () => {
+    const dir = fixtureDir({ design: designWith("None.") });
+    try {
+      await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, async () => {
+        const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+        try {
+          await withStandards(repo.path);
+          await Bun.write(join(repo.path, "intent", "add-numbers", "standards.md"), "# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the spec: the debug log stays until the audit (J., from the console, 2026-10-28)\n");
+          await new Git(repo.path).commitAll("record");
+          await ctx.reload();
+          await runDesignStep(ctx);
+          for (const name of ["design", "spec-check"]) {
+            const p = await promptOf(trace, ctx.runDir, name);
+            const at = (s: string) => { expect(p, `${name}: ${s}`).toContain(s); return p.indexOf(s); };
+            const order = [
+              at("Standards this repository holds every change to:"),
+              at(name === "design" ? "Add `## Standards` after Areas of concern" : "with `standard` set to the rule's label"),
+              at("### Security (loopstra/standards/security.md)\nApplies to every change."),
+              at("These apply only to changes that touch the files named."),
+              at("### Payments data (loopstra/standards/payments.md)\nApplies only to changes that touch services/payments/**."),
+              at("Rules under an approved exception:\n- SEC-1: the debug log stays until the audit"),
+            ];
+            expect(order).toEqual([...order].sort((a, b) => a - b));
+          }
+        } finally {
+          trace.close(); repo.cleanup();
+        }
+      });
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  test("with every standard removed from the change, its spec is given none and has no standards check", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+    try {
+      await withStandards(repo.path);
+      await Bun.write(join(repo.path, "intent", "add-numbers", "standards.md"), "# Standards decisions for add-numbers\n\n## Removed\n- security: a prototype (M., from the console, 2026-10-28)\n- payments: a prototype (M., from the console, 2026-10-28)\n");
+      await new Git(repo.path).commitAll("record");
+      await ctx.reload();
+      await runDesignStep(ctx);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("spec-approved");
+      expect(gates(trace).map((g) => g.split(":")[0])).toEqual(["headings", "spec-check"]);
+      expect(await promptOf(trace, ctx.runDir, "design")).not.toContain("Standards this repository holds");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
+  test("a repository without standards has no standards check", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted", { config: NO_AHEAD });
+    try {
+      await runDesignStep(ctx);
+      expect(gates(trace).map((g) => g.split(":")[0])).toEqual(["headings", "spec-check"]);
+      expect(await promptOf(trace, ctx.runDir, "design")).not.toContain("Standards this repository holds");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+});

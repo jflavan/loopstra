@@ -94,10 +94,11 @@ describe("prompt templates", () => {
     expect(filled.sections["Done when"]).toContain("A short list");
   });
 
-  test("skills reach the prompt only through the prepended line; every prompt variable is used by some template", async () => {
+  test("skills reach the prompt only through the prepended line; every prompt variable but standards is used by some template", async () => {
     expect(PROMPT_VARS as readonly string[]).not.toContain("skills");
     const all = (await Promise.all(Object.keys(Envelopes).map((n) => Bun.file(join(ROOT, `${n}.md`)).text()))).join("\n");
-    for (const v of PROMPT_VARS) expect({ v, used: all.includes(`{{${v}}}`) }).toEqual({ v, used: true });
+    // phasePrompt adds the standards at the end, so a repository without them gets the prompts it always had.
+    for (const v of PROMPT_VARS) expect({ v, used: all.includes(`{{${v}}}`) }).toEqual({ v, used: v !== "standards" });
   });
 
   test("the config template names all four models, and no step starts on max", async () => {

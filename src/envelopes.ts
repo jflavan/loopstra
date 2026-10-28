@@ -16,6 +16,8 @@ const requirement = z.object({
   requirement: z.string(),
   met: z.boolean(),
   evidence: z.string(),
+  /** The label of the rule of a standard the finding is about, when it is about one. */
+  standard: z.string().optional(),
 });
 
 /** A question for a person (only when the decision is theirs and there is no sensible default). Optional: absent means none. */

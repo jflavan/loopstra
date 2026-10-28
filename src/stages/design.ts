@@ -2,6 +2,7 @@ import { block, writeIntentPriority, type StepContext, type StepResult } from ".
 import { agentPhase } from "../phases";
 import { runArtifactStep, type ArtifactStage } from "./artifact";
 import { planAhead } from "./plan";
+import { stageStandards } from "./shared";
 
 const DESIGN: ArtifactStage<"design", "spec-check"> = {
   stage: "design", gate: "spec", artifact: "spec.md",
@@ -11,10 +12,13 @@ const DESIGN: ArtifactStage<"design", "spec-check"> = {
   vars: (a, findings) => ({ intent: a.intent, findings }),
   text: (e) => e.spec_markdown,
   headings: ["Summary", "Requirements", "Design", "Affected code", "Out of scope", "Open questions", "Areas of concern"],
+  // The spec's view: the files are not known yet (see stageStandards).
+  standards: (ctx) => stageStandards(ctx, null),
   judge: {
     name: "spec-check", who: "checker",
     vars: (a) => ({ intent: a.intent, spec: a.spec }),
-    findings: (e) => e.findings.filter((f) => !f.met).map((f) => `${f.requirement}: ${f.evidence}`),
+    // A finding on a rule of a standard starts with its label.
+    findings: (e) => e.findings.filter((f) => !f.met).map((f) => `${f.standard ? `${f.standard}: ` : ""}${f.requirement}: ${f.evidence}`),
   },
   ahead: planAhead,
   rewritingNote: "The first spec did not pass its automatic check, so it is being written again.",

@@ -9,7 +9,8 @@ import { agentPhase, alongsideFirst, phasePrompt, renderedThen, type AgentPhaseR
 import type { PromptVars } from "../prompts";
 import { errorText } from "../shell";
 import { notTheStepsFault, StopRequested } from "../stop";
-import { artifacts, bullets, humanNote, runHookCommands, type Artifacts } from "./shared";
+import { checkStandardsSection, readStandardsSection } from "../standards";
+import { artifacts, bullets, humanNote, runHookCommands, type Artifacts, type StageStandards } from "./shared";
 
 /**
  * Design and plan are mirror images: an agent writes an artifact (spec.md, plan.md), and the gate's
@@ -55,6 +56,12 @@ export interface ArtifactStage<W extends Writer, J extends Judge> {
   headings: string[];
   /** Checks of the stage's own, run between the headings and the judge. */
   checks?: (ctx: StepContext, a: Artifacts) => Check[];
+  /**
+   * The standards the artifact is held to (see stageStandards). write and checks ask once per
+   * artifact: the writer and the judge get them as {{standards}}, and the gate gets a `standards`
+   * check when there are any. A stage without it sees no standards.
+   */
+  standards?: (ctx: StepContext, a: Artifacts) => Promise<StageStandards>;
   /** The agent judge: its phase, prompt variables, what it found, and what the evidence calls it. */
   judge: { name: J; vars: (a: Artifacts) => PromptVars; findings: (e: Envelope<J>) => string[]; who: string };
   /** Work for the next stage, run alongside the judge and kept only if the whole gate passes (design: planAhead in plan.ts). */
@@ -98,10 +105,11 @@ export async function runArtifactStep<W extends Writer, J extends Judge>(ctx: St
  * The writing session, told the findings of a failed check ("" at first). Work written ahead for this
  * stage builds its session here too, so it asks exactly what the writing session would.
  */
-export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, a: Artifacts, findings: string): AgentPhaseSpec & { name: W } {
+export function writerPhase<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, a: Artifacts, findings: string, standards?: StageStandards): AgentPhaseSpec & { name: W } {
   const cfg = ctx.cfg.stages[s.stage];
+  const vars = standards ? { ...s.vars(a, findings), standards: standards.text } : s.vars(a, findings);
   // Read-only sessions in plan mode: it returns the structured output normally (verified live).
-  return { name: s.stage, permissionMode: "plan", tools: "read", vars: s.vars(a, findings), skills: cfg.skills };
+  return { name: s.stage, permissionMode: "plan", tools: "read", vars, skills: cfg.skills };
 }
 
 /** One writing session (or an answer written earlier, see take): the artifact is written, then the after commands run. */
@@ -109,7 +117,8 @@ async function write<W extends Writer, J extends Judge>(ctx: StepContext, s: Art
   // A person's note from sending the change back comes first; the check's findings (a rewrite) after it.
   const sentBack = sentBackNote(ctx);
   const all = [sentBack, findings].filter(Boolean).join("\n\n");
-  const phase = writerPhase(ctx, s, await artifacts(ctx), all);
+  const a = await artifacts(ctx);
+  const phase = writerPhase(ctx, s, a, all, await s.standards?.(ctx, a));
   // Rendered once, so an answer written earlier is matched against exactly what the session is sent;
   // a retry renders it again (see renderedThen). The note reaches the session even through an older
   // prompt file without {{findings}}.
@@ -250,6 +259,7 @@ async function aheadNow<W extends Writer, J extends Judge>(ctx: StepContext, s: 
 async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: ArtifactStage<W, J>, pending: Pending): Promise<Check<JudgePayload>[]> {
   const a = await artifacts(ctx);
   const text = (await readArtifact(ctx, s.artifact)) ?? "";
+  const standards = await s.standards?.(ctx, a);
   const list: Check<JudgePayload>[] = [
     {
       name: "headings",
@@ -259,6 +269,8 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       },
     },
     ...(s.checks?.(ctx, a) ?? []),
+    // Only when the session was given standards: a change with every standard removed has none to cover.
+    ...(standards?.text ? [standardsCheck(text, standards)] : []),
   ];
   if (!ctx.cfg.gates[s.gate].agent) return list;
   list.push({
@@ -271,7 +283,8 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       // Beside that work, a cheaper judge in shadow needs room for a third session. The strong judge's
       // verdict comes back without waiting for the cheaper one, so a rejection calls the work off at once.
       const judge = async () => {
-        const j = await judgeFirst(ctx, { name: s.judge.name, permissionMode: "default", tools: "read", vars: s.judge.vars(a) }, work ? { alongside: 1 } : {});
+        const vars = standards ? { ...s.judge.vars(a), standards: standards.text } : s.judge.vars(a);
+        const j = await judgeFirst(ctx, { name: s.judge.name, permissionMode: "default", tools: "read", vars }, work ? { alongside: 1 } : {});
         pending.comparison = j;
         return j.result;
       };
@@ -294,4 +307,20 @@ async function checks<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
     },
   });
   return list;
+}
+
+/**
+ * The gate's `standards` check of the spec: it has a Standards section, and every label there is a
+ * rule of a standard on main. The spec covers only the rules its design decides something about, so
+ * none is required; the plan (which knows the files) covers every rule that applies.
+ */
+function standardsCheck(text: string, standards: StageStandards): Check<JudgePayload> {
+  return {
+    name: "standards",
+    run: async () => {
+      const known = new Set(standards.read.standards.flatMap((st) => st.rules.map((r) => r.label)));
+      const r = checkStandardsSection(readStandardsSection(text), [], known);
+      return { result: r.ok ? "pass" : "fail", evidence: r.evidence };
+    },
+  };
 }
