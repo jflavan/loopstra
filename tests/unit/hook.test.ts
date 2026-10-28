@@ -161,4 +161,44 @@ describe("protect-tests hook", () => {
       expect((await edit("tests/new.test.ts", { ...env, LOOPSTRA_BASE: "no-such-branch" })).code).toBe(2);
     } finally { repo.cleanup(); }
   });
+
+  test("no session of the loop edits loopstra/standards/: refused in every writing phase and resolve, and never logged as a protected test", async () => {
+    const t = tempDir();
+    try {
+      const log = join(t.path, "protected-tests.txt");
+      const env = (phase: string) => ({ LOOPSTRA_PHASE: phase, LOOPSTRA_PROTECTED_LOG: log, CLAUDE_PROJECT_DIR: "/repo" });
+      const message = "Loopstra: the repository's standards (loopstra/standards/) are changed by a person on main, never by the loop's sessions (loopstra/standards/x.md).\n";
+      for (const phase of ["acceptance", "build", "fix", "reconcile", "revise", "resolve"]) {
+        for (const tool_name of ["Edit", "Write"]) {
+          const r = await runHook({ tool_name, tool_input: { file_path: "/repo/loopstra/standards/x.md" } }, env(phase));
+          expect({ phase, tool_name, code: r.code }).toEqual({ phase, tool_name, code: 2 });
+          expect(r.err).toBe(message);
+        }
+      }
+      expect(existsSync(log)).toBe(false);
+      // The standards folder itself is held too, and the standards rule is checked before the acceptance rule.
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/loopstra/standards" } }, env("build"))).code).toBe(2);
+      const accepted = { ...env("acceptance"), LOOPSTRA_ACCEPTANCE: JSON.stringify(["loopstra/standards/x.md"]) };
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/loopstra/standards/x.md" } }, accepted)).err).toBe(message);
+      // Outside those phases, and for files that only look like the folder, the hook exits 0.
+      for (const phase of ["review", "merge", "", "setup"]) {
+        expect({ phase, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/loopstra/standards/x.md" } }, env(phase))).code }).toEqual({ phase, code: 0 });
+      }
+      for (const p of ["/repo/loopstra/standardsX.md", "/repo/loopstra/standards.md", "/repo/docs/loopstra/standards/x.md"]) {
+        expect({ p, code: (await runHook({ tool_name: "Edit", tool_input: { file_path: p } }, env("build"))).code }).toEqual({ p, code: 0 });
+      }
+      // In resolve only the standards rule applies: the test rules stay off, as before.
+      const resolveTest = { ...env("resolve"), LOOPSTRA_ACCEPTANCE: JSON.stringify(["tests/count.test.ts"]) };
+      expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/tests/count.test.ts" } }, resolveTest)).code).toBe(0);
+      expect(existsSync(log)).toBe(false);
+    } finally { t.cleanup(); }
+  });
+
+  test("the standards folder is matched through backslashes, and its case only where the file system ignores case", async () => {
+    const caseless = process.platform === "win32" || process.platform === "darwin";
+    const windows = await runHook({ tool_name: "Edit", tool_input: { file_path: "C:\\repo\\loopstra\\standards\\x.md" } }, { LOOPSTRA_PHASE: "fix", CLAUDE_PROJECT_DIR: "C:\\repo" });
+    expect(windows.code).toBe(2);
+    const upper = await runHook({ tool_name: "Edit", tool_input: { file_path: "/repo/Loopstra/Standards/x.md" } }, { LOOPSTRA_PHASE: "fix", CLAUDE_PROJECT_DIR: "/repo" });
+    expect(upper.code).toBe(caseless ? 2 : 0);
+  });
 });
