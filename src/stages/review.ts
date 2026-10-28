@@ -1,4 +1,5 @@
 import { block, clearMarker, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
+import type { Envelope } from "../envelopes";
 import { Git } from "../git";
 import { modelFor } from "../config";
 import { passes, runJudge } from "../judges";
@@ -21,6 +22,18 @@ export async function catchUpTested(ctx: StepContext): Promise<{ ok: true } | Fa
   const up = await catchUp(ctx);
   if (!up.ok) return up;
   return up.outcome === "resolved" ? testLoop(ctx, "resolve-test") : { ok: true };
+}
+
+/**
+ * The reviewer's review.md, and after it the findings that name a rule of a standard, one line each:
+ * "- important · SEC-3 · src/pay.ts:42: text" (severity, rule, file:line, with :0 for a whole file).
+ * Nothing is added when no finding names a rule.
+ */
+function withStandardsFindings(e: Envelope<"review">): string {
+  const named = e.findings.flatMap((f) => (f.standard ? [{ ...f, standard: f.standard }] : []));
+  if (!named.length) return e.review_markdown;
+  const lines = named.map((f) => `- ${f.severity} · ${f.standard} · ${f.file}:${f.line}: ${f.finding}`);
+  return `${e.review_markdown.trimEnd()}\n\n## Findings against the standards\n${lines.join("\n")}\n`;
 }
 
 /**
@@ -65,11 +78,11 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await runJudge(ctx, phase, { prompt });
     if (!review.ok) return block(ctx, review.note);
     // review.md, the gate row and the findings all come from the review that decided.
-    await writeArtifact(ctx, "review.md", review.envelope.review_markdown);
+    await writeArtifact(ctx, "review.md", withStandardsFindings(review.envelope));
 
     // The runtime decides: the change passes when there are no important findings. The
     // reviewer's own approved flag is kept in the trace only.
-    const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.finding}`);
+    const important = review.envelope.findings.filter((f) => f.severity === "important").map((f) => `${f.file}:${f.line} ${f.standard ? `(${f.standard}) ` : ""}${f.finding}`);
     const pass = passes("review", review.envelope);
     const by = review.decidedBy === "cheap" ? `; decided by the cheaper judge (${modelFor(ctx.cfg, "default")})` : "";
     const summary = `round ${round}; reviewer approved: ${review.envelope.approved}; ${pass ? "no important findings" : `important: ${important.join("; ")}`}${by}`;

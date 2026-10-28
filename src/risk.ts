@@ -54,6 +54,15 @@ function numstat(out: string): Changed[] {
 }
 
 /**
+ * The files the branch in `wt` changed since it parted from `main`, outside intent/, names as git has
+ * them (spaces, other alphabets) and both paths of a rename.
+ */
+export async function changedFiles(wt: Git, main: string): Promise<string[]> {
+  const out = (await wt.run(["diff", "--numstat", "-z", "-M", `${main}...HEAD`])).out;
+  return [...new Set(numstat(out).flatMap((c) => c.paths).filter((p) => !p.startsWith("intent/")))];
+}
+
+/**
  * Scores the branch checked out in `wt` against `main` (from where the two parted, so only the
  * branch's own changes count), outside intent/. A file counts when a pattern matches its path; a
  * renamed one when a pattern matches its new path or its old one (moving a file out of a risky

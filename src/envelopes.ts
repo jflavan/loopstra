@@ -10,6 +10,8 @@ const finding = z.object({
   file: z.string(),
   line: z.number().int().nonnegative(),
   finding: z.string(),
+  /** The label of the rule of a standard the finding is about, when it is about one. */
+  standard: z.string().optional(),
 });
 
 const requirement = z.object({

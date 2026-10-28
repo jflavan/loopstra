@@ -6,6 +6,7 @@ Loopstra's reviewer and any Claude review of this repository follow these rules.
 - Bugs: logic errors, broken edge cases, subtle regressions.
 - Security: injection risks, authentication gaps, secrets or PII in logs.
 - Compliance: the change matches `spec.md` and `plan.md` for its intent, and the repository's conventions in `CLAUDE.md`.
+- Standards: the change keeps every rule in `loopstra/standards/` that applies to it.
 
 ## What Important means here
 Reserve `important` for findings that break behavior, leak data, breach policy, or contradict the spec or plan. Style and naming are nits.

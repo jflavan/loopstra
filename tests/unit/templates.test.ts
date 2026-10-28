@@ -14,6 +14,13 @@ import { PROMPT_VARS, renderPrompt } from "../../src/prompts";
 
 const ROOT = fileURLToPath(new URL("../../templates/prompts/", import.meta.url));
 
+describe("REVIEW.md template", () => {
+  test("has a Standards pass", async () => {
+    const text = await Bun.file(fileURLToPath(new URL("../../templates/REVIEW.md", import.meta.url))).text();
+    expect(text).toContain("- Standards: the change keeps every rule in `loopstra/standards/` that applies to it.\n");
+  });
+});
+
 describe("prompt templates", () => {
   test("one template per phase; the shared contract is not repeated in them, and the rendered prompt ends with it", async () => {
     for (const name of Object.keys(Envelopes)) {

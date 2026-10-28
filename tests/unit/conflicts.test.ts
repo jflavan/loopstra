@@ -112,6 +112,24 @@ async function personSets(ctx: StepContext, to: "merge-approved"): Promise<void>
 }
 
 describe("the merge checks resolve a conflict with main", () => {
+  test("the resolve session is given the standards that apply to the plan's files", async () => {
+    const { repo, ctx, trace } = await copy("reviewed");
+    try {
+      await Bun.write(join(repo.path, "loopstra", "standards", "layout.md"), "---\napplies_to:\n  - src/**\n---\n# Source layout\n\n## Rules\n- SRC-1: code lives under src\n");
+      await Bun.write(join(repo.path, "loopstra", "standards", "docs.md"), "---\napplies_to:\n  - docs/**\n---\n# Docs\n\n## Rules\n- DOC-1: docs have a title\n");
+      await new Git(repo.path).commitAll("standards");
+      await mainMoves(repo.path);
+      await personSets(ctx, "merge-approved");
+      const { prompts } = await withResolve({ resolve: resolveFixture(RESOLVED, true) }, () => runMergeStep(ctx));
+      const resolve = prompts.find((p) => p.phase === "resolve")!.prompt;
+      expect(resolve).toContain("Keep every rule below. If the plan would make you break one, ask a question rather than break it.");
+      expect(resolve).toContain("SRC-1");
+      expect(resolve).not.toContain("DOC-1");
+    } finally {
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("resolved, tested, then reviewed once more with the resolution in the prompt, without using up the review rounds", async () => {
     const { repo, ctx, trace } = await copy("reviewed");
     try {

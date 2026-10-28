@@ -259,6 +259,62 @@ describe("review", () => {
   });
 });
 
+describe("review with standards", () => {
+  const SECURITY = "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n- SEC-3: card numbers are never logged\n";
+  const SRC_ONLY = "---\napplies_to:\n  - src/**\n---\n# Source layout\n\n## Rules\n- SRC-1: code lives under src\n";
+  const DOCS_ONLY = "---\napplies_to:\n  - docs/**\n---\n# Docs\n\n## Rules\n- DOC-1: docs have a title\n";
+  const EXCEPTION = "# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the audit log keeps one token (M., from a status edit, 2026-10-27)\n";
+
+  /** A built change whose main has standards (and the record of an exception), reviewed with the finding fixture. */
+  async function withStandards(finding: boolean) {
+    const s = await built(ONE_ROUND);
+    mkdirSync(join(s.repo.path, "loopstra", "standards"), { recursive: true });
+    for (const [name, text] of [["security", SECURITY], ["layout", SRC_ONLY], ["docs", DOCS_ONLY]] as const) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+    await Bun.write(join(s.repo.path, "intent", "add-numbers", "standards.md"), EXCEPTION);
+    await Bun.write(join(s.repo.path, "loopstra", "prompts", "review.md"), `{{spec}} FIXTURE:${finding ? "review-standard" : "review"}`);
+    await new Git(s.repo.path).commitAll("standards");
+    await s.ctx.reload();
+    rmSync(join(s.ctx.runDir, EARLY_REVIEW), { force: true });
+    return s;
+  }
+  const reviewPrompt = async (s: Awaited<ReturnType<typeof withStandards>>) => {
+    const p = s.trace.phases("add-numbers").find((x) => x.name === "review-1")!;
+    return Bun.file(join(s.ctx.runDir, "phases", `${p.seq}-review-1`, "prompt.md")).text();
+  };
+
+  test("the reviewer is given the standards that apply to the diff, the excepted rules, and the instruction", async () => {
+    const s = await withStandards(false);
+    await runMergeStep(s.ctx);
+    const prompt = await reviewPrompt(s);
+    expect(prompt).toContain("Standards this repository holds every change to:");
+    expect(prompt).toContain("A change that breaks a rule below is an important finding; set `standard` to the rule's label.");
+    expect(prompt).toContain("SEC-3");
+    expect(prompt).toContain("SRC-1");
+    expect(prompt).not.toContain("DOC-1");
+    expect(prompt).toContain("Rules under an approved exception:\n- SEC-1: the audit log keeps one token");
+    expect(prompt).toContain("a breach within an approved exception is not a finding");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a finding that names a rule is important, and review.md lists it under Findings against the standards", async () => {
+    const s = await withStandards(true);
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "review")).toEqual(["findings:fail", "findings:fail"]);
+    const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+    expect(md).toContain("## Findings\n- important src/add.ts:1 logs the card number");
+    expect(md.endsWith("\n## Findings against the standards\n- important · SEC-3 · src/add.ts:1: logs the card number\n")).toBe(true);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("review.md is as the reviewer wrote it when no finding names a rule", async () => {
+    const s = await withStandards(false);
+    await runMergeStep(s.ctx);
+    const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
+    expect(md).not.toContain("Findings against the standards");
+    s.trace.close(); s.repo.cleanup();
+  });
+});
+
 describe("cheaper judges on the review", () => {
   /** A built copy with a person on the merge gate, `config` added (committed), and no early review kept. */
   async function builtWith(config: string) {

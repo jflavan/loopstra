@@ -82,6 +82,30 @@ describe("build stage", () => {
     }
   });
 
+  test("with standards, the build prompt holds those that apply to the plan's files, the excepted rules, and the instruction", async () => {
+    const { repo, ctx, trace } = await planned({ test: "echo ok" });
+    try {
+      mkdirSync(join(repo.path, "loopstra", "standards"), { recursive: true });
+      await Bun.write(join(repo.path, "loopstra", "standards", "security.md"), "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n- SEC-3: card numbers are never logged\n");
+      await Bun.write(join(repo.path, "loopstra", "standards", "layout.md"), "---\napplies_to:\n  - src/**\n---\n# Source layout\n\n## Rules\n- SRC-1: code lives under src\n");
+      await Bun.write(join(repo.path, "loopstra", "standards", "docs.md"), "---\napplies_to:\n  - docs/**\n---\n# Docs\n\n## Rules\n- DOC-1: docs have a title\n");
+      await Bun.write(join(repo.path, "intent", "add-numbers", "standards.md"), "# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the audit log keeps one token (M., from a status edit, 2026-10-27)\n");
+      await new Git(repo.path).commitAll("standards");
+      await ctx.reload();
+      await runBuildStep(ctx);
+      const prompt = await promptOf(ctx.runDir, trace, "build");
+      expect(prompt).toContain("Standards this repository holds every change to:");
+      expect(prompt).toContain("Keep every rule below. If the plan would make you break one, ask a question rather than break it.");
+      expect(prompt).toContain("SEC-3");
+      expect(prompt).toContain("SRC-1");
+      expect(prompt).not.toContain("DOC-1");
+      expect(prompt).toContain("Rules under an approved exception:\n- SEC-1: the audit log keeps one token");
+    } finally {
+      trace.close();
+      repo.cleanup();
+    }
+  });
+
   test("a plan approved by a status edit has its exceptions recorded as the build starts", async () => {
     const { repo, ctx, trace } = await planned({ test: "echo ok" });
     try {

@@ -1258,3 +1258,13 @@ describe("standards in the prompt", () => {
     }
   });
 });
+
+describe("standards instructions for build, resolve and review", () => {
+  test("build and resolve keep the rules or ask; review makes a breach an important finding unless excepted", () => {
+    const keep = "Keep every rule below. If the plan would make you break one, ask a question rather than break it.";
+    expect(STANDARDS_INSTRUCTIONS.build).toBe(keep);
+    expect(STANDARDS_INSTRUCTIONS.resolve).toBe(keep);
+    expect(STANDARDS_INSTRUCTIONS.review).toContain("A change that breaks a rule below is an important finding; set `standard` to the rule's label.");
+    expect(STANDARDS_INSTRUCTIONS.review).toContain("a breach within an approved exception is not a finding");
+  });
+});

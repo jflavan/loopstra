@@ -3,6 +3,9 @@ import type { PhaseName } from "./envelopes";
 /** The line the standards start under when phasePrompt adds them to a prompt. */
 export const STANDARDS_HEADING = "Standards this repository holds every change to:";
 
+/** What the build and the resolve are told about the rules: keep them, or ask. */
+const KEEP_THE_RULES = "Keep every rule below. If the plan would make you break one, ask a question rather than break it.";
+
 /**
  * What each phase does with the standards, said to its session. The shipped prompts are not changed:
  * this text reaches a session only when the repository has standards (see standardsBlock).
@@ -34,6 +37,12 @@ export const STANDARDS_INSTRUCTIONS: Partial<Record<PhaseName, string>> = {
     "   - Does the plan break any rule that applies, or claim something the Order of work does not carry out? That is a concern with `blocking` true. Set `standard` to the rule's label.",
     "   - An exception is not yours to grant or refuse. Check that its reason is stated and that the plan does what it says. Whether the exception is acceptable is a person's call.",
   ].join("\n"),
+  build: KEEP_THE_RULES,
+  resolve: KEEP_THE_RULES,
+  review: [
+    "A change that breaks a rule below is an important finding; set `standard` to the rule's label.",
+    "A rule listed under an approved exception is one a person allowed this change not to keep, for the reason given: a breach within an approved exception is not a finding.",
+  ].join(" "),
 };
 
 /** The standards as a phase's prompt gets them: the heading, the phase's instructions, then the standards. "" when there are none. */

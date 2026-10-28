@@ -4,7 +4,7 @@ import { clearMarker, readMarker, writeArtifact, writeMarker, type Failure, type
 import { Git, NO_AUTO_MAINTENANCE, passOn, RUNTIME_COMMIT_CONFIG, RUNTIME_EMAIL } from "../git";
 import { agentPhase, codePhase } from "../phases";
 import { errorText } from "../shell";
-import { artifacts, bullets, CATCHING_UP, restoreCatchUp } from "./shared";
+import { artifacts, bullets, CATCHING_UP, planFiles, restoreCatchUp, stageStandards } from "./shared";
 
 /** Run-folder marker: how many conflict resolutions this build has tried (see roundsAllowed). A new build clears it. */
 export const RESOLUTIONS = "resolutions";
@@ -116,7 +116,7 @@ async function resolveConflicts(ctx: StepContext, wt: Git): Promise<{ ok: true; 
     const a = await artifacts(ctx);
     const session = await agentPhase(ctx, {
       name: "resolve", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-      vars: { spec: a.spec, plan: a.currentPlan, conflicts, test_command: ctx.cfg.commands.test },
+      vars: { spec: a.spec, plan: a.currentPlan, conflicts, test_command: ctx.cfg.commands.test, standards: (await stageStandards(ctx, planFiles(a.currentPlan))).text },
     });
     // Counted once the session has answered: one a stop, an outage or the day's budget cut short is not.
     writeMarker(ctx, RESOLUTIONS, String(resolutionsUsed(ctx) + 1));

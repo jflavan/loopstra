@@ -8,7 +8,7 @@ import { errorText } from "../shell";
 import { notTheStepsFault } from "../stop";
 import { EARLY } from "../trace";
 import { runArtifactStep, writerPhase, type AheadWork, type ArtifactStage } from "./artifact";
-import { BY_STATUS_EDIT, codeDiffers, recordApprovals, stageStandards, takeKept, type Artifacts, type Kept } from "./shared";
+import { BY_STATUS_EDIT, codeDiffers, planFiles, recordApprovals, stageStandards, takeKept, type Artifacts, type Kept } from "./shared";
 
 const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   stage: "plan", gate: "plan", artifact: "plan.md",
@@ -30,7 +30,7 @@ const PLAN: ArtifactStage<"plan", "plan-challenge"> = {
   }],
   // The writer has no file list yet and sees the spec's view; the gate and the challenger see the
   // standards that apply to the files the plan lists (null Files section: the headings check reports it).
-  standards: (ctx, a, view) => stageStandards(ctx, view === "write" ? null : (parsePlanFiles(a.plan) ?? []).map((f) => f.path)),
+  standards: (ctx, a, view) => stageStandards(ctx, view === "write" ? null : planFiles(a.plan)),
   coversAll: true,
   judge: {
     name: "plan-challenge", who: "challenger",

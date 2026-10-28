@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { validateConfig, type Config } from "../../src/config";
 import { Git, NO_AUTO_MAINTENANCE } from "../../src/git";
-import { riskEvidence, riskNote, riskySet, scoreRisk, type Risk } from "../../src/risk";
+import { changedFiles, riskEvidence, riskNote, riskySet, scoreRisk, type Risk } from "../../src/risk";
 import { run, tempGitRepo } from "../helpers";
 
 function config(risky: Record<string, unknown> = {}): Config {
@@ -140,5 +140,16 @@ describe("the words", () => {
     expect(riskNote(risk(["a"], { lines: 1612, limit: 1500 }), "pr")).toBe(
       "This change touches files set to need a person before merging: a. It also has 1612 changed lines, more than the 1500 set. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.",
     );
+  });
+});
+
+describe("changedFiles", () => {
+  test("the branch's files outside intent/, names as they are, both paths of a rename", async () => {
+    const wt = await branchWith({ "intent/x/plan.md": "p\n", "src/my file.ts": "a\n", "src/naïve.ts": "b\n", "docs/new.md": "d\n" });
+    expect((await changedFiles(wt, "main")).sort()).toEqual(["docs/new.md", "src/my file.ts", "src/naïve.ts"]);
+    const moved = await branchWith({ "src/pay.ts": lines(20) }, { "old/pay.ts": lines(20) });
+    await run(["git", "mv", "old/pay.ts", "src/moved.ts"], moved.cwd);
+    await run(["git", ...NO_AUTO_MAINTENANCE, "commit", "-q", "-m", "move"], moved.cwd);
+    expect((await changedFiles(moved, "main")).sort()).toEqual(["old/pay.ts", "src/moved.ts", "src/pay.ts"]);
   });
 });

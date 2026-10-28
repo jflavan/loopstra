@@ -7,7 +7,7 @@ import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
 import { RESOLUTION, RESOLUTIONS, RESOLVED_AT } from "./catch-up";
-import { artifacts, bullets, buildSession, BY_STATUS_EDIT, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, recordApprovals, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { artifacts, bullets, buildSession, BY_STATUS_EDIT, MERGING, planFiles, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, recordApprovals, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, stageStandards, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -61,7 +61,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   const feedback = readMarker(ctx, SENT_BACK)?.trim() ?? "";
   const phase: AgentPhaseSpec & { name: "build" } = {
     name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
-    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback }, skills: stage.skills,
+    vars: { plan: a.plan, spec: a.spec, test_command: ctx.cfg.commands.test, feedback, standards: (await stageStandards(ctx, planFiles(a.plan))).text }, skills: stage.skills,
   };
   // The note reaches the session even through an older build.md without {{feedback}}.
   const build = await agentPhase(ctx, phase, () => phasePrompt(ctx, phase, { variable: "feedback", note: feedback, text: `A person's notes on an earlier build of this change; address each one:\n\n${feedback}` }));

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parsePlanFiles } from "../checks";
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeArtifact, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
 import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
@@ -66,6 +67,11 @@ export async function artifacts(ctx: StepContext): Promise<Artifacts> {
     currentPlan: readMarker(ctx, RECONCILED_PLAN) ?? plan,
     review: (await readArtifact(ctx, "review.md")) ?? "",
   };
+}
+
+/** The paths of the plan's Files that change; none when it lists none. */
+export function planFiles(plan: string): string[] {
+  return parsePlanFiles(plan)?.map((f) => f.path) ?? [];
 }
 
 /**
