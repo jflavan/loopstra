@@ -67,6 +67,15 @@ describe("the standards routes", () => {
     });
   });
 
+  test("uncommitted files are named as they are: spaces and other alphabets, and both paths of a rename", async () => {
+    await withStandards(async (base, root) => {
+      write(join(root, "loopstra/standards/naïve rules.md"), STYLE);
+      await new Git(root).run(["mv", "loopstra/standards/style.md", "loopstra/standards/stylé.md"]);
+      const view = await (await fetch(`${base}/api/standards`)).json() as StandardsView;
+      expect([...view.uncommitted].sort()).toEqual(["loopstra/standards/naïve rules.md", "loopstra/standards/style.md", "loopstra/standards/stylé.md"]);
+    });
+  });
+
   test("a merge gate's marker decides what applies to an open change", async () => {
     await withStandards(async (base, root) => {
       mkdirSync(join(root, ".loopstra/runs/beta"), { recursive: true });

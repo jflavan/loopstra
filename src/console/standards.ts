@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { localUser } from "../chat/transports/shared";
 import type { Config } from "../config";
-import { Git } from "../git";
+import { Git, statusPaths } from "../git";
 import { isOpen } from "../actions";
 import { changeExists, readIntent, scanRepo, SLUG } from "../intents";
 import { runDir } from "../paths";
@@ -140,8 +140,9 @@ export async function standardsView(root: string): Promise<StandardsView> {
   const read = parseStandards(files);
   const [tree, busy] = [await treeOf(m.git, m.commit), await inProgressBy(root, read.standards)];
   const texts = new Map(files.map((f) => [f.path, f.text]));
-  const status = await m.git.run(["--literal-pathspecs", "status", "--porcelain", "--untracked-files=all", "--", `${STANDARDS_DIR}/`], { allowFail: true });
-  const uncommitted = status.code === 0 ? status.out.split("\n").filter(Boolean).map((l) => l.slice(3)) : [];
+  // -z: names as they are (spaces, other alphabets), and both paths of a rename.
+  const status = await m.git.run(["--literal-pathspecs", "status", "--porcelain", "-z", "--untracked-files=all", "--", `${STANDARDS_DIR}/`], { allowFail: true });
+  const uncommitted = status.code === 0 ? statusPaths(status.out) : [];
   const standards = read.standards.map((s): StandardRow => {
     const text = texts.get(s.path) ?? "";
     return {
