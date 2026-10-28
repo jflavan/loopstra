@@ -310,6 +310,24 @@ describe("readOutcomeStandards", () => {
       { label: "OPS-1", title: "Ops (core)", result: "not-checked", evidence: "" },
     ]);
   });
+
+  test("a line with no evidence still reads", () => {
+    expect(readOutcomeStandards("- ARCH-1 (Service architecture): met:")).toEqual([{ label: "ARCH-1", title: "Service architecture", result: "met", evidence: "" }]);
+    expect(readOutcomeStandards("- ARCH-1 (Service architecture): unmet: \r\n")).toEqual([{ label: "ARCH-1", title: "Service architecture", result: "unmet", evidence: "" }]);
+  });
+
+  test("a title with \"): \" in it is read whole, up to the result", () => {
+    const outcome = [
+      "- API-1 (APIs (v2): the public ones): met: the route is versioned (see v2.ts)",
+      "- API-2 (APIs (v2): the public ones): exception, approved by J. at the spec: legacy route",
+      "- API-3 (APIs (v2): the public ones): not checked automatically",
+    ].join("\n");
+    expect(readOutcomeStandards(outcome)).toEqual([
+      { label: "API-1", title: "APIs (v2): the public ones", result: "met", evidence: "the route is versioned (see v2.ts)" },
+      { label: "API-2", title: "APIs (v2): the public ones", result: "exception", evidence: "legacy route" },
+      { label: "API-3", title: "APIs (v2): the public ones", result: "not-checked", evidence: "" },
+    ]);
+  });
 });
 
 test("standardsBytes adds up the files' text", () => {

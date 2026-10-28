@@ -469,6 +469,14 @@ describe("verify stage with standards", () => {
     s.trace.close(); s.repo.cleanup();
   });
 
+  test("a rule judged with no evidence gets a line that still reads back", async () => {
+    const s = await done([["SOC-1", "met", "  "], ["SEC-1", "met", "x"], ["SEC-2", "met", "y"]]);
+    const outcome = await outcomeOf(s.repo.path);
+    expect(outcome).toContain("- SOC-1 (SOC 2): met: no detail given\n");
+    expect(readOutcomeStandards(outcome).find((l) => l.label === "SOC-1")).toEqual({ label: "SOC-1", title: "SOC 2", result: "met", evidence: "no detail given" });
+    s.trace.close(); s.repo.cleanup();
+  });
+
   test("a needs-person rule goes under For a person to confirm with its label", async () => {
     const s = await done([["SOC-1", "needs-person", "the alert exists in the monitoring system"], ["SEC-1", "met", "x"], ["SEC-2", "met", "y"]]);
     const outcome = await outcomeOf(s.repo.path);

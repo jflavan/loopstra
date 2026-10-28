@@ -364,16 +364,22 @@ export function standardsSizeWarning(r: StandardsRead): string | null {
 /** One rule's line in an outcome's Standards section. `result` is met, unmet, needs-person, exception or not-checked; `evidence` is the reason for an exception. */
 export interface OutcomeLine { label: string; title: string; result: string; evidence: string }
 
-const OUTCOME_LINE = /^- (\S+) \((.+?)\): (.*)$/;
+/** `- LABEL (`, then the rest of the line: the title, then `): ` and the result. */
+const OUTCOME_LINE = /^- (\S+) \((.*)$/;
+/** Where the title ends: `): ` before a result. A title may hold `): ` itself, so the last one counts. */
+const RESULT_START = /\): (?=(?:met|unmet|needs-person):(?:\s|$)|exception, approved by |not checked automatically$)/g;
 
 /** Reads the runtime's Standards section of outcome.md back. Lines that do not start with a rule label are skipped. */
 export function readOutcomeStandards(outcome: string): OutcomeLine[] {
   const out: OutcomeLine[] = [];
   for (const raw of outcome.split(/\r?\n/)) {
-    const m = OUTCOME_LINE.exec(raw);
+    const m = OUTCOME_LINE.exec(raw.trimEnd());
     if (!m || !RULE_LABEL.test(m[1] ?? "")) continue;
-    const [label, title, rest] = [m[1] ?? "", m[2] ?? "", m[3] ?? ""];
-    const judged = /^(met|unmet|needs-person): (.*)$/.exec(rest);
+    const tail = m[2] ?? "";
+    const end = [...tail.matchAll(RESULT_START)].at(-1)?.index;
+    if (end === undefined) continue;
+    const [label, title, rest] = [m[1] ?? "", tail.slice(0, end), tail.slice(end + 3)];
+    const judged = /^(met|unmet|needs-person):\s*(.*)$/.exec(rest);
     const exception = /^exception, approved by .+? at the (?:spec|plan): (.*)$/.exec(rest);
     if (judged) out.push({ label, title, result: judged[1] ?? "", evidence: judged[2] ?? "" });
     else if (exception) out.push({ label, title, result: "exception", evidence: exception[1] ?? "" });

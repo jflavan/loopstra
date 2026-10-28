@@ -196,7 +196,8 @@ function judgeRules(list: Applying[], record: ChangeStandards, items: RuleItem[]
     const title = a.standard.title;
     if (!items) return { label: r.label, title, result: "not-checked", evidence: "" };
     const i = items.find((x) => x.label === r.label);
-    return i ? { label: r.label, title, result: i.result, evidence: oneLine(i.evidence) } : { label: r.label, title, result: "needs-person", evidence: "not judged" };
+    // Never empty, so the line in outcome.md has its evidence and reads back (see readOutcomeStandards).
+    return i ? { label: r.label, title, result: i.result, evidence: oneLine(i.evidence) || "no detail given" } : { label: r.label, title, result: "needs-person", evidence: "not judged" };
   }));
 }
 
