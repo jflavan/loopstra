@@ -80,8 +80,8 @@ describe("the standards section", () => {
     const root = await repo();
     const bin = tempDir("loopstra-bin-");
     dirs.push(bin);
-    const tool = join(bin.path, "gitleaks");
-    writeFileSync(tool, "#!/bin/sh\nexit 0\n");
+    const tool = join(bin.path, process.platform === "win32" ? "gitleaks.cmd" : "gitleaks");
+    writeFileSync(tool, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
     chmodSync(tool, 0o755);
     const r = await withEnv({ PATH: `${bin.path}${delimiter}${process.env.PATH ?? ""}` }, () => asked(root, ["add", "", "secrets", "Secrets", "-", "n", "", "SEC-1: No secrets.", "", "done"]));
     expect(r.shown).toContain('[gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"]');

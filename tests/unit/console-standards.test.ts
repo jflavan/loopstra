@@ -234,7 +234,7 @@ describe("the standards routes", () => {
 
   test("try takes a form as check does", async () => {
     await withStandards(async (base, _root, sentinel) => {
-      const form = { name: "perf", title: "Perf", patterns: [], needsPerson: false, check: `echo f > ${sentinel}.form`, rules: [{ label: "PERF-1", text: "Measure." }], context: "" };
+      const form = { name: "perf", title: "Perf", patterns: [], needsPerson: false, check: `echo f > ${JSON.stringify(sentinel + ".form")}`, rules: [{ label: "PERF-1", text: "Measure." }], context: "" };
       const r = await (await post(base, "/api/standards/try", { name: "perf", form })).json() as TriedCheck;
       expect(r.ok).toBe(true);
       expect(existsSync(`${sentinel}.form`)).toBe(true);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
 import { NOT_SET_UP } from "../../src/config";
@@ -432,9 +432,11 @@ describe("setup --check and the standards", () => {
 
   test("a check that fails on main warns with the sentence, and suggests the base-aware form for gitleaks", async () => {
     const bin = tempDir();
-    writeFileSync(join(bin.path, "gitleaks"), "#!/bin/sh\necho leaked >&2\nexit 1\n");
-    chmodSync(join(bin.path, "gitleaks"), 0o755);
-    const restore = setEnv({ PATH: `${bin.path}:${process.env.PATH ?? ""}` });
+    const win = process.platform === "win32";
+    const tool = join(bin.path, win ? "gitleaks.cmd" : "gitleaks");
+    writeFileSync(tool, win ? "@echo leaked 1>&2\r\n@exit /b 1\r\n" : "#!/bin/sh\necho leaked >&2\nexit 1\n");
+    chmodSync(tool, 0o755);
+    const restore = setEnv({ PATH: `${bin.path}${delimiter}${process.env.PATH ?? ""}` });
     const repo = await standardsRepo({ "secrets.md": `---\ncheck: gitleaks detect\n---\n# Secrets\n\n${rule}` });
     try {
       const r = await check(repo.path);
