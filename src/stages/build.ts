@@ -1,7 +1,8 @@
 import { diffWithinPlan, parsePlanFiles } from "../checks";
-import { block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
+import { ACCEPTANCE, acceptanceFiles, block, clearMarker, readMarker, saveSession, SENT_BACK, setStatus, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { agentPhase, alongside, codePhase, mayOverlap, phasePrompt, projectCommand, type AgentPhaseSpec } from "../phases";
+import { writeAcceptance } from "./acceptance";
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
@@ -9,7 +10,11 @@ import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSH
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
-  if (ctx.intent.file.frontmatter.status !== "building") await setStatus(ctx, "building");
+  if (ctx.intent.file.frontmatter.status !== "building") {
+    // A new build writes its own acceptance tests; one resumed after a stop keeps what it wrote.
+    clearMarker(ctx, ACCEPTANCE);
+    await setStatus(ctx, "building");
+  }
   clearMarker(ctx, MERGING); // a new build is never an earlier merge in progress
   clearMarker(ctx, RECONCILED_PLAN); // nor is it compared with a plan reconciled for an earlier build
   clearMarker(ctx, EARLY_REVIEW); // nor reviewed by a review of an earlier build
@@ -39,6 +44,12 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   const a = await artifacts(ctx);
   const stage = ctx.cfg.stages.build;
 
+  // Tests from the owner's Done when list, written before the build, once per build.
+  if (stage.acceptance_tests && readMarker(ctx, ACCEPTANCE) === null) {
+    const wrote = await writeAcceptance(ctx, wt, a);
+    if (!wrote.ok) return block(ctx, wrote.note, wrote);
+  }
+
   const feedback = readMarker(ctx, SENT_BACK)?.trim() ?? "";
   const phase: AgentPhaseSpec & { name: "build" } = {
     name: "build", permissionMode: "acceptEdits", tools: "build", cwd: ctx.worktreeDir,
@@ -54,10 +65,11 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   // Used: the build it asked to change is saved.
   clearMarker(ctx, SENT_BACK);
 
-  // Plan drift: files changed that main's plan did not list.
+  // Plan drift: files changed that main's plan did not list. The acceptance tests are not the build's to list.
   let plan = a.plan;
+  const accepted = new Set(acceptanceFiles(ctx));
   const drift = await codePhase(ctx, "drift", async () => {
-    const changed = await wt.changedFilesSince(ctx.cfg.main_branch);
+    const changed = (await wt.changedFilesSince(ctx.cfg.main_branch)).filter((f) => !accepted.has(f));
     const planned = parsePlanFiles(plan);
     if (planned === null) {
       // No file list to compare against: say so in the trace rather than flag every file.

@@ -10,14 +10,14 @@ test("every step's default is today's model", () => {
   const got = Object.fromEntries(STEP_KEYS.map((k) => [k, stepModel(DEFAULTS, k)]));
   expect(got).toEqual({
     intake: "cheap", design: "strong", "spec-check": "strong", plan: "strong", "plan-challenge": "strong",
-    build: "default", reconcile: "default", fix: "default", review: "strong", revise: "default",
+    acceptance: "default", build: "default", reconcile: "default", fix: "default", review: "strong", revise: "default",
     verify: "default", "done-check": "strong", lessons: "cheap", orchestrator: "default", "write-intent": "strong",
   });
 });
 
 test("a step that follows a stage moves with it", () => {
   const cfg = validateConfig({ ...BASE, stages: { build: { model: "strong" } } });
-  expect([stepModel(cfg, "reconcile"), stepModel(cfg, "fix"), stepModel(cfg, "revise")]).toEqual(["strong", "strong", "strong"]);
+  expect([stepModel(cfg, "acceptance"), stepModel(cfg, "reconcile"), stepModel(cfg, "fix"), stepModel(cfg, "revise")]).toEqual(["strong", "strong", "strong", "strong"]);
 });
 
 test("a step's own setting wins", () => {
@@ -44,6 +44,7 @@ test("the table lists every step key once, and each stage its own steps", () => 
   expect(STEPS.map((s) => s.key)).toEqual([...STEP_KEYS]);
   expect(stepsOf("verify").map((s) => s.key)).toEqual(["verify", "done-check", "lessons"]);
   expect(stepsOf("chat").map((s) => s.key)).toEqual(["orchestrator", "write-intent"]);
+  expect(stepsOf("build").map((s) => s.key)).toEqual(["acceptance", "build", "reconcile", "fix"]);
 });
 
 test("a group's model is its stage's, or chat's", () => {

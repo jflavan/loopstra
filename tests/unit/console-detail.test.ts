@@ -51,12 +51,13 @@ describe("a change's page", () => {
     const trace = Trace.open(t.path);
     try {
       await Bun.write(join(t.path, "intent", "one", "spec.md"), "# Spec\n");
+      await Bun.write(join(t.path, "intent", "one", "acceptance.md"), "# Acceptance tests\n");
       trace.gate("one", "plan", "headings", "pass", "ok");
       const fix = trace.phaseStart("one", "fix-1", "agent");
       trace.phaseEnd("one", fix, { status: "fail", denied: ["Bash(git tag v1)"] });
       const d = await changeDetail(t.path, trace, "one");
       expect(d).toMatchObject({ slug: "one", status: "building", stage: "build", dependsOn: [] });
-      expect(d!.documents).toEqual([{ name: "intent.md", url: "/docs/one/intent.md" }, { name: "spec.md", url: "/docs/one/spec.md" }]);
+      expect(d!.documents).toEqual([{ name: "intent.md", url: "/docs/one/intent.md" }, { name: "spec.md", url: "/docs/one/spec.md" }, { name: "acceptance.md", url: "/docs/one/acceptance.md" }]);
       expect(d!.phases[0]).toMatchObject({
         seq: 1, name: "build", status: "success", costUsd: 0.1, denied: [],
         files: [{ name: "prompt.md", url: "/files/one/phases/1-build/prompt.md" }, { name: "envelope.json", url: "/files/one/phases/1-build/envelope.json" }],

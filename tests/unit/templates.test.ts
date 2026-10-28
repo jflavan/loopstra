@@ -62,6 +62,16 @@ describe("prompt templates", () => {
     expect(text).toMatch(/no test names, commands, file paths, or line numbers/);
   });
 
+  test("the acceptance prompt has the Done when list, the spec, the plan, the test command and what people said; it writes only tests", async () => {
+    const text = await Bun.file(join(ROOT, "acceptance.md")).text();
+    for (const v of ["done_when", "spec", "plan", "test_command", "conversation", "commands"]) expect({ v, used: text.includes(`{{${v}}}`) }).toEqual({ v, used: true });
+    const rendered = renderPrompt(text, { done_when: "- add(1, 2) returns 3.", spec: "SPEC", plan: "PLAN", test_command: "bun test", conversation: "SAID", commands: "`bun test`" });
+    expect(rendered).not.toMatch(/\{\{[a-z_]+\}\}/);
+    for (const part of ["- add(1, 2) returns 3.", "SPEC", "PLAN", "`bun test`", "SAID"]) expect(rendered).toContain(part);
+    expect(text).toMatch(/only tests and test fixtures/);
+    expect(text).toContain("`not_testable`");
+  });
+
   test("every {{variable}} is a known prompt variable", async () => {
     const known = new Set<string>(PROMPT_VARS);
     for (const name of Object.keys(Envelopes)) {
@@ -99,6 +109,8 @@ describe("prompt templates", () => {
       const cfg = await loadConfig(repo.path);
       expect(cfg.claude.models).toEqual({ cheap: "haiku", default: "sonnet", strong: "opus", max: "fable" });
       for (const s of STEPS) expect({ step: s.key, model: stepModel(cfg, s.key) }).not.toEqual({ step: s.key, model: "max" });
+      // New repos write acceptance tests from Done when; the schema's default keeps upgraded repos as they were.
+      expect(cfg.stages.build.acceptance_tests).toBe(true);
     } finally { repo.cleanup(); }
   });
 });

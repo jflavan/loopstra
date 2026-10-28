@@ -699,3 +699,118 @@ describe("the first review alongside the verifier", () => {
     });
   }
 });
+
+describe("acceptance tests from Done when", () => {
+  const ON = "stages:\n  build:\n    acceptance_tests: true\n";
+  type Call = { phase: string; prompt: string; acceptance: string | null };
+  const calls = async (log: string): Promise<Call[]> => (await Bun.file(log).text()).trim().split("\n").map((l) => JSON.parse(l) as Call);
+  const wtOf = (repo: { path: string }) => join(repo.path, ".loopstra", "worktrees", "add-numbers");
+  const ACCEPTANCE_MD = "# Acceptance tests\n\nWritten from Done when before the build. The build may not change them.\n\n## Covered by tests\n- add(1, 2) returns 3: `tests/accept.test.ts`, \"adds one and two\"\n\n## Not covered by a test\n- People find add easy to use: needs a person.\n";
+
+  test("off (the default), no acceptance session runs and nothing is held back", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" });
+    try {
+      const log = join(repo.path, "prompts.jsonl");
+      await withEnv({ LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      expect((await calls(log)).map((c) => c.phase)).not.toContain("acceptance");
+      expect(phaseNames(trace)).not.toContain("acceptance");
+      expect(existsSync(join(repo.path, "intent", "add-numbers", "acceptance.md"))).toBe(false);
+      expect((await calls(log)).find((c) => c.phase === "build")?.acceptance).toBe("[]");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("on, a session writes tests before the build; they are committed on the branch, recorded on main, held from the build, and left out of the drift check", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, ON);
+    try {
+      const log = join(repo.path, "prompts.jsonl");
+      const r = await withEnv({ LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      expect(r.ok).toBe(true);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+      // Before the build; the test file is not in the plan, yet no reconcile runs.
+      expect(withoutEarlyReview(trace)).toEqual(["branch", "acceptance", "build", "drift", "test-1", "verify"]);
+      const seen = await calls(log);
+      expect(seen.map((c) => c.phase).slice(0, 2)).toEqual(["acceptance", "build"]);
+      const asked = seen[0]!;
+      expect(asked.prompt).toContain("- add(1, 2) returns 3.");
+      expect(asked.prompt).toContain("# Plan: add");
+      expect(asked.prompt).toContain("`bun test`");
+      // Every session after it is given the files it wrote.
+      for (const c of seen.slice(1)) expect({ phase: c.phase, acceptance: c.acceptance }).toEqual({ phase: c.phase, acceptance: JSON.stringify(["tests/accept.test.ts"]) });
+      // Its own commit on the branch, before the build's.
+      const wt = new Git(wtOf(repo));
+      const subjects = (await wt.run(["log", "--format=%s", "main..HEAD"])).out.trim().split("\n").reverse();
+      expect(subjects.slice(0, 2)).toEqual(["loopstra(add-numbers): acceptance tests", "feat: add function"]);
+      expect((await wt.run(["show", "--name-only", "--format=", "HEAD~1"])).out.trim()).toBe("tests/accept.test.ts");
+      // Recorded on main for the owner, and in the run folder for the sessions that follow.
+      expect(await Bun.file(join(repo.path, "intent", "add-numbers", "acceptance.md")).text()).toBe(ACCEPTANCE_MD);
+      expect((await new Git(repo.path).run(["log", "-1", "--format=%s", "--", "intent/add-numbers/acceptance.md"])).out.trim()).not.toBe("");
+      expect(readMarker(ctx, "acceptance")).toBe(JSON.stringify(["tests/accept.test.ts"]));
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("a build resumed after a stop does not write its acceptance tests again; a new build does", async () => {
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, ON);
+    try {
+      const log = join(repo.path, "prompts.jsonl");
+      await withEnv({ LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      // Resumed: the status is still building and the run folder has the marker.
+      await writeIntentOnDisk(ctx.intent, { status: "building" });
+      await new Git(repo.path).commitAll("resume");
+      await ctx.reload();
+      await withEnv({ LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      expect((await calls(log)).filter((c) => c.phase === "acceptance").length).toBe(1);
+      expect((await calls(log)).filter((c) => c.phase === "build").map((c) => c.acceptance)).toEqual([JSON.stringify(["tests/accept.test.ts"]), JSON.stringify(["tests/accept.test.ts"])]);
+      // A new build (from plan-approved) writes them again.
+      await writeIntentOnDisk(ctx.intent, { status: "plan-approved" });
+      await new Git(repo.path).commitAll("rebuild");
+      await ctx.reload();
+      await withEnv({ LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      expect((await calls(log)).filter((c) => c.phase === "acceptance").length).toBe(2);
+      // The tests are on the branch already and unchanged, but the session names them, so they stay held.
+      expect(readMarker(ctx, "acceptance")).toBe(JSON.stringify(["tests/accept.test.ts"]));
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+    } finally { trace.close(); repo.cleanup(); }
+  });
+
+  test("an acceptance session that fails does not block: the trace says why, acceptance.md says none were written, its files are dropped and the build goes on", async () => {
+    const failing = [
+      `{"type":"system","subtype":"init","session_id":"fake-acceptance","cwd":"/","tools":[],"model":"fake"}`,
+      `{"type":"fake_action","write":{"path":"tests/half.test.ts","content":"half\\n"}}`,
+      `{"type":"result","subtype":"success","is_error":false,"session_id":"fake-acceptance","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"fail","summary":"could not find the test folder","commit_message":"","tests":[],"not_testable":[]},"result":"ok"}`,
+    ].join("\n") + "\n";
+    const dir = fixtureDir({ acceptance: failing });
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, ON);
+    try {
+      const log = join(repo.path, "prompts.jsonl");
+      const r = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path, LOOPSTRA_FAKE_PROMPTS: log }, () => runBuildStep(ctx));
+      expect(r.ok).toBe(true);
+      expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("reviewing");
+      expect(trace.events("add-numbers").some((e) => e.type === "error" && e.payload.includes("acceptance") && e.payload.includes("agent-fail"))).toBe(true);
+      const md = await Bun.file(join(repo.path, "intent", "add-numbers", "acceptance.md")).text();
+      expect(md).toStartWith("# Acceptance tests\n\nNo acceptance tests were written for this change.");
+      expect(md).not.toContain("## Covered by tests");
+      expect(existsSync(join(wtOf(repo), "tests", "half.test.ts"))).toBe(false);
+      expect((await new Git(wtOf(repo)).run(["log", "--format=%s", "main..HEAD"])).out).not.toContain("acceptance tests");
+      expect((await calls(log)).find((c) => c.phase === "build")?.acceptance).toBe("[]");
+      // Not tried again when the build resumes.
+      expect(readMarker(ctx, "acceptance")).toBe("[]");
+    } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+  });
+
+  test("a fix refused an acceptance test blocks with a note that names it and says how to change it", async () => {
+    const refused = [
+      `{"type":"system","subtype":"init","session_id":"fake-fix-refused","cwd":"/","tools":[],"model":"fake"}`,
+      `{"type":"fake_action","refuse":"tests/accept.test.ts"}`,
+      `{"type":"result","subtype":"success","is_error":false,"session_id":"fake-fix-refused","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"fail","summary":"The only fix is in the acceptance test","commit_message":""},"result":"ok"}`,
+    ].join("\n") + "\n";
+    const dir = fixtureDir({ fix: refused });
+    const { repo, ctx, trace } = await planned({ test: "exit 1" }, `${ON}    max_fix_loops: 1\n`);
+    try {
+      const r = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => runBuildStep(ctx));
+      expect(r.ok).toBe(false);
+      const i = await readIntent(repo.path, "add-numbers");
+      expect(i.file.frontmatter.status).toBe("blocked");
+      expect(i.file.frontmatter.note).toBe("The assistant reported it could not finish this step. It was not allowed to edit the acceptance test `tests/accept.test.ts`, written from Done when before the build. If the test is wrong, an engineer can fix it on the branch intent/add-numbers. When that is sorted out, set status to plan-approved to try again.");
+    } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+  });
+});

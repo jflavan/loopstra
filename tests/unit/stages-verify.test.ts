@@ -217,6 +217,48 @@ describe("verify stage", () => {
     trace.close(); repo.cleanup();
   });
 
+  test("the done-check is given the acceptance tests written from Done when, and told a passing one meets its criterion", async () => {
+    const covered = "- add(1, 2) returns 3: `tests/accept.test.ts`, \"adds one and two\"";
+    const accepted = `# Acceptance tests\n\nWritten from Done when before the build. The build may not change them.\n\n## Covered by tests\n${covered}\n\n## Not covered by a test\n- People find add easy to use: needs a person.\n`;
+    const doneCheckPrompt = async (ctx: { runDir: string }, trace: Trace) => promptOf(ctx.runDir, trace.phases("add-numbers").find((p) => p.name === "done-check")!);
+    {
+      const { repo, ctx, trace } = await merged();
+      await Bun.write(join(repo.path, "intent", "add-numbers", "acceptance.md"), accepted);
+      await new Git(repo.path).commitAll("acceptance");
+      await ctx.reload();
+      await runVerifyStep(ctx);
+      const prompt = await doneCheckPrompt(ctx, trace);
+      expect(prompt).toContain(covered);
+      expect(prompt).not.toContain("People find add easy to use");
+      expect(prompt).toContain("A criterion covered by an acceptance test that passes in this copy of main is met");
+      trace.close(); repo.cleanup();
+    }
+    {
+      const { ctx, trace, repo } = await merged();
+      await runVerifyStep(ctx);
+      expect(await doneCheckPrompt(ctx, trace)).toContain("No acceptance tests were written for this change.");
+      trace.close(); repo.cleanup();
+    }
+    {
+      // A repository's own done-check.md without {{acceptance}} still gets the list, at its end.
+      const { repo, ctx, trace } = await merged({ doneCheck: "done-check" });
+      await Bun.write(join(repo.path, "intent", "add-numbers", "acceptance.md"), accepted);
+      await new Git(repo.path).commitAll("acceptance");
+      await ctx.reload();
+      await runVerifyStep(ctx);
+      const prompt = await doneCheckPrompt(ctx, trace);
+      expect(prompt).toContain(`passes in this copy of main is met, with the test as its evidence:\n\n${covered}\n`);
+      trace.close(); repo.cleanup();
+    }
+    {
+      // Without acceptance tests, an older prompt is left as it was.
+      const { ctx, trace, repo } = await merged({ doneCheck: "done-check" });
+      await runVerifyStep(ctx);
+      expect(await doneCheckPrompt(ctx, trace)).not.toContain("acceptance");
+      trace.close(); repo.cleanup();
+    }
+  });
+
   test("the done-check runs in a throwaway copy of main, so what it builds never reaches the owner's checkout", async () => {
     const { repo, ctx, trace } = await merged({ doneCheck: "done-check-writes" });
     await runVerifyStep(ctx);

@@ -9,7 +9,7 @@ import { BUILTIN_AGENTS, isEmptySetup, resolveSetup, setupLines, type AgentSetup
 import { findAgent, setupSession, userHome, type AgentDefinition, type Where } from "./agent-files";
 import type { Trace } from "./trace";
 import { GitTimeout } from "./git";
-import { CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
+import { acceptanceFiles, CRASH_NOTE, TIMEOUT_NOTE, type StepContext } from "./context";
 import { Envelopes, jsonSchemaFor, type Envelope, type PhaseName } from "./envelopes";
 import { promptPath, renderPrompt, type PromptVars } from "./prompts";
 import { issuesText, tracedSession } from "./sessions";
@@ -537,7 +537,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
       }, seq);
     }
     const dir = join(ctx.runDir, "phases", `${seq}-${traceName}`);
-    // The protect-tests hook writes here the test files it refused to let a fix session edit.
+    // The protect-tests hook writes here the test files it refused to let a session edit.
     const protectedLog = join(dir, "protected-tests.txt");
     // The session's question, when it asked one (see agentPhase); `refused`: the note when it may not ask.
     let asked: Question | null = null;
@@ -553,7 +553,7 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
         allowedTools: toolsFor(ctx, spec.tools, setup),
         // With the setup's and main's: no edits in main's snapshot when the session may read it as an added dir.
         disallowedTools: [...new Set([...disallowedFor(spec.tools), ...(extra?.deny ?? []), ...(main?.deny ?? [])])],
-        // The test-protection hook, from the installed package; it acts only in a fix session.
+        // The test-protection hook, from the installed package; it acts only in sessions that write (see the hook).
         settings: hookSettings(),
         // The step's agent setup (see setupRun), which may also replace the settings.
         ...extra?.run,
@@ -563,8 +563,10 @@ async function attempt<N extends PhaseName>(ctx: StepContext, spec: AgentPhaseSp
         maxBudgetUsd: capUsd,
         resume: spec.resume,
         // A session that may run the project's commands gets the change's slot, as its commands do.
+        // LOOPSTRA_ACCEPTANCE: the tests written from Done when, which the hook keeps the build's sessions from editing.
         env: {
           LOOPSTRA_PHASE: spec.name, LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_BASE: ctx.cfg.main_branch, LOOPSTRA_PROTECTED_LOG: protectedLog,
+          LOOPSTRA_ACCEPTANCE: JSON.stringify(acceptanceFiles(ctx)),
           ...(RUNS_COMMANDS.has(spec.tools) ? slotEnv(ctx.slug) : {}), ...main?.env, ...(spec.env ?? {}),
         },
         signal,
@@ -645,10 +647,25 @@ function protectedTests(log: string): string[] {
   }
 }
 
-/** Names the protected test files a failed fix wanted to edit, so a person can make the edit instead of a rebuild. */
+/** A path as the hook compares it: forward slashes, and without case where the file system ignores it. */
+function samePath(p: string): string {
+  const s = p.replace(/\\/g, "/");
+  return process.platform === "win32" || process.platform === "darwin" ? s.toLowerCase() : s;
+}
+
+/**
+ * Names the protected test files a failed session wanted to edit, so a person can make the edit instead
+ * of a rebuild: tests written from Done when (see ACCEPTANCE in context.ts), and tests a fix may not change.
+ */
 function protectedNote(ctx: StepContext, files: string[]): string {
-  const list = files.map((f) => `\`${f}\``).join(", ");
-  return `It was not allowed to edit ${files.length === 1 ? "this test file" : "these test files"}, which this branch did not add or edit: ${list}. If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
+  const list = (fs: string[]) => fs.map((f) => `\`${f}\``).join(", ");
+  const accepted = new Set(acceptanceFiles(ctx).map(samePath));
+  const fromDoneWhen = files.filter((f) => accepted.has(samePath(f)));
+  const others = files.filter((f) => !accepted.has(samePath(f)));
+  const said: string[] = [];
+  if (others.length) said.push(`It was not allowed to edit ${others.length === 1 ? "this test file" : "these test files"}, which this branch did not add or edit: ${list(others)}.`);
+  if (fromDoneWhen.length) said.push(`It was not allowed to edit ${fromDoneWhen.length === 1 ? "the acceptance test" : "the acceptance tests"} ${list(fromDoneWhen)}, written from Done when before the build.`);
+  return `${said.join(" ")} If the test is wrong, an engineer can fix it on the branch ${ctx.branch}.`;
 }
 
 const PROBE_SCHEMA = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };

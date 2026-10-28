@@ -125,7 +125,8 @@ export function parseIntentFile(rawText: string): IntentFile {
   return { frontmatter: fm.data, title, body, sections: parseSections(body) };
 }
 
-function parseSections(body: string): Record<string, string> {
+/** A Markdown document's `## ` sections, by heading, each trimmed; text before the first heading is left out. */
+export function parseSections(body: string): Record<string, string> {
   const sections: Record<string, string> = {};
   const lines = body.split(/\r?\n/);
   let current: string | null = null;
@@ -161,7 +162,7 @@ export interface Intent {
   artifacts: Set<string>;
 }
 
-export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
+export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "acceptance.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
 
 export function intentRoot(root: string): string {
   return join(root, "intent");
