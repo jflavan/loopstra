@@ -8,6 +8,7 @@ import { readIntent } from "../../src/intents";
 import { runDesignStep } from "../../src/stages/design";
 import { PLAN_AHEAD, runPlanStep } from "../../src/stages/plan";
 import { resetStop } from "../../src/stop";
+import { localDate } from "../../src/text";
 import type { Trace } from "../../src/trace";
 import { fixture, fixtureDir, openRepo, setupRepo, stopAfterPass, withEnv } from "../helpers";
 
@@ -478,10 +479,6 @@ describe("plan stage with standards", () => {
     }
   }
 
-  const today = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
   const READS = "billing reads the orders table until it is migrated";
   const EXCEPTED = `- SEC-1: ok\\n- ARCH-1: exception: ${READS}\\n- ARCH-2: ok`;
   const recordOf = (reason: string) => `# Standards decisions for add-numbers\n\n## Exceptions approved\n- ARCH-1 at the spec: ${reason} (J., from the console, 2026-10-28)\n`;
@@ -517,8 +514,10 @@ describe("plan stage with standards", () => {
 
   test("a spec approved by a status edit has its exceptions recorded as the plan step starts", async () => {
     const spec = `# Spec\n\n## Summary\ns\n\n## Standards\n- ARCH-1: exception: ${READS}\n`;
+    const before = localDate();
     const s = await plannedWith(planWith(BILLING, EXCEPTED), { "spec.md": spec });
-    expect(record(s)).toBe(`# Standards decisions for add-numbers\n\n## Exceptions approved\n- ARCH-1 at the spec: ${READS} (a status edit, from intent.md, ${today()})\n`);
+    const expected = (date: string) => `# Standards decisions for add-numbers\n\n## Exceptions approved\n- ARCH-1 at the spec: ${READS} (a status edit, from intent.md, ${date})\n`;
+    expect([expected(before), expected(localDate())]).toContain(record(s));
     // The plan repeats it: approved already.
     expect((await readIntent(s.repo.path, "add-numbers")).file.frontmatter.status).toBe("plan-approved");
     s.trace.close(); s.repo.cleanup();

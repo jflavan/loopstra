@@ -74,11 +74,12 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
 /**
  * Standards that cannot be read, live from main's commit (never from the trace, so a fix clears it at
  * once), then the unreadable lines of an open change's standards.md. One read of main per call.
+ * True when main has standards (files in the folder, read or not).
  */
-async function addStandards(root: string, cfg: Config, intents: Scan["intents"], add: (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => void): Promise<void> {
+async function addStandards(root: string, cfg: Config, intents: Scan["intents"], add: (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => void): Promise<boolean> {
   const git = new Git(root);
   const commit = await git.commitOf(cfg.main_branch);
-  if (!commit) return;
+  if (!commit) return false;
   const read = await readStandards(git, commit);
   const stop = standardsStopText(read.problems);
   if (stop) add("standards", null, "Standards", stop);
@@ -90,6 +91,7 @@ async function addStandards(root: string, cfg: Config, intents: Scan["intents"],
     if (!existsSync(file)) continue;
     for (const problem of parseRecord(readFileSync(file, "utf8"), known).problems) add("standards", i.slug, i.file.title || i.slug, problem);
   }
+  return read.standards.length + read.problems.length > 0;
 }
 
 /**
@@ -130,7 +132,7 @@ export async function attention(root: string, config: Config | { problem: string
   }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);
 
-  if (cfg) await addStandards(root, cfg, intents, add);
+  const standards = cfg ? await addStandards(root, cfg, intents, add) : false;
 
   for (const i of intents) {
     if (i.file.frontmatter.status === "blocked") {
@@ -173,7 +175,7 @@ export async function attention(root: string, config: Config | { problem: string
     }
     const gate = REVIEW_GATE[fm.status]!;
     // A spec or plan asking for exceptions says which rules in its label.
-    const asks = gate === "spec" || gate === "plan" ? exceptionsWaiting(i.dir, gate) : [];
+    const asks = standards && (gate === "spec" || gate === "plan") ? exceptionsWaiting(i.dir, gate) : [];
     const label = asks.length ? `${ATTENTION_LABEL.waiting}: ${asks.length > 1 ? "exceptions" : "exception"} to ${andList(asks)}` : undefined;
     add("waiting", i.slug, title, fm.note || humanNote(GATE_DOC[gate].artifact, GATE_DOC[gate].approved, changeGates(human, fm)[gate]), undefined, label);
   }

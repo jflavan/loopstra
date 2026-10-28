@@ -369,6 +369,25 @@ describe("attention and standards", () => {
     }
   });
 
+  test("with no standards on main, a wait is not labelled with an exception", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await intent(t.path, "a", "status: plan-review\nplan_gate: status\nnote: Read plan.md.");
+      await Bun.write(join(t.path, "intent", "a", "plan.md"), "# Plan\n\n## Standards\n- ARCH-1: exception: billing reads the orders table\n");
+      await new Git(t.path).commitAll("a");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = (await attention(t.path, await loadConfig(t.path), trace)).filter((i) => i.kind === "waiting");
+        expect(items.map((i) => i.label)).toEqual(["Waiting for you"]);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a standard named in a change's record and then deleted from main is listed, not dropped", async () => {
     const t = await tempGitRepo();
     try {

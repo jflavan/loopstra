@@ -15,6 +15,7 @@ import { configPath } from "../../src/config";
 import { FIRST_NEEDS } from "../../src/judges";
 import { fixture, fixtureDir, judgeNotes, openRepo, seedCaught, setEnv, setupRepo, tempDir, withEnv, writeIntentOnDisk } from "../helpers";
 import { requestStop, resetStop, StopRequested } from "../../src/stop";
+import { localDate } from "../../src/text";
 
 const PLAN = "# Plan: add\n\n## Files that change\n- src/add.ts (new)\n- tests/add.test.ts (new)\n\n## Order of work\n1. x\n\n## Risks\nNone.\n\n## Proof\nbun test.\n";
 
@@ -89,10 +90,10 @@ describe("build stage", () => {
       await Bun.write(join(repo.path, "intent", "add-numbers", "plan.md"), `${PLAN}\n## Standards\n- SEC-1: exception: the debug log stays until the audit\n`);
       await new Git(repo.path).commitAll("standards");
       await ctx.reload();
+      const before = localDate();
       await runBuildStep(ctx);
-      const d = new Date();
-      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      expect(await Bun.file(join(repo.path, "intent", "add-numbers", "standards.md")).text()).toBe(`# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the debug log stays until the audit (a status edit, from intent.md, ${date})\n`);
+      const record = (date: string) => `# Standards decisions for add-numbers\n\n## Exceptions approved\n- SEC-1 at the plan: the debug log stays until the audit (a status edit, from intent.md, ${date})\n`;
+      expect([record(before), record(localDate())]).toContain(await Bun.file(join(repo.path, "intent", "add-numbers", "standards.md")).text());
     } finally {
       trace.close();
       repo.cleanup();

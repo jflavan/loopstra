@@ -17,6 +17,8 @@ import { Trace } from "../../src/trace";
 import { chatRepo, INTENT } from "../chat-helpers";
 import { until } from "../console-helpers";
 import { lastCommit, run } from "../helpers";
+import { localDate } from "../../src/text";
+import { exceptionsToApprove, parseRecord } from "../../src/standards-record";
 
 const by = { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "" };
 /** A person on every gate, so approve and send back are theirs to give. */
@@ -988,22 +990,28 @@ describe("approving exceptions", () => {
   const SPEC_APPROVED = "- ARCH-1 at the spec: billing reads the orders table (M., from a status edit, 2026-10-27)";
   const waiting = INTENT("plan-review", "x").replace("status: plan-review\n", "status: plan-review\nplan_gate: status\n");
 
-  async function repoWith(files: Record<string, string>) {
+  async function repoWith(files: Record<string, string>, standards = true) {
     const r = await chatRepo({ intents: { a: waiting } });
     for (const [name, text] of Object.entries(files)) await Bun.write(join(r.root, "intent", "a", name), text);
+    if (standards) {
+      mkdirSync(join(r.root, "loopstra", "standards"), { recursive: true });
+      await Bun.write(join(r.root, "loopstra", "standards", "security.md"), "# Security\n\n## Rules\n- SEC-1: no secrets in logs\n- ARCH-1: billing goes through the gateway\n");
+    }
     await new Git(r.root).commitAll("artifacts");
     return r;
   }
+  /** The record's text for the dates the run may have used (it may cross midnight). */
+  const either = (text: (date: string) => string, before: string) => [text(before), text(localDate())];
 
   test("approving the plan records its new exceptions, with the request's person and from the console, in the same commit", async () => {
     const r = await repoWith({ "plan.md": PLAN, "standards.md": `# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n` });
     try {
       const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      const before = localDate();
       await apply(r.root);
       expect(requestState(r.root, q.id)).toMatchObject({ ok: true, status: "plan-approved" });
-      const today = new Date();
-      const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-      expect(readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8")).toBe(`# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n- SEC-1 at the plan: the debug log stays until the audit (John, from the console, ${date})\n`);
+      expect(either((date) => `# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n- SEC-1 at the plan: the debug log stays until the audit (John, from the console, ${date})\n`, before))
+        .toContain(readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8"));
       const shown = (await run(["git", "show", "--stat", "--format=%s", "HEAD"], r.root)).out;
       expect(shown).toContain("plan approved by John from the dashboard");
       expect(shown).toContain("intent/a/standards.md");
@@ -1038,6 +1046,75 @@ describe("approving exceptions", () => {
       trace.close();
     } finally {
       plain.cleanup();
+    }
+  });
+
+  test("a name with parentheses is written so the record reads it back", async () => {
+    const r = await repoWith({ "plan.md": PLAN });
+    try {
+      submitRequest(r.root, { ...by, byName: "Ann Lee (she/her)", kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      const record = parseRecord(readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8"));
+      expect(record.problems).toEqual([]);
+      expect(record.exceptions.map((e) => [e.label, e.by, e.via, e.reason])).toEqual([
+        ["SEC-1", "Ann Lee [she/her]", "the console", "the debug log stays until the audit"],
+        ["ARCH-1", "Ann Lee [she/her]", "the console", "billing reads the orders table"],
+      ]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("undoing the approval takes its exceptions out of the record in the same commit, so they wait again", async () => {
+    const r = await repoWith({ "plan.md": PLAN, "standards.md": `# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n` });
+    try {
+      submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      expect(parseRecord(readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8")).exceptions.map((e) => e.label)).toEqual(["ARCH-1", "SEC-1"]);
+      const q = submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, status: "plan-review" });
+      const text = readFileSync(join(r.root, "intent", "a", "standards.md"), "utf8");
+      // Only what the approval added goes: the spec's approval stays.
+      expect(text).toBe(`# Standards decisions for a\n\n## Exceptions approved\n${SPEC_APPROVED}\n`);
+      const shown = (await run(["git", "show", "--stat", "--format=%s", "HEAD"], r.root)).out;
+      expect(shown).toContain("intent/a/standards.md");
+      expect(shown).toContain("intent/a/intent.md");
+      // The plan, written again with the same exception, asks for it again.
+      expect(exceptionsToApprove(PLAN, "plan", parseRecord(text)).map((b) => b.label)).toEqual(["SEC-1"]);
+      expect((await readIntent(r.root, "a")).file.frontmatter).toMatchObject({ status: "plan-review", plan_gate: "status" });
+      const trace = Trace.open(r.root);
+      expect(trace.gates("a").map((g) => `${g.check}:${g.result}:${g.evidence}`)).toEqual(["exception:pass:SEC-1", "exception:waiting:SEC-1"]);
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("undoing an approval that made the record removes the file", async () => {
+    const r = await repoWith({ "plan.md": PLAN });
+    try {
+      submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      expect(existsSync(join(r.root, "intent", "a", "standards.md"))).toBe(true);
+      submitRequest(r.root, { ...by, kind: "undo", slug: "a", expect: "plan-approved", to: "plan-review", note: "" });
+      await apply(r.root);
+      expect(existsSync(join(r.root, "intent", "a", "standards.md"))).toBe(false);
+      expect((await run(["git", "ls-files", "intent/a"], r.root)).out).not.toContain("standards.md");
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("with no standards on main, approving records nothing", async () => {
+    const r = await repoWith({ "plan.md": PLAN }, false);
+    try {
+      submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "plan-review" });
+      await apply(r.root);
+      expect((await readIntent(r.root, "a")).file.frontmatter.status).toBe("plan-approved");
+      expect(existsSync(join(r.root, "intent", "a", "standards.md"))).toBe(false);
+    } finally {
+      r.cleanup();
     }
   });
 

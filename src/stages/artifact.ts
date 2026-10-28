@@ -173,7 +173,8 @@ async function settle<W extends Writer, J extends Judge>(ctx: StepContext, s: Ar
       try {
         const exceptions = await exceptionsAsked(ctx, s);
         // Exceptions to allow bring a person onto a gate the config left to nobody, in the same record;
-        // any other pass takes off one an earlier pass wrote.
+        // any other pass takes off one an earlier pass wrote. `human` is the config's gate, not
+        // changeGates: the field is decided afresh at each pass, never kept because it was set.
         const field = `${s.gate}_gate` as const satisfies keyof Frontmatter;
         const fields = exceptions && human === "none" ? { set: { [field]: "status" as const } } : { remove: [field] };
         if (exceptions) await setStatus(ctx, s.review, exceptions, {}, fields);

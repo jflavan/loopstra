@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resultText, retryOptions, sameQuestion, SEND_BACK_TO, targetOf, undoMatches } from "./actions";
@@ -15,7 +16,8 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { localDate, oneLine } from "./text";
-import { approvedRecord, exceptionsToApprove, parseRecord, STANDARDS_RECORD } from "./standards-record";
+import { addedApprovals, approvedRecord, exceptionsToApprove, parseRecord, revokedRecord, STANDARDS_RECORD, type ApprovedException } from "./standards-record";
+import { readStandards } from "./standards";
 import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
@@ -596,7 +598,10 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
   if (problem || !to) return refuse(trace, req, was, problem ?? `${req.slug} cannot do that now.`);
   const note = noteFor(req);
   let refused = null as Status | null;
-  let excepted: string[] = [];
+  // Approving a spec or plan records the exceptions it asks for; taking that approval back takes them
+  // out of the record again, exactly those the approval added (its status change in the trace says).
+  let excepted: ApprovedException[] = done && approvesArtifact(req) ? await exceptionsLanded(root, cfg.main_branch, req) : [];
+  const taken = takesBackApproval(req) ? approvalsIn(trace, req.slug) : [];
   if (!done) {
     await commitRecord(root, cfg.main_branch, req.slug, `${doneWords(req)} by ${byWhom(req)}`, async (draft) => {
       const fresh = await readIntent(root, req.slug);
@@ -604,7 +609,13 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
         refused = fresh.file.frontmatter.status;
         return false;
       }
-      excepted = approveExceptions(req, draft);
+      excepted = await approveExceptions(root, cfg.main_branch, req, draft);
+      if (taken.length) {
+        const rel = `intent/${req.slug}/${STANDARDS_RECORD}`;
+        const text = revokedRecord(req.slug, draft.read(rel), taken);
+        if (text === null) draft.remove(rel);
+        else draft.write(rel, text);
+      }
       if (req.kind === "send-back") writeRecord(req.slug, { kind: "sent-back", who: req.byName, via: req.via, text: req.note.trim(), at: new Date() }, draft);
       // The send back's note no longer stands: said in the record every work session reads.
       if (undoesSendBack(req)) writeRecord(req.slug, { kind: "took-back", who: req.byName, via: req.via, at: new Date() }, draft);
@@ -619,9 +630,11 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
     after += followUp(trace, req, lastTry, "Its note for the next session could not be kept; an engineer can find why in the trace.", () => writeSentBack(root, req.slug, kept));
   }
   trace.upsertIntent(req.slug, to, effectivePriority(found.intent.file.frontmatter));
-  const gate = EXCEPTION_GATE[req.expect];
-  if (gate && excepted.length) trace.gate(req.slug, gate, "exception", "pass", excepted.join(", "));
-  trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via });
+  const labels = (list: ApprovedException[]) => list.map((e) => e.label).join(", ");
+  if (excepted.length) trace.gate(req.slug, excepted[0]!.gate, "exception", "pass", labels(excepted));
+  // Taken back: the exceptions wait for a person again.
+  if (taken.length) trace.gate(req.slug, taken[0]!.gate, "exception", "waiting", labels(taken));
+  trace.statusChange(req.slug, req.expect, to, note, { by: req.byName, via: req.via, ...(excepted.length ? { exceptions: excepted } : {}) });
   traced(trace, req.slug, req, "applied", { from: req.expect, to, what: doneWords(req) });
   if (req.kind === "undo") after += followUp(trace, req, lastTry, "The note it was sent back with could not be dropped, so the next session may still read it; an engineer can find why in the trace.", () => dropSentBack(root, req.slug));
   return { ok: true, status: to, text: resultText(req, req.slug, to) + after };
@@ -630,22 +643,72 @@ async function applyStatus(root: string, cfg: Config, trace: Trace, req: StatusR
 /** The review statuses whose approval allows the exceptions their artifact asks for, and that artifact's gate. */
 const EXCEPTION_GATE: Partial<Record<Status, "spec" | "plan">> = { "spec-review": "spec", "plan-review": "plan" };
 
+/** True for an approve of a spec or plan. */
+const approvesArtifact = (req: StatusRequest): boolean => req.kind === "approve" && !!EXCEPTION_GATE[req.expect];
+
+/** True for an undo that takes back the approval of a spec or plan. */
+const takesBackApproval = (req: StatusRequest): boolean => req.kind === "undo" && APPROVE_TO[req.to] === req.expect && !!EXCEPTION_GATE[req.to];
+
+/** True when main has standards (files in the folder, read or not): without any there is no rule to except. */
+async function hasStandards(root: string, main: string): Promise<boolean> {
+  const git = new Git(root);
+  const commit = await git.commitOf(main);
+  if (!commit) return false;
+  const read = await readStandards(git, commit);
+  return read.standards.length + read.problems.length > 0;
+}
+
 /**
  * Approving a spec or plan allows every exception it asks for: those the change's standards.md does
  * not have yet are written into it, in the approval's draft, so they land in the same record. Who is
- * the request's person; where is "the console" for the console, else where the request says. Gives
- * the labels written.
+ * the request's person; where is "the console" for the console, else where the request says. Nothing
+ * when main has no standards. Gives the approvals written.
  */
-function approveExceptions(req: StatusRequest, draft: RecordDraft): string[] {
+async function approveExceptions(root: string, main: string, req: StatusRequest, draft: RecordDraft): Promise<ApprovedException[]> {
   const gate = EXCEPTION_GATE[req.expect];
-  if (req.kind !== "approve" || !gate) return [];
+  if (!approvesArtifact(req) || !gate) return [];
   const rel = (name: string) => `intent/${req.slug}/${name}`;
   const text = draft.read(rel(STANDARDS_RECORD));
-  const asks = exceptionsToApprove(draft.read(rel(`${gate}.md`)) ?? "", gate, parseRecord(text));
-  if (!asks.length) return [];
+  const before = parseRecord(text);
+  const asks = exceptionsToApprove(draft.read(rel(`${gate}.md`)) ?? "", gate, before);
+  if (!asks.length || !(await hasStandards(root, main))) return [];
   const who = { by: oneLine(req.byName, 80), via: req.transport === CONSOLE ? "the console" : oneLine(req.via, 40) };
-  draft.write(rel(STANDARDS_RECORD), approvedRecord(req.slug, text, gate, asks, who, localDate()));
-  return asks.map((b) => b.label);
+  const next = approvedRecord(req.slug, text, gate, asks, who, localDate());
+  draft.write(rel(STANDARDS_RECORD), next);
+  return addedApprovals(before, parseRecord(next));
+}
+
+/**
+ * The approvals an approve's record added, read from that record's commit on main: for an approve
+ * whose record landed in a pass the loop was killed in, before it traced them.
+ */
+async function exceptionsLanded(root: string, main: string, req: StatusRequest): Promise<ApprovedException[]> {
+  const rel = `intent/${req.slug}/${STANDARDS_RECORD}`;
+  const git = new Git(root);
+  const commit = (await git.run(["log", "-1", "--format=%H", `--grep=^Loopstra-Request: ${req.id}$`, `refs/heads/${main}`, "--", rel])).out.trim();
+  if (!commit) return [];
+  const at = async (rev: string) => {
+    const r = await git.run(["show", `${rev}:${rel}`], true);
+    return r.code === 0 ? r.out : null;
+  };
+  return addedApprovals(parseRecord(await at(`${commit}^`)), parseRecord(await at(commit)));
+}
+
+/** The approvals an approve added, as its status change in the trace has them (see applyStatus). */
+const Approvals = z.object({
+  exceptions: z.array(z.object({ label: z.string(), gate: z.enum(["spec", "plan"]), reason: z.string(), by: z.string(), via: z.string(), date: z.string() })).default([]),
+});
+
+/** The approvals the change's last status change (the approve an undo takes back, see undoMatches) added. */
+function approvalsIn(trace: Trace, slug: string): ApprovedException[] {
+  const e = trace.lastEvent(slug, "status_change");
+  if (!e) return [];
+  try {
+    const parsed = Approvals.safeParse(JSON.parse(e.payload));
+    return parsed.success ? parsed.data.exceptions : [];
+  } catch {
+    return [];
+  }
 }
 
 /**

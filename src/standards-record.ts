@@ -7,7 +7,7 @@ export const STANDARDS_RECORD = "standards.md";
 interface Decision { name: string; note: string; by: string; via: string; date: string }
 
 /** An exception a person approved at the spec or the plan. */
-interface ApprovedException { label: string; gate: "spec" | "plan"; reason: string; by: string; via: string; date: string }
+export interface ApprovedException { label: string; gate: "spec" | "plan"; reason: string; by: string; via: string; date: string }
 
 export interface ChangeStandards { added: Decision[]; removed: Decision[]; exceptions: ApprovedException[]; problems: string[] }
 
@@ -25,7 +25,7 @@ export function parseRecord(text: string | null, known?: ReadonlySet<string>): C
   const out: ChangeStandards = { added: [], removed: [], exceptions: [], problems: [] };
   if (text === null) return out;
   let section: keyof typeof SECTIONS | "other" | null = null;
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
     const line = raw.trimEnd();
     if (/^#{1,2}\s/.test(line)) {
       const found = (Object.keys(SECTIONS) as (keyof typeof SECTIONS)[]).find((k) => SECTIONS[k].test(line));
@@ -33,7 +33,13 @@ export function parseRecord(text: string | null, known?: ReadonlySet<string>): C
       else if (line.startsWith("## ")) { section = "other"; out.problems.push(`standards.md has a section ${line.slice(3).trim()}, which is not Added, Removed or Exceptions approved.`); }
       continue;
     }
-    if (!line.startsWith("- ")) continue;
+    if (!line.trim()) continue;
+    // Any other text (prose, a `###` heading, a wrapped line) is a person's: it does not read, so it is
+    // listed and kept as it is (see approvedRecord). Lines under an unknown section are that section's problem.
+    if (!line.startsWith("- ")) {
+      if (section !== "other") out.problems.push(unread(line, "a `- ` line under Added, Removed or Exceptions approved"));
+      continue;
+    }
     if (section === "added" || section === "removed") {
       const m = DECISION.exec(line);
       if (!m || !STANDARD_NAME.test(m[1] ?? "")) { out.problems.push(unread(line, `- <standard>: <note> (<who>, from <where>, <date>)`)); continue; }
@@ -108,14 +114,43 @@ export function exceptionNote(gate: Gate, bullets: SectionBullet[], titles: Read
   return `The ${gate} asks for ${asks}. Read ${gate}.md. To allow ${it}, set status to ${gate}-approved; to have the ${gate} written again without ${it}, send it back with a note.`;
 }
 
-/** The record with `bullets` approved at `gate` by `who` on `date` (YYYY-MM-DD); one approved already is not added again. */
+/** Who or where as the record can read it back: one line, with no parentheses (they end the reason's tail). */
+const tailSafe = (s: string): string => oneLine(s).replace(/\(/g, "[").replace(/\)/g, "]");
+
+/**
+ * The record with `bullets` approved at `gate` by `who` on `date` (YYYY-MM-DD); one approved already is
+ * not added again. `who` is written so it reads back (see tailSafe).
+ */
 export function withApprovals(r: ChangeStandards, gate: Gate, bullets: SectionBullet[], who: Approver, date: string): ChangeStandards {
   const exceptions = [...r.exceptions];
   for (const b of bullets) {
     if (approved({ ...r, exceptions }, b.label, b.text)) continue;
-    exceptions.push({ label: b.label, gate, reason: oneLine(b.text), by: who.by, via: who.via, date });
+    exceptions.push({ label: b.label, gate, reason: oneLine(b.text), by: tailSafe(who.by), via: tailSafe(who.via), date });
   }
   return { ...r, exceptions };
+}
+
+/** The approvals in `after` that `before` does not have: what one record added. */
+export function addedApprovals(before: ChangeStandards, after: ChangeStandards): ApprovedException[] {
+  return after.exceptions.filter((e) => !before.exceptions.some((b) => sameApproval(b, e)));
+}
+
+const sameApproval = (a: ApprovedException, b: ApprovedException): boolean =>
+  a.label === b.label && a.gate === b.gate && oneLine(a.reason) === oneLine(b.reason) && a.by === b.by && a.via === b.via && a.date === b.date;
+
+/**
+ * The record's file, `text`, without the approvals `taken` (an approval taken back): exactly those
+ * entries, by rule, gate, reason, who, where and date. Null when nothing is left to record (the file
+ * goes). A record with lines that do not read keeps them: only the taken lines are dropped.
+ */
+export function revokedRecord(slug: string, text: string | null, taken: ApprovedException[]): string | null {
+  const r = parseRecord(text);
+  const isTaken = (e: ApprovedException) => taken.some((t) => sameApproval(t, e));
+  if (!r.problems.length || text === null) return renderRecord(slug, { ...r, exceptions: r.exceptions.filter((e) => !isTaken(e)) });
+  return text.split(/(?<=\n)/).filter((line) => {
+    const e = parseRecord(`## Exceptions approved\n${line}`).exceptions[0];
+    return !(e && isTaken(e));
+  }).join("");
 }
 
 /**

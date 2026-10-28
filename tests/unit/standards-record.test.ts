@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { approvedRecord, exceptionNote, exceptionsToApprove, parseRecord, renderRecord, scopeOf, STANDARDS_RECORD, withApprovals } from "../../src/standards-record";
+import { addedApprovals, approvedRecord, exceptionNote, exceptionsToApprove, parseRecord, renderRecord, revokedRecord, scopeOf, STANDARDS_RECORD, withApprovals } from "../../src/standards-record";
 
 const EXAMPLE = `# Standards decisions for billing-refunds
 
@@ -105,5 +105,42 @@ describe("exceptions to approve", () => {
     expect(approvedRecord("b", broken, "plan", bullets, who, "2026-10-28")).toBe(`${broken}\n## Exceptions approved\n${line}\n`);
     const brokenUnder = "# Standards decisions for b\n\n## Exceptions approved\n- ARCH-9 somewhere\n";
     expect(approvedRecord("b", brokenUnder, "plan", bullets, who, "2026-10-28")).toBe(`${brokenUnder}${line}\n`);
+  });
+
+  test("who and where are written without parentheses, so they read back", () => {
+    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const text = approvedRecord("b", null, "plan", bullets, { by: "Ann Lee (she/her)", via: "Slack (eu)" }, "2026-10-28");
+    expect(text).toContain("(Ann Lee [she/her], from Slack [eu], 2026-10-28)");
+    const back = parseRecord(text);
+    expect(back.problems).toEqual([]);
+    expect(back.exceptions[0]).toMatchObject({ by: "Ann Lee [she/her]", via: "Slack [eu]", reason: "billing keeps reading the legacy orders table until it is migrated (ADR-12)" });
+  });
+
+  test("prose, a ### heading or a wrapped line is a problem, so approving keeps the person's text", () => {
+    const text = "# Standards decisions for b\n\nWe agreed this in the review.\n\n## Added\n- payments: why (J., from the console, 2026-10-27)\n  wrapped onto a second line\n### Notes\n";
+    expect(parseRecord(text).problems).toHaveLength(3);
+    expect(parseRecord(text).problems[0]).toContain("We agreed this in the review.");
+    const bullets = exceptionsToApprove(PLAN, "plan", parseRecord(null));
+    const out = approvedRecord("b", text, "plan", bullets, { by: "J.", via: "the console" }, "2026-10-28");
+    expect(out.startsWith(text)).toBe(true);
+    expect(parseRecord(out).exceptions).toHaveLength(1);
+    // A record a person left as rendered, with a byte-order mark, still reads.
+    expect(parseRecord(`\uFEFF${EXAMPLE}`).problems).toEqual([]);
+  });
+
+  test("an approval taken back removes exactly the entries it added", () => {
+    const base = parseRecord("## Exceptions approved\n- ARCH-1 at the spec: billing keeps reading the legacy orders table until it is migrated (ADR-12) (M., from a status edit, 2026-10-27)\n");
+    const two = [...exceptionsToApprove(PLAN, "plan", parseRecord(null)), { label: "SEC-1", kind: "exception" as const, text: "the debug log stays" }];
+    const before = renderRecord("b", base)!;
+    const after = approvedRecord("b", before, "plan", two, { by: "J.", via: "the console" }, "2026-10-28");
+    const added = addedApprovals(base, parseRecord(after));
+    expect(added.map((e) => `${e.label}@${e.gate}`)).toEqual(["SEC-1@plan"]);
+    expect(revokedRecord("b", after, added)).toBe(before);
+    // Nothing left: no file.
+    const only = approvedRecord("b", null, "plan", two, { by: "J.", via: "the console" }, "2026-10-28");
+    expect(revokedRecord("b", only, addedApprovals(parseRecord(null), parseRecord(only)))).toBeNull();
+    // A record with a line that does not read keeps it; only the taken line goes.
+    const broken = `${after}Some prose.\n`;
+    expect(revokedRecord("b", broken, added)).toBe(`${before}Some prose.\n`);
   });
 });
