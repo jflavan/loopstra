@@ -31,7 +31,7 @@ Today a repository can tell Loopstra's sessions how to work (`CLAUDE.md`, `.clau
 
 - **An agent must never weaken the rules that judge it.** No session may edit `loopstra/standards/`, and a change whose diff does is blocked, whatever the hook let through.
 - **A broken standards file must never mean "no standards".** If a file on `main` cannot be read, the loop does nothing until it is fixed. It does not run changes as if the rules were not there.
-- **Standards must not turn the owner's documents into engineering documents.** The parts of the spec and outcome written for the owner stay in plain words; rule ids and technical evidence go in sections of their own.
+- **Standards must not turn the owner's documents into engineering documents.** The parts of the spec and outcome written for the owner stay in plain words; rule labels and technical evidence go in sections of their own.
 
 ---
 
@@ -61,12 +61,12 @@ Sessions are given the whole file, so this text is context, not decoration.
   - Unknown keys are errors, as in the config.
 - **The title is the first `# ` heading.** It is required.
 - **The rules are under `## Rules`.** The section is required and holds at least one rule.
-  - Each rule is a bullet `- ID: text`. Indented lines that follow continue the rule.
-  - An id starts with a capital letter and has up to 32 letters, digits, `.`, `_` and `-`, ending in a letter or digit: `ARCH-1`, `SOC2-CC6.1`, `SEC_3`. Claude's call: a team's own scheme (including a framework's control numbers) fits, and ids are stable as rules are added. A rule's number in a list is not, so an id is never derived from its position.
-  - Ids are unique across all files.
+  - Each rule is a bullet `- LABEL: text`, where the rule label is a short name the team gives the rule. The spec, the plan, review findings and the outcome point at a rule by its label. Indented lines that follow continue the rule.
+  - A rule label starts with a capital letter and has up to 32 letters, digits, `.`, `_` and `-`, ending in a letter or digit: `ARCH-1`, `SOC2-CC6.1`, `SEC_3`. Claude's call: a team's own scheme (including a framework's control numbers) fits, and labels stay the same as rules are added. A rule's number in a list does not, so a label is never derived from its position.
+  - No two rules have the same label, across all files.
 - **Everything else in the file is free text.** Sessions read it; Loopstra does not parse it.
 
-A file breaks these rules when it has no title, no Rules section, an empty one, a bullet without a valid id, a duplicate id, a pattern that is not a valid glob, or front matter that does not parse. Such a file is unreadable (see When a file cannot be read).
+A file breaks these rules when it has no title, no Rules section, an empty one, a bullet without a valid rule label, a label used twice, a pattern that is not a valid glob, or front matter that does not parse. Such a file is unreadable (see When a file cannot be read).
 
 ### Which standards apply
 
@@ -94,7 +94,7 @@ Standards are read with `git cat-file` from the same commit of `main` that the s
 
 Unreadable standards are treated like a config that does not load, and the check fails closed:
 
-- At the start of each tick, after the config loads, the tick reads `loopstra/standards/` from `main`'s commit. If any file is unreadable, the tick starts no steps and traces it once while it stays the same (`eventOnChange`), with the reason `standards`. `loopstra status` and the console show it under Needs attention: "loopstra/standards/soc2.md cannot be read: the rule on line 14 has no id (write it as `- ID: text`). Fix it on main and commit; until then no change moves on."
+- At the start of each tick, after the config loads, the tick reads `loopstra/standards/` from `main`'s commit. If any file is unreadable, the tick starts no steps and traces it once while it stays the same (`eventOnChange`), with the reason `standards`. `loopstra status` and the console show it under Needs attention: "loopstra/standards/soc2.md cannot be read: the rule on line 14 has no rule label (write it as `- LABEL: text`). Fix it on main and commit; until then no change moves on."
 - `loopstra start` refuses with the same sentence, and `loopstra setup --check` lists it under "To fix".
 - A step that finds an unreadable file at its own commit (main moved between the tick's read and the step's) fails as `notTheStepsFault`, keeps its status and runs again. It never runs without the rules.
 
@@ -103,7 +103,7 @@ Unreadable standards are treated like a config that does not load, and the check
 A new command, read-only, needing no Claude:
 
 ```
-loopstra standards          # each standard: title, scope (every change, or its patterns), whether it needs a person, its rule ids
+loopstra standards          # each standard: title, scope (every change, or its patterns), whether it needs a person, its rule labels
 loopstra standards --check  # also exits 1 when any file is unreadable, naming each problem
 ```
 
@@ -130,27 +130,27 @@ The shipped prompts that get it: `design`, `spec-check`, `plan`, `plan-challenge
 
 ### Spec (design and spec-check)
 
-- **`design.md`** says: when standards are listed, add `## Standards` after Areas of concern. It has one bullet per rule of each standard you include, `- ID: how the design keeps it`, or `- ID: does not apply: why`. This section is for engineers and may be technical. Every standard that applies to every change must be there in full.
+- **`design.md`** says: when standards are listed, add `## Standards` after Areas of concern. It has one bullet per rule of each standard you include, `- LABEL: how the design keeps it`, or `- LABEL: does not apply: why`. This section is for engineers and may be technical. Every standard that applies to every change must be there in full.
 - **The spec gate gets a code check, `standards`,** run with the headings check when the repository has standards. It checks four things:
   - the `Standards` heading is present;
-  - every rule id of every standard without `applies_to` has a bullet;
-  - every id there is a real rule (an id that does not exist is a failure, which catches a rule the designer invented);
+  - the label of every rule of every standard without `applies_to` has a bullet;
+  - every label there is a real rule's (a label that matches no rule is a failure, which catches a rule the designer invented);
   - a scoped standard is either absent or there in full.
 
   Evidence: "all 12 rules addressed", or "missing SEC-2, SEC-4; no rule called SEC-9".
 - **`spec-check.md`** gets a fourth task, when standards are listed:
   - Check each bullet of the Standards section against the Design. Is the claim borne out, and is each "does not apply" sound?
   - Does the design break any rule that applies, whether the section says so or not?
-  - Each problem is a finding that is not met, with `standard` set to the rule id.
+  - Each problem is a finding that is not met, with `standard` set to the rule label.
 
   The readability task names Standards with Design and Affected code as the engineers' sections.
-- **The envelope.** `requirement` gets an optional `standard: string`. The gate evidence and the rewrite's findings put the id first: "SEC-3: the design logs the request body, which holds card numbers".
+- **The envelope.** `requirement` gets an optional `standard: string`. The gate evidence and the rewrite's findings put the rule label first: "SEC-3: the design logs the request body, which holds card numbers".
 
 A failure takes the existing path: one rewrite with the findings, then blocked with the stage's `failedNote`.
 
 ### Plan (plan and plan-challenge)
 
-- **`plan.md`** says: when standards are listed, add `## Standards` after Proof. It has one bullet per rule that applies, `- ID: how the plan keeps it, and which item under Proof shows it`, or `- ID: does not apply: why`.
+- **`plan.md`** says: when standards are listed, add `## Standards` after Proof. It has one bullet per rule that applies, `- LABEL: how the plan keeps it, and which item under Proof shows it`, or `- LABEL: does not apply: why`.
 - **The plan gate's `standards` code check** works as the spec's, on the plan's applicable set, with one difference: every rule of every standard that applies must have a bullet, the scoped ones included, since the files are known now. It runs after the `files` check, on the files that check read.
 - **`plan-challenge.md`** gets the same task as spec-check, on the plan. A broken rule, or a claim the Order of work does not carry out, is a concern with `blocking: true`. `concern` gets an optional `standard`.
 
@@ -160,8 +160,8 @@ A failure takes the existing path: one rewrite with the findings, then blocked w
 
 ### Review
 
-- **`review.md`** gets the standards that apply to the diff, with: "A change that breaks a rule below is an important finding; set `standard` to the rule's id."
-- **`finding` gets an optional `standard`.** `review.md`, the record, lists a finding's rule id before its location.
+- **`review.md`** gets the standards that apply to the diff, with: "A change that breaks a rule below is an important finding; set `standard` to the rule's label."
+- **`finding` gets an optional `standard`.** `review.md`, the record, lists a finding's rule label before its location.
 - **`REVIEW.md`'s shipped template** gets a Standards pass: "the change keeps every rule in `loopstra/standards/` that applies to it". That covers a Claude review of the repository outside the loop too.
 - **A rule that applies to the diff but was not in the plan's set** (the build touched a scoped standard's files the plan did not list) needs no special handling. The reviewer is given it like any other, and the drift check's reconcile has already rewritten the plan.
 
@@ -172,26 +172,26 @@ The merge gate gets two checks, both code, both at `passMergeGate` with the risk
 1. **`standards-untouched`**: the diff touches nothing under `loopstra/standards/`. If it does, the change is blocked, and the gate row names the files. The note: "This change edits the repository's standards (loopstra/standards/soc2.md), which only a person may change. An engineer can take that edit out of the change's branch and retry the change, or close it." Claude's call: block rather than let a person approve it. An approval at the merge gate is about the change, and a standards edit hidden in a feature is exactly what the reviewer at the gate is least likely to read.
 2. **`needs_person`**: a standard with `needs_person: true` that applies to the diff makes the change risky, as a file in `gates.merge.risky.paths` does. The same rule holds as for risk: it only changes who decides when nobody is on the config's merge gate. `scoreRisk` is given the patterns of those standards beside `risky.paths`, and `riskNote` names the standard: "This change falls under the standard Payments data (loopstra/standards/payments.md), which is set to need a person before merging: it touches services/billing/api.ts. Approve the pull request on GitHub, or set status to merge-approved." A `needs_person` standard without `applies_to` makes every change wait. `loopstra standards` says so, since it is the same as `gates.merge.human: pr`.
 
-The trace gets a `standards` row on the merge gate when the repository has standards. It names the standards that apply and their rule ids, so the record of what applied is fixed at the commit that merged.
+The trace gets a `standards` row on the merge gate when the repository has standards. It names the standards that apply and their rule labels, so the record of what applied is fixed at the commit that merged.
 
 ### Done (done-check and outcome.md)
 
 - **The files** are those the change brought into `main`: the diff of the commit that brought it in, against its first parent (for a squash, the squash commit; for a merge, the merge commit). It is read where the done-check's clean copy of `main` is made. Claude's call: this is the same answer for a local merge, a pull request merged by Loopstra and one merged by hand. If the step cannot name that commit, it uses the merge gate's `standards` row.
-- **`done-check.md`** gets the applicable standards. The envelope gets `standards: [{ id, result: met | unmet | needs-person, evidence }]`, one item per applicable rule, judged as the criteria are: `met` only with evidence from the repository, `needs-person` for what the repository cannot show ("the alert exists in the monitoring system").
-- **The runtime writes the section, not the agent.** It appends `## Standards` to `outcome.md`, after the owner's sections: one bullet per rule, `- ID (Title): met: evidence`. The format is the runtime's, so it is the same in every outcome and a script can read it. The section is introduced by one plain sentence for the owner: "The engineering rules this change was checked against:".
-- **Unmet rules block,** as unmet criteria do, with their own note when only standards are unmet: "The change merged, but the final check found engineering rules it does not keep. The details are in outcome.md. An engineer should decide whether to open a follow-up change, then set this one to done or closed." When both are unmet, the existing note gets "and engineering rules" after "Done when criteria". `needs-person` rules go under the existing "For a person to confirm" heading too, with their ids.
+- **`done-check.md`** gets the applicable standards. The envelope gets `standards: [{ label, result: met | unmet | needs-person, evidence }]`, one item per applicable rule, judged as the criteria are: `met` only with evidence from the repository, `needs-person` for what the repository cannot show ("the alert exists in the monitoring system").
+- **The runtime writes the section, not the agent.** It appends `## Standards` to `outcome.md`, after the owner's sections: one bullet per rule, `- LABEL (Title): met: evidence`. The format is the runtime's, so it is the same in every outcome and a script can read it. The section is introduced by one plain sentence for the owner: "The engineering rules this change was checked against:".
+- **Unmet rules block,** as unmet criteria do, with their own note when only standards are unmet: "The change merged, but the final check found engineering rules it does not keep. The details are in outcome.md. An engineer should decide whether to open a follow-up change, then set this one to done or closed." When both are unmet, the existing note gets "and engineering rules" after "Done when criteria". `needs-person` rules go under the existing "For a person to confirm" heading too, with their labels.
 - **With `gates.done.agent: false`** no rule is judged, and the Standards section lists the rules that applied with "not checked automatically". Claude's call: the record still says what applied.
 
 ## Protection
 
 The test-protection hook (`templates/hooks/loopstra-protect-tests.ts`) refuses an edit under `loopstra/standards/` in every session that can write, whatever `LOOPSTRA_PHASE` is: acceptance, build, fix, reconcile, revise and resolve. The refusal message says that standards are changed by a person on `main`. The merge check above is the backstop for what a hook cannot see (a write through a shell command the session was allowed).
 
-Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` is not treated as a standard. Rules there are guidance Claude Code loads into sessions. Standards are what the gates check, with ids and a record. A team keeps conventions in the first and the must-haves in the second, and can point one at the other.
+Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` is not treated as a standard. Rules there are guidance Claude Code loads into sessions. Standards are what the gates check, with rule labels and a record. A team keeps conventions in the first and the must-haves in the second, and can point one at the other.
 
 ## Status, console and records
 
 - No new screen. The spec, plan, review and outcome pages already render those files, and the new sections show there.
-- The session page needs nothing new. The gate rows (`standards` on spec, plan, merge and done, plus findings with ids) show in the trace as rows do today.
+- The session page needs nothing new. The gate rows (`standards` on spec, plan, merge and done, plus findings with rule labels) show in the trace as rows do today.
 - `loopstra status` and the console show unreadable standards under Needs attention (see When a file cannot be read).
 - Nothing is added to the intent template, the owner's guide or chat.
 
@@ -199,7 +199,7 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 
 - **`loopstra init`** writes no standards. Off is the default and means absent.
 - **`loopstra setup --check`** runs `loopstra standards --check`.
-- **The operator skill** (`templates/skill/SKILL.md`) gets a section on writing a standard. It covers the file's shape, choosing ids, scoping with `applies_to`, and writing a rule a judge can check ("every endpoint under api/ checks the caller's role with `requireRole`", not "be secure"). It ends by saying to commit the file on `main`.
+- **The operator skill** (`templates/skill/SKILL.md`) gets a section on writing a standard. It covers the file's shape, choosing rule labels, scoping with `applies_to`, and writing a rule a judge can check ("every endpoint under api/ checks the caller's role with `requireRole`", not "be secure"). It ends by saying to commit the file on `main`.
 - **README** gets a Standards section with two worked examples:
   - an architecture standard for every change;
   - a SOC 2 technical-controls standard scoped to `services/**` and `infra/**`: authentication and role checks, audit logs for access to customer data, encryption in transit and at rest, no secrets or personal data in logs, keeping and deleting data on schedule.
@@ -211,7 +211,7 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 ## Code
 
 - **`src/standards.ts`** (layer 3, state on disk). It holds:
-  - the zod schema of the front matter and the parsed `Standard` (`name`, `path`, `title`, `appliesTo?`, `needsPerson`, `rules: { id, text }[]`, `body`);
+  - the zod schema of the front matter and the parsed `Standard` (`name`, `path`, `title`, `appliesTo?`, `needsPerson`, `rules: { label, text }[]`, `body`);
   - `readStandards(git, commit)`, which returns the standards or the problems, each naming the file and line;
   - `applying(standards, files)`;
   - `renderStandards(applying, matched)`, for the prompt variable;
@@ -230,16 +230,16 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 ## Tests
 
 - **Unit, in `tests/unit/standards.test.ts`:**
-  - parsing: front matter, titles, rules with continuation lines, each kind of unreadable file, and duplicate ids across files;
+  - parsing: front matter, titles, rules with continuation lines, each kind of unreadable file, and a label used in two files;
   - applicability, renames included;
-  - the section check: missing ids, unknown ids, and a scoped standard given in part.
+  - the section check: missing labels, labels that match no rule, and a scoped standard given in part.
 
-  A property test in `properties.test.ts` checks that parsing a rendered rule list gives back the same ids and texts.
+  A property test in `properties.test.ts` checks that parsing a rendered rule list gives back the same labels and texts.
 - **Stages, with the fake claude:**
   - a spec without a Standards section fails the check and is rewritten once;
   - a spec-check finding with `standard` reaches the rewrite's findings and the gate evidence;
   - a plan's scoped standards come from its file list;
-  - a review finding with `standard` is important and is listed with its id;
+  - a review finding with `standard` is important and is listed with its label;
   - a merge whose diff touches `loopstra/standards/` blocks with the note;
   - a `needs_person` standard makes a change wait in `merge-review` with the standard named, and only when nobody is on the merge gate;
   - the done-check's unmet rule blocks, its `needs-person` rule does not, and `outcome.md` has the runtime-written section;
@@ -251,7 +251,7 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 
 ## Follow-ups (not in this change)
 
-- **Acceptance tests from standards.** Give the `acceptance` step the plan's applicable rules, so the rules a test can check get one, listed in `acceptance.md` by id, which the done-check then reads like the criteria's.
+- **Acceptance tests from standards.** Give the `acceptance` step the plan's applicable rules, so the rules a test can check get one, listed in `acceptance.md` by rule label, which the done-check then reads like the criteria's.
 - **Chat.** Tell the orchestrator the standards' titles and scopes, so it can answer "what rules would this change fall under?" while an intent is worked out.
 - **An export for auditors.** `loopstra export <since>` would write each change's records and its trace rows (gates, approvals, who did what, when) into one folder or archive, since `.loopstra/` is local and not kept.
 - **`loopstra retro`** could report which rules most often fail at which gate. That is the signal that a rule is unclear, or that a design keeps fighting it.
