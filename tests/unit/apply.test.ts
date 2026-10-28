@@ -359,6 +359,20 @@ describe("applying requests", () => {
     }
   });
 
+  test("a risky change's merge_gate puts a person on its merge gate: Approve the merge is theirs to give", async () => {
+    const risky = INTENT("merge-review", "x").replace("status: merge-review\n", "status: merge-review\nmerge_gate: pr\n");
+    const r = await chatRepo({ intents: { a: risky, b: INTENT("merge-review", "y") } });
+    try {
+      const q = submitRequest(r.root, { ...by, kind: "approve", slug: "a", expect: "merge-review" });
+      const other = submitRequest(r.root, { ...by, kind: "approve", slug: "b", expect: "merge-review" });
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, status: "merge-approved" });
+      expect(requestState(r.root, other.id)).toMatchObject({ ok: false, text: "b cannot be approved now: nobody reviews that step, so the loop goes on by itself." });
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("retry only from blocked, even when an old block named the status", async () => {
     const r = await chatRepo({ intents: { a: INTENT("spec-review", "x") }, config: PEOPLE });
     try {

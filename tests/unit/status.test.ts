@@ -103,6 +103,22 @@ describe("renderStatus", () => {
     }
   });
 
+  test("a risky change waiting in merge-review needs a person though nobody is on the config's merge gate; its own note, else the gate's, says what to do", async () => {
+    const t = tempDir();
+    try {
+      await config(t.path);
+      await intent(t.path, "risky", "status: merge-review\nmerge_gate: pr\nnote: \"This change touches files set to need a person before merging: package.json.\"");
+      await intent(t.path, "bare", "status: merge-review\nmerge_gate: status");
+      await intent(t.path, "plain", "status: merge-review\nnote: Waiting for the automatic checks on GitHub.");
+      const text = await renderStatus(t.path, 1000);
+      expect(text).toContain("- Waiting for you (risky): This change touches files set to need a person before merging: package.json.");
+      expect(text).toContain("- Waiting for you (bare): Read review.md. When you are happy with it, change the status line to merge-approved.");
+      expect(text).not.toContain("Waiting for you (plain)");
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("a change whose pull request waits says why in place of the merge gate's note; one only an engineer can end needs attention whoever is on the gate", async () => {
     const t = tempDir();
     try {

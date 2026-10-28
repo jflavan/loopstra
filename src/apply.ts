@@ -5,7 +5,7 @@ import { APPROVE_TO, doneWords, isOpen, personReviews, questionChangedText, resu
 import { loadConfig, type Config } from "./config";
 import { commitRecord, dropSentBack, landed, MainCheckoutMoved, statusPatch, writeSentBack } from "./context";
 import { withEntry, type ConversationEntry } from "./conversation";
-import { changeExists, effectivePriority, humanGates, isHeld, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
+import { changeExists, changeGates, effectivePriority, humanGates, isHeld, parseIntentFile, readIntent, SLUG, writeIntent, type Frontmatter, type Intent, type Status } from "./intents";
 import { anythingToApply, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pruneResults, requestsDir, saveApplying, waitingIds, type Outcome, type Request } from "./requests";
 import type { RecordDraft } from "./record-draft";
 import { Git, GitError } from "./git";
@@ -542,7 +542,7 @@ async function openChange(root: string, trace: Trace, req: FieldRequest | Answer
 
 /** Why a status request is not something the change can do from `expect`, or null when it is. */
 function notAllowed(req: StatusRequest, fm: Frontmatter, cfg: Config, trace: Trace): string | null {
-  const human = humanGates(cfg);
+  const human = changeGates(humanGates(cfg), fm);
   switch (req.kind) {
     case "approve": case "send-back":
       if (!targetOf(req)) return `${req.slug} cannot be ${req.kind === "approve" ? "approved" : "sent back"} while it is ${req.expect}.`;

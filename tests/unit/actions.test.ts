@@ -16,6 +16,9 @@ describe("what a change offers", () => {
     expect(kinds(offers(fm("plan-review"), nobody, []))).toEqual(["hold", "priority", "close"]);
     expect(offers(fm("verifying"), everyone, [])[0]).toEqual({ kind: "approve", label: "Confirm it is done", to: "done" });
     expect(kinds(offers(fm("verifying"), everyone, []))).not.toContain("send-back");
+    // A risky change's merge_gate puts a person on the merge gate the config left to nobody.
+    expect(kinds(offers(fm("merge-review", "merge_gate: pr\n"), nobody, []))).toEqual(["approve", "send-back", "hold", "priority", "close"]);
+    expect(kinds(offers(fm("merge-review"), nobody, []))).toEqual(["hold", "priority", "close"]);
   });
 
   test("a draft offers start; a blocked change offers one retry per target; finished changes offer nothing", () => {
