@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { block, readArtifact, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
+import { acceptanceFiles, block, readArtifact, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
 import { loopstraDir } from "../paths";
@@ -96,7 +96,9 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
   if (!ctx.cfg.gates.done.agent) return { ok: true, items: [], outcome: "" };
   const dir = join(loopstraDir(ctx.root), "verify", ctx.slug);
   // The tests written from Done when before the build (see writeAcceptance); main has them merged.
-  const covered = coveredByTests(await readArtifact(ctx, "acceptance.md"));
+  // Only while this build's marker names them: acceptance.md from an earlier build (the setting
+  // turned off since) lists tests this build was free to change.
+  const covered = acceptanceFiles(ctx).length ? coveredByTests(await readArtifact(ctx, "acceptance.md")) : "";
   let r: Awaited<ReturnType<typeof agentPhase<"done-check">>>;
   try {
     r = await withDetachedWorktree(ctx.git, dir, ctx.cfg.main_branch, async (cwd) => {

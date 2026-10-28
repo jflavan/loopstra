@@ -27,7 +27,7 @@ describe("protect-tests hook", () => {
 
   test("the acceptance step may write only tests and test fixtures", async () => {
     const acceptance = { LOOPSTRA_PHASE: "acceptance" };
-    for (const p of ["/repo/tests/count.test.ts", "/repo/tests/fixtures/words.txt", "/repo/src/__tests__/count.ts", "C:\\repo\\tests\\count.test.ts"]) {
+    for (const p of ["/repo/tests/count.test.ts", "/repo/tests/fixtures/words.txt", "/repo/src/__tests__/count.ts", "C:\\repo\\tests\\count.test.ts", "/repo/pkg/calc/testdata/input.json", "/repo/fixtures/users.json", "/repo/src/__fixtures__/a.json", "/repo/test-utils/helpers.ts"]) {
       expect({ p, code: (await runHook({ tool_name: "Write", tool_input: { file_path: p } }, acceptance)).code }).toEqual({ p, code: 0 });
     }
     for (const p of ["/repo/src/count.ts", "/repo/package.json", "/repo/docs/testing.md"]) {

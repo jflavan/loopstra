@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { ACCEPTANCE, writeArtifact, writeMarker, type Failure, type StepContext } from "../context";
 import type { Envelope } from "../envelopes";
@@ -6,6 +6,7 @@ import { parseSections } from "../intents";
 import { passOn, type Git } from "../git";
 import { agentPhase } from "../phases";
 import { errorText } from "../shell";
+import { isAcceptancePath } from "../test-paths";
 import { bullets, KEEP_UNFINISHED, saveWork, type Artifacts } from "./shared";
 
 /** What acceptance.md and the done-check say when the change has no acceptance tests. */
@@ -44,6 +45,8 @@ export async function writeAcceptance(ctx: StepContext, wt: Git, a: Artifacts): 
     writeMarker(ctx, ACCEPTANCE, "[]");
     return { ok: true };
   }
+  // The session could edit only tests (the hook); anything else changed was written by the commands it ran.
+  await dropNonTests(ctx, wt);
   const subject = `loopstra(${ctx.slug}): acceptance tests`;
   const said = r.envelope.commit_message.trim();
   const saved = await saveWork(ctx, wt, said ? `${subject}\n\n${said}` : subject);
@@ -53,7 +56,8 @@ export async function writeAcceptance(ctx: StepContext, wt: Git, a: Artifacts): 
   const written = (await wt.run(["diff", "--name-only", "-z", "--diff-filter=d", before, "HEAD", "--"])).out.split("\0").filter(Boolean);
   const tests = r.envelope.tests.map((t) => ({ ...t, file: inRepo(ctx, t.file) }));
   const named = tests.map((t) => t.file).filter((f) => f && existsSync(join(ctx.worktreeDir, f)));
-  const files = [...new Set([...written, ...named])];
+  // Only tests and their fixtures are held: a source file the session named (the module under test) never is.
+  const files = [...new Set([...written, ...named])].filter(isAcceptancePath);
   ctx.trace.event(ctx.slug, "command", { command: "acceptance", files, tests: tests.length, not_testable: r.envelope.not_testable.length });
   await writeArtifact(ctx, "acceptance.md", acceptanceRecord({ tests, not_testable: r.envelope.not_testable }, files));
   writeMarker(ctx, ACCEPTANCE, JSON.stringify(files));
@@ -77,6 +81,23 @@ async function dropUnsaved(ctx: StepContext, wt: Git): Promise<void> {
   } catch (e) {
     passOn(e);
     ctx.trace.event(ctx.slug, "error", { where: "acceptance", error: errorText(e), note: "what the acceptance session wrote was not removed; the build's commit may include it" });
+  }
+}
+
+/**
+ * Puts back tracked files that are not tests, and removes new ones, before the acceptance commit:
+ * output of the test command the session ran (a coverage folder, a cache), never its own edits. A
+ * failure is traced, and the commit may then include that output.
+ */
+async function dropNonTests(ctx: StepContext, wt: Git): Promise<void> {
+  try {
+    const changed = (await wt.changedTrackedFiles()).filter((f) => !isAcceptancePath(f));
+    if (changed.length) await wt.putBack(changed);
+    const added = (await wt.run(["ls-files", "--others", "--exclude-standard", "-z"])).out.split("\0").filter((f) => f && !isAcceptancePath(f));
+    for (const f of added) rmSync(join(ctx.worktreeDir, f), { force: true, recursive: true });
+  } catch (e) {
+    passOn(e);
+    ctx.trace.event(ctx.slug, "error", { where: "acceptance", error: errorText(e), note: "files the test command wrote were not removed; the acceptance commit may include them" });
   }
 }
 

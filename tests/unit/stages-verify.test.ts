@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { writeMarker } from "../../src/context";
 import { Git } from "../../src/git";
 import { pauseAfterUnavailable, readPause } from "../../src/heartbeat";
 import { readIntent } from "../../src/intents";
@@ -226,6 +227,7 @@ describe("verify stage", () => {
       await Bun.write(join(repo.path, "intent", "add-numbers", "acceptance.md"), accepted);
       await new Git(repo.path).commitAll("acceptance");
       await ctx.reload();
+      writeMarker(ctx, "acceptance", JSON.stringify(["tests/accept.test.ts"]));
       await runVerifyStep(ctx);
       const prompt = await doneCheckPrompt(ctx, trace);
       expect(prompt).toContain(covered);
@@ -240,11 +242,25 @@ describe("verify stage", () => {
       trace.close(); repo.cleanup();
     }
     {
+      // acceptance.md from an earlier build, when this build wrote none (the setting was turned off
+      // since): those tests were this build's to change, so the judge is not told they hold.
+      const { repo, ctx, trace } = await merged();
+      await Bun.write(join(repo.path, "intent", "add-numbers", "acceptance.md"), accepted);
+      await new Git(repo.path).commitAll("acceptance");
+      await ctx.reload();
+      await runVerifyStep(ctx);
+      const prompt = await doneCheckPrompt(ctx, trace);
+      expect(prompt).toContain("No acceptance tests were written for this change.");
+      expect(prompt).not.toContain(covered);
+      trace.close(); repo.cleanup();
+    }
+    {
       // A repository's own done-check.md without {{acceptance}} still gets the list, at its end.
       const { repo, ctx, trace } = await merged({ doneCheck: "done-check" });
       await Bun.write(join(repo.path, "intent", "add-numbers", "acceptance.md"), accepted);
       await new Git(repo.path).commitAll("acceptance");
       await ctx.reload();
+      writeMarker(ctx, "acceptance", JSON.stringify(["tests/accept.test.ts"]));
       await runVerifyStep(ctx);
       const prompt = await doneCheckPrompt(ctx, trace);
       expect(prompt).toContain(`passes in this copy of main is met, with the test as its evidence:\n\n${covered}\n`);

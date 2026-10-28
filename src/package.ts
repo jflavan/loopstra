@@ -48,7 +48,8 @@ export async function stampVersion(): Promise<string> {
 /**
  * The `claude --settings` JSON that adds the test-protection hook to a session Loopstra starts. The
  * hook runs from the installed package by absolute path (forward slashes, for the Git Bash Claude
- * Code runs hooks through on Windows); it does nothing outside a fix phase.
+ * Code runs hooks through on Windows). It acts in the acceptance step and in the phases that edit
+ * the build's code (build, fix, reconcile, revise), and does nothing in any other.
  */
 export function hookSettings(): string {
   const hook = templatePath("hooks", "loopstra-protect-tests.ts").replace(/\\/g, "/");

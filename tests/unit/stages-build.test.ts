@@ -797,6 +797,27 @@ describe("acceptance tests from Done when", () => {
     } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
   });
 
+  test("only tests are committed and held: what the test command wrote is dropped, and a source file the session names is not held", async () => {
+    const messy = [
+      `{"type":"system","subtype":"init","session_id":"fake-acceptance","cwd":"/","tools":[],"model":"fake"}`,
+      `{"type":"fake_action","write":{"path":"tests/accept.test.ts","content":"import { expect, test } from \\"bun:test\\";\\ntest(\\"adds one and two\\", () => { expect(1 + 2).toBe(3); });\\n"}}`,
+      `{"type":"fake_action","write":{"path":"coverage/lcov.info","content":"TN:\\n"}}`,
+      `{"type":"result","subtype":"success","is_error":false,"session_id":"fake-acceptance","total_cost_usd":0.01,"usage":{},"structured_output":{"status":"success","summary":"wrote one test","commit_message":"","tests":[{"criterion":"add(1, 2) returns 3","file":"tests/accept.test.ts","test":"adds one and two"},{"criterion":"the coverage report","file":"coverage/lcov.info","test":"lcov"}],"not_testable":[]},"result":"ok"}`,
+    ].join("\n") + "\n";
+    const dir = fixtureDir({ acceptance: messy });
+    const { repo, ctx, trace } = await planned({ test: "bun test" }, ON);
+    try {
+      const r = await withEnv({ LOOPSTRA_FAKE_FIXTURE_DIR: dir.path }, () => runBuildStep(ctx));
+      expect(r.ok).toBe(true);
+      expect(readMarker(ctx, "acceptance")).toBe(JSON.stringify(["tests/accept.test.ts"]));
+      const wt = new Git(wtOf(repo));
+      const sha = (await wt.run(["log", "--format=%H", "--grep=acceptance tests", "main..HEAD"])).out.trim();
+      expect((await wt.run(["show", "--name-only", "--format=", sha])).out.trim()).toBe("tests/accept.test.ts");
+      const md = await Bun.file(join(repo.path, "intent", "add-numbers", "acceptance.md")).text();
+      expect(md).not.toContain("coverage/lcov.info");
+    } finally { trace.close(); repo.cleanup(); dir.cleanup(); }
+  });
+
   test("a fix refused an acceptance test blocks with a note that names it and says how to change it", async () => {
     const refused = [
       `{"type":"system","subtype":"init","session_id":"fake-fix-refused","cwd":"/","tools":[],"model":"fake"}`,
