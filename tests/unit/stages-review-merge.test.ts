@@ -7,7 +7,7 @@ import { StopRequested } from "../../src/stop";
 import { readIntent } from "../../src/intents";
 import { runBuildStep } from "../../src/stages/build";
 import { EARLY_REVIEW } from "../../src/stages/early-review";
-import { cleanupChange, DIRTY_ROOT_NOTE, fixesNotMerged, NO_REMOTE_PR_NOTE, runMergeStep } from "../../src/stages/merge";
+import { cleanupChange, DIRTY_ROOT_NOTE, fixesNotMerged, NO_REMOTE_PR_NOTE, runMergeStep, STANDARDS_APPLIED } from "../../src/stages/merge";
 import { MERGE_WAIT_NOTE } from "../../src/stages/shared";
 import type { PrInfo } from "../../src/github";
 import type { StepContext } from "../../src/context";
@@ -311,6 +311,100 @@ describe("review with standards", () => {
     await runMergeStep(s.ctx);
     const md = await Bun.file(join(s.repo.path, "intent", "add-numbers", "review.md")).text();
     expect(md).not.toContain("Findings against the standards");
+    s.trace.close(); s.repo.cleanup();
+  });
+});
+
+describe("merge with standards", () => {
+  const SOC2 = "# SOC 2\n\n## Rules\n- SOC-1: changes are reviewed\n";
+  const PAYMENTS = "---\napplies_to:\n  - src/**\nneeds_person: true\n---\n# Payments data\n\n## Rules\n- PAY-1: card numbers are never stored\n";
+  const EVERY = "---\nneeds_person: true\n---\n# Everything\n\n## Rules\n- ALL-1: be careful\n";
+
+  /** A built change (nobody on the merge gate unless `config` says so) whose main has `files` under loopstra/standards/. */
+  async function withStandards(files: Record<string, string>, config = "") {
+    const s = config ? await builtWith(config) : await built();
+    mkdirSync(join(s.repo.path, "loopstra", "standards"), { recursive: true });
+    for (const [name, text] of Object.entries(files)) await Bun.write(join(s.repo.path, "loopstra", "standards", `${name}.md`), text);
+    await new Git(s.repo.path).commitAll("standards");
+    await s.ctx.reload();
+    return s;
+  }
+
+  test("a diff touching loopstra/standards/ blocks, before anything else is checked", async () => {
+    const s = await withStandards({ soc2: SOC2 });
+    const wt = new Git(s.ctx.worktreeDir);
+    mkdirSync(join(s.ctx.worktreeDir, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(s.ctx.worktreeDir, "loopstra", "standards", "extra.md"), SOC2.replace("SOC-1", "SOC-9"));
+    await wt.commitAll("edit a standard");
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter.status).toBe("blocked");
+    expect(s.ctx.intent.file.frontmatter.note).toStartWith("This change edits the repository's standards (loopstra/standards/extra.md), which only a person may change. An engineer can take that edit out of the change's branch and retry the change, or close it.");
+    expect(gateRows(s.trace, "merge")).toEqual(["standards-untouched:fail"]);
+    expect(s.trace.lastGate("add-numbers", "merge", "standards-untouched")?.evidence).toContain("loopstra/standards/extra.md");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a diff touching the folder blocks even when main has no standards yet", async () => {
+    const s = await built();
+    mkdirSync(join(s.ctx.worktreeDir, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(s.ctx.worktreeDir, "loopstra", "standards", "new.md"), SOC2);
+    await new Git(s.ctx.worktreeDir).commitAll("add a standard");
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "merge")).toEqual(["standards-untouched:fail"]);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a needs_person standard makes the change wait, and the note names it", async () => {
+    const s = await withStandards({ payments: PAYMENTS });
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    const fm = s.ctx.intent.file.frontmatter;
+    expect(fm).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(fm.note).toBe("This change falls under the standard Payments data (loopstra/standards/payments.md), which is set to need a person before merging: it touches src/add.ts. Read review.md. To let this change in, change the status line to merge-approved. To stop this change, set it to closed.");
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")?.result).toBe("waiting");
+    expect(await onMain(s.repo.path, "src/add.ts")).toBe(false);
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a person already on the gate is unchanged: no risk row, no merge_gate", async () => {
+    const s = await withStandards({ payments: PAYMENTS }, PERSON_MERGES.replace("status", "pr"));
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter.merge_gate).toBeUndefined();
+    expect(s.trace.lastGate("add-numbers", "merge", "risk")).toBeNull();
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a needs_person standard without applies_to makes every change wait", async () => {
+    const s = await withStandards({ everything: EVERY });
+    await runMergeStep(s.ctx);
+    await s.ctx.reload();
+    expect(s.ctx.intent.file.frontmatter).toMatchObject({ status: "merge-review", merge_gate: "pr" });
+    expect(s.ctx.intent.file.frontmatter.note).toContain("falls under the standard Everything");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("the merge gate records standards.applied and a standards row", async () => {
+    const s = await withStandards({ soc2: SOC2, payments: PAYMENTS.replace("needs_person: true", "needs_person: false") });
+    await runMergeStep(s.ctx);
+    const marker = JSON.parse(await Bun.file(join(s.ctx.runDir, STANDARDS_APPLIED)).text());
+    expect(marker.commit).toMatch(/^[0-9a-f]{40,64}$/);
+    expect(marker.applying).toEqual([
+      { name: "payments", why: "files", files: expect.arrayContaining(["src/add.ts"]) },
+      { name: "soc2", why: "every", files: [] },
+    ]);
+    expect(s.trace.lastGate("add-numbers", "merge", "standards")).toMatchObject({ result: "pass", evidence: "applying Payments data (PAY-1); SOC 2 (SOC-1)" });
+    expect(await status(s.repo.path)).toBe("merged");
+    s.trace.close(); s.repo.cleanup();
+  });
+
+  test("a repository without standards writes no row and no marker", async () => {
+    const s = await built();
+    await runMergeStep(s.ctx);
+    expect(gateRows(s.trace, "merge")).toEqual(["up-to-date:pass", "tests:pass", "findings:pass"]);
+    expect(existsSync(join(s.ctx.runDir, STANDARDS_APPLIED))).toBe(false);
     s.trace.close(); s.repo.cleanup();
   });
 });

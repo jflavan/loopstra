@@ -19,7 +19,12 @@ export interface Risk {
   overLines: boolean;
   /** gates.merge.risky.lines, when it is set. */
   limit?: number;
+  /** The standards (needs_person) whose patterns the change's files match, with those files. */
+  standards: { title: string; path: string; files: string[] }[];
 }
+
+/** Patterns beside gates.merge.risky.paths that make a change risky: a standard's applies_to (or `**`). */
+export interface RiskSource { patterns: string[]; standard?: { title: string; path: string } }
 
 /** True when the config names anything risky: patterns of files, or a size. */
 export function riskySet(cfg: Config): boolean {
@@ -68,9 +73,10 @@ export async function changedFiles(wt: Git, main: string): Promise<string[]> {
  * renamed one when a pattern matches its new path or its old one (moving a file out of a risky
  * folder changes it as much as moving one in), listed under the name that matched.
  */
-export async function scoreRisk(wt: Git, main: string, cfg: Config): Promise<Risk> {
+export async function scoreRisk(wt: Git, main: string, cfg: Config, extra: RiskSource[] = []): Promise<Risk> {
   const { paths, lines: limit } = cfg.gates.merge.risky;
   const globs = paths.map((p) => new Bun.Glob(p));
+  const sources = extra.map((e) => ({ ...e, globs: e.patterns.map((p) => new Bun.Glob(p)), hits: [] as string[] }));
   // -z: names as they are (spaces, other alphabets); -M: a rename is one record, whatever diff.renames says.
   const out = (await wt.run(["diff", "--numstat", "-z", "-M", `${main}...HEAD`])).out;
   const files: string[] = [];
@@ -81,9 +87,16 @@ export async function scoreRisk(wt: Git, main: string, cfg: Config): Promise<Ris
     lines += c.lines;
     const hit = outside.find((p) => globs.some((g) => g.match(p)));
     if (hit !== undefined) files.push(hit);
+    for (const src of sources) {
+      const h = outside.find((p) => src.globs.some((g) => g.match(p)));
+      if (h !== undefined) src.hits.push(h);
+    }
   }
   const overLines = limit !== undefined && lines > limit;
-  return { risky: files.length > 0 || overLines, files, lines, overLines, ...(limit !== undefined ? { limit } : {}) };
+  const standards = sources.flatMap((s) => (s.standard && s.hits.length ? [{ ...s.standard, files: s.hits }] : []));
+  // A source without a standard names nobody, but still makes the change risky.
+  const risky = files.length > 0 || overLines || sources.some((s) => s.hits.length > 0);
+  return { risky, files, lines, overLines, standards, ...(limit !== undefined ? { limit } : {}) };
 }
 
 /** `names` joined in words, at most `max` of them, then how many more. */
@@ -96,6 +109,7 @@ export function riskEvidence(r: Risk): string {
   if (!r.risky) return "nothing risky";
   const parts: string[] = [];
   if (r.files.length) parts.push(`touches ${someOf(r.files, 10)}`);
+  for (const st of r.standards) parts.push(`standard ${st.title} (${st.path}) applies: touches ${someOf(st.files, 10)}`);
   if (r.overLines) parts.push(`${r.lines} lines changed (over ${r.limit ?? 0})`);
   return parts.join("; ");
 }
@@ -111,8 +125,9 @@ const NEEDS_PERSON = "set to need a person before merging";
 export function riskNote(r: Risk, human: "status" | "pr"): string {
   const why: string[] = [];
   if (r.files.length) why.push(`This change touches files ${NEEDS_PERSON}: ${someOf(r.files, 3)}.`);
+  for (const st of r.standards) why.push(`This change falls under the standard ${st.title} (${st.path}), which is ${NEEDS_PERSON}: it touches ${someOf(st.files, 3)}.`);
   if (r.overLines) {
-    why.push(r.files.length
+    why.push(r.files.length || r.standards.length
       ? `It also has ${r.lines} changed lines, more than the ${r.limit ?? 0} set.`
       : `This change has ${r.lines} changed lines, more than the ${r.limit ?? 0} ${NEEDS_PERSON}.`);
   }

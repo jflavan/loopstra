@@ -45,7 +45,7 @@ describe("riskySet", () => {
 describe("scoreRisk", () => {
   test("with nothing set, no change is risky", async () => {
     const wt = await branchWith({ ".github/workflows/ci.yml": "on: push\n" });
-    expect(await scoreRisk(wt, "main", config())).toEqual({ risky: false, files: [], lines: 1, overLines: false });
+    expect(await scoreRisk(wt, "main", config())).toEqual({ risky: false, files: [], lines: 1, overLines: false, standards: [] });
   });
 
   test("a pattern matches repository paths: .github/** anything under it, a bare name only at the top, **/ at any depth", async () => {
@@ -65,20 +65,20 @@ describe("scoreRisk", () => {
   test("records under intent/ never count, neither as files nor as lines", async () => {
     const wt = await branchWith({ "intent/x/intent.md": lines(50), "src/a.ts": "x\n" });
     const r = await scoreRisk(wt, "main", config({ paths: ["**"], lines: 5 }));
-    expect(r).toEqual({ risky: true, files: ["src/a.ts"], lines: 1, overLines: false, limit: 5 });
+    expect(r).toEqual({ risky: true, files: ["src/a.ts"], lines: 1, overLines: false, standards: [], limit: 5 });
     const only = await branchWith({ "intent/x/intent.md": lines(50) });
-    expect(await scoreRisk(only, "main", config({ paths: ["**"], lines: 5 }))).toEqual({ risky: false, files: [], lines: 0, overLines: false, limit: 5 });
+    expect(await scoreRisk(only, "main", config({ paths: ["**"], lines: 5 }))).toEqual({ risky: false, files: [], lines: 0, overLines: false, standards: [], limit: 5 });
   });
 
   test("lines added and deleted add up; over the size set is risky, at it is not", async () => {
     const wt = await branchWith({ "src/a.ts": lines(4), "src/b.ts": "" }, { "src/b.ts": lines(2) });
-    expect(await scoreRisk(wt, "main", config({ lines: 6 }))).toEqual({ risky: false, files: [], lines: 6, overLines: false, limit: 6 });
-    expect(await scoreRisk(wt, "main", config({ lines: 5 }))).toEqual({ risky: true, files: [], lines: 6, overLines: true, limit: 5 });
+    expect(await scoreRisk(wt, "main", config({ lines: 6 }))).toEqual({ risky: false, files: [], lines: 6, overLines: false, standards: [], limit: 6 });
+    expect(await scoreRisk(wt, "main", config({ lines: 5 }))).toEqual({ risky: true, files: [], lines: 6, overLines: true, standards: [], limit: 5 });
   });
 
   test("a binary file adds no lines, but its path still counts", async () => {
     const wt = await branchWith({ "assets/logo.bin": new Uint8Array([0, 1, 2, 0, 255]) });
-    expect(await scoreRisk(wt, "main", config({ paths: ["assets/**"], lines: 1 }))).toEqual({ risky: true, files: ["assets/logo.bin"], lines: 0, overLines: false, limit: 1 });
+    expect(await scoreRisk(wt, "main", config({ paths: ["assets/**"], lines: 1 }))).toEqual({ risky: true, files: ["assets/logo.bin"], lines: 0, overLines: false, standards: [], limit: 1 });
   });
 
   test("a file renamed into a risky path counts under its new name; one renamed out counts under its old one", async () => {
@@ -86,7 +86,7 @@ describe("scoreRisk", () => {
     mkdirSync(join(into.cwd, ".github", "workflows"), { recursive: true });
     await into.run(["mv", "ci/build.yml", ".github/workflows/build.yml"]);
     await into.run([...NO_AUTO_MAINTENANCE, "commit", "-q", "-m", "move"]);
-    expect(await scoreRisk(into, "main", config({ paths: [".github/**"] }))).toEqual({ risky: true, files: [".github/workflows/build.yml"], lines: 0, overLines: false });
+    expect(await scoreRisk(into, "main", config({ paths: [".github/**"] }))).toEqual({ risky: true, files: [".github/workflows/build.yml"], lines: 0, overLines: false, standards: [] });
 
     const out = await branchWith({}, { ".github/workflows/build.yml": lines(30) });
     mkdirSync(join(out.cwd, "ci"), { recursive: true });
@@ -113,9 +113,39 @@ describe("scoreRisk", () => {
   });
 });
 
+describe("scoreRisk with standards", () => {
+  const src = { title: "Payments data", path: "loopstra/standards/payments.md" };
+
+  test("needs_person is scored with the default config: empty risky.paths, no lines", async () => {
+    const wt = await branchWith({ "services/billing/api.ts": "x\n", "src/a.ts": "y\n" });
+    const r = await scoreRisk(wt, "main", config(), [{ patterns: ["services/**"], standard: src }]);
+    expect(r).toEqual({ risky: true, files: [], lines: 2, overLines: false, standards: [{ ...src, files: ["services/billing/api.ts"] }] });
+    expect((await scoreRisk(wt, "main", config(), [{ patterns: ["docs/**"], standard: src }])).risky).toBe(false);
+  });
+
+  test("a pattern of ** matches every file, dotfiles included", async () => {
+    const wt = await branchWith({ ".github/x.yml": "on: push\n" });
+    expect((await scoreRisk(wt, "main", config(), [{ patterns: ["**"], standard: src }])).standards[0]?.files).toEqual([".github/x.yml"]);
+  });
+
+  test("names with spaces and é match", async () => {
+    const wt = await branchWith({ "docs/read me.md": "x\n", "docs/café.md": "y\n" });
+    const r = await scoreRisk(wt, "main", config(), [{ patterns: ["docs/read me.md", "docs/caf*"], standard: src }]);
+    expect(r.standards[0]?.files).toEqual(["docs/café.md", "docs/read me.md"]);
+  });
+
+  test("the note names the standard, and files from risky.paths keep their wording", () => {
+    const risk: Risk = { risky: true, files: [], lines: 3, overLines: false, standards: [{ ...src, files: ["services/billing/api.ts"] }] };
+    expect(riskNote(risk, "pr")).toBe(
+      "This change falls under the standard Payments data (loopstra/standards/payments.md), which is set to need a person before merging: it touches services/billing/api.ts. Approve the pull request on GitHub, or set status to merge-approved. To stop this change, set it to closed.",
+    );
+    expect(riskEvidence(risk)).toBe("standard Payments data (loopstra/standards/payments.md) applies: touches services/billing/api.ts");
+  });
+});
+
 describe("the words", () => {
   const risk = (files: string[], over?: { lines: number; limit: number }): Risk => ({
-    risky: files.length > 0 || !!over, files, lines: over?.lines ?? 3, overLines: !!over, ...(over ? { limit: over.limit } : {}),
+    risky: files.length > 0 || !!over, files, lines: over?.lines ?? 3, overLines: !!over, standards: [], ...(over ? { limit: over.limit } : {}),
   });
   const many = Array.from({ length: 12 }, (_, i) => `f${i}.yml`);
 
