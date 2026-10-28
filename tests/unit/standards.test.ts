@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { formToMarkdown, parseStandard, parseStandards, problemText, STANDARD_NAME, STANDARDS_DIR, standardToForm, type Rule, type Standard } from "../../src/standards";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { Git } from "../../src/git";
+import {
+  applying, checkStandardsSection, formToMarkdown, parseStandard, parseStandards, problemText, readOutcomeStandards, readStandards, readStandardsSection,
+  renderStandards, STANDARD_NAME, STANDARDS_DIR, standardsBytes, standardToForm, type Applying, type Rule, type Standard,
+} from "../../src/standards";
+import { tempGitRepo } from "../helpers";
 
 const EXAMPLE = `---
 applies_to: ["services/**", "api/**"]
@@ -160,4 +167,150 @@ describe("formToMarkdown", () => {
     expect(md).toContain("needs_person: true");
     expect(standardToForm(ok("a", md))).toEqual(f);
   });
+});
+
+function std(name: string, appliesTo: string[] | null, title = name, rules: string[] = ["X-1"]): Standard {
+  return {
+    name, path: `${STANDARDS_DIR}/${name}.md`, title, appliesTo, needsPerson: false, check: null,
+    rules: rules.map((label, i) => ({ label, text: "t", line: i + 1 })),
+    body: `# ${title}\n\n## Rules\n${rules.map((r) => `- ${r}: t\n`).join("")}`,
+  };
+}
+
+describe("readStandards", () => {
+  test("readStandards reads only the commit", async () => {
+    const repo = await tempGitRepo();
+    try {
+      mkdirSync(join(repo.path, STANDARDS_DIR), { recursive: true });
+      const file = join(repo.path, STANDARDS_DIR, "arch.md");
+      await Bun.write(file, "# Arch\n\n## Rules\n- ARCH-1: committed\n");
+      await Bun.write(join(repo.path, STANDARDS_DIR, "notes.txt"), "x");
+      const git = new Git(repo.path);
+      await git.commitAll("standards");
+      await Bun.write(file, "# Arch\n\n## Rules\n- ARCH-1: edited\n");
+      const sha = (await git.run(["rev-parse", "HEAD"])).out.trim();
+      const r = await readStandards(git, sha);
+      expect(r.problems).toEqual([]);
+      expect(r.standards.map((s) => s.rules[0]?.text)).toEqual(["committed"]);
+      expect(r.ignored).toEqual([`${STANDARDS_DIR}/notes.txt`]);
+      const none = await readStandards(git, `${sha}~1`);
+      expect(none).toEqual({ standards: [], problems: [], ignored: [] });
+    } finally { repo.cleanup(); }
+  });
+});
+
+describe("applying", () => {
+  const every = std("every", null);
+  const svc = std("svc", ["services/**"]);
+  const other = std("other", ["docs/**"]);
+  test("every and files: the matched files are listed", () => {
+    const r = applying([every, svc, other], ["services/a.ts", "README.md", "services/b.ts", "old/x.ts"]);
+    expect(r.map((a) => [a.standard.name, a.why, a.files])).toEqual([["every", "every", []], ["svc", "files", ["services/a.ts", "services/b.ts"]]]);
+    const renamed = applying([svc], ["old/a.ts", "services/a.ts"]);
+    expect(renamed[0]?.files).toEqual(["services/a.ts"]);
+  });
+  test("removed beats both", () => {
+    expect(applying([every, svc], ["services/a.ts"], { added: [], removed: ["every", "svc"] })).toEqual([]);
+  });
+  test("added applies with no matching file", () => {
+    const r = applying([every, other], ["README.md"], { added: ["other"], removed: [] });
+    expect(r.map((a) => [a.standard.name, a.why, a.files])).toEqual([["every", "every", []], ["other", "added", []]]);
+  });
+  test("a path with a space and an accent matches services/**", () => {
+    expect(applying([svc], ["services/café menu/é.ts"])[0]?.files).toEqual(["services/café menu/é.ts"]);
+  });
+});
+
+describe("renderStandards", () => {
+  const arch = std("architecture", ["services/**"], "Service architecture");
+  const sec = std("secrets", null, "Secrets");
+  const list: Applying[] = [
+    { standard: arch, why: "files", files: ["a", "b"] },
+    { standard: sec, why: "every", files: [] },
+  ];
+  test("heading, why line and the file's text", () => {
+    const out = renderStandards(list);
+    expect(out).toContain("### Service architecture (loopstra/standards/architecture.md)\nApplies because the change touches a and b.\n\n# Service architecture");
+    expect(out).toContain("### Secrets (loopstra/standards/secrets.md)\nApplies to every change.\n\n# Secrets");
+  });
+  test("a standard a person added says so", () => {
+    expect(renderStandards([{ standard: sec, why: "added", files: [] }])).toContain("Applies because a person added it to this change.");
+  });
+  test("scoped standards come under their sentence", () => {
+    const out = renderStandards([{ standard: sec, why: "every", files: [] }], { scoped: [arch] });
+    expect(out).toContain("These apply only to changes that touch the files named.");
+    expect(out).toContain("### Service architecture (loopstra/standards/architecture.md)\nApplies only to changes that touch services/**.");
+    expect(out.indexOf("Secrets")).toBeLessThan(out.indexOf("These apply only"));
+  });
+  test("excepted rules are listed with their reasons", () => {
+    const out = renderStandards(list, { excepted: [{ label: "ARCH-1", reason: "legacy table" }] });
+    expect(out).toContain("Rules under an approved exception:\n- ARCH-1: legacy table");
+  });
+  test("empty input gives an empty string", () => {
+    expect(renderStandards([])).toBe("");
+    expect(renderStandards([], { scoped: [], excepted: [{ label: "A", reason: "r" }] })).toBe("");
+  });
+});
+
+describe("Standards section", () => {
+  const doc = (body: string) => `# Spec\n\n## Design\nd\n\n## Standards\n${body}\n## Next\n- NOT-1: x\n`;
+  test("readStandardsSection accepts decorated labels", () => {
+    const s = readStandardsSection(doc("- **ARCH-1**: x\n- `ARCH-2`: y\n- ARCH-3 \u2014 z\n- ARCH-4: does not apply: why\n- ARCH-5: exception: because\n- ARCH-6 - dash\n- **ARCH-7:** bold\r\n"));
+    expect(s).toEqual([
+      { label: "ARCH-1", kind: "keeps", text: "x" },
+      { label: "ARCH-2", kind: "keeps", text: "y" },
+      { label: "ARCH-3", kind: "keeps", text: "z" },
+      { label: "ARCH-4", kind: "not-applicable", text: "why" },
+      { label: "ARCH-5", kind: "exception", text: "because" },
+      { label: "ARCH-6", kind: "keeps", text: "dash" },
+      { label: "ARCH-7", kind: "keeps", text: "bold" },
+    ]);
+  });
+  test("None. gives [] and no heading gives null", () => {
+    expect(readStandardsSection(doc("None.\n"))).toEqual([]);
+    expect(readStandardsSection("# Spec\n\n## Design\nx\n")).toBeNull();
+  });
+  test("labels keep their case", () => {
+    expect(readStandardsSection(doc("- arch-1: x\n- Arch-1: y\n"))?.map((b) => b.label)).toEqual(["Arch-1"]);
+  });
+  const known = new Set(["SEC-1", "SEC-2", "SEC-4"]);
+  const b = (label: string, kind: "keeps" | "exception" = "keeps") => ({ label, kind, text: "t" });
+  test("checkStandardsSection", () => {
+    expect(checkStandardsSection(null, [], known)).toEqual({ ok: false, evidence: "no Standards section" });
+    expect(checkStandardsSection([b("SEC-9")], [], known)).toEqual({ ok: false, evidence: "no rule called SEC-9" });
+    expect(checkStandardsSection([b("SEC-1")], ["SEC-1", "SEC-2", "SEC-4"], known)).toEqual({ ok: false, evidence: "missing SEC-2, SEC-4" });
+    expect(checkStandardsSection([b("SEC-1"), b("SEC-9")], ["SEC-1", "SEC-2"], known).evidence).toBe("missing SEC-2; no rule called SEC-9");
+    expect(checkStandardsSection([b("SEC-1"), b("SEC-2")], ["SEC-1", "SEC-2"], known)).toEqual({ ok: true, evidence: "all 2 rules addressed" });
+    expect(checkStandardsSection([b("SEC-1"), b("SEC-2"), b("SEC-4", "exception")], [], known)).toEqual({ ok: true, evidence: "3 rules addressed, 1 exception" });
+    expect(checkStandardsSection([], [], known)).toEqual({ ok: true, evidence: "0 rules addressed" });
+  });
+});
+
+describe("readOutcomeStandards", () => {
+  test("reads the five line forms and skips the rest", () => {
+    const outcome = [
+      "## Standards",
+      "The engineering rules this change was checked against (the standards as of commit 3f9c2ab):",
+      "- ARCH-1 (Service architecture): met: services only call the HTTP API (see api.ts)",
+      "- ARCH-2 (Service architecture): unmet: billing reads the table",
+      "- SEC-4 (Secrets): needs-person: the alert exists in the monitoring system",
+      "- ARCH-3 (Service architecture): exception, approved by J. at the plan: billing keeps the legacy table",
+      "- OPS-1 (Ops (core)): not checked automatically",
+      "- Check of Secrets: passed at merge",
+      "- Payments data was added to this change by J.: card data",
+    ].join("\n");
+    expect(readOutcomeStandards(outcome)).toEqual([
+      { label: "ARCH-1", title: "Service architecture", result: "met", evidence: "services only call the HTTP API (see api.ts)" },
+      { label: "ARCH-2", title: "Service architecture", result: "unmet", evidence: "billing reads the table" },
+      { label: "SEC-4", title: "Secrets", result: "needs-person", evidence: "the alert exists in the monitoring system" },
+      { label: "ARCH-3", title: "Service architecture", result: "exception", evidence: "billing keeps the legacy table" },
+      { label: "OPS-1", title: "Ops (core)", result: "not-checked", evidence: "" },
+    ]);
+  });
+});
+
+test("standardsBytes adds up the files' text", () => {
+  expect(standardsBytes({ standards: [std("a", null), std("b", null, "é")], problems: [], ignored: [] })).toBe(
+    Buffer.byteLength(std("a", null).body) + Buffer.byteLength(std("b", null, "é").body),
+  );
 });

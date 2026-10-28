@@ -1,6 +1,7 @@
 import { stringify } from "yaml";
 import { z } from "zod";
-import { lineText, splitFrontmatter } from "./text";
+import type { Git } from "./git";
+import { andList, lineText, splitFrontmatter } from "./text";
 
 /** Where a repository's standard files are, relative to its root. */
 export const STANDARDS_DIR = "loopstra/standards";
@@ -212,4 +213,133 @@ export function standardToForm(s: Standard): StandardForm {
     rules: s.rules.map(({ label, text }) => ({ label, text })),
     context: titleAt >= 0 && rulesAt > titleAt ? lines.slice(titleAt + 1, rulesAt).join("\n").trim() : "",
   };
+}
+
+/** Reads the standards as they are in a commit: only what is committed, never the checkout's edits. None there gives an empty read. */
+export async function readStandards(git: Git, commit: string): Promise<StandardsRead> {
+  const listed = await git.run(["ls-tree", "-z", "--name-only", commit, "--", `${STANDARDS_DIR}/`], { allowFail: true });
+  const paths = listed.code === 0 ? listed.out.split("\0").filter(Boolean) : [];
+  const files: { path: string; text: string }[] = [];
+  const skipped: string[] = [];
+  for (const path of paths) {
+    const blob = await git.run(["cat-file", "blob", `${commit}:${path}`], { allowFail: true });
+    if (blob.code === 0) files.push({ path, text: blob.out });
+    else skipped.push(path); // a folder
+  }
+  const read = parseStandards(files);
+  read.ignored.push(...skipped);
+  return read;
+}
+
+/** The standards a person added to a change or removed from it, by name. */
+export interface Scope { added: string[]; removed: string[] }
+
+/** A standard that applies to a change, why, and the files that made it apply (for `files`). */
+export interface Applying { standard: Standard; why: "every" | "files" | "added"; files: string[] }
+
+/** Which standards apply to a change's files. A removed standard applies to none; an added one applies whatever the files. The order of `standards` is kept. */
+export function applying(standards: Standard[], files: string[], scope: Scope = { added: [], removed: [] }): Applying[] {
+  const out: Applying[] = [];
+  for (const standard of standards) {
+    if (scope.removed.includes(standard.name)) continue;
+    if (!standard.appliesTo) { out.push({ standard, why: "every", files: [] }); continue; }
+    const globs = standard.appliesTo.map((p) => new Bun.Glob(p));
+    const hit = files.filter((f) => globs.some((g) => g.match(f)));
+    if (hit.length) out.push({ standard, why: "files", files: hit });
+    else if (scope.added.includes(standard.name)) out.push({ standard, why: "added", files: [] });
+  }
+  return out;
+}
+
+/** A rule under an approved exception, with the reason. */
+export interface Excepted { label: string; reason: string }
+
+const standardText = (s: Standard): string => `### ${s.title} (${s.path})`;
+
+/** The `standards` prompt variable: each standard whole under a line naming why it applies, then the scoped ones that do not apply yet, then the approved exceptions. "" when there is nothing to show. */
+export function renderStandards(list: Applying[], opts: { scoped?: Standard[]; excepted?: Excepted[] } = {}): string {
+  const scoped = opts.scoped ?? [];
+  if (!list.length && !scoped.length) return "";
+  const parts = list.map(({ standard, why, files }) => {
+    const line = why === "every" ? "Applies to every change."
+      : why === "added" ? "Applies because a person added it to this change."
+      : `Applies because the change touches ${andList(files)}.`;
+    return `${standardText(standard)}\n${line}\n\n${standard.body.trim()}`;
+  });
+  if (scoped.length) {
+    parts.push("These apply only to changes that touch the files named.");
+    for (const s of scoped) parts.push(`${standardText(s)}\nApplies only to changes that touch ${andList(s.appliesTo ?? [])}.\n\n${s.body.trim()}`);
+  }
+  const excepted = opts.excepted ?? [];
+  if (excepted.length) parts.push(`Rules under an approved exception:\n${excepted.map((e) => `- ${e.label}: ${e.reason}`).join("\n")}`);
+  return parts.join("\n\n");
+}
+
+type BulletKind = "keeps" | "not-applicable" | "exception";
+export interface SectionBullet { label: string; kind: BulletKind; text: string }
+
+const STANDARDS_HEADING = /^##\s+Standards\s*:?\s*$/i;
+/** `- ARCH-1: x` as agents write it: the label bare, in `**`, or in backticks, followed by `:`, a dash or a long dash. */
+const SECTION_BULLET = /^[-*]\s+(?:\*\*|`)?([A-Z][A-Za-z0-9._-]*)(?:\*\*|`)?(?:\s*[:\u2014\u2013]|\s+-{1,2}(?=\s))\s*(?:\*\*|`)?\s*(.*)$/;
+
+/** The bullets of a spec's or plan's `## Standards` section; null when it has no such heading, [] for "None.". */
+export function readStandardsSection(markdown: string): SectionBullet[] | null {
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex((l) => STANDARDS_HEADING.test(l));
+  if (start < 0) return null;
+  const out: SectionBullet[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i] ?? "";
+    if (/^#{1,2}\s/.test(l)) break;
+    const m = SECTION_BULLET.exec(l);
+    if (m) {
+      const rest = (m[2] ?? "").trim();
+      const na = /^does not apply\s*:\s*/i.exec(rest);
+      const ex = /^exception\s*:\s*/i.exec(rest);
+      out.push({ label: m[1] ?? "", kind: na ? "not-applicable" : ex ? "exception" : "keeps", text: rest.slice((na ?? ex)?.[0].length ?? 0).trim() });
+    } else if (/^\s+\S/.test(l) && out.length && !/^\s*[-*]\s/.test(l)) {
+      const last = out[out.length - 1];
+      if (last) last.text = `${last.text} ${l.trim()}`.trim();
+    }
+  }
+  return out;
+}
+
+/** The standards code check of the spec and plan gates: the heading is there, each required rule has a bullet, and every label is a real rule's. */
+export function checkStandardsSection(section: SectionBullet[] | null, required: string[], known: ReadonlySet<string>): { ok: boolean; evidence: string } {
+  if (!section) return { ok: false, evidence: "no Standards section" };
+  const labels = new Set(section.map((b) => b.label));
+  const missing = required.filter((r) => !labels.has(r));
+  const unknown = [...labels].filter((l) => !known.has(l));
+  const problems = [...(missing.length ? [`missing ${missing.join(", ")}`] : []), ...unknown.map((l) => `no rule called ${l}`)];
+  if (problems.length) return { ok: false, evidence: problems.join("; ") };
+  if (required.length) return { ok: true, evidence: `all ${required.length} rules addressed` };
+  const exceptions = section.filter((b) => b.kind === "exception").length;
+  return { ok: true, evidence: `${labels.size} ${labels.size === 1 ? "rule" : "rules"} addressed${exceptions ? `, ${exceptions} ${exceptions === 1 ? "exception" : "exceptions"}` : ""}` };
+}
+
+/** The size of the standards' text in bytes: what goes into every prompt that uses them whole. */
+export function standardsBytes(r: StandardsRead): number {
+  return r.standards.reduce((n, s) => n + Buffer.byteLength(s.body), 0);
+}
+
+/** One rule's line in an outcome's Standards section. `result` is met, unmet, needs-person, exception or not-checked; `evidence` is the reason for an exception. */
+export interface OutcomeLine { label: string; title: string; result: string; evidence: string }
+
+const OUTCOME_LINE = /^- (\S+) \((.+?)\): (.*)$/;
+
+/** Reads the runtime's Standards section of outcome.md back. Lines that do not start with a rule label are skipped. */
+export function readOutcomeStandards(outcome: string): OutcomeLine[] {
+  const out: OutcomeLine[] = [];
+  for (const raw of outcome.split(/\r?\n/)) {
+    const m = OUTCOME_LINE.exec(raw);
+    if (!m || !RULE_LABEL.test(m[1] ?? "")) continue;
+    const [label, title, rest] = [m[1] ?? "", m[2] ?? "", m[3] ?? ""];
+    const judged = /^(met|unmet|needs-person): (.*)$/.exec(rest);
+    const exception = /^exception, approved by .+? at the (?:spec|plan): (.*)$/.exec(rest);
+    if (judged) out.push({ label, title, result: judged[1] ?? "", evidence: judged[2] ?? "" });
+    else if (exception) out.push({ label, title, result: "exception", evidence: exception[1] ?? "" });
+    else if (rest === "not checked automatically") out.push({ label, title, result: "not-checked", evidence: "" });
+  }
+  return out;
 }

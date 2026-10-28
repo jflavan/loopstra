@@ -120,18 +120,30 @@ export class RecordUnsettled extends Error {
   }
 }
 
+/**
+ * A standard file at the step's commit cannot be read (main moved between the tick's read and the
+ * step's). Not the step's fault: it ends, the change keeps its status, and it runs again. The step
+ * never runs without the rules. `message` is the problems as plain sentences.
+ */
+export class StandardsUnreadable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StandardsUnreadable";
+  }
+}
+
 /** A record that could not be committed this time (RecordRaced, RecordUnsettled): it is tried again on the next tick. */
 export function recordNotYet(e: unknown): e is RecordRaced | RecordUnsettled {
   return e instanceof RecordRaced || e instanceof RecordUnsettled;
 }
 
 /**
- * A stop request, an unavailable assistant, the loop's used-up day, or a record that could not be
+ * A stop request, an unavailable assistant, the loop's used-up day, unreadable standards, or a record that could not be
  * committed this time (see recordNotYet): none is the step's own failure. The step ends, the change
  * keeps its status, and the scheduler handles each. The one list.
  */
 export function notTheStepsFault(e: unknown): boolean {
-  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached || recordNotYet(e);
+  return e instanceof StopRequested || e instanceof AssistantUnavailable || e instanceof LoopBudgetReached || e instanceof StandardsUnreadable || recordNotYet(e);
 }
 
 let requested = false;

@@ -9,7 +9,8 @@ import {
   StepContext, block, blockNote, clearMarker, commitRecord, MainCheckoutMoved, OFF_MAIN_NOTE, onceMarker, PersonChangedStatus,
   readArtifact, setStatus, settleRecord, statusPatch, writeArtifact, writeIntentPriority, clearSession, loadSessions, saveSession,
 } from "../../src/context";
-import { requestStop, resetStop, StopRequested } from "../../src/stop";
+import { runStepGuarded } from "../../src/scheduler";
+import { notTheStepsFault, requestStop, resetStop, StandardsUnreadable, StopRequested } from "../../src/stop";
 import { lastCommit, run, setupRepo, tempGitRepo, writeIntentOnDisk } from "../helpers";
 
 async function setup() {
@@ -391,5 +392,53 @@ describe("the retry status of a block", () => {
     expect(statusPatch("plan-review", "plan-approved", "")).toEqual({ status: "plan-approved", note: "", resume_from: "plan-approved" });
     expect(statusPatch("plan-approved", "building", "x")).toEqual({ status: "building", note: "x", resume_from: "plan-approved" });
     expect(statusPatch("building", "blocked", "y")).toEqual({ status: "blocked", note: "y" });
+  });
+});
+
+describe("StepContext standards", () => {
+  const GOOD = "# Arch\n\n## Rules\n- ARCH-1: one\n";
+  async function commitStandard(root: string, name: string, text: string) {
+    mkdirSync(join(root, "loopstra", "standards"), { recursive: true });
+    writeFileSync(join(root, "loopstra", "standards", `${name}.md`), text);
+    await new Git(root).commitAll(`standard ${name}`);
+  }
+
+  test("standards reads once per step", async () => {
+    const { repo, ctx, trace } = await setup();
+    await commitStandard(repo.path, "arch", GOOD);
+    const first = await ctx.standards();
+    expect(first.standards.map((s) => s.name)).toEqual(["arch"]);
+    await commitStandard(repo.path, "second", "# Second\n\n## Rules\n- SEC-1: two\n");
+    expect(await ctx.standards()).toBe(first);
+    await ctx.dropSnapshot();
+    expect((await ctx.standards()).standards.map((s) => s.name)).toEqual(["arch", "second"]);
+    trace.close(); repo.cleanup();
+  });
+
+  test("an unreadable standard at the step's commit throws StandardsUnreadable", async () => {
+    const { repo, ctx, trace } = await setup();
+    await commitStandard(repo.path, "bad", "# Bad\n\n## Rules\n- no label here\n");
+    const e = await ctx.standards().catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(StandardsUnreadable);
+    expect(notTheStepsFault(e)).toBe(true);
+    expect((e as Error).message).toContain("loopstra/standards/bad.md cannot be read");
+    trace.close(); repo.cleanup();
+  });
+
+  test("a step that finds one ends without blocking the change", async () => {
+    const { repo, ctx, trace } = await setupRepo("accepted");
+    await commitStandard(repo.path, "bad", "# Bad\n\n## Rules\n- no label here\n");
+    ctx.snapshot = async () => { await ctx.standards(); return repo.path; };
+    await expect(runStepGuarded(ctx)).rejects.toBeInstanceOf(StandardsUnreadable);
+    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("designing"); // the status the step set; not blocked
+    trace.close(); repo.cleanup();
+  });
+
+  test("standardsRecord reads the change's standards.md from disk, and is empty without one", async () => {
+    const { repo, ctx, trace } = await setup();
+    expect(ctx.standardsRecord()).toEqual({ added: [], removed: [], exceptions: [], problems: [] });
+    writeFileSync(join(repo.path, "intent", "x", "standards.md"), "# Standards decisions for x\n\n## Added\n- arch: why (J., from the console, 2026-10-28)\n");
+    expect(ctx.standardsRecord().added.map((d) => d.name)).toEqual(["arch"]);
+    trace.close(); repo.cleanup();
   });
 });
