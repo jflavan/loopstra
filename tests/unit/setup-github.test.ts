@@ -28,10 +28,38 @@ describe("the github section", () => {
     } finally { r.cleanup(); }
   });
 
+  test("nobody on the merge gate: asks which files need a person, suggesting the ones this repository has", async () => {
+    const r = await repoWithRemote();
+    try {
+      await Bun.write(`${r.path}/package.json`, "{}\n");
+      await Bun.write(`${r.path}/go.mod`, "module x\n");
+      const { text, shown } = await askSection(github, r.path, ["none", "", "squash"]);
+      expect(shown).toContain("Files whose change needs a person before merging (comma-separated globs; - for none) [.github/**, **/migrations/**, package.json, go.mod]");
+      expect(parse(text).gates.merge).toEqual({ risky: { paths: [".github/**", "**/migrations/**", "package.json", "go.mod"] } });
+      // Asked again, the file's own list is the suggestion; an answer replaces it, and - empties it.
+      expect(parse((await askSection(github, r.path, ["none", "", "squash"])).text).gates.merge.risky.paths).toEqual([".github/**", "**/migrations/**", "package.json", "go.mod"]);
+      expect(parse((await askSection(github, r.path, ["none", "infra/**, Dockerfile", "squash"])).text).gates.merge.risky.paths).toEqual(["infra/**", "Dockerfile"]);
+      expect((await askSection(github, r.path, ["none", "-", "squash"])).text).toBe(CONFIG);
+    } finally { r.cleanup(); }
+  });
+
+  test("a person on the merge gate already: the risky files are not asked about", async () => {
+    const r = await repoWithRemote();
+    try {
+      const { text, shown } = await askSection(github, r.path, ["status", "squash"]);
+      expect(shown).not.toContain("Files whose change needs a person");
+      expect(parse(text).gates.merge).toEqual({ human: "status" });
+    } finally { r.cleanup(); }
+  });
+
   test("--defaults keeps merging on its own, squashed, and adds nothing", async () => {
     const r = await repoWithRemote();
     try {
       expect((await askSection(github, r.path, "defaults")).text).toBe(CONFIG);
+      // A list already in the file is kept as it is.
+      const risky = `${CONFIG}gates:\n  merge:\n    risky:\n      paths: [ .github/**, Dockerfile ]\n`;
+      await Bun.write(`${r.path}/loopstra/config.yaml`, risky);
+      expect((await askSection(github, r.path, "defaults")).text).toBe(risky);
     } finally { r.cleanup(); }
   });
 

@@ -22,6 +22,7 @@ About 165 modules under `src/`, in eight layers. A module imports only from its 
    - `heartbeat.ts` holds the loop's lock and pause.
    - `requests.ts`, `inbox.ts`, `conversation.ts` and `questions.ts` are what people leave for the loop.
    - `stamp.ts` holds what an upgrade knows.
+   - `risk.ts` scores a change's diff against `gates.merge.risky` (`scoreRisk`), for the merge gate.
    - `agents.ts` resolves a step's agent setup from the config (`resolveSetup`) and holds its rules: which steps are read-only, which git a step may never get, and which steps run as the build's agent.
 4. **Records.**
    - `record-draft.ts` holds `RecordDraft`.

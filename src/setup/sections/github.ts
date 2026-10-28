@@ -1,8 +1,33 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { Git } from "../../git";
 import { GitHub } from "../../github";
 import { errorText } from "../../shell";
 import { DEFAULTS } from "../defaults";
-import type { Check, Section } from "../types";
+import type { Check, Section, SetupContext } from "../types";
+
+/** Risky in any repository: CI workflows and database migrations. */
+const RISKY_ANYWHERE = [".github/**", "**/migrations/**"];
+/** Dependency and build files, suggested as risky when the repository has them at the top. */
+const RISKY_AT_TOP = ["package.json", "bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock", "pyproject.toml", "requirements.txt", "Gemfile", "Gemfile.lock", "Dockerfile"];
+
+/**
+ * Asks which files make a change wait for a person before it merges (gates.merge.risky.paths), when
+ * nobody is on the merge gate. The file's own list is the suggestion; without one, in a terminal,
+ * the usual risky files this repository has. --defaults never adds a list: nothing is risky until
+ * a person says so.
+ */
+async function askRisky(ctx: SetupContext): Promise<void> {
+  const at = ["gates", "merge", "risky", "paths"];
+  const written = ctx.doc.get(at);
+  const own = Array.isArray(written) ? written.filter((p): p is string => typeof p === "string") : [];
+  const suggested = own.length ? own : ctx.ask.interactive ? [...RISKY_ANYWHERE, ...RISKY_AT_TOP.filter((f) => existsSync(join(ctx.root, f)))] : [];
+  ctx.ask.say("A change that touches some files (workflows, dependencies, migrations) can wait for a person before it merges, though other changes merge on their own.");
+  const answer = await ctx.ask.text("Files whose change needs a person before merging (comma-separated globs; - for none)", { suggestion: suggested.join(", ") || undefined, optional: true });
+  const paths = answer.split(",").map((p) => p.trim()).filter(Boolean);
+  if (paths.length) ctx.doc.set(at, paths, { flow: true });
+  else ctx.doc.clear(at);
+}
 
 /** How long the remote and gh each get to answer during a check. */
 export const REMOTE_CHECK_MS = 20_000;
@@ -32,6 +57,7 @@ export const github: Section = {
       human = await ctx.ask.pick("Who approves a merge?", ["none", "status", "pr"] as const, suggestion);
     }
     ctx.doc.put(["gates", "merge", "human"], human, DEFAULTS.gates.merge.human);
+    if (human === "none") await askRisky(ctx);
     ctx.ask.say("squash: each change lands on the main branch as one commit; merge: its commits are kept, with a merge commit.");
     const currentMethod = ctx.doc.get(["gates", "merge", "method"]);
     const method = await ctx.ask.pick("Merge method", ["squash", "merge"] as const, currentMethod === "merge" || currentMethod === "squash" ? currentMethod : DEFAULTS.gates.merge.method);
