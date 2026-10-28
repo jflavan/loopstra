@@ -175,6 +175,15 @@ export function problemText(p: StandardsProblem): string {
   return `${p.path} cannot be read: ${p.text}.`;
 }
 
+/** What the loop, `start` and Needs attention say after the first unreadable file's sentence. */
+const STANDARDS_STOP = " Fix it on main and commit; until then no change moves on.";
+
+/** The one sentence for a set of problems (the first one's, then what to do); null when there are none. */
+export function standardsStopText(problems: StandardsProblem[]): string | null {
+  const first = problems[0];
+  return first ? `${problemText(first)}${STANDARDS_STOP}` : null;
+}
+
 /** What setup and the console edit: a standard's parts, rendered back to a file by `formToMarkdown`. */
 export interface StandardForm {
   name: string;

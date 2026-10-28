@@ -1,16 +1,21 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { loopDayNote, loopDaySpent } from "./budget";
 import type { Config } from "./config";
 import { ghProblem, GITHUB_SIGNAL, GITHUB_SILENT_MS } from "./github";
 import { activePause, agoText, readLoopHold } from "./heartbeat";
 import { changeGates, dependencyWait, hasQuestion, heldNote, humanGates, orderQueue, REVIEW_GATE, scanRepo, waitsForPerson, WATCHING_PR, type HumanGates, type Scan, type Status } from "./intents";
+import { Git } from "./git";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
+import { parseRecord, STANDARDS_RECORD } from "./standards-record";
+import { readStandards, standardsStopText } from "./standards";
 import { humanNote, prWait } from "./stages/shared";
 import type { Trace } from "./trace";
 
 /** One thing a person should do or know. The same list in `loopstra status` and the dashboard. */
 export interface AttentionItem {
-  kind: "paused" | "health" | "sync" | "config" | "blocked" | "held" | "question" | "unreadable" | "waiting";
+  kind: "paused" | "health" | "sync" | "config" | "standards" | "blocked" | "held" | "question" | "unreadable" | "waiting";
   /** The kind in plain words, e.g. "Blocked" or "Waiting for you". */
   label: string;
   /** The change it is about; null for the repository as a whole. */
@@ -23,7 +28,7 @@ export interface AttentionItem {
 }
 
 const ATTENTION_LABEL: Record<AttentionItem["kind"], string> = {
-  paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings",
+  paused: "Paused", health: "Main branch", sync: "GitHub", config: "Settings", standards: "Standards",
   blocked: "Blocked", held: "Held", question: "Has a question", unreadable: "Cannot read intent.md", waiting: "Waiting for you",
 };
 
@@ -66,6 +71,27 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
 };
 
 /**
+ * Standards that cannot be read, live from main's commit (never from the trace, so a fix clears it at
+ * once), then the unreadable lines of an open change's standards.md. One read of main per call.
+ */
+async function addStandards(root: string, cfg: Config, intents: Scan["intents"], add: (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => void): Promise<void> {
+  const git = new Git(root);
+  const commit = await git.commitOf(cfg.main_branch);
+  if (!commit) return;
+  const read = await readStandards(git, commit);
+  const stop = standardsStopText(read.problems);
+  if (stop) add("standards", null, "Standards", stop);
+  const known = new Set(read.standards.map((s) => s.name));
+  for (const i of intents) {
+    const s = i.file.frontmatter.status;
+    if (s === "done" || s === "closed") continue;
+    const file = join(i.dir, STANDARDS_RECORD);
+    if (!existsSync(file)) continue;
+    for (const problem of parseRecord(readFileSync(file, "utf8"), known).problems) add("standards", i.slug, i.file.title || i.slug, problem);
+  }
+}
+
+/**
  * Everything that needs a person, most pressing first: a pause, a red main, main out of step with
  * GitHub, a config problem, blocked changes, held changes, unreadable intents, then changes waiting for a person
  * (drafts, and reviews with a person on the gate). `config` is the loaded config, or the problem
@@ -102,6 +128,8 @@ export async function attention(root: string, config: Config | { problem: string
     add("sync", null, "Not answering", `GitHub hasn't answered for 15 minutes: ${ghProblem(trace.lastSignal(GITHUB_SIGNAL)!.output)}`);
   }
   if ("problem" in config) add("config", null, "Loopstra settings", config.problem);
+
+  if (cfg) await addStandards(root, cfg, intents, add);
 
   for (const i of intents) {
     if (i.file.frontmatter.status === "blocked") {

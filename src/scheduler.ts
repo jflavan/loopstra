@@ -15,6 +15,7 @@ import { errorText, timerMs } from "./shell";
 import { changeGates, checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
+import { problemText, readStandards, standardsStopText } from "./standards";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
@@ -163,6 +164,17 @@ export async function tick(root: string): Promise<TickResult> {
     const pause = activePause(root);
     if (pause) {
       out.paused = pause.reason;
+      return out;
+    }
+
+    // A standard on main that cannot be read: the rules are unknown, so no step starts (never "no rules").
+    // Requests, syncing, signals and the queue above keep working. A git failure here throws, like any other.
+    const git = new Git(root);
+    const mainCommit = await git.commitOf(cfg.main_branch);
+    const unreadable = mainCommit ? (await readStandards(git, mainCommit)).problems : [];
+    if (unreadable.length) {
+      out.paused = standardsStopText(unreadable) ?? "";
+      trace.eventOnChange("_loop", "error", '"where":"standards"', { where: "standards", problems: unreadable.map(problemText) }, "problems");
       return out;
     }
 
@@ -959,6 +971,9 @@ export async function preflight(root: string, env: Record<string, string | undef
   if (uncommitted.length) {
     return `These Loopstra files are not committed on ${cfg.main_branch} yet, so the loop's own checkouts would not see them: ${uncommitted.join(", ")}. Commit them, then start again.`;
   }
+  const mainCommit = await git.commitOf(cfg.main_branch);
+  const unreadable = mainCommit ? (await readStandards(git, mainCommit)).problems : [];
+  if (unreadable.length) return standardsStopText(unreadable);
   if (await git.remoteName()) {
     const gh = new GitHub(root);
     if (!(await gh.available())) return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";

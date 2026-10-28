@@ -11,7 +11,8 @@ import { SYNC_TEXT } from "../../src/remote";
 import { MERGED_NOT_HERE } from "../../src/stages/merge";
 import { PR_APPROVE_NOTE, PR_MERGED_ELSEWHERE, PR_WAIT } from "../../src/stages/shared";
 import { Trace } from "../../src/trace";
-import { tempDir } from "../helpers";
+import { Git } from "../../src/git";
+import { tempDir, tempGitRepo } from "../helpers";
 
 const BODY = "\n## Problem\np\n\n## Proposed outcome\no\n\n## Done when\n- d\n";
 
@@ -266,6 +267,75 @@ describe("attention", () => {
         }]);
         await intent(t.path, "a", "status: merge-approved");
         expect((await github()).length).toBe(1);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("attention and standards", () => {
+  const SENTENCE = "loopstra/standards/soc2.md cannot be read: ";
+  const STOP = " Fix it on main and commit; until then no change moves on.";
+  const commit = async (root: string, text: string) => {
+    mkdirSync(join(root, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(root, "loopstra", "standards", "soc2.md"), text);
+    await new Git(root).commitAll("standards");
+  };
+
+  test("attention lists unreadable standards", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, "# SOC 2\n\nWhy.\n");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = (await attention(t.path, await loadConfig(t.path), trace, new Date())).filter((i) => i.kind === "standards");
+        expect(items).toHaveLength(1);
+        expect(items[0]!.what.startsWith(SENTENCE)).toBe(true);
+        expect(items[0]!.what.endsWith(STOP)).toBe(true);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("attention clears once main is fixed", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, "# SOC 2\n\nWhy.\n");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const cfg = await loadConfig(t.path);
+        expect((await attention(t.path, cfg, trace)).some((i) => i.kind === "standards")).toBe(true);
+        await commit(t.path, "# SOC 2\n\nWhy.\n\n## Rules\n- SEC-1: Secrets stay out of the repo.\n");
+        expect((await attention(t.path, cfg, trace)).some((i) => i.kind === "standards")).toBe(false);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a change's unreadable standards.md is listed, naming the change", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, "# SOC 2\n\nWhy.\n\n## Rules\n- SEC-1: Secrets stay out of the repo.\n");
+      await intent(t.path, "a", "status: building");
+      await Bun.write(join(t.path, "intent", "a", "standards.md"), "# Standards\n\n## Added\n- nope: x (J, from console, 2026-10-28)\n");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = (await attention(t.path, await loadConfig(t.path), trace)).filter((i) => i.kind === "standards");
+        expect(items).toHaveLength(1);
+        expect(items[0]!.slug).toBe("a");
+        expect(items[0]!.what).toContain("nope, which is not a standard on main");
       } finally {
         trace.close();
       }
