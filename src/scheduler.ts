@@ -15,7 +15,7 @@ import { errorText, timerMs } from "./shell";
 import { changeGates, checkConsistency, effectivePriority, fileHolds, hasQuestion, humanGates, isHeld, isRunnable, MERGED, orderQueue, planFilesNeeded, readIntent, renderQueue, scanRepo, waitingOn, WATCHING_PR, type HumanGates, type Intent, type Scan, type Status } from "./intents";
 import { closeStaleQuestion, closeUnusedAnswer, openQuestions } from "./questions";
 import { andList } from "./text";
-import { problemText, readStandards, standardsStopText } from "./standards";
+import { branchStandards, problemText, standardsStopText } from "./standards";
 import { applyRequests, armApplier, betweenPasses, startApplier } from "./apply";
 import { parsePlanFiles } from "./checks";
 import { mainHealthDue, runMainHealth } from "./signals";
@@ -169,9 +169,7 @@ export async function tick(root: string): Promise<TickResult> {
 
     // A standard on main that cannot be read: the rules are unknown, so no step starts (never "no rules").
     // Requests, syncing, signals and the queue above keep working. A git failure here throws, like any other.
-    const git = new Git(root);
-    const mainCommit = await git.commitOf(cfg.main_branch);
-    const unreadable = mainCommit ? (await readStandards(git, mainCommit)).problems : [];
+    const unreadable = (await branchStandards(new Git(root), cfg.main_branch))?.read.problems ?? [];
     if (unreadable.length) {
       out.paused = standardsStopText(unreadable) ?? "";
       trace.eventOnChange("_loop", "error", '"where":"standards"', { where: "standards", problems: unreadable.map(problemText) }, "problems");
@@ -988,9 +986,8 @@ export async function preflight(root: string, env: Record<string, string | undef
 export async function startWarning(root: string): Promise<string | null> {
   try {
     const cfg = await loadConfig(root);
-    const git = new Git(root);
-    const mainCommit = await git.commitOf(cfg.main_branch);
-    return mainCommit ? standardsStopText((await readStandards(git, mainCommit)).problems) : null;
+    const on = await branchStandards(new Git(root), cfg.main_branch);
+    return on ? standardsStopText(on.read.problems) : null;
   } catch (e) {
     if (e instanceof StopRequested) throw e;
     return null;

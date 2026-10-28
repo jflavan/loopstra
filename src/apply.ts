@@ -17,7 +17,7 @@ import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { localDate, oneLine } from "./text";
 import { addedApprovals, approvedRecord, exceptionsToApprove, parseRecord, revokedRecord, scopedRecord, scopeReverses, scopeStands, STANDARDS_RECORD, type ApprovedException } from "./standards-record";
-import { parseStandards, problemText, readStandards, standardsFilesAt, STANDARDS_DIR } from "./standards";
+import { branchStandards, hasStandardFiles, parseStandards, problemText, readStandards, standardsFilesAt, STANDARDS_DIR } from "./standards";
 import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
@@ -668,11 +668,8 @@ const takesBackApproval = (req: StatusRequest): boolean => req.kind === "undo" &
 
 /** True when main has standards (files in the folder, read or not): without any there is no rule to except. */
 async function hasStandards(root: string, main: string): Promise<boolean> {
-  const git = new Git(root);
-  const commit = await git.commitOf(main);
-  if (!commit) return false;
-  const read = await readStandards(git, commit);
-  return read.standards.length + read.problems.length > 0;
+  const on = await branchStandards(new Git(root), main);
+  return on !== null && hasStandardFiles(on.read);
 }
 
 /**

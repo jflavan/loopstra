@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
@@ -198,6 +198,31 @@ describe("readStandards", () => {
       const none = await readStandards(git, `${sha}~1`);
       expect(none).toEqual({ standards: [], problems: [], ignored: [] });
       await expect(readStandards(git, "0".repeat(40))).rejects.toThrow();
+    } finally { repo.cleanup(); }
+  });
+
+  test("a commit read once is not read from git again, and a caller's changes to the lists stay its own; a branch name is always read", async () => {
+    const repo = await tempGitRepo();
+    try {
+      mkdirSync(join(repo.path, STANDARDS_DIR), { recursive: true });
+      for (const n of ["a", "b", "c"]) await Bun.write(join(repo.path, STANDARDS_DIR, `${n}.md`), `# ${n}\n\n## Rules\n- ${n.toUpperCase()}-1: ${Math.random()}\n`);
+      const git = new Git(repo.path);
+      await git.commitAll("standards");
+      const sha = (await git.run(["rev-parse", "HEAD"])).out.trim();
+      const runs = spyOn(git, "run");
+      const first = await readStandards(git, sha);
+      expect(first.standards.map((s) => s.name)).toEqual(["a", "b", "c"]);
+      const calls = runs.mock.calls.length;
+      expect(calls).toBe(4);
+      first.standards.pop();
+      first.ignored.push("x");
+      const again = await readStandards(git, sha);
+      expect(runs.mock.calls.length).toBe(calls);
+      expect(again.standards.map((s) => s.name)).toEqual(["a", "b", "c"]);
+      expect(again.ignored).toEqual([]);
+      await readStandards(git, "HEAD");
+      expect(runs.mock.calls.length).toBeGreaterThan(calls);
+      runs.mockRestore();
     } finally { repo.cleanup(); }
   });
 });

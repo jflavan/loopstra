@@ -239,24 +239,63 @@ export function formKeeps(text: string, s: Standard): boolean {
 export async function standardsFilesAt(git: Git, commit: string): Promise<{ files: { path: string; text: string }[]; folders: string[] }> {
   // A missing folder lists nothing (exit 0); any failure is real and throws, so a step never runs on fewer rules than main has.
   const listed = await git.run(["ls-tree", "-z", commit, "--", `${STANDARDS_DIR}/`]);
-  const files: { path: string; text: string }[] = [];
+  const blobs: string[] = [];
   const folders: string[] = [];
   for (const entry of listed.out.split("\0").filter(Boolean)) {
     const m = /^\d+ (\w+) \w+\t([\s\S]*)$/.exec(entry);
     if (!m) throw new Error(`git ls-tree gave a line that does not read: ${entry}`);
     const [type, path] = [m[1] ?? "", m[2] ?? ""];
-    if (type !== "blob") { folders.push(path); continue; }
-    files.push({ path, text: (await git.run(["cat-file", "blob", `${commit}:${path}`])).out });
+    if (type !== "blob") folders.push(path);
+    else blobs.push(path);
   }
+  // The files are read at the same time: a folder holds a handful, and each read is one short git call.
+  const files = await Promise.all(blobs.map(async (path) => ({ path, text: (await git.run(["cat-file", "blob", `${commit}:${path}`])).out })));
   return { files, folders };
 }
 
-/** Reads the standards as they are in a commit: only what is committed, never the checkout's edits. None there gives an empty read. */
+/** A commit's full name: what a cached read is keyed by (a branch name moves, so it is never cached). */
+const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** How many commits' reads are kept: main's last few, so the tick, Needs attention and the requests share one. */
+const READS_KEPT = 8;
+const reads = new Map<string, StandardsRead>();
+
+/**
+ * Reads the standards as they are in a commit: only what is committed, never the checkout's edits.
+ * None there gives an empty read. A commit's files never change, so a read by its full sha is kept
+ * (the last few, newest last) and the next caller gets a copy of it without asking git again.
+ */
 export async function readStandards(git: Git, commit: string): Promise<StandardsRead> {
+  const keep = COMMIT_SHA.test(commit);
+  const kept = keep ? reads.get(commit) : undefined;
+  if (kept) {
+    reads.delete(commit);
+    reads.set(commit, kept);
+    return copyOf(kept);
+  }
   const { files, folders } = await standardsFilesAt(git, commit);
   const read = parseStandards(files);
   read.ignored.push(...folders);
-  return read;
+  if (keep) {
+    reads.set(commit, read);
+    for (const oldest of reads.keys()) { if (reads.size <= READS_KEPT) break; reads.delete(oldest); }
+  }
+  return copyOf(read);
+}
+
+/** A read's lists copied, so a caller that adds to one never changes the kept read. */
+function copyOf(r: StandardsRead): StandardsRead {
+  return { standards: [...r.standards], problems: [...r.problems], ignored: [...r.ignored] };
+}
+
+/** The standards on a branch's last commit, with that commit; null when the branch has no commit yet. */
+export async function branchStandards(git: Git, branch: string): Promise<{ commit: string; read: StandardsRead } | null> {
+  const commit = await git.commitOf(branch);
+  return commit ? { commit, read: await readStandards(git, commit) } : null;
+}
+
+/** True when a read found standard files, read or not: a repository with any has rules to except. */
+export function hasStandardFiles(r: StandardsRead): boolean {
+  return r.standards.length + r.problems.length > 0;
 }
 
 /** The standards a person added to a change or removed from it, by name. */

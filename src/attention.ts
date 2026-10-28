@@ -9,7 +9,9 @@ import { Git } from "./git";
 import { readQuestion, type Asked } from "./questions";
 import { SYNC_SIGNAL } from "./remote";
 import { exceptionsToApprove, parseRecord, STANDARDS_RECORD } from "./standards-record";
-import { readStandards, standardsStopText } from "./standards";
+import { branchStandards, hasStandardFiles, standardsStopText } from "./standards";
+import { errorText } from "./shell";
+import { StopRequested } from "./stop";
 import { andList } from "./text";
 import { humanNote, prWait } from "./stages/shared";
 import type { Trace } from "./trace";
@@ -77,10 +79,17 @@ const GATE_DOC: Record<keyof HumanGates, { artifact: string; approved: Status }>
  * True when main has standards (files in the folder, read or not).
  */
 async function addStandards(root: string, cfg: Config, intents: Scan["intents"], add: (kind: AttentionItem["kind"], slug: string | null, title: string, what: string) => void): Promise<boolean> {
-  const git = new Git(root);
-  const commit = await git.commitOf(cfg.main_branch);
-  if (!commit) return false;
-  const read = await readStandards(git, commit);
+  let on;
+  try {
+    on = await branchStandards(new Git(root), cfg.main_branch);
+  } catch (e) {
+    // git failed (a broken repository, a timeout): one item says so, and the rest of the list stands.
+    if (e instanceof StopRequested) throw e;
+    add("standards", null, "Standards", `The standards on ${cfg.main_branch} could not be read: ${(errorText(e).split("\n")[0] ?? "").replace(/[.\s]+$/, "")}.`);
+    return false;
+  }
+  if (!on) return false;
+  const { read } = on;
   const stop = standardsStopText(read.problems);
   if (stop) add("standards", null, "Standards", stop);
   const known = new Set(read.standards.map((s) => s.name));
@@ -91,7 +100,7 @@ async function addStandards(root: string, cfg: Config, intents: Scan["intents"],
     if (!existsSync(file)) continue;
     for (const problem of parseRecord(readFileSync(file, "utf8"), known).problems) add("standards", i.slug, i.file.title || i.slug, problem);
   }
-  return read.standards.length + read.problems.length > 0;
+  return hasStandardFiles(read);
 }
 
 /**

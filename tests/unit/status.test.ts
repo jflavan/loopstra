@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { attention } from "../../src/attention";
 import { renderStatus } from "../../src/commands/status";
@@ -296,6 +296,32 @@ describe("attention and standards", () => {
         expect(items).toHaveLength(1);
         expect(items[0]!.what.startsWith(SENTENCE)).toBe(true);
         expect(items[0]!.what.endsWith(STOP)).toBe(true);
+      } finally {
+        trace.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("standards git cannot read are one item, and the rest of the list still comes", async () => {
+    const t = await tempGitRepo();
+    try {
+      await config(t.path);
+      await commit(t.path, `# SOC 2\n\n## Rules\n- SEC-1: Unread ${Math.random()}.\n`);
+      // The file's blob is gone from the repository: reading it fails in git, not in the parser.
+      const git = new Git(t.path);
+      const blob = (await git.run(["rev-parse", "main:loopstra/standards/soc2.md"])).out.trim();
+      rmSync(join(t.path, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+      holdLoop(t.path, "Ann");
+      const trace = Trace.open(t.path, () => {});
+      try {
+        const items = await attention(t.path, await loadConfig(t.path), trace, new Date());
+        const standards = items.filter((i) => i.kind === "standards");
+        expect(standards).toHaveLength(1);
+        expect(standards[0]!.what).toStartWith("The standards on main could not be read: ");
+        expect(standards[0]!.what).toEndWith(".");
+        expect(items.some((i) => i.kind === "paused")).toBe(true);
       } finally {
         trace.close();
       }
