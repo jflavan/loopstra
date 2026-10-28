@@ -1,6 +1,15 @@
 # Standards: rules every change is held to
 
-2026-10-28. A way for an engineering or architecture team to write down the rules every change must keep (architecture, security, compliance controls such as SOC 2's), and have the loop check each change against them at every gate, with a record per rule of how the change met it. The user asked for this as a spec and left most decisions to Claude; each one marked "Claude's call" is recorded in `docs/decisions.md` when it is built. The user chose, from options, how the record stays accurate as standards change, how exceptions are granted, how tool checks run, how much the spec and plan list, the command, and keeping `needs_person`; those are marked "The user's choice".
+2026-10-28. A way for an engineering or architecture team to write down the rules every change must keep (architecture, security, compliance controls such as SOC 2's), and have the loop check each change against them at every gate, with a record per rule of how the change met it. The user asked for this as a spec and left most decisions to Claude; each one marked "Claude's call" is recorded in `docs/decisions.md` when it is built. The user chose, from options, several parts; those are marked "The user's choice":
+- how the record stays accurate as standards change;
+- how exceptions are granted, and who may approve them;
+- how tool checks run;
+- how much the spec and plan list;
+- the command, and keeping `needs_person`;
+- changing a change's standards by hand;
+- the console's editor, and its list of exceptions.
+
+The user also asked that the whole workflow be possible in the console (writing and scoping standards, approving exceptions, reviewing them), and that `loopstra setup` set up standards and their tool checks.
 
 ## Why
 
@@ -16,6 +25,7 @@ Today a repository can tell Loopstra's sessions how to work (`CLAUDE.md`, `.clau
 - A team writes its rules once, as Markdown in the repository, and every change is checked against the ones that apply to it: at the spec, at the plan, in review, and after the merge.
 - Each check that can be code is code: which rules apply, whether the plan addresses each one, whether a change edited the rules, and any rule a tool can check (a standard can name the command). The agents judge only what needs judgment: whether a design, plan or diff actually keeps a rule.
 - A change that cannot keep a rule can ask for an exception, and only a person can grant it.
+- Everything a person does with standards can be done in the console: write, scope and remove them, try their tool checks, see which apply to a change and why, add or remove a standard for one change, approve exceptions, and list every exception granted. `loopstra setup standards` does the writing and checking from a terminal.
 - Every change leaves a plain record, in git, of the rules that applied to it and the evidence for each: the spec's and plan's Standards sections, review findings that name the rule, and a Standards section in `outcome.md` that names the version of the standards it was checked against.
 - No standards, no change: a repository without `loopstra/standards/` runs exactly as before, and its specs and plans keep their current headings.
 
@@ -23,7 +33,8 @@ Today a repository can tell Loopstra's sessions how to work (`CLAUDE.md`, `.clau
 
 - Loopstra does not make an application compliant with anything, and does not claim to. SOC 2 is an auditor's opinion of an organisation's controls over a period. Standards let a team state the technical controls it wants in the code and get evidence that each change kept them; access reviews, vendor management, incident response and the rest stay outside.
 - No standards library shipped with Loopstra (no "SOC 2 pack"). The README shows an example; the rules are the team's, in its words.
-- No agent writes or edits standards. A person changes them, on `main`, by hand.
+- No agent writes or edits standards. A person changes them on `main`: by hand, on the console's Standards page, or in `loopstra setup standards`. The console's writes are made by the loop's runtime (code) for the person who asked, as with agent files.
+- Chat neither edits standards nor changes which apply to a change (Claude's call: the orchestrator is an agent, and edits made through it would come from an agent). Chat still approves a spec or plan, its exceptions included, as it can today.
 - Acceptance tests are not written from standards in this change (a follow-up; see the end).
 - Chat does not read standards in this change. The orchestrator is not told them, and intents are unchanged: product owners never need to know the standards exist.
 - No export of the trace for auditors (a follow-up). The records in `intent/<slug>/` are the durable evidence this change adds.
@@ -83,6 +94,8 @@ Applicability is a fact about files, never an agent's judgment, except at the sp
 | build, resolve | the plan's Files that change | as for the plan |
 | review, merge | the branch's diff against `main` outside `intent/` (as `scoreRisk` reads it, renames by old and new path) | as for the plan, on the diff |
 | done | the files the change brought into `main` | as for the plan, on those files |
+
+A person can change this for one change (see Changing a change's standards): a standard they added applies at every step from then on, whatever the files, and one they removed applies at none.
 
 A standard that applies is used whole: every rule in it applies. Claude's call: a rule-level scope would let a file of 30 controls send each rule to its own files, but it doubles what a team writes and reads, and splitting such a file in two does the same.
 
@@ -173,9 +186,42 @@ A spec or plan can say a rule cannot be kept for this change: `- ARCH-1: excepti
 
 - **Who decides.** When a spec or plan passes its checks and has an exception not already approved for this change, its gate waits for a person, even when nobody is on that gate in the config. The runtime writes `spec_gate: status` or `plan_gate: status` in the intent's front matter, in the record that moves the status to `spec-review` or `plan-review`. It works as `merge_gate` does for a risky change: runtime-managed, left out when blank, and read through `changeGates` in `src/intents.ts` beside `merge_gate`, so the scheduler, `status`, the console and chat treat the change as waiting for a person. A person who deletes the line takes the change back to the config's gate.
 - **The note.** "The plan asks for an exception to ARCH-1 (Service architecture): billing keeps reading the legacy orders table until it is migrated. Read plan.md. To allow it, set status to plan-approved; to have the plan written again without it, send it back with a note." With more than one exception, it names them all.
-- **What counts as approved.** A person moving the status to `spec-approved` or `plan-approved` approves every exception in that artifact. The trace records it as a gate row, `exception`, `pass`, with the labels and who approved, when the approval came as a request that names them (the console, chat). An exception approved at the spec and repeated in the plan for the same rule needs no second approval. An exception that is new in the plan, or a rule whose exception the plan's wording changes, does.
+- **Who approves.** Whoever can approve the spec or plan today: a status edit, the console, or a chat acceptor. The user's choice: no separate list of approvers; the record says who approved and from where.
+- **What counts as approved.** A person moving the status to `spec-approved` or `plan-approved` approves every exception in that artifact. The runtime writes the approval into the change's `standards.md` record (see below) in the same record as the status move: the rule, the reason, the gate, who, from where, and the date. Who is the request's person when the approval came as a request (the console, chat), and "a status edit" when it was made by hand. The trace has it too, as a gate row: `exception`, `pass`, with the labels. An exception approved at the spec and repeated in the plan for the same rule needs no second approval. An exception that is new in the plan, or a rule whose exception the plan's wording changes, does.
 - **Later steps.** Build, resolve and review are told which rules are under an approved exception and why (see Prompt variable). A breach of that rule, within what the exception says, is not a finding. The build cannot ask for an exception itself: when the plan would make it break a rule, it asks a question, as it can today, and a person answers or sends the change back.
-- **The record.** The outcome's Standards section lists the rule as `- ARCH-1 (Service architecture): exception, approved by a person at the plan: <the reason>` (see Done), and the done-check does not judge it.
+- **The record.** The outcome's Standards section lists the rule as `- ARCH-1 (Service architecture): exception, approved by J. at the plan: <the reason>` (see Done), and the done-check does not judge it.
+
+### Changing a change's standards
+
+A person can add a standard to one change, or remove one from it, with a note saying why. The user's choice: both, with removing recorded like an exception, so a missed case can be covered and a wrong match taken off, and each is on the record.
+
+- **Where.** From the change's page in the console (see The console), or by editing the change's `standards.md` record by hand. Not from chat.
+- **When.** At any status before `done`. It applies from the next step on.
+  - **Added after the plan was approved:** review, the merge checks and the done-check check the standard; the plan does not cover it. The console's dialog offers "Send the change back to planning" in the same step, for a person who wants the plan to cover it.
+  - **Removed:** the standard stops applying from the next step, its tool check and its `needs_person` included. Removing one is a person taking responsibility for that, and the record says so.
+- **The record.** It is a request (`standards-scope`: the change, the status it expects, add or remove, the standard's name and the note, which removing requires). The loop applies it as one record on `main`, `loopstra(<slug>): standard payments added by J. from the dashboard`, writing it into the change's `standards.md`. The trace gets a row, and the outcome's Standards section lists it: "Payments data was added to this change by J.: <note>", or "Service architecture was removed from this change by M.: <note>".
+
+### The change's `standards.md` record
+
+`intent/<slug>/standards.md` holds what people decided about standards for one change, written by the runtime in a fixed format:
+
+```markdown
+# Standards decisions for billing-refunds
+
+## Added
+- payments: card data passes through the shared lib the patterns miss (J., from the console, 2026-10-28)
+
+## Removed
+- architecture: prototype behind a flag, see ADR-14 (M., from the console, 2026-10-28)
+
+## Exceptions approved
+- ARCH-1 at the plan: billing keeps reading the legacy orders table until it is migrated (J., from the console, 2026-10-28)
+```
+
+- It is written only when there is something to record. A change without decisions has no such file.
+- The loop reads Added and Removed to work out which standards apply, and Exceptions approved to know which exceptions need no second approval.
+- A person may edit it by hand. Their edit wins, as everywhere. A line that does not read (an unknown standard, or a bullet in another form) is listed under Needs attention, and is not applied until fixed.
+- It is the durable record that the console's list of exceptions reads.
 
 ### Build and resolve
 
@@ -216,7 +262,8 @@ The trace gets a `standards` row on the merge gate when the repository has stand
 - **What the section lists:**
   - one bullet per rule, `- LABEL (Title): met: evidence`;
   - an exception as `- LABEL (Title): exception, approved by a person at the plan: <the reason>`;
-  - each tool check as `- Check of Secrets: passed at merge`.
+  - each tool check as `- Check of Secrets: passed at merge`;
+  - each standard a person added to or removed from the change, with who and the note, from its `standards.md`.
 
   The format is the runtime's, so it is the same in every outcome and a script can read it.
 - **Unmet rules block,** as unmet criteria do, with their own note when only standards are unmet: "The change merged, but the final check found engineering rules it does not keep. The details are in outcome.md. An engineer should decide whether to open a follow-up change, then set this one to done or closed." When both are unmet, the existing note gets "and engineering rules" after "Done when criteria". `needs-person` rules go under the existing "For a person to confirm" heading too, with their labels.
@@ -228,17 +275,82 @@ The test-protection hook (`templates/hooks/loopstra-protect-tests.ts`) refuses a
 
 Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` is not treated as a standard. Rules there are guidance Claude Code loads into sessions. Standards are what the gates check, with rule labels and a record. A team keeps conventions in the first and the must-haves in the second, and can point one at the other.
 
-## Status, console and records
+## The console
 
-- No new screen. The spec, plan, review and outcome pages already render those files, and the new sections show there.
-- The session page needs nothing new. The gate rows (`standards` on spec, plan, merge and done, `exception`, `check:<name>`, and findings with rule labels) show in the trace as rows do today.
-- A change waiting for a person to approve an exception shows in `status`, the console's inbox and chat as waiting for a person, with the exception's note, through `changeGates`.
-- `loopstra status` and the console show unreadable standards under Needs attention (see When a file cannot be read).
-- Nothing is added to the intent template, the owner's guide or chat.
+The console never writes the repository itself, here as elsewhere. Each change a person makes is a request the loop applies and commits (see Writes).
+
+### Settings › Standards
+
+A third section of the Settings page, after Models and Agents.
+
+- **Problems at the top:** unreadable files with each problem, standards edited in the main checkout but not yet committed (not in force), lines in a change's `standards.md` that do not read, and a `check` that names a program not installed.
+- **The list.** One row per standard:
+  - its title and file;
+  - its scope: "every change", or its patterns with how many files on `main` they match now;
+  - whether it needs a person;
+  - its tool check;
+  - how many rules it has;
+  - how many changes in progress it applies to.
+
+  Actions: New standard (blank, or from one of the README's two examples), Edit, Remove (with a confirmation that names the changes in progress it applies to).
+- **The editor.** The user's choice: a form, with "Edit as Markdown" for the whole file. Both are checked before saving.
+  - **The form:**
+    - the title;
+    - the patterns, each with a live count of matching files on `main` and, on request, the list;
+    - "Needs a person before merging";
+    - the tool check, with "Try it on main";
+    - the rules, as label and text rows to add, edit or remove;
+    - the context text.
+  - **As you edit:** a label used twice, a label that is not valid, or a pattern that is not a glob shows next to its field.
+  - **Markdown:** the whole file in one editor, with the same problems listed under it and a preview.
+  - **Saving:** "Save" is offered only when the file would read. The console cannot put an unreadable standard on `main`.
+  - **Changing the rules a change in progress is held to:** saving says so, naming the changes ("billing-refunds and csv-export are in progress under this standard; their next steps use the new rules").
+- **Try it on main** runs the standard's `check` in a throwaway checkout of `main`'s last commit, as `loopstra setup` runs `commands.test`, with `commands.install` first and `timeout_minutes` as its limit. It shows whether it passed, how long it took and the end of its output. It writes nothing to the repository.
+- **Exceptions granted.** The user's choice: one list across all changes, read from every change's `standards.md`. For each exception it shows the rule (with its standard), the change, the reason, who approved it, from where, when, and at which gate. It can be filtered by standard and by rule, and links to the change. Standards added to or removed from a change are listed beside it, under "Changes to scope", with the same columns.
+
+### The change page
+
+A **Standards** panel, shown when the repository has standards. It lists each standard that applies and why ("touches services/billing/api.ts", "every change", "added by J."). Under each standard, each rule shows how the change stands on it so far:
+- what the spec or plan said;
+- findings from review;
+- the tool check;
+- the result after the merge;
+- exceptions, asked for and approved.
+
+- **Exceptions waiting.** When the change waits for a person over an exception, the panel puts it first: the rule, the reason, and where in the spec or plan it is asked for. The buttons say what they do: "Allow the exception and approve the plan", and "Send back" with a note. Approving is the existing `approve` request; the runtime writes the approval into `standards.md` as it applies it.
+- **Add a standard…** and **Remove…** open a dialog. It names the standard, asks for the note (required to remove), and says what happens next (see Changing a change's standards), with the option to send the change back to planning.
+
+### Inbox, status and chat
+
+- A change waiting for a person to approve an exception shows in `loopstra status`, the console's inbox and chat as waiting for a person, through `changeGates`, labelled "Waiting for you: exception to ARCH-1" with its note.
+- Unreadable standards, and unreadable lines in a change's `standards.md`, show under Needs attention (see When a file cannot be read).
+- The session page needs nothing new. The gate rows (`standards` on spec, plan, merge and done, `exception`, `check:<name>`, scope changes, and findings with rule labels) show in the trace as rows do today.
+- The spec, plan, review and outcome pages already render those files, and the new sections show there.
+- Nothing is added to the intent template or the owner's guide.
+
+### Writes
+
+- **Standard files** go through the existing `agent-files` request, which also takes paths under `loopstra/standards/` (`<name>.md` only). The loop refuses, with nothing committed:
+  - a standard that would not read (the console checks first; the loop checks again);
+  - a file with uncommitted changes in the main checkout;
+  - a file that changed since the page read it, as for agent files.
+
+  The record is `loopstra(_settings): standards: edit architecture.md by J. from the dashboard`.
+- **A change's scope** goes through the new `standards-scope` request (see Changing a change's standards).
+- **Exceptions** go through the existing `approve` and `send-back` requests.
+- **The routes:**
+  - `GET /api/standards`: the list, the problems, the counts;
+  - `POST /api/standards/check`: a draft's problems and pattern matches;
+  - `POST /api/standards/try`: Try it on main;
+  - `GET /api/standards/exceptions`: the list of exceptions granted;
+  - the change's panel, in the change's existing detail.
+
+  Each route has the Host check every console route has.
 
 ## Setup, skill and docs
 
 - **`loopstra init`** writes no standards. Off is the default and means absent.
+- **`loopstra setup standards`**, a new section (see below).
 - **`loopstra setup --check`** reads the standards from `main`'s last commit and lists each problem under "To fix". It warns when a standard's `check` names a program that is not installed, as it does for the commands.
 - **The operator skill** (`templates/skill/SKILL.md`) gets a section on writing a standard. It covers the file's shape, choosing rule labels, scoping with `applies_to`, putting what a tool can check in `check`, when to ask for an exception, and writing a rule a judge can check ("every endpoint under api/ checks the caller's role with `requireRole`", not "be secure"). It ends by saying to commit the file on `main`.
 - **README** gets a Standards section with two worked examples:
@@ -247,6 +359,24 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 
   It states plainly the limits under Non-goals, and how the records it leaves map to a change-management control (the intent is the request, the spec and plan the design, `review.md` the review, the outcome the evidence, and the pull request's approval with `merge.human: pr` the approval).
 - **`docs/architecture.md`** lists `standards.ts` in layer 3.
+
+### `loopstra setup standards`
+
+A new section, listed with the others and runnable alone. Like agents, it is not part of the first full walk-through unless the person says yes to "Set up standards, rules every change is checked against, now? (y/N)".
+
+1. **What is there.** It lists the standards on `main`: title, file, scope, whether it needs a person, the tool check, the number of rules. It lists the problems with them too.
+2. **The menu:** add a standard, edit one, remove one, or finish. "Add" offers a blank standard or one of the README's two examples, to edit.
+3. **Add or edit** asks, showing the current value and a suggestion, with the usual Enter for the suggestion and `-` for empty:
+   - the file name (add only), as lowercase words joined by dashes;
+   - the title;
+   - which files it applies to: comma-separated patterns, `-` for every change. It answers with how many files on `main` they match, and asks again if one is not a valid pattern;
+   - "Does a change under this standard need a person before it merges? (y/N)";
+   - the tool check. The suggestion is the first of these found on PATH, as a command that fails on findings: `gitleaks detect --no-banner`, `semgrep scan --error`, `trivy fs --exit-code 1 .`, `checkov -d . --quiet`. Otherwise there is none. `-` leaves it out;
+   - **the rules.** It lists the current ones by label, then asks "Add a rule as LABEL: text (Enter when done)", one at a time. A label already used is refused with the rule that has it. Then it asks "Rules to remove (labels, comma-separated)". To reword a rule, a person removes it and adds it again with the same label.
+   - The context text is not asked. A new file gets a line saying where to write it, and setup says the file is plain Markdown to edit any time.
+4. **Saving and checking.** It saves with the rest of setup, once, at the end. If the result would not read, it saves nothing, as for the config. Then it checks, with the section's other checks: every standard reads, and each new or changed tool check passes on `main` in a throwaway checkout, as `commands.test` is checked. What is not ok is listed under "To fix", with `loopstra setup standards` to run again. Like the rest of setup, it does not commit; it says to commit `loopstra/standards/`.
+
+`loopstra setup --defaults` adds no standards. `loopstra setup --check` reads them and runs each tool check on `main`, as it does `commands.test`.
 - **`docs/decisions.md`** gets the calls in this spec.
 
 ## Code
@@ -268,7 +398,10 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
 - **`src/envelopes.ts`**: the optional `standard` fields, and `done-check`'s `standards` array (default `[]`, so a prompt override that never asks for it still parses).
 - **`src/scheduler.ts`**: the tick's read and the `standards` problem, beside `traceConfigProblem`.
 - **`src/commands/standards.ts`**, the command.
-- **`src/attention.ts`**, the Needs attention entry.
+- **`src/attention.ts`**, the Needs attention entries.
+- **`src/requests.ts` and `src/apply.ts`**: the `standards-scope` request; `agent-files` taking `loopstra/standards/<name>.md` with the readability check; and the `approve` request's record also writing a change's approved exceptions into `standards.md`, as a status edit noticed by the loop does.
+- **`src/console/standards.ts`** (the routes), with `src/ui/views/StandardSettings.tsx`, `src/ui/views/Exceptions.tsx` and the change page's `Standards` part. They follow the Agents settings pattern: read-only views from the server, and writes as requests.
+- **`src/setup/sections/standards.ts`**, the setup section, sharing the throwaway-checkout run with the commands check.
 - **The hook**, the refusal.
 
 ## Tests
@@ -297,11 +430,22 @@ Claude's call: a standard is not added to `.claude/rules`, and `.claude/rules` i
   - one tick in a repository with an unreadable standard on `main` starts no step and traces `standards`;
   - one change runs from accepted to done with one standard for every change and one scoped standard.
 - **The hook:** an edit under `loopstra/standards/` is refused in each writing phase.
+- **Requests:**
+  - `agent-files` writing a standard that would not read is refused with nothing committed, and so is one that changed since the page read it;
+  - `standards-scope` adds and removes with the note, refuses a removal without one, and the next step uses the new set;
+  - approving a plan with an exception, by request and by a status edit, writes the approval into `standards.md` with who and from where.
+- **Console:**
+  - the routes, with their Host check;
+  - a draft's problems and pattern counts;
+  - Try it on main in a throwaway checkout, which leaves the repository unchanged;
+  - the exceptions list read from several changes' `standards.md`;
+  - the UI's views, as the Agents settings views are tested.
+- **Setup:** the section adds, edits and removes a standard, refuses a label used twice, suggests a scanner found on PATH, saves nothing when the result would not read, and lists a failing tool check under "To fix".
 
 ## Follow-ups (not in this change)
 
 - **Acceptance tests from standards.** Give the `acceptance` step the plan's applicable rules, so the rules a test can check get one, listed in `acceptance.md` by rule label, which the done-check then reads like the criteria's.
-- **Chat.** Tell the orchestrator the standards' titles and scopes, so it can answer "what rules would this change fall under?" while an intent is worked out.
+- **Chat.** Tell the orchestrator the standards' titles and scopes, so it can answer "what rules would this change fall under?" while an intent is worked out. Whether chat may change a change's standards is decided then.
 - **An export for auditors.** `loopstra export <since>` would write each change's records and its trace rows (gates, approvals, who did what, when) into one folder or archive, since `.loopstra/` is local and not kept.
 - **Standing waivers.** A file of exceptions people approved once for a set of files, with a reason and an end date, which a spec or plan could cite instead of asking each time. Worth it only if the same exception keeps coming back.
 - **`loopstra retro`** could report which rules most often fail at which gate, and which exceptions are asked for most. That is the signal that a rule is unclear, or that a design keeps fighting it.
