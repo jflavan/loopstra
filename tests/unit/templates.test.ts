@@ -21,6 +21,36 @@ describe("REVIEW.md template", () => {
   });
 });
 
+describe("operator skill template", () => {
+  const skillPath = fileURLToPath(new URL("../../templates/skill/SKILL.md", import.meta.url));
+  const section = (text: string, heading: string) => {
+    const i = text.indexOf(`\n## ${heading}\n`);
+    expect(i).toBeGreaterThan(-1);
+    const rest = text.slice(i + 1);
+    const j = rest.indexOf("\n## ", 4);
+    return j < 0 ? rest : rest.slice(0, j);
+  };
+
+  test("Onboard has a 'Set up the standards' step right after 'Set up the agents'", async () => {
+    const onboard = section(await Bun.file(skillPath).text(), "Onboard");
+    const steps = onboard.split("\n").filter((l) => /^\d+\. /.test(l));
+    expect(steps.map((l) => Number(l.split(".")[0]))).toEqual(steps.map((_, i) => i + 1));
+    const agents = steps.findIndex((l) => l.startsWith("6. Set up the agents."));
+    expect(agents).toBe(5);
+    const std = onboard.slice(onboard.indexOf("\n7. Set up the standards."), onboard.indexOf("\n8. "));
+    expect(steps[agents + 1]!.startsWith("7. Set up the standards.")).toBe(true);
+    for (const needle of ["loopstra setup --check", "loopstra setup standards", "$LOOPSTRA_BASE", "loopstra/standards/", "never commit", "loopstra start"]) expect(std).toContain(needle);
+    expect(steps[agents + 2]!.startsWith("8. Read `CLAUDE.md`")).toBe(true);
+  });
+
+  test("Tune and the description mention standards", async () => {
+    const text = await Bun.file(skillPath).text();
+    expect(section(text, "Tune")).toContain("Onboard step 7");
+    expect(section(text, "Tune")).toContain("loopstra setup standards");
+    expect(text.split("\n")[2]).toContain("standards");
+  });
+});
+
 describe("prompt templates", () => {
   test("one template per phase; the shared contract is not repeated in them, and the rendered prompt ends with it", async () => {
     for (const name of Object.keys(Envelopes)) {
