@@ -127,9 +127,10 @@ describe("the standards routes", () => {
       // Replacing security with its own labels is not a clash with itself.
       const own = await (await post(base, "/api/standards/check", { name: "security", text: SECURITY("true") })).json() as DraftChecked;
       expect(own.problems).toEqual([]);
-      // An unreadable draft is a problem in words, and a form is kept for the page.
+      // An unreadable draft is a problem in words, and no form comes back for text.
       const bad = await (await post(base, "/api/standards/check", { name: "perf", text: "no title\n" })).json() as DraftChecked;
       expect(bad.problems.length).toBeGreaterThan(0);
+      expect(bad.form).toBeNull();
     });
   });
 
@@ -185,11 +186,44 @@ describe("the standards routes", () => {
       write(join(root, "intent/gamma/standards.md"), "# Standards decisions for gamma\n\n## Exceptions approved\n- SEC-2 at the spec: vendored (J., from the console, 2026-10-24)\n");
       const r = await (await fetch(`${base}/api/standards/exceptions`)).json() as { exceptions: ExceptionRow[]; scope: ScopeRow[] };
       expect(r.exceptions.map((e) => [e.slug, e.label, e.gate, e.date])).toEqual([["beta", "STY-1", "plan", "2026-10-26"], ["gamma", "SEC-2", "spec", "2026-10-24"], ["alpha", "SEC-1", "spec", "2026-10-22"]]);
-      expect(r.exceptions[0]).toEqual({ label: "STY-1", title: "Beta", slug: "beta", reason: "generated", by: "A.", via: "the console", date: "2026-10-26", gate: "plan" });
+      expect(r.exceptions[0]).toEqual({ label: "STY-1", title: "Style", standard: "style", change: "Beta", slug: "beta", reason: "generated", by: "A.", via: "the console", date: "2026-10-26", gate: "plan" });
       expect(r.scope).toEqual([
-        { name: "security", slug: "beta", action: "removed", note: "docs only", by: "A.", via: "intent.md", date: "2026-10-25" },
-        { name: "style", slug: "alpha", action: "added", note: "wanted here", by: "J.", via: "the console", date: "2026-10-20" },
+        { name: "security", title: "Security", change: "Beta", slug: "beta", action: "removed", note: "docs only", by: "A.", via: "intent.md", date: "2026-10-25" },
+        { name: "style", title: "Style", change: "Alpha", slug: "alpha", action: "added", note: "wanted here", by: "J.", via: "the console", date: "2026-10-20" },
       ]);
+    });
+  });
+
+  test("an exception or scope row of a standard no longer on main shows the label alone", async () => {
+    await withStandards(async (base, root) => {
+      write(join(root, "intent/alpha/standards.md"), "# x\n\n## Added\n- gone: was wanted (J., from the console, 2026-10-20)\n\n## Exceptions approved\n- OLD-1 at the spec: legacy (J., from the console, 2026-10-22)\n");
+      const r = await (await fetch(`${base}/api/standards/exceptions`)).json() as { exceptions: ExceptionRow[]; scope: ScopeRow[] };
+      expect(r.exceptions[0]).toMatchObject({ label: "OLD-1", title: "", standard: "", change: "Alpha", slug: "alpha" });
+      expect(r.scope[0]).toMatchObject({ name: "gone", title: "", change: "Alpha" });
+    });
+  });
+
+  test("the view's problems include open changes' unreadable standards.md and a check whose program is not installed", async () => {
+    await withStandards(async (base, root) => {
+      write(join(root, "intent/alpha/standards.md"), "# x\n\n## Added\n- ghost: gone (J., from the console, 2026-10-20)\nstray prose\n");
+      write(join(root, "intent/gamma/standards.md"), "stray prose in a done change\n");
+      write(join(root, "loopstra/standards/tools.md"), "---\ncheck: no-such-program-xyz --all\n---\n# Tools\n\n## Rules\n- TOOL-1: Run it.\n");
+      await new Git(root).commitAll("tools");
+      const view = await (await fetch(`${base}/api/standards`)).json() as StandardsView;
+      expect(view.problems.some((p) => p.startsWith("alpha: ") && p.includes("ghost"))).toBe(true);
+      expect(view.problems.some((p) => p.startsWith("alpha: ") && p.includes("stray prose"))).toBe(true);
+      expect(view.problems.some((p) => p.startsWith("gamma"))).toBe(false);
+      expect(view.problems).toContain("The check of Tools runs no-such-program-xyz, which is not installed on this machine, so the check cannot run here.");
+      expect(view.problems.some((p) => p.includes("Security"))).toBe(false);
+    });
+  });
+
+  test("try takes a form as check does", async () => {
+    await withStandards(async (base, _root, sentinel) => {
+      const form = { name: "perf", title: "Perf", patterns: [], needsPerson: false, check: `echo f > ${sentinel}.form`, rules: [{ label: "PERF-1", text: "Measure." }], context: "" };
+      const r = await (await post(base, "/api/standards/try", { name: "perf", form })).json() as TriedCheck;
+      expect(r.ok).toBe(true);
+      expect(existsSync(`${sentinel}.form`)).toBe(true);
     });
   });
 
@@ -228,6 +262,7 @@ describe("a change's standards panel", () => {
       expect(s.applying.map((a) => [a.name, a.title])).toEqual([["security", "Security"], ["style", "Style"]]);
       const sec = s.applying[0]!;
       expect(sec.why).toContain("src/pay.ts");
+      expect(s.applying[1]!.why).toBe("It applies to every change.");
       expect(sec.check).toBe("pass: ok");
       expect(sec.rules[0]).toEqual({ label: "SEC-1", text: "Validate input.", spec: "validated at the edge.", plan: "zod at the route.", findings: ["important · src/pay.ts:42: input not checked"], result: "met" });
       expect(sec.rules[1]).toMatchObject({ label: "SEC-2", spec: "Exception: a vendored key in a test.", findings: [], result: "exception" });
@@ -237,6 +272,21 @@ describe("a change's standards panel", () => {
       // A standard named in the record that main does not have is a problem, not a crash.
       expect(s.record.added).toEqual([]);
       expect(s.record.problems.join(" ")).toContain("ghost");
+    });
+  });
+
+  test("why comes from the merge gate's marker files, and from who added a standard", async () => {
+    await withStandards(async (base, root) => {
+      mkdirSync(join(root, ".loopstra/runs/beta"), { recursive: true });
+      write(join(root, ".loopstra/runs/beta/standards.applied"), JSON.stringify({ commit: "x", applying: [{ name: "security", why: "files", files: ["src/my file.ts"] }, { name: "style", why: "every", files: [] }] }));
+      write(join(root, "intent/beta/standards.md"), "# x\n\n## Added\n- style: also (Ann, from the console, 2026-10-20)\n");
+      const d = await (await fetch(`${base}/api/changes/beta`)).json() as ChangeDetail;
+      expect(d.standards!.applying[0]!.why).toBe("The change touches src/my file.ts.");
+      mkdirSync(join(root, ".loopstra/runs/alpha"), { recursive: true });
+      write(join(root, ".loopstra/runs/alpha/standards.applied"), JSON.stringify({ commit: "x", applying: [{ name: "style", why: "every", files: [] }] }));
+      write(join(root, "intent/alpha/standards.md"), "# x\n\n## Added\n- security: also (Ann, from the console, 2026-10-20)\n");
+      const a = await (await fetch(`${base}/api/changes/alpha`)).json() as ChangeDetail;
+      expect(a.standards!.applying.map((x) => [x.name, x.why])).toEqual([["style", "It applies to every change."], ["security", "Added by Ann."]]);
     });
   });
 

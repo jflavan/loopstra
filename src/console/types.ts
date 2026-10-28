@@ -3,6 +3,8 @@ import type { JudgesView } from "../commands/judges";
 import type { LoopStatus } from "../heartbeat";
 import type { ModelRef, StepGroup, StepKey } from "../models";
 import type { SectionBullet, StandardForm, StandardsProblem } from "../standards";
+
+export type { StandardForm, StandardsProblem } from "../standards";
 import type { CheckOnMain } from "../standards-check";
 import type { ChangeStandards } from "../standards-record";
 
@@ -160,11 +162,12 @@ export type DraftChecked = DraftCheck & { text: string; form: StandardForm | nul
 /** A tool check tried on main (`POST /api/standards/try`). */
 export type TriedCheck = CheckOnMain;
 
-/** An exception a person approved at a change's spec or plan. `title` is the change's. */
-export interface ExceptionRow { label: string; title: string; slug: string; reason: string; by: string; via: string; date: string; gate: "spec" | "plan" }
+/** An exception a person approved at a change's spec or plan. `title` and `standard` are the rule's standard (empty when main no longer has it); `change` is the change's title. */
+export interface ExceptionRow { label: string; title: string; standard: string; change: string; slug: string; reason: string; by: string; via: string; date: string; gate: "spec" | "plan" }
 
 /** A standard added to a change or removed from it. */
-export interface ScopeRow { name: string; slug: string; action: "added" | "removed"; note: string; by: string; via: string; date: string }
+/** `title`: the standard's, empty when main no longer has it. */
+export interface ScopeRow { name: string; title: string; change: string; slug: string; action: "added" | "removed"; note: string; by: string; via: string; date: string }
 
 /** The change page's standards panel. */
 export interface ChangeStandardsView {

@@ -5,6 +5,7 @@ import { CHAT_SLUG } from "../budget";
 import { judgesView } from "../commands/judges";
 import { DEFAULT_POLL_SECONDS, loadConfig, type Config } from "../config";
 import { ARTIFACTS, humanGates, orderQueue, scanRepo } from "../intents";
+import { errorText } from "../shell";
 import { sameFileHolds } from "../scheduler";
 import type { Trace } from "../trace";
 import { PHASE_FILES } from "./files";
@@ -54,7 +55,8 @@ async function standardsPanel(root: string, trace: Trace, slug: string): Promise
   try {
     const standards = await changeStandards(root, trace, slug);
     return standards ? { standards } : {};
-  } catch {
+  } catch (e) {
+    console.error(`loopstra ui: a change's standards could not be read: ${errorText(e).replace(/\s+/g, " ")}`);
     // The page's other parts still show; Needs attention names an unreadable standards folder.
     return {};
   }

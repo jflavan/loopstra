@@ -87,13 +87,13 @@ async function agentFiles(root: string, hub: Hub, req: Request, url: URL, server
 }
 
 /**
- * `/api/standards/check`, `/try` and `/scope`. A check tried on main may take as long as the
- * config's claude timeout (it runs in a throwaway checkout), so those two wait generously. Null for any other path.
+ * `/api/standards/check`, `/try` and `/scope`. Only `/try` runs a command (in a throwaway checkout,
+ * as long as the config's claude timeout allows), so only it has no idle limit. Null for any other path.
  */
 async function standardsWrites(root: string, hub: Hub, req: Request, url: URL, server: Timeouts): Promise<Response | null> {
   const handler = { "/api/standards/check": checkDraft, "/api/standards/try": tryCheck, "/api/standards/scope": scopeAction }[url.pathname];
   if (!handler) return null;
-  server.timeout(req, TRY_IDLE_SECONDS);
+  server.timeout(req, url.pathname === "/api/standards/try" ? TRY_IDLE_SECONDS : JSON_IDLE_SECONDS);
   return jsonWrite(req, url, async (body) => {
     const answer = await handler(root, body);
     if (url.pathname === "/api/standards/scope") hub.poke();

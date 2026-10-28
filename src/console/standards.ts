@@ -12,15 +12,16 @@ import { fileVersion } from "../settings";
 import { planFiles } from "../stages/shared";
 import {
   applying, formToMarkdown, parseStandards, problemText, readOutcomeStandards, readStandards, readStandardsSection, standardsFilesAt, standardToForm,
-  STANDARD_NAME, STANDARDS_DIR, type Applying, type Scope, type Standard, type StandardForm,
+  STANDARD_NAME, STANDARDS_DIR, type Applying, type Scope, type Standard,
 } from "../standards";
+import { programsIn } from "../shell";
 import { checkOnMain } from "../standards-check";
 import { exceptionsToApprove, parseRecord, scopeOf, STANDARDS_RECORD } from "../standards-record";
 import type { Trace } from "../trace";
 import { loopNow } from "./model";
 import { json, refuse } from "./routes";
 import { readConfig } from "./settings";
-import type { ChangeStandardsView, DraftCheck, DraftChecked, ExceptionRow, ScopeRow, StandardRow, StandardsView } from "./types";
+import type { ChangeStandardsView, DraftCheck, StandardForm, StandardsProblem, DraftChecked, ExceptionRow, ScopeRow, StandardRow, StandardsView } from "./types";
 
 /*
  * The standards routes' server side: Settings › Standards (`/api/standards`), a draft checked
@@ -71,12 +72,12 @@ function matchCount(s: Standard, tree: string[]): number | null {
 }
 
 /** The files a change's standards are judged by: what the merge gate recorded, else the plan's Files that change, else none known yet. */
-function judgedFiles(root: string, slug: string): { names: Map<string, Applying["why"]>; files: string[] } | { files: string[] } {
+function judgedFiles(root: string, slug: string): { names: Map<string, { why: Applying["why"]; files: string[] }>; files: string[] } | { files: string[] } {
   const marker = join(runDir(root, slug), APPLIED_MARKER);
   if (existsSync(marker)) {
     try {
-      const m = z.object({ applying: z.array(z.object({ name: z.string(), why: z.enum(["every", "files", "added"]) })) }).parse(JSON.parse(readFileSync(marker, "utf8")));
-      return { names: new Map(m.applying.map((a) => [a.name, a.why])), files: [] };
+      const m = z.object({ applying: z.array(z.object({ name: z.string(), why: z.enum(["every", "files", "added"]), files: z.array(z.string()).default([]) })) }).parse(JSON.parse(readFileSync(marker, "utf8")));
+      return { names: new Map(m.applying.map((a) => [a.name, { why: a.why, files: a.files }])), files: [] };
     } catch { /* not what the gate writes: as no marker */ }
   }
   const plan = join(root, "intent", slug, "plan.md");
@@ -93,7 +94,7 @@ function applyingTo(root: string, slug: string, standards: Standard[], record = 
   const scope: Scope = scopeOf(record);
   if ("names" in judged) {
     const marked = judged.names;
-    const out: Applying[] = standards.filter((s) => marked.has(s.name) && !scope.removed.includes(s.name)).map((standard) => ({ standard, why: marked.get(standard.name) ?? "files", files: [] }));
+    const out: Applying[] = standards.filter((s) => marked.has(s.name) && !scope.removed.includes(s.name)).map((standard) => ({ standard, why: marked.get(standard.name)?.why ?? "files", files: marked.get(standard.name)?.files ?? [] }));
     for (const a of applying(standards, [], { added: scope.added, removed: scope.removed })) if (a.why === "added" && !out.some((o) => o.standard.name === a.standard.name)) out.push(a);
     return out;
   }
@@ -110,6 +111,22 @@ async function inProgressBy(root: string, standards: Standard[]): Promise<Map<st
   for (const i of (await scanRepo(root)).intents) {
     if (!isOpen(i.file.frontmatter.status)) continue;
     for (const a of applyingTo(root, i.slug, standards)) out.set(a.standard.name, [...(out.get(a.standard.name) ?? []), i.slug]);
+  }
+  return out;
+}
+
+/** A sentence for each standard whose check runs a program this machine does not have. */
+function missingPrograms(standards: Standard[]): string[] {
+  return standards.flatMap((s) => (s.check ? [...new Set(programsIn(s.check))].filter((p) => !Bun.which(p)).map((p) => `The check of ${s.title} runs ${p}, which is not installed on this machine, so the check cannot run here.`) : []));
+}
+
+/** What cannot be read in the open changes' standards.md, each with its change. A standard no longer on main is one of them. */
+async function recordProblems(root: string, standards: Standard[]): Promise<string[]> {
+  const known = new Set(standards.map((s) => s.name));
+  const out: string[] = [];
+  for (const i of (await scanRepo(root)).intents) {
+    if (!isOpen(i.file.frontmatter.status)) continue;
+    out.push(...parseRecord(readText(join(root, "intent", i.slug, STANDARDS_RECORD)), known).problems.map((p) => `${i.slug}: ${p}`));
   }
   return out;
 }
@@ -132,7 +149,8 @@ export async function standardsView(root: string): Promise<StandardsView> {
       rules: s.rules.map((r) => ({ label: r.label, text: r.text })), inProgress: (busy.get(s.name) ?? []).sort(), text, version: fileVersion(text),
     };
   });
-  return { standards, problems: read.problems.map(problemText), ignored: [...read.ignored, ...folders], uncommitted };
+  const problems = [...read.problems.map(problemText), ...missingPrograms(read.standards), ...(await recordProblems(root, read.standards))];
+  return { standards, problems, ignored: [...read.ignored, ...folders], uncommitted };
 }
 
 /** The draft's name from a body, or why it is not one. */
@@ -153,7 +171,7 @@ function draftText(b: Record<string, unknown>): string | { error: string } {
 }
 
 /** main's other standards together with the draft, read as one set; the draft's own problems and, if it reads, its standard. */
-async function readDraft(m: { git: Git; commit: string }, name: string, text: string): Promise<{ problems: DraftCheck["problems"]; standard: Standard | null }> {
+async function readDraft(m: { git: Git; commit: string }, name: string, text: string): Promise<{ problems: StandardsProblem[]; standard: Standard | null }> {
   const path = `${STANDARDS_DIR}/${name}.md`;
   const { files } = await standardsFilesAt(m.git, m.commit);
   const read = parseStandards([...files.filter((f) => f.path !== path), { path, text }]);
@@ -170,7 +188,7 @@ export async function checkDraft(root: string, body: Record<string, unknown>): P
   if ("problem" in m) return refuse(m.problem);
   const draft = await readDraft(m, name, text);
   const tree = draft.standard?.appliesTo ? await treeOf(m.git, m.commit) : [];
-  const matches = (draft.standard?.appliesTo ?? []).map((pattern) => {
+  const matches: DraftCheck["matches"] = (draft.standard?.appliesTo ?? []).map((pattern) => {
     const glob = new Bun.Glob(pattern);
     const hit = tree.filter((f) => glob.match(f));
     return { pattern, count: hit.length, sample: hit.slice(0, SAMPLES) };
@@ -192,12 +210,13 @@ export async function tryCheck(root: string, body: Record<string, unknown>): Pro
   const m = await onMain(root);
   if ("problem" in m) return refuse(m.problem);
   let standard: Standard | null;
-  if (body.text === undefined) {
+  if (body.text === undefined && body.form === undefined) {
     standard = (await readStandards(m.git, m.commit)).standards.find((s) => s.name === name) ?? null;
     if (!standard) return refuse(`There is no standard called ${name} on main.`, 404);
   } else {
-    if (typeof body.text !== "string" || body.text.length > MAX_TEXT) return refuse("Send the standard's text.", 400);
-    const draft = await readDraft(m, name, body.text);
+    const text = draftText(body);
+    if (typeof text !== "string") return refuse(text.error, 400);
+    const draft = await readDraft(m, name, text);
     standard = draft.standard;
     if (!standard) return refuse(draft.problems.map(problemText).join(" ") || `${name} cannot be read.`);
   }
@@ -209,18 +228,28 @@ export async function tryCheck(root: string, body: Record<string, unknown>): Pro
   }
 }
 
+/** The standards on main now; none when main cannot be read. */
+async function mainStandards(root: string): Promise<Standard[]> {
+  const m = await onMain(root);
+  return "problem" in m ? [] : (await readStandards(m.git, m.commit)).standards;
+}
+
 /** `GET /api/standards/exceptions`: what people decided about standards across the changes, newest first. */
 export async function exceptionsView(root: string): Promise<{ exceptions: ExceptionRow[]; scope: ScopeRow[] }> {
+  // A rule's standard, as main has it; a label or name main no longer has is shown alone.
+  const standards = await mainStandards(root);
+  const ofLabel = new Map(standards.flatMap((s) => s.rules.map((r) => [r.label, s] as const)));
+  const byName = new Map(standards.map((s) => [s.name, s]));
   const exceptions: ExceptionRow[] = [];
   const scope: ScopeRow[] = [];
   for (const i of (await scanRepo(root)).intents) {
     const text = readText(join(root, "intent", i.slug, STANDARDS_RECORD));
     if (text === null) continue;
     const r = parseRecord(text);
-    const title = i.file.title || i.slug;
-    for (const e of r.exceptions) exceptions.push({ label: e.label, title, slug: i.slug, reason: e.reason, by: e.by, via: e.via, date: e.date, gate: e.gate });
+    const change = i.file.title || i.slug;
+    for (const e of r.exceptions) exceptions.push({ label: e.label, title: ofLabel.get(e.label)?.title ?? "", standard: ofLabel.get(e.label)?.name ?? "", change, slug: i.slug, reason: e.reason, by: e.by, via: e.via, date: e.date, gate: e.gate });
     for (const [action, list] of [["added", r.added], ["removed", r.removed]] as const) {
-      for (const d of list) scope.push({ name: d.name, slug: i.slug, action, note: d.note, by: d.by, via: d.via, date: d.date });
+      for (const d of list) scope.push({ name: d.name, title: byName.get(d.name)?.title ?? "", change, slug: i.slug, action, note: d.note, by: d.by, via: d.via, date: d.date });
     }
   }
   const newest = <T extends { date: string; slug: string }>(a: T, b: T) => b.date.localeCompare(a.date) || a.slug.localeCompare(b.slug);
@@ -250,10 +279,10 @@ export async function scopeAction(root: string, body: Record<string, unknown>): 
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-const WHY: Record<Applying["why"], (a: Applying) => string> = {
+const WHY: Record<Applying["why"], (a: Applying, by: string | undefined) => string> = {
   every: () => "It applies to every change.",
   files: (a) => (a.files.length ? `The change touches ${a.files.slice(0, 5).join(", ")}${a.files.length > 5 ? " and more" : ""}.` : "The change's files match its patterns."),
-  added: () => "A person added it to this change.",
+  added: (_a, by) => (by ? `Added by ${by}.` : "A person added it to this change."),
 };
 
 /** A line of review.md's "Findings against the standards": `- important · SEC-3 · src/pay.ts:42: text`. */
@@ -299,7 +328,7 @@ export async function changeStandards(root: string, trace: Trace, slug: string):
     applying: list.map((a) => {
       const row = gates.filter((g) => g.gate === "merge" && g.check === `check:${a.standard.name}`).at(-1);
       return {
-        name: a.standard.name, title: a.standard.title, why: WHY[a.why](a),
+        name: a.standard.name, title: a.standard.title, why: WHY[a.why](a, record.added.find((d) => d.name === a.standard.name)?.by),
         rules: a.standard.rules.map((r) => ({
           label: r.label, text: r.text, ...(inSpec.has(r.label) ? { spec: inSpec.get(r.label) } : {}), ...(inPlan.has(r.label) ? { plan: inPlan.get(r.label) } : {}),
           findings: found.get(r.label) ?? [], ...(results.has(r.label) ? { result: results.get(r.label) } : {}),
