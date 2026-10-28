@@ -971,15 +971,30 @@ export async function preflight(root: string, env: Record<string, string | undef
   if (uncommitted.length) {
     return `These Loopstra files are not committed on ${cfg.main_branch} yet, so the loop's own checkouts would not see them: ${uncommitted.join(", ")}. Commit them, then start again.`;
   }
-  const mainCommit = await git.commitOf(cfg.main_branch);
-  const unreadable = mainCommit ? (await readStandards(git, mainCommit)).problems : [];
-  if (unreadable.length) return standardsStopText(unreadable);
   if (await git.remoteName()) {
     const gh = new GitHub(root);
     if (!(await gh.available())) return "This repo has a remote but gh was not found. Install GitHub CLI or remove the remote.";
     if (!(await gh.signedIn())) return "GitHub CLI is installed but not signed in. Run gh auth login, then start again.";
   }
   return null;
+}
+
+/**
+ * What `start` warns of before the loop begins, without refusing: a standard on main that cannot be
+ * read (the sentence each tick pauses with). The loop still starts, because it is what applies a
+ * fix sent from the console; its ticks keep requests working and start no step until main reads.
+ * Null when the standards read, or when main or the config cannot be read (the loop reports that).
+ */
+export async function startWarning(root: string): Promise<string | null> {
+  try {
+    const cfg = await loadConfig(root);
+    const git = new Git(root);
+    const mainCommit = await git.commitOf(cfg.main_branch);
+    return mainCommit ? standardsStopText((await readStandards(git, mainCommit)).problems) : null;
+  } catch (e) {
+    if (e instanceof StopRequested) throw e;
+    return null;
+  }
 }
 
 /** Waits up to `ms`, or until a stop is requested or `until` settles. Leaves no timer behind. */

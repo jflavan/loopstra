@@ -5,7 +5,7 @@ import { Git } from "../../src/git";
 import { readIntent } from "../../src/intents";
 import { fileVersion } from "../../src/settings";
 import { CONSOLE, submitRequest } from "../../src/requests";
-import { preflight, tick } from "../../src/scheduler";
+import { preflight, startWarning, tick } from "../../src/scheduler";
 import { resetStop } from "../../src/stop";
 import { setupRepo } from "../helpers";
 
@@ -63,13 +63,16 @@ describe("standards that cannot be read stop the loop", () => {
     }
   }, 60_000);
 
-  test("start refuses with the same sentence", async () => {
+  test("start does not refuse: it warns with the same sentence, since the loop is what applies the console's fix", async () => {
     const { repo, trace } = await setupRepo("accepted");
     try {
       await commitStandard(repo.path, BAD);
-      const refusal = await preflight(repo.path, { ...process.env, PATH: process.env.PATH });
-      expect(refusal).toContain(SENTENCE);
-      expect(refusal).toEndWith(" Fix it on main and commit; until then no change moves on.");
+      expect(await preflight(repo.path, { ...process.env, PATH: process.env.PATH })).toBeNull();
+      const warning = await startWarning(repo.path);
+      expect(warning).toContain(SENTENCE);
+      expect(warning).toEndWith(" Fix it on main and commit; until then no change moves on.");
+      await commitStandard(repo.path, GOOD);
+      expect(await startWarning(repo.path)).toBeNull();
     } finally {
       trace.close();
       repo.cleanup();

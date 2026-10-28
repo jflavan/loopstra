@@ -142,10 +142,12 @@ async function main(): Promise<number> {
     case "start": {
       const a = args("start");
       if (!a) return 1;
-      const { log, preflight, start } = await import("./scheduler");
+      const { log, preflight, start, startWarning } = await import("./scheduler");
       const pending = notice();
       const refusal = await preflight(root);
       if (refusal) { console.error(refusal); return 1; }
+      const warning = await startWarning(root);
+      if (warning) console.error(`warning: ${warning}`);
       // Printed whenever it arrives, as a line of the loop's output: a slow registry never holds up the loop.
       printNotice(pending, log).catch(() => {});
       // Two starts at once both pass the preflight; only one gets the loop's lock.
