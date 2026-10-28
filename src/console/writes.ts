@@ -17,8 +17,8 @@ import { decode, fromPage, json, jsonWrite, ownSite, plain, refuse } from "./rou
 const MAX_NOTE = 4_000;
 const MAX_REASON = 300;
 /** Every request kind on a change: not chat's written intents, nor a change of a setting. */
-type Kind = Exclude<RequestKind, "new" | "settings" | "agent-files">;
-const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new" && k !== "settings" && k !== "agent-files");
+type Kind = Exclude<RequestKind, "new" | "settings" | "agent-files" | "standards-scope">;
+const KINDS: readonly string[] = REQUEST_KINDS.filter((k) => k !== "new" && k !== "settings" && k !== "agent-files" && k !== "standards-scope");
 
 /**
  * The console's writes: requests for the loop (`/api/requests`, with GET and DELETE of one by id)

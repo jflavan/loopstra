@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync }
 import { join } from "node:path";
 import { anythingToApply, applyingRequests, cancelRequest, claimedRequests, claimRequest, CONSOLE, drainOld, finishRequest, pendingRequests, pruneResults, requestState, requestsDir, submitRequest, waitingResults, waitingIds } from "../../src/requests";
 import { wakeStamp } from "../../src/wake";
+import { CHANGE_ACTIONS } from "../../src/actions";
+import { ProposedAction } from "../../src/chat/schemas";
 import { tempDir } from "../helpers";
 
 const by = { by: "u1", byName: "Ana", via: "the dashboard", transport: CONSOLE, thread: "" };
@@ -287,6 +289,29 @@ describe("request files", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+describe("standards-scope requests", () => {
+  test("is a request with an action, a standard and a note (which defaults to none)", () => {
+    const t = tempDir();
+    try {
+      const q = submitRequest(t.path, { ...by, kind: "standards-scope", slug: "a", expect: "building", action: "add", name: "payments", note: "why" });
+      expect(pendingRequests(t.path)[0]).toMatchObject({ id: q.id, kind: "standards-scope", action: "add", name: "payments", note: "why" });
+      const raw = { ...q, id: "x" };
+      writeFileSync(join(requestsDir(t.path), `${q.id}.json`), JSON.stringify({ ...raw, id: q.id, note: undefined }));
+      expect(pendingRequests(t.path)[0]).toMatchObject({ kind: "standards-scope", note: "" });
+      writeFileSync(join(requestsDir(t.path), `${q.id}.json`), JSON.stringify({ ...q, action: "swap" }));
+      expect(pendingRequests(t.path)).toEqual([]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("chat never proposes it: not in its actions, and a proposed action of that kind does not parse", () => {
+    expect((CHANGE_ACTIONS as readonly string[]).includes("standards-scope")).toBe(false);
+    expect(ProposedAction.safeParse({ kind: "standards-scope", slug: "a", note: "", priority: null }).success).toBe(false);
+    expect(ProposedAction.safeParse({ kind: "hold", slug: "a", note: "", priority: null }).success).toBe(true);
   });
 });
 

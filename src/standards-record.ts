@@ -168,3 +168,45 @@ export function approvedRecord(slug: string, text: string | null, gate: Gate, bu
   const last = headings[headings.length - 1] ?? "";
   return SECTIONS.exceptions.test(last.trimEnd()) ? `${body}${lines}\n` : `${body}\n## Exceptions approved\n${lines}\n`;
 }
+
+/** What a person decided about one standard for one change: add it or remove it, with a note. */
+export type ScopeAction = "add" | "remove";
+
+/** True when the record already says it: an added standard is in Added and not Removed, a removed one in Removed and not Added (the latest decision wins). */
+export function scopeStands(r: ChangeStandards, action: ScopeAction, name: string): boolean {
+  const [same, other] = action === "add" ? [r.added, r.removed] : [r.removed, r.added];
+  return same.some((d) => d.name === name) && !other.some((d) => d.name === name);
+}
+
+/** True when the record has the opposite decision about `name`, which a new decision takes back. */
+export function scopeReverses(r: ChangeStandards, action: ScopeAction, name: string): boolean {
+  return (action === "add" ? r.removed : r.added).some((d) => d.name === name);
+}
+
+/**
+ * The record's file once `who` has added `name` to the change or removed it, on `date` (YYYY-MM-DD):
+ * the decision's line in Added or Removed, and the opposite decision about the same standard taken
+ * out (the latest wins). Who and where are written so they read back (see tailSafe). A record that
+ * reads is written again whole; one with lines that do not read (a person's) keeps them as they are.
+ */
+export function scopedRecord(slug: string, text: string | null, action: ScopeAction, name: string, note: string, who: Approver, date: string): string {
+  const r = parseRecord(text);
+  // A decision line needs a note to read back, and adding needs none: "no note" stands in.
+  const made: Decision = { name, note: oneLine(note) || "no note", by: tailSafe(who.by), via: tailSafe(who.via), date };
+  const key = action === "add" ? "added" : "removed";
+  const other = action === "add" ? "removed" : "added";
+  if (!r.problems.length || text === null) {
+    const next = { ...r, [key]: [...r[key].filter((d) => d.name !== name), made], [other]: r[other].filter((d) => d.name !== name) };
+    return renderRecord(slug, next) ?? "";
+  }
+  const opposite = (line: string) => parseRecord(`## ${other === "added" ? "Added" : "Removed"}\n${line}`)[other].some((d) => d.name === name);
+  const lines = text.replace(/\s*$/, "\n").split(/(?<=\n)/).filter((l) => !opposite(l));
+  const heading = key === "added" ? "## Added" : "## Removed";
+  const at = lines.findIndex((l) => (key === "added" ? SECTIONS.added : SECTIONS.removed).test(l.trimEnd()));
+  const line = `${decision(made)}\n`;
+  if (at < 0) return `${lines.join("")}\n${heading}\n${line}`;
+  let end = at + 1;
+  while (end < lines.length && !/^#{1,2}\s/.test(lines[end]!)) end++;
+  while (end > at + 1 && !lines[end - 1]!.trim()) end--;
+  return [...lines.slice(0, end), line, ...lines.slice(end)].join("");
+}

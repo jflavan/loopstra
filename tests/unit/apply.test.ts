@@ -18,7 +18,8 @@ import { chatRepo, INTENT } from "../chat-helpers";
 import { until } from "../console-helpers";
 import { lastCommit, run } from "../helpers";
 import { localDate } from "../../src/text";
-import { exceptionsToApprove, parseRecord } from "../../src/standards-record";
+import { exceptionsToApprove, parseRecord, scopeOf } from "../../src/standards-record";
+import { applying, readStandards } from "../../src/standards";
 
 const by = { by: "u1", byName: "John", via: "the dashboard", transport: CONSOLE, thread: "" };
 /** A person on every gate, so approve and send back are theirs to give. */
@@ -1530,6 +1531,191 @@ describe("the applier", () => {
       expect((await readIntent(r.root, "a")).file.frontmatter.hold).not.toBe("");
     } finally {
       trace.close();
+      r.cleanup();
+    }
+  });
+});
+
+describe("standards-scope", () => {
+  const PAY = "---\napplies_to: [\"services/**\"]\n---\n# Payments data\n\n## Rules\n- PAY-1: card numbers are never stored\n";
+  const ARCH = "# Service architecture\n\n## Rules\n- ARCH-1: services call each other through the gateway\n";
+  const scope = (more: Record<string, unknown>) => ({ ...by, kind: "standards-scope" as const, slug: "a", expect: "building" as const, action: "add" as const, name: "payments", note: "", ...more }) as Submission;
+  const recordOf = (root: string) => join(root, "intent", "a", "standards.md");
+
+  async function repoWith(status = "building") {
+    const r = await chatRepo({ intents: { a: INTENT(status, "x") } });
+    mkdirSync(join(r.root, "loopstra", "standards"), { recursive: true });
+    await Bun.write(join(r.root, "loopstra", "standards", "payments.md"), PAY);
+    await Bun.write(join(r.root, "loopstra", "standards", "architecture.md"), ARCH);
+    await new Git(r.root).commitAll("standards");
+    return r;
+  }
+
+  test("adding writes ## Added with the note, in one record that says who and where", async () => {
+    const r = await repoWith();
+    try {
+      const q = submitRequest(r.root, scope({ note: "card data passes (through) the shared lib" }));
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: true, status: "building" });
+      const text = readFileSync(recordOf(r.root), "utf8");
+      expect([`# Standards decisions for a\n\n## Added\n- payments: card data passes (through) the shared lib (John, from the console, ${localDate()})\n`]).toContain(text);
+      expect(parseRecord(text).problems).toEqual([]);
+      const shown = (await run(["git", "show", "--stat", "--format=%s", "HEAD"], r.root)).out;
+      expect(shown).toContain("loopstra(a): standard payments added by John from the dashboard");
+      expect(shown).toContain("intent/a/standards.md");
+      const trace = Trace.open(r.root);
+      expect(trace.gates("a").map((g) => `${g.gate}:${g.check}:${g.result}:${g.evidence}`)).toEqual(["standards:standards-scope:pass:payments added by John: card data passes (through) the shared lib"]);
+      trace.close();
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("adding with no note writes a line that reads back", async () => {
+    const r = await repoWith();
+    try {
+      submitRequest(r.root, scope({}));
+      await apply(r.root);
+      const record = parseRecord(readFileSync(recordOf(r.root), "utf8"));
+      expect(record.problems).toEqual([]);
+      expect(record.added.map((d) => [d.name, d.note])).toEqual([["payments", "no note"]]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("removing needs a note: without one it is refused in words and nothing is written", async () => {
+    const r = await repoWith();
+    try {
+      const head = (await run(["git", "rev-parse", "HEAD"], r.root)).out;
+      const q = submitRequest(r.root, scope({ action: "remove", name: "architecture", note: "  " }));
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "Say why this standard does not apply to this change." });
+      expect(existsSync(recordOf(r.root))).toBe(false);
+      expect((await run(["git", "rev-parse", "HEAD"], r.root)).out).toBe(head);
+      const ok = submitRequest(r.root, scope({ action: "remove", name: "architecture", note: "prototype behind a flag" }));
+      await apply(r.root);
+      expect(requestState(r.root, ok.id)).toMatchObject({ ok: true });
+      expect(readFileSync(recordOf(r.root), "utf8")).toContain("## Removed\n- architecture: prototype behind a flag (John, from the console, ");
+      expect(await lastCommit(r.root)).toContain("standard architecture removed by John from the dashboard");
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a standard main does not have is refused", async () => {
+    const r = await repoWith();
+    try {
+      const q = submitRequest(r.root, scope({ name: "nope" }));
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: "There is no standard called nope on main." });
+      expect(existsSync(recordOf(r.root))).toBe(false);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("adding one already added, or removing one already removed, changes nothing and says so", async () => {
+    const r = await repoWith();
+    try {
+      submitRequest(r.root, scope({}));
+      submitRequest(r.root, scope({ action: "remove", name: "architecture", note: "flag" }));
+      await apply(r.root);
+      const head = (await run(["git", "rev-parse", "HEAD"], r.root)).out;
+      const again = submitRequest(r.root, scope({ note: "again" }));
+      const gone = submitRequest(r.root, scope({ action: "remove", name: "architecture", note: "again" }));
+      await apply(r.root);
+      expect(requestState(r.root, again.id)).toMatchObject({ ok: true, text: "payments is added already for a; nothing changed." });
+      expect(requestState(r.root, gone.id)).toMatchObject({ ok: true, text: "architecture is removed already for a; nothing changed." });
+      expect((await run(["git", "rev-parse", "HEAD"], r.root)).out).toBe(head);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("the latest decision wins: adding a removed standard takes its Removed line away, and the other way round", async () => {
+    const r = await repoWith();
+    try {
+      submitRequest(r.root, scope({ action: "remove", name: "payments", note: "no card data here" }));
+      await apply(r.root);
+      expect(parseRecord(readFileSync(recordOf(r.root), "utf8")).removed.map((d) => d.name)).toEqual(["payments"]);
+      const q = submitRequest(r.root, scope({ note: "it does now" }));
+      await apply(r.root);
+      expect(requestState(r.root, q.id)).toMatchObject({ text: expect.stringContaining("The earlier decision to have it removed is taken back.") });
+      let record = parseRecord(readFileSync(recordOf(r.root), "utf8"));
+      expect([record.added.map((d) => d.name), record.removed]).toEqual([["payments"], []]);
+      submitRequest(r.root, scope({ action: "remove", note: "after all, no" }));
+      await apply(r.root);
+      record = parseRecord(readFileSync(recordOf(r.root), "utf8"));
+      expect([record.added, record.removed.map((d) => d.name)]).toEqual([[], ["payments"]]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a record with a line that does not read keeps it and still gets the decision", async () => {
+    const r = await repoWith();
+    try {
+      await Bun.write(recordOf(r.root), "# Standards decisions for a\n\n## Removed\n- payments: no cards (M., from the console, 2026-10-27)\n\nsome prose\n\n## Exceptions approved\n- ARCH-1 at the plan: legacy (M., from the console, 2026-10-27)\n");
+      await new Git(r.root).commitAll("record");
+      submitRequest(r.root, scope({ note: "cards again" }));
+      await apply(r.root);
+      const text = readFileSync(recordOf(r.root), "utf8");
+      expect(text).toContain("some prose");
+      expect(text).not.toContain("## Removed\n- payments");
+      const record = parseRecord(text);
+      expect(record.added.map((d) => d.name)).toEqual(["payments"]);
+      expect(record.exceptions.map((e) => e.label)).toEqual(["ARCH-1"]);
+      expect(record.problems.length).toBe(1);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a change that is done or closed is refused, and nothing is written", async () => {
+    for (const status of ["done", "closed"]) {
+      const r = await repoWith(status);
+      try {
+        const q = submitRequest(r.root, scope({ expect: status }));
+        await apply(r.root);
+        expect(requestState(r.root, q.id)).toMatchObject({ ok: false, text: `a is ${status}; nothing changed.` });
+        expect(existsSync(recordOf(r.root))).toBe(false);
+      } finally {
+        r.cleanup();
+      }
+    }
+  });
+
+  test("the next step's set of standards reflects the change (the file stageStandards reads)", async () => {
+    const r = await repoWith();
+    try {
+      const names = async () => {
+        const git = new Git(r.root);
+        const read = await readStandards(git, (await git.commitOf("main"))!);
+        const rec = existsSync(recordOf(r.root)) ? readFileSync(recordOf(r.root), "utf8") : null;
+        return applying(read.standards, ["docs/readme.md"], scopeOf(parseRecord(rec))).map((a) => a.standard.name);
+      };
+      expect(await names()).toEqual(["architecture"]);
+      submitRequest(r.root, scope({}));
+      submitRequest(r.root, scope({ action: "remove", name: "architecture", note: "flag" }));
+      await apply(r.root);
+      expect(await names()).toEqual(["payments"]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a request landed before the loop was killed is finished as applied, not refused or written twice", async () => {
+    const r = await repoWith();
+    try {
+      const q = submitRequest(r.root, scope({}));
+      await apply(r.root);
+      const head = (await run(["git", "rev-parse", "HEAD"], r.root)).out;
+      claimRequest(r.root, q.id);
+      saveApplying(r.root, { ...q, tries: 1 });
+      await apply(r.root);
+      expect((await run(["git", "rev-parse", "HEAD"], r.root)).out).toBe(head);
+    } finally {
       r.cleanup();
     }
   });

@@ -16,13 +16,14 @@ import { answerQuestion, readQuestion } from "./questions";
 import { Trace } from "./trace";
 import { CHAT_SLUG } from "./chat/agents";
 import { localDate, oneLine } from "./text";
-import { addedApprovals, approvedRecord, exceptionsToApprove, parseRecord, revokedRecord, STANDARDS_RECORD, type ApprovedException } from "./standards-record";
+import { addedApprovals, approvedRecord, exceptionsToApprove, parseRecord, revokedRecord, scopedRecord, scopeReverses, scopeStands, STANDARDS_RECORD, type ApprovedException } from "./standards-record";
 import { readStandards } from "./standards";
 import { checkedPath, repoPath } from "./agent-library";
 import { applySetting, CONFIG_REL, configVersion, fileVersion, settingPath, settingProblem, SETTINGS_SLUG, settingText, STALE_SETTINGS, UNCOMMITTED_FILES } from "./settings";
 
 type StatusRequest = Extract<Request, { kind: "approve" | "send-back" | "retry" | "close" | "undo" }>;
 type FieldRequest = Extract<Request, { kind: "priority" | "hold" | "release" }>;
+type ScopeRequest = Extract<Request, { kind: "standards-scope" }>;
 type AnswerRequest = Extract<Request, { kind: "answer" }>;
 type SettingsRequest = Extract<Request, { kind: "settings" }>;
 type AgentFilesRequest = Extract<Request, { kind: "agent-files" }>;
@@ -293,6 +294,7 @@ function applyOne(root: string, cfg: Config, trace: Trace, req: Request, lastTry
     case "new": return applyNew(root, cfg.main_branch, trace, req, lastTry);
     case "priority": case "hold": case "release": return applyField(root, cfg, trace, req);
     case "answer": return applyAnswer(root, cfg, trace, req, lastTry);
+    case "standards-scope": return applyStandardsScope(root, cfg, trace, req);
     case "settings": return applySettings(root, cfg, trace, req);
     case "agent-files": return applyAgentFiles(root, cfg, trace, req);
     default: return applyStatus(root, cfg, trace, req, lastTry);
@@ -530,13 +532,13 @@ function traced(trace: Trace, slug: string, req: { id: string; kind: string; tra
 }
 
 /** A request refused at `status` (traced so), with `text` as its result. */
-function refuse(trace: Trace, req: StatusRequest | FieldRequest | AnswerRequest, status: Status, text: string, more: Record<string, unknown> = {}): Outcome {
+function refuse(trace: Trace, req: StatusRequest | FieldRequest | AnswerRequest | ScopeRequest, status: Status, text: string, more: Record<string, unknown> = {}): Outcome {
   traced(trace, req.slug, req, "refused", { status, ...more });
   return { ok: false, status, text };
 }
 
 /** A field or answer request's change while it is open; else the refusal that ends the request. */
-async function openChange(root: string, trace: Trace, req: FieldRequest | AnswerRequest): Promise<{ fm: Frontmatter } | { refused: Outcome }> {
+async function openChange(root: string, trace: Trace, req: FieldRequest | AnswerRequest | ScopeRequest): Promise<{ fm: Frontmatter } | { refused: Outcome }> {
   const found = await current(root, req.slug);
   if ("problem" in found) { traced(trace, req.slug, req, "missing"); return { refused: { ok: false, status: null, text: found.problem } }; }
   const fm = found.intent.file.frontmatter;
@@ -783,4 +785,53 @@ async function applyAnswer(root: string, cfg: Config, trace: Trace, req: AnswerR
     () => { answerQuestion(root, req.slug, { text, by: req.byName, via: req.via }); });
   traced(trace, req.slug, req, "applied", { status: fm.status, what: doneWords(shape) });
   return { ok: true, status: fm.status, text: resultText(shape, req.slug, fm.status) + after };
+}
+
+/**
+ * Adds a standard to one change or removes it from it, on any open change whatever its status now
+ * (it applies from the next step). One record, "standard <name> added|removed by <who> from <where>",
+ * writing the decision into the change's standards.md and taking back the opposite one about the same
+ * standard (the latest wins). Refused: a change that is not open, a standard main does not have, a
+ * removal without its note. A decision the record already holds changes nothing and says so.
+ */
+async function applyStandardsScope(root: string, cfg: Config, trace: Trace, req: ScopeRequest): Promise<Outcome> {
+  const change = await openChange(root, trace, req);
+  if ("refused" in change) return change.refused;
+  const { fm } = change;
+  const name = req.name.trim();
+  const words = req.action === "add" ? "added" : "removed";
+  // Its record landed in a pass the loop was killed in: finished as applied, not looked at again.
+  const done = await doneBefore(root, cfg.main_branch, req, req.slug);
+  const git = new Git(root);
+  const commit = await git.commitOf(cfg.main_branch);
+  if (!done && !(commit && (await readStandards(git, commit)).standards.some((s) => s.name === name))) {
+    return refuse(trace, req, fm.status, `There is no standard called ${name} on main.`);
+  }
+  const note = req.note.trim();
+  if (!done && req.action === "remove" && !note) return refuse(trace, req, fm.status, "Say why this standard does not apply to this change.");
+  const rel = `intent/${req.slug}/${STANDARDS_RECORD}`;
+  let reversed = false;
+  let unchanged = false;
+  if (!done) {
+    await commitRecord(root, cfg.main_branch, req.slug, `standard ${name} ${words} by ${byWhom(req)}`, async (draft) => {
+      const text = draft.read(rel);
+      const record = parseRecord(text);
+      if (scopeStands(record, req.action, name)) { unchanged = true; return false; }
+      reversed = scopeReverses(record, req.action, name);
+      const who = { by: oneLine(req.byName, 80), via: req.transport === CONSOLE ? "the console" : oneLine(req.via, 40) };
+      draft.write(rel, scopedRecord(req.slug, text, req.action, name, note, who, localDate()));
+      return true;
+    }, { request: req.id, trace });
+  }
+  if (unchanged) {
+    traced(trace, req.slug, req, "unchanged", { status: fm.status, standard: name, action: req.action });
+    return { ok: true, status: fm.status, text: `${name} is ${words} already for ${req.slug}; nothing changed.` };
+  }
+  trace.gate(req.slug, "standards", "standards-scope", "pass", `${name} ${words} by ${oneLine(req.byName, 80)}${note ? `: ${oneLine(note, 200)}` : ""}`);
+  traced(trace, req.slug, req, "applied", { status: fm.status, standard: name, action: req.action, what: `standard ${name} ${words}` });
+  const back = reversed ? ` The earlier decision to have it ${req.action === "add" ? "removed" : "added"} is taken back.` : "";
+  const text = req.action === "add"
+    ? `${name} is added to ${req.slug}: it applies from the next step on.${back}`
+    : `${name} is removed from ${req.slug}: it no longer applies from the next step on.${back}`;
+  return { ok: true, status: fm.status, text };
 }
