@@ -78,6 +78,14 @@ describe("GitHub", () => {
       expect(await approvedWith("", [member, { author: { login: "cat" }, authorAssociation: "MEMBER", state: "COMMENTED" }])).toBe(true);
       // Without authorAssociation, any approval but the pull request's author's own counts.
       expect(await approvedWith("", [{ author: { login: "ann" }, state: "APPROVED" }])).toBe(true);
+      // When the newest approval that counts was given (an approval from before a conflict resolution approved other code).
+      const approvedAtWith = async (latestReviews: object[]) => {
+        await approvedWith("", latestReviews);
+        return (await gh.prForBranch("intent/x"))?.approvedAt;
+      };
+      expect(await approvedAtWith([{ ...member, submittedAt: "2026-10-01T10:00:00Z" }, { ...member, author: { login: "bob" }, submittedAt: "2026-10-02T10:00:00Z" }])).toBe("2026-10-02T10:00:00Z");
+      expect(await approvedAtWith([{ ...member, submittedAt: "2026-10-01T10:00:00Z" }, { ...member, authorAssociation: "NONE", submittedAt: "2026-10-03T10:00:00Z" }])).toBe("2026-10-01T10:00:00Z");
+      expect(await approvedAtWith([member])).toBeNull();
       expect(await approvedWith("", [{ author: { login: "loopstra-bot" }, state: "APPROVED" }])).toBe(false);
       // When GitHub decides, its decision stands.
       expect(await approvedWith("REVIEW_REQUIRED", [member])).toBe(false);

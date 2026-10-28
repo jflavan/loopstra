@@ -10,7 +10,7 @@ test("every step's default is today's model", () => {
   const got = Object.fromEntries(STEP_KEYS.map((k) => [k, stepModel(DEFAULTS, k)]));
   expect(got).toEqual({
     intake: "cheap", design: "strong", "spec-check": "strong", plan: "strong", "plan-challenge": "strong",
-    build: "default", reconcile: "default", fix: "default", review: "strong", revise: "default",
+    build: "default", reconcile: "default", fix: "default", review: "strong", revise: "default", resolve: "strong",
     verify: "default", "done-check": "strong", lessons: "cheap", orchestrator: "default", "write-intent": "strong",
   });
 });

@@ -1,14 +1,24 @@
-import { block, clearMarker, writeArtifact, type StepContext, type StepResult } from "../context";
+import { block, clearMarker, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import { Git } from "../git";
 import { modelFor } from "../config";
 import { passes, runJudge } from "../judges";
-import { phasePrompt } from "../phases";
 import { testLoop } from "./build";
-import { reviewPhase, takeEarlyReview } from "./early-review";
+import { catchUp, outOfDate, RESOLUTION, roundsAllowed } from "./catch-up";
+import { reviewPhase, reviewPrompt, takeEarlyReview } from "./early-review";
 import { artifacts, bullets, buildSession, KEEP_UNFINISHED, openBranchWorktree, readRound, REVIEW_ROUND, runHookCommands, saveWork, writeRound } from "./shared";
 
 /** The review rounds ended with a review that had no important findings (and the after commands ran). */
 export const REVIEW_PASSED = "review-passed";
+
+/**
+ * Brings the branch up to date with main (see catchUp), and runs the test loop on a resolution, so
+ * whoever reviews it next reads tested code. A failure to block with.
+ */
+export async function catchUpTested(ctx: StepContext): Promise<{ ok: true } | Failure> {
+  const up = await catchUp(ctx);
+  if (!up.ok) return up;
+  return up.outcome === "resolved" ? testLoop(ctx, "resolve-test") : { ok: true };
+}
 
 /**
  * Stage 5 review rounds, run by the merge step for reviewing (see runMergeStep): review, and on
@@ -16,7 +26,6 @@ export const REVIEW_PASSED = "review-passed";
  * The round in progress is kept in the run folder, so a restart continues it.
  */
 export async function runReviewRounds(ctx: StepContext): Promise<StepResult | typeof REVIEW_PASSED> {
-  const stage = ctx.cfg.stages.review;
   const wt = new Git(ctx.worktreeDir);
 
   // The change must be on its branch, in a real worktree, before anyone reviews it.
@@ -34,6 +43,13 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
 
   const resumed = readRound(ctx);
   if (resumed === null) {
+    // Main gained code since the build: the review reads the change on top of it. A conflict is
+    // resolved, and tested before anyone reviews it. Records alone leave the branch (and the early
+    // review kept for its commit) as they are; the merge checks bring those in.
+    if (await outOfDate(ctx.git, ctx.cfg.main_branch, ctx.branch)) {
+      const up = await catchUpTested(ctx);
+      if (!up.ok) return block(ctx, up.note, up);
+    }
     const before = await runHookCommands(ctx, "before", "review", ctx.worktreeDir);
     if (!before.ok) return before;
   }
@@ -42,7 +58,7 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
   for (let round = resumed ?? 1; ; round++) {
     writeRound(ctx, round);
     const phase = await reviewPhase(ctx, round, a.spec, a.currentPlan);
-    const prompt = await phasePrompt(ctx, phase);
+    const prompt = await reviewPrompt(ctx, phase);
     const review = (await takeEarlyReview(ctx, phase, prompt)) ?? await runJudge(ctx, phase, { prompt });
     if (!review.ok) return block(ctx, review.note);
     // review.md, the gate row and the findings all come from the review that decided.
@@ -57,11 +73,13 @@ export async function runReviewRounds(ctx: StepContext): Promise<StepResult | ty
     ctx.trace.gate(ctx.slug, "review", "findings", pass ? "pass" : "fail", summary);
 
     if (pass) {
+      // Seen: a later review is not shown it again.
+      clearMarker(ctx, RESOLUTION);
       const after = await runHookCommands(ctx, "after", "review", ctx.worktreeDir);
       return after.ok ? REVIEW_PASSED : after;
     }
 
-    if (round > stage.max_rounds) {
+    if (round > roundsAllowed(ctx)) {
       clearMarker(ctx, REVIEW_ROUND);
       return block(ctx, "The reviewer still found important problems after the change was revised. The details are in review.md. An engineer needs to look at the change.", { detail: { rounds: round, important } });
     }

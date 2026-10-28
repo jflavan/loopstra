@@ -5,7 +5,8 @@ import { agentPhase, alongside, codePhase, mayOverlap, phasePrompt, projectComma
 import { EARLY_REVIEW, keepEarlyReview, reviewAhead } from "./early-review";
 import { errorText, type CommandResult } from "../shell";
 import { StopRequested } from "../stop";
-import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
+import { RESOLUTION, RESOLUTIONS, RESOLVED_AT } from "./catch-up";
+import { artifacts, bullets, buildSession, MERGING, PR_LEASE, PR_NUMBER, PR_PUSHING, PR_WAIT, RECONCILED_PLAN, REMOTE_AHEAD, restoreCatchUp, REVIEW_ROUND, runHookCommands, saveWork, TESTED, testedMarker, testResult } from "./shared";
 
 /** Stage 3 build half plus Stage 4. Called for plan-approved and building. Ends at reviewing or blocked. */
 export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
@@ -18,12 +19,17 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
   clearMarker(ctx, PR_LEASE); // nor tied to what was pushed for it (a person may have deleted that branch on GitHub)
   clearMarker(ctx, PR_PUSHING); // nor an earlier build's push that was cut short
   writeMarker(ctx, PR_NUMBER, ""); // nor an earlier build's pull request, closed or merged (see ownPr)
+  clearMarker(ctx, RESOLUTIONS); // a new build gets its own conflict resolutions
+  clearMarker(ctx, RESOLUTION); // and no reviewer is shown an earlier build's
+  clearMarker(ctx, RESOLVED_AT); // nor does an earlier build's resolution ask for a fresh approval
 
   const branch = await codePhase(ctx, "branch", async () => {
     // Branches and worktrees take no lock (see Git.run): another change's commits and checkouts go on meanwhile.
     if (!(await ctx.git.branchExists(ctx.branch))) await ctx.git.createBranch(ctx.branch, ctx.cfg.main_branch);
     // Never trust a leftover directory: a plain folder here would send commits to the main checkout.
     await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
+    // A conflict resolution an earlier step left part-way is undone before anything builds on it.
+    await restoreCatchUp(ctx);
     if (ctx.cfg.commands.install) {
       const r = await projectCommand(ctx, ctx.cfg.commands.install, ctx.worktreeDir);
       if (r.code !== 0) throw new Error(`install failed: ${r.lastLine}`);

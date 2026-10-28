@@ -76,7 +76,7 @@ export async function runMainHealth(root: string, cfg: Config, trace: Trace, aft
   const git = new Git(root);
   const dir = join(loopstraDir(root), "health", "main");
   // Traced on the loop; the commands get no change's slug.
-  const on = { trace, cfg, slug: "_loop" };
+  const on = { root, trace, cfg, slug: "_loop" };
   let result: HealthResult;
   let output: string;
   try {

@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { block, clearMarker, clearSession, loadSessions, readArtifact, readMarker, saveSession, writeMarker, type Failure, type StepContext, type StepResult } from "../context";
 import { Envelopes, type Envelope, type PhaseName } from "../envelopes";
-import { Git, passOn } from "../git";
-import { onCheckout, slotEnv } from "../lanes";
+import { Git, NO_AUTO_MAINTENANCE, passOn } from "../git";
+import { onCheckout } from "../lanes";
+import { changeEnv } from "../resources";
 import { agentPhase, codePhase, projectCommand, type AgentPhaseResult, type AgentPhaseSpec } from "../phases";
 import { WATCHING_PR, type Intent, type Status } from "../intents";
 import { runDir } from "../paths";
@@ -21,7 +22,7 @@ export async function runHookCommands(ctx: StepContext, which: "before" | "after
   let timedOut = false;
   const runAll = async () => {
     for (const cmd of cmds) {
-      const res = await projectCommand(ctx, cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage, ...slotEnv(ctx.slug) } });
+      const res = await projectCommand(ctx, cmd, cwd, { env: { LOOPSTRA_SLUG: ctx.slug, LOOPSTRA_STAGE: stage, ...(await changeEnv(ctx)) } });
       if (res.code !== 0) { timedOut = res.timedOut; throw new Error(`\`${cmd}\` failed: ${res.lastLine || `exit ${res.code}`}`); }
     }
     return { ok: true as const };
@@ -241,8 +242,34 @@ export function writeRound(ctx: StepContext, round: number): void {
 }
 
 /**
- * Makes sure the intent branch exists and has its own worktree checked out on it. Returns a
- * failure for the caller to record; it never blocks by itself.
+ * Run-folder marker: the branch's head before a conflict resolution squashed it onto main (see
+ * catchUp), until the resolution is saved. While it is here, the branch is mid-resolution, and
+ * restoreCatchUp puts it back.
+ */
+export const CATCHING_UP = "catching-up";
+
+/**
+ * Puts the branch back where it was before a conflict resolution that did not finish (CATCHING_UP),
+ * with the files the resolution left removed, and clears the marker. The worktree was clean when
+ * the resolution started, so nothing of anyone's is lost. Runs even after a stop request.
+ */
+export async function restoreCatchUp(ctx: StepContext): Promise<void> {
+  const old = readMarker(ctx, CATCHING_UP)?.trim();
+  if (old === undefined) return;
+  if (old) {
+    const wt = new Git(ctx.worktreeDir);
+    await wt.run(["merge", "--abort"], { allowFail: true, cleanup: true });
+    await wt.run([...NO_AUTO_MAINTENANCE, "reset", "-q", "--hard", old], { cleanup: true });
+    await wt.run(["clean", "-f", "-d", "-q"], { allowFail: true, cleanup: true });
+    ctx.trace.event(ctx.slug, "command", { command: "catch up", note: "a conflict resolution that did not finish was undone; the branch is back where it was", head: old });
+  }
+  clearMarker(ctx, CATCHING_UP);
+}
+
+/**
+ * Makes sure the intent branch exists and has its own worktree checked out on it, and puts back a
+ * conflict resolution that did not finish (see restoreCatchUp). Returns a failure for the caller
+ * to record; it never blocks by itself.
  */
 export async function openBranchWorktree(ctx: StepContext): Promise<{ ok: true } | Failure> {
   if (!(await ctx.git.branchExists(ctx.branch))) {
@@ -251,6 +278,7 @@ export async function openBranchWorktree(ctx: StepContext): Promise<{ ok: true }
   try {
     await ctx.git.ensureWorktree(ctx.worktreeDir, ctx.branch);
     await new Git(ctx.worktreeDir).assertBranch(ctx.branch);
+    await restoreCatchUp(ctx);
   } catch (e) {
     passOn(e);
     return { ok: false, note: "The workspace for this change could not be prepared. An engineer needs to look at it.", detail: errorText(e) };
