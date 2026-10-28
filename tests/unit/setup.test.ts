@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parse } from "yaml";
@@ -12,7 +12,8 @@ import { gates } from "../../src/setup/sections/gates";
 import { github } from "../../src/setup/sections/github";
 import { models } from "../../src/setup/sections/models";
 import type { Check, Section, SetupContext } from "../../src/setup/types";
-import { tempDir } from "../helpers";
+import { Git } from "../../src/git";
+import { setEnv, tempDir, tempGitRepo, writeTestStamp } from "../helpers";
 import { configRepo } from "../setup-helpers";
 
 function io(...answers: string[]) {
@@ -399,5 +400,86 @@ describe("the setup command line", () => {
     const help = setupHelp([fake({ name: "one" }), fake({ name: "three" })]);
     expect(help).toBe(`${SETUP_USAGE}\n\nSections:\n  one    The one section\n  three  The three section\n`);
     expect(setupHelp()).toContain("  github    GitHub and merging\n");
+  });
+});
+
+describe("setup --check and the standards", () => {
+  const rule = "## Rules\n- SEC-1: No secrets.\n";
+  async function standardsRepo(files: Record<string, string>) {
+    const repo = await tempGitRepo();
+    mkdirSync(join(repo.path, "loopstra", "standards"), { recursive: true });
+    writeFileSync(join(repo.path, "loopstra", "config.yaml"), CONFIG);
+    writeTestStamp(repo.path);
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(repo.path, "loopstra", "standards", name), text);
+    await new Git(repo.path).commitAll("standards");
+    return repo;
+  }
+  const check = async (root: string, sections: Section[] = []) => {
+    const o = io();
+    const code = await setup(root, { output: o.output, check: true, sections });
+    return { code, text: o.text() };
+  };
+
+  test("an unreadable standard is listed under To fix and the exit code is 1, with no section named", async () => {
+    const repo = await standardsRepo({ "broken.md": "no title\n" });
+    try {
+      const r = await check(repo.path);
+      expect(r.code).toBe(1);
+      expect(r.text).toContain("FAIL  loopstra/standards/broken.md cannot be read");
+      expect(r.text).toContain("To fix: 2 items above.");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a check that fails on main warns with the sentence, and suggests the base-aware form for gitleaks", async () => {
+    const bin = tempDir();
+    writeFileSync(join(bin.path, "gitleaks"), "#!/bin/sh\necho leaked >&2\nexit 1\n");
+    chmodSync(join(bin.path, "gitleaks"), 0o755);
+    const restore = setEnv({ PATH: `${bin.path}:${process.env.PATH ?? ""}` });
+    const repo = await standardsRepo({ "secrets.md": `---\ncheck: gitleaks detect\n---\n# Secrets\n\n${rule}` });
+    try {
+      const r = await check(repo.path);
+      expect(r.code).toBe(0);
+      expect(r.text).toContain("warn  The check of Secrets fails on main already, so every change under it would fail it too. Use a form that looks only at what a change adds (with $LOOPSTRA_BASE), or fix main first.");
+      expect(r.text).toContain('gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"');
+    } finally { restore(); bin.cleanup(); repo.cleanup(); }
+  });
+
+  test("a check that passes on main is ok, and one already using LOOPSTRA_BASE gets no suggestion", async () => {
+    const repo = await standardsRepo({
+      "a.md": `---\ncheck: bun -e "process.exit(0)"\n---\n# Alpha\n\n${rule}`,
+      "b.md": `---\ncheck: 'bun -e "process.exit(process.env.LOOPSTRA_BASE ? 1 : 0)" # semgrep'\n---\n# Beta\n\n## Rules\n- B-1: x.\n`,
+    });
+    try {
+      const r = await check(repo.path);
+      expect(r.text).toContain("ok    The check of Alpha passes on main.");
+      expect(r.text).toContain("warn  The check of Beta fails on main already");
+      expect(r.text).not.toContain("baseline-commit");
+    } finally { repo.cleanup(); }
+  });
+
+  test("a check that names a missing program warns about it", async () => {
+    const repo = await standardsRepo({ "s.md": `---\ncheck: no-such-scanner-xyz --go\n---\n# Scan\n\n${rule}` });
+    try {
+      const r = await check(repo.path);
+      expect(r.text).toContain("warn  The check of Scan names `no-such-scanner-xyz`, which is not installed or not on PATH.");
+      expect(r.text).not.toContain("fails on main already");
+    } finally { repo.cleanup(); }
+  });
+
+  test("standards over 40 KB give a warning", async () => {
+    const repo = await standardsRepo({ "big.md": `# Big\n\n${"filler ".repeat(7000)}\n\n${rule}` });
+    try {
+      const r = await check(repo.path);
+      expect(r.code).toBe(0);
+      expect(r.text).toMatch(/warn  The standards together are .* KB, over 40 KB/);
+    } finally { repo.cleanup(); }
+  });
+
+  test("a repository without standards, or without git, adds no line", async () => {
+    const r = configRepo(CONFIG);
+    try {
+      const out = await check(r.root, [fake()]);
+      expect(out.text).toBe("loopstra/config.yaml loads.\n");
+    } finally { r.cleanup(); }
   });
 });

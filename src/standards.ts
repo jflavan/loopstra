@@ -334,6 +334,16 @@ export function standardsBytes(r: StandardsRead): number {
   return r.standards.reduce((n, s) => n + Buffer.byteLength(s.body), 0);
 }
 
+/** More standards text than this (40 KB) gets a warning. */
+const SIZE_WARNING_BYTES = 40 * 1024;
+
+/** The warning for standards over 40 KB together, or null. A warning, not a limit: a team with large standards can scope them. */
+export function standardsSizeWarning(r: StandardsRead): string | null {
+  const bytes = standardsBytes(r);
+  if (bytes <= SIZE_WARNING_BYTES) return null;
+  return `The standards together are ${Math.round(bytes / 1024)} KB, over 40 KB. Every standard that applies goes into every prompt that uses them whole, so scope some with applies_to or shorten them.`;
+}
+
 /** One rule's line in an outcome's Standards section. `result` is met, unmet, needs-person, exception or not-checked; `evidence` is the reason for an exception. */
 export interface OutcomeLine { label: string; title: string; result: string; evidence: string }
 

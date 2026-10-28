@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { configPath } from "../../src/config";
 import { init } from "../../src/init";
-import { commands, missingProgram, programsIn } from "../../src/setup/sections/commands";
+import { commands } from "../../src/setup/sections/commands";
+import { missingProgram, programsIn } from "../../src/shell";
 import { setupRepo, tempGitRepo } from "../helpers";
 import { askSection, checkSection, configRepo } from "../setup-helpers";
 

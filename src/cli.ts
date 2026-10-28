@@ -20,6 +20,7 @@ const HELP = `loopstra <command>
             Ctrl-C once finishes gracefully, twice exits at once
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
+  standards the team's engineering rules read from main, and what is wrong with them
   judges    how often the cheaper judges agreed with the strong ones
   retro     how the loop did lately, and what to change (--days <n>, default 7)
   ui        the console: live agents, inbox, changes and chat (--port <n>, default 4646; --no-chat)
@@ -34,12 +35,13 @@ const HELP = `loopstra <command>
 `;
 
 /** The words each command takes (see parseArgs); the usage line is said when they do not fit. */
-const ARGS: Record<"init" | "status" | "start" | "tail" | "judges" | "retro" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
+const ARGS: Record<"init" | "status" | "start" | "tail" | "judges" | "standards" | "retro" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
   init: { usage: "Usage: loopstra init" },
   status: { usage: "Usage: loopstra status" },
   start: { usage: "Usage: loopstra start [--once]", flags: ["--once"] },
   tail: { usage: "Usage: loopstra tail [slug]", names: 1 },
   judges: { usage: "Usage: loopstra judges" },
+  standards: { usage: "Usage: loopstra standards" },
   retro: { usage: "Usage: loopstra retro [--days <number>]", days: true },
   ui: { usage: "Usage: loopstra ui [--port <number>] [--no-chat]", flags: ["--no-chat"], port: true },
   chat: { usage: "Usage: loopstra chat [--no-terminal]", flags: ["--no-terminal"] },
@@ -55,7 +57,7 @@ function args(command: keyof typeof ARGS): Args | null {
   return parsed;
 }
 
-/** status, tail, judges, retro, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, judges, standards, retro, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
@@ -157,6 +159,15 @@ async function main(): Promise<number> {
       const { tail } = await import("./commands/tail");
       await tail(root, a.names[0]);
       return 0;
+    }
+    case "standards": {
+      if (!args("standards") || !setUp()) return 1;
+      const { renderStandardsList } = await import("./commands/standards");
+      const { loadConfig } = await import("./config");
+      try {
+        process.stdout.write(await renderStandardsList(root, await loadConfig(root)));
+        return 0;
+      } catch (e) { console.error(errorText(e)); return 1; }
     }
     case "judges": {
       if (!args("judges") || !setUp()) return 1;

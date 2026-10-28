@@ -14,7 +14,7 @@ describe("the command line outside a set-up repo", () => {
   test("status, tail, ui, judges, retro, upgrade, and customize say the folder is not set up, and create nothing", async () => {
     const t = tempDir();
     try {
-      for (const cmd of ["status", "tail", "ui", "judges", "retro", "upgrade", "customize"]) {
+      for (const cmd of ["status", "tail", "ui", "judges", "standards", "retro", "upgrade", "customize"]) {
         const r = await run([process.execPath, CLI, cmd], t.path);
         expect({ cmd, code: r.code, said: (r.out + r.err).trim() }).toEqual({ cmd, code: 1, said: NOT_SET_UP });
       }
