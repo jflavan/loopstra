@@ -63,6 +63,8 @@ A finished change also gets `lessons.md`, notes for the engineers; you can leave
 
 `spec.md` is written partly for you: its Summary, Requirements, Out of scope, Open questions, and Areas of concern say in plain words what the change will do. Its Design and Affected code sections are for the engineers. `plan.md` is written for the engineers; you do not need to read it unless the note asks you to.
 
+Before a change is built, the system may write tests from your "Done when" list, and lists them in `acceptance.md`: each test under the item it checks, and the items no test can check (how people feel about something, say), with why. The build may not change these tests, so they hold it to what you asked, and the final check counts an item whose test passes as done. Write "Done when" items someone could check, and more of them can be tested. If `acceptance.md` says no tests were written, the change was built without them.
+
 When a change is finished, `outcome.md` may have a section called "For a person to confirm". These are things the system could not check for itself. They never hold the change up; look at them when you can.
 
 ## Template
