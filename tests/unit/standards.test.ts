@@ -185,6 +185,8 @@ describe("readStandards", () => {
       const file = join(repo.path, STANDARDS_DIR, "arch.md");
       await Bun.write(file, "# Arch\n\n## Rules\n- ARCH-1: committed\n");
       await Bun.write(join(repo.path, STANDARDS_DIR, "notes.txt"), "x");
+      mkdirSync(join(repo.path, STANDARDS_DIR, "sub"), { recursive: true });
+      await Bun.write(join(repo.path, STANDARDS_DIR, "sub", "x.md"), "# X\n");
       const git = new Git(repo.path);
       await git.commitAll("standards");
       await Bun.write(file, "# Arch\n\n## Rules\n- ARCH-1: edited\n");
@@ -192,9 +194,10 @@ describe("readStandards", () => {
       const r = await readStandards(git, sha);
       expect(r.problems).toEqual([]);
       expect(r.standards.map((s) => s.rules[0]?.text)).toEqual(["committed"]);
-      expect(r.ignored).toEqual([`${STANDARDS_DIR}/notes.txt`]);
+      expect(r.ignored.sort()).toEqual([`${STANDARDS_DIR}/notes.txt`, `${STANDARDS_DIR}/sub`]);
       const none = await readStandards(git, `${sha}~1`);
       expect(none).toEqual({ standards: [], problems: [], ignored: [] });
+      await expect(readStandards(git, "0".repeat(40))).rejects.toThrow();
     } finally { repo.cleanup(); }
   });
 });

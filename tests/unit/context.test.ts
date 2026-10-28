@@ -430,7 +430,9 @@ describe("StepContext standards", () => {
     await commitStandard(repo.path, "bad", "# Bad\n\n## Rules\n- no label here\n");
     ctx.snapshot = async () => { await ctx.standards(); return repo.path; };
     await expect(runStepGuarded(ctx)).rejects.toBeInstanceOf(StandardsUnreadable);
-    expect((await readIntent(repo.path, "add-numbers")).file.frontmatter.status).toBe("designing"); // the status the step set; not blocked
+    const after = (await readIntent(repo.path, "add-numbers")).file.frontmatter;
+    expect(after.status).toBe("designing"); // the status the step set itself; never blocked
+    expect(after.note ?? "").toBe(""); // no block note
     trace.close(); repo.cleanup();
   });
 

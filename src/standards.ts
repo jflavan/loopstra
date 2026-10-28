@@ -217,17 +217,19 @@ export function standardToForm(s: Standard): StandardForm {
 
 /** Reads the standards as they are in a commit: only what is committed, never the checkout's edits. None there gives an empty read. */
 export async function readStandards(git: Git, commit: string): Promise<StandardsRead> {
-  const listed = await git.run(["ls-tree", "-z", "--name-only", commit, "--", `${STANDARDS_DIR}/`], { allowFail: true });
-  const paths = listed.code === 0 ? listed.out.split("\0").filter(Boolean) : [];
+  // A missing folder lists nothing (exit 0); any failure is real and throws, so a step never runs on fewer rules than main has.
+  const listed = await git.run(["ls-tree", "-z", commit, "--", `${STANDARDS_DIR}/`]);
   const files: { path: string; text: string }[] = [];
-  const skipped: string[] = [];
-  for (const path of paths) {
-    const blob = await git.run(["cat-file", "blob", `${commit}:${path}`], { allowFail: true });
-    if (blob.code === 0) files.push({ path, text: blob.out });
-    else skipped.push(path); // a folder
+  const folders: string[] = [];
+  for (const entry of listed.out.split("\0").filter(Boolean)) {
+    const m = /^\d+ (\w+) \w+\t([\s\S]*)$/.exec(entry);
+    if (!m) throw new Error(`git ls-tree gave a line that does not read: ${entry}`);
+    const [type, path] = [m[1] ?? "", m[2] ?? ""];
+    if (type !== "blob") { folders.push(path); continue; }
+    files.push({ path, text: (await git.run(["cat-file", "blob", `${commit}:${path}`])).out });
   }
   const read = parseStandards(files);
-  read.ignored.push(...skipped);
+  read.ignored.push(...folders);
   return read;
 }
 
