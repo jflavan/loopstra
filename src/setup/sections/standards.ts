@@ -1,10 +1,11 @@
 import { Git } from "../../git";
 import { STANDARD_EXAMPLES } from "../../standard-examples";
-import { formToMarkdown, globProblem, parseStandards, problemText, RULE_LABEL, standardsFilesAt, STANDARD_NAME, STANDARDS_DIR, standardToForm, type StandardForm, type StandardsRead } from "../../standards";
+import { formToMarkdown, globProblem, parseStandard, parseStandards, problemText, RULE_LABEL, standardsFilesAt, STANDARD_NAME, STANDARDS_DIR, standardToForm, type StandardForm, type StandardsRead } from "../../standards";
 import { baseAware } from "../../standards-check";
 import { andList, printable } from "../../text";
-import { standardsChecks } from "../standards-checks";
-import type { Section, SetupContext } from "../types";
+import type { Config } from "../../config";
+import { standardsChecks, tryCheck } from "../standards-checks";
+import type { Check, Section, SetupContext } from "../types";
 
 /** The tool checks offered; the first one found on PATH is the suggestion. */
 const TOOLS: { program: string; command: string }[] = [
@@ -157,12 +158,14 @@ async function edit(run: Run): Promise<void> {
   if (!all.length) { ask.say("There are no standards to edit."); return; }
   const name = await ask.pick("Which standard to edit", all.map((s) => s.name), all[0]!.name);
   const current = all.find((s) => s.name === name)!;
-  stage(run, current.path, formToMarkdown(await askForm(run, standardToForm(current), false)));
+  const text = formToMarkdown(await askForm(run, standardToForm(current), false));
+  if (text !== run.files.get(current.path)) stage(run, current.path, text);
+  else ask.say("No changes to it.");
 }
 
 async function remove(run: Run): Promise<void> {
   const { ask } = run.ctx;
-  const names = [...run.files].filter(([, t]) => t !== null).map(([p]) => p.slice(STANDARDS_DIR.length + 1, -3)).filter((n) => STANDARD_NAME.test(n));
+  const names = [...run.files].filter(([p, t]) => t !== null && p.endsWith(".md")).map(([p]) => p.slice(STANDARDS_DIR.length + 1, -3)).filter((n) => STANDARD_NAME.test(n));
   if (!names.length) { ask.say("There are no standards to remove."); return; }
   const name = await ask.pick("Which standard to remove", names, names[0]!);
   stage(run, pathOf(name), null);
@@ -192,9 +195,33 @@ export const standards: Section = {
     if (!ctx.files.some((f) => f.path.startsWith(`${STANDARDS_DIR}/`))) return;
     // The whole resulting set must read, or nothing is saved.
     const result = read(run);
-    if (result.problems.length) throw new Error(`the standards would not read, so none were saved: ${andList(result.problems.map(problemText))}`);
+    if (result.problems.length) {
+      const before = new Set(first.problems.map((p) => p.path));
+      const old = [...new Set(result.problems.map((p) => p.path).filter((p) => before.has(p)))];
+      const first1 = old.length ? ` Fix or remove ${andList(old)} first: it cannot be read on ${mainName(ctx)} now.` : "";
+      throw new Error(`the standards would not read, so none were saved: ${andList(result.problems.map(problemText))}${first1}`);
+    }
     ctx.ask.say("Commit loopstra/standards/ on the main branch once it is written.");
   },
 
-  check: (ctx, cfg) => standardsChecks(ctx.root, cfg),
+  async check(ctx, cfg) {
+    return [...(await standardsChecks(ctx.root, cfg)), ...(await newChecks(ctx, cfg))];
+  },
 };
+
+/** The tool checks this run added or changed (not yet committed), tried on main like the committed ones. */
+async function newChecks(ctx: SetupContext, cfg: Config): Promise<Check[]> {
+  const last = new Map<string, string | null>();
+  for (const f of ctx.files) if (f.path.startsWith(`${STANDARDS_DIR}/`)) last.set(f.path, f.content);
+  if (!last.size) return [];
+  const committed = new Map((await load(ctx)).files.map((f) => [f.path, f.text]));
+  const before = new Map(parseStandards([...committed].map(([path, text]) => ({ path, text }))).standards.map((s) => [s.path, s.check]));
+  const tries: Promise<Check>[] = [];
+  for (const [path, text] of last) {
+    if (text === null) continue;
+    const name = path.slice(STANDARDS_DIR.length + 1, -3);
+    const r = parseStandard(name, text);
+    if (r.ok && r.standard.check && r.standard.check !== (before.get(path) ?? null)) tries.push(tryCheck(ctx.root, cfg, r.standard.title, r.standard.check));
+  }
+  return Promise.all(tries);
+}

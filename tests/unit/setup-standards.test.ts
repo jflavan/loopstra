@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { Writable } from "node:stream";
+import { loadConfig } from "../../src/config";
 import { Git } from "../../src/git";
+import { setup } from "../../src/setup";
+import { ConfigDocument } from "../../src/setup/document";
+import { DefaultsPrompt } from "../../src/setup/prompt";
 import { standards } from "../../src/setup/sections/standards";
 import { tempDir, tempGitRepo, withEnv, writeTestStamp } from "../helpers";
 import { askSection, checkSection } from "../setup-helpers";
@@ -119,5 +124,50 @@ describe("the standards section", () => {
     const checks = await checkSection(standards, root);
     const bad = checks.find((c) => c.level === "warn");
     expect(bad?.text).toContain("The check of Gate fails on main already");
+  });
+
+  test("full setup: yes carries on to the menu", async () => {
+    const root = await repo();
+    const r = await asked(root, ["y", "add", "", "security", "Security", "-", "n", "-", "SEC-1: Fine.", "", "done"], false);
+    expect(r.files).toEqual(["loopstra/standards/security.md"]);
+  });
+
+  test("a check typed in this run is tried on main without committing; an unchanged one is not tried again", async () => {
+    const root = await repo({ "ok.md": std("Fine", "- F-1: x.\n", '---\ncheck: bun -e "process.exit(0)"\n---\n') });
+    const files = [
+      { path: "loopstra/standards/ok.md", content: std("Fine", "- F-1: x.\n", '---\ncheck: bun -e "process.exit(0)"\n---\n') },
+      { path: "loopstra/standards/new.md", content: std("Newer", "- N-1: y.\n", '---\ncheck: bun -e "process.exit(3)"\n---\n') },
+    ];
+    const checks = await standards.check({ root, doc: ConfigDocument.load(root), ask: new DefaultsPrompt(() => {}), env: {}, files, only: false }, await loadConfig(root));
+    expect(checks.filter((c) => c.text.includes("The check of Newer fails on main already"))).toHaveLength(1);
+    expect(checks.filter((c) => c.text.includes("Fine"))).toHaveLength(1);
+    expect(existsSync(join(root, "loopstra", "standards", "new.md"))).toBe(false);
+  });
+
+  test("remove offers only .md names", async () => {
+    const root = await repo({ "arch.md": std("Architecture", "- ARCH-1: Use ports.\n"), "ab.ts": "x\n" });
+    const r = await asked(root, ["remove", "ab", "arch", "done"]);
+    expect(r.shown).toContain("Answer one of: arch.");
+    expect(r.files).toEqual(["loopstra/standards/arch.md"]);
+  });
+
+  test("an unreadable file on main is named when it blocks the save", async () => {
+    const root = await repo({ "broken.md": "no title\n" });
+    await expect(asked(root, ["add", "", "security", "Security", "-", "n", "-", "SEC-1: Fine.", "", "done"])).rejects.toThrow("Fix or remove loopstra/standards/broken.md first");
+  });
+
+  test("edit with no changes stages no write", async () => {
+    const root = await repo({ "arch.md": "# Architecture\n\n## Rules\n- ARCH-1: Use ports.\n" });
+    const r = await asked(root, ["edit", "arch", "", "", "", "", "", "", "done"]);
+    expect(r.files).toEqual([]);
+    expect(r.shown).toContain("No changes to it.");
+  });
+
+  test("--check with the section listed reports a committed check once", async () => {
+    const root = await repo({ "gate.md": std("Gate", "- G-1: x.\n", '---\ncheck: bun -e "process.exit(3)"\n---\n') });
+    let text = "";
+    const output = new Writable({ write(c, _e, d) { text += String(c); d(); } });
+    await setup(root, { output, check: true, sections: [standards] });
+    expect(text.split("The check of Gate fails on main already").length - 1).toBe(1);
   });
 });

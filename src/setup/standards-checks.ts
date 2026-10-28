@@ -23,7 +23,7 @@ export async function standardsChecks(root: string, cfg: Config): Promise<Check[
   return [...checks, ...tried];
 }
 
-async function tryCheck(root: string, cfg: Config, title: string, command: string): Promise<Check> {
+export async function tryCheck(root: string, cfg: Config, title: string, command: string): Promise<Check> {
   try {
     const r = await checkOnMain(root, cfg, command, title);
     if (r.ok) return { level: "ok", text: `The check of ${title} passes on ${cfg.main_branch}.` };
