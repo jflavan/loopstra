@@ -42,11 +42,24 @@ function occupy(port: number): Promise<void> {
   });
 }
 
-/** A range of ports nothing else is likely to use, a different one per test. */
-let nextFrom = 41000 + Math.floor(Math.random() * 500) * 20;
-function freshFrom(): number {
-  nextFrom += 400;
-  return nextFrom;
+/** True when the port can be bound on 127.0.0.1 now (Windows reserves some ranges outright: EACCES). */
+function bindable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = createServer();
+    s.once("error", () => resolve(false));
+    s.listen({ port, host: "127.0.0.1", exclusive: true }, () => s.close(() => resolve(true)));
+  });
+}
+
+/** The first of `count` ports in a row that all bind now, from a random start, so tests running at once rarely meet. */
+async function freshFrom(count = 16): Promise<number> {
+  for (let tries = 0; tries < 200; tries++) {
+    const from = 21000 + Math.floor(Math.random() * 900) * 20;
+    let all = true;
+    for (let p = from; p < from + count && all; p++) all = await bindable(p);
+    if (all) return from;
+  }
+  throw new Error("no free run of ports found");
 }
 
 describe("changeEnv", () => {
@@ -56,7 +69,7 @@ describe("changeEnv", () => {
 
   test("a claimed change gets its slot, its own temp folder and a block of ports; release removes the folder", async () => {
     const r = root();
-    const from = freshFrom();
+    const from = await freshFrom();
     const cfg = config({ ports_from: from, ports_per_change: 5 });
     claim("a");
     const env = await changeEnv({ root: r, cfg, slug: "a" });
@@ -76,7 +89,7 @@ describe("changeEnv", () => {
 
   test("two changes running at once never share ports, and a block with a busy port is passed over", async () => {
     const r = root();
-    const from = freshFrom();
+    const from = await freshFrom();
     const cfg = config({ ports_from: from, ports_per_change: 4 });
     // The second block has a port in use by something else.
     await occupy(from + 4 + 2);
