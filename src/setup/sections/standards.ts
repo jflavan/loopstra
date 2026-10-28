@@ -1,6 +1,6 @@
 import { Git } from "../../git";
 import { STANDARD_EXAMPLES } from "../../standard-examples";
-import { formToMarkdown, globProblem, parseStandard, parseStandards, problemText, RULE_LABEL, standardsFilesAt, STANDARD_NAME, STANDARDS_DIR, standardToForm, type StandardForm, type StandardsRead } from "../../standards";
+import { formKeeps, formToMarkdown, globProblem, parseStandard, parseStandards, problemText, RULE_LABEL, standardsFilesAt, STANDARD_NAME, STANDARDS_DIR, standardToForm, type StandardForm, type StandardsRead } from "../../standards";
 import { baseAware } from "../../standards-check";
 import { andList, printable } from "../../text";
 import type { Config } from "../../config";
@@ -158,8 +158,14 @@ async function edit(run: Run): Promise<void> {
   if (!all.length) { ask.say("There are no standards to edit."); return; }
   const name = await ask.pick("Which standard to edit", all.map((s) => s.name), all[0]!.name);
   const current = all.find((s) => s.name === name)!;
+  // The questions keep only the form's parts: a file with more is never rewritten by them.
+  if (!formKeeps(run.files.get(current.path) ?? "", current)) {
+    ask.say(`${current.path} has text these questions cannot keep, so it is left as it is. Edit it by hand, or in the console as Markdown.`);
+    return;
+  }
+  const before = formToMarkdown(standardToForm(current));
   const text = formToMarkdown(await askForm(run, standardToForm(current), false));
-  if (text !== run.files.get(current.path)) stage(run, current.path, text);
+  if (text !== before) stage(run, current.path, text);
   else ask.say("No changes to it.");
 }
 

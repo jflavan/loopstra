@@ -100,7 +100,7 @@ describe("the standards section", () => {
   });
 
   test("edit removes a rule and rewords another", async () => {
-    const root = await repo({ "arch.md": std("Architecture", "- ARCH-1: Use ports.\n- ARCH-2: Use repos.\n- ARCH-3: Keep ADRs.\n", "---\nneeds_person: false\n---\n") });
+    const root = await repo({ "arch.md": std("Architecture", "- ARCH-1: Use ports.\n- ARCH-2: Use repos.\n- ARCH-3: Keep ADRs.\n") });
     const r = await asked(root, ["edit", "arch", "", "", "", "", "ARCH-2, ARCH-3", "ARCH-3: Keep ADRs in docs/adr/.", "", "done"]);
     expect(r.files).toEqual(["loopstra/standards/arch.md"]);
     expect(onDisk(root, "arch")).toBe("# Architecture\n\n## Rules\n- ARCH-1: Use ports.\n- ARCH-3: Keep ADRs in docs/adr/.\n");
@@ -161,6 +161,34 @@ describe("the standards section", () => {
     const r = await asked(root, ["edit", "arch", "", "", "", "", "", "", "done"]);
     expect(r.files).toEqual([]);
     expect(r.shown).toContain("No changes to it.");
+  });
+
+  const KEEP = "has text these questions cannot keep, so it is left as it is. Edit it by hand, or in the console as Markdown.";
+
+  test("edit leaves a file with text the questions cannot keep untouched, and says so", async () => {
+    const text = "# Architecture\n\n## Rules\n- ARCH-1: Use ports.\n\n## Examples\nA port is an interface.\n";
+    const root = await repo({ "arch.md": text });
+    const r = await asked(root, ["edit", "arch", "done"]);
+    expect(r.shown).toContain(`loopstra/standards/arch.md ${KEEP}`);
+    expect(r.shown).not.toContain("Title");
+    expect(r.files).toEqual([]);
+    expect(onDisk(root, "arch")).toBe(text);
+  });
+
+  test("edit with no changes to a file written the form's way stages nothing, CRLF included", async () => {
+    const root = await repo({ "arch.md": '---\napplies_to: ["services/**"]\n---\n# Architecture\r\n\r\nWhy.\r\n\r\n## Rules\r\n- ARCH-1: Use ports.\r\n'.replace(/(?<!\r)\n/g, "\r\n") });
+    const r = await asked(root, ["edit", "arch", "", "", "", "", "", "", "done"]);
+    expect(r.files).toEqual([]);
+    expect(r.shown).toContain("No changes to it.");
+  });
+
+  test("front matter written another way than the form's (a block list) is text the form would rewrite: the file is left untouched", async () => {
+    const text = "---\napplies_to:\n  - services/**\n---\n# Architecture\n\n## Rules\n- ARCH-1: Use ports.\n";
+    const root = await repo({ "arch.md": text });
+    const r = await asked(root, ["edit", "arch", "done"]);
+    expect(r.shown).toContain(`loopstra/standards/arch.md ${KEEP}`);
+    expect(r.files).toEqual([]);
+    expect(onDisk(root, "arch")).toBe(text);
   });
 
   test("--check with the section listed reports a committed check once", async () => {

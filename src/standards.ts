@@ -224,6 +224,17 @@ export function standardToForm(s: Standard): StandardForm {
   };
 }
 
+/**
+ * Whether the form keeps a standard's file whole: the form read from it writes the same text back,
+ * line endings and the file's end aside. When it does not (text before the title, a section after
+ * the rules, front matter written another way), editing it as a form would rewrite it, so setup
+ * leaves it to be edited by hand. The console's page makes the same decision (opensAsMarkdown).
+ */
+export function formKeeps(text: string, s: Standard): boolean {
+  const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
+  return norm(text) === norm(formToMarkdown(standardToForm(s)));
+}
+
 /** The files in the standards folder as they are in a commit (only what is committed), and the folders found there. */
 export async function standardsFilesAt(git: Git, commit: string): Promise<{ files: { path: string; text: string }[]; folders: string[] }> {
   // A missing folder lists nothing (exit 0); any failure is real and throws, so a step never runs on fewer rules than main has.
