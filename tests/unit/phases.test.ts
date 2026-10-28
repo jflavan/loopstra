@@ -323,10 +323,18 @@ describe("agentPhase failures", () => {
     claim(ctx.slug);
     try {
       await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "build", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
-      expect((await Bun.file(argsFile).json()).env.LOOPSTRA_SLOT).toBe("0");
+      const built = (await Bun.file(argsFile).json()).env;
+      expect(built.LOOPSTRA_SLOT).toBe("0");
+      // The change's own temp folder and ports reach it too (see src/resources.ts).
+      expect(built.TMPDIR).toBe(join(repo.path, ".loopstra", "tmp", ctx.slug));
+      expect(Number(built.LOOPSTRA_PORT_BASE)).toBeGreaterThanOrEqual(20000);
       await agentPhase(ctx, { name: "intake", model: "cheap", permissionMode: "default", tools: "read", vars: {}, env: { LOOPSTRA_FAKE_ARGS: argsFile } });
-      expect((await Bun.file(argsFile).json()).env.LOOPSTRA_SLOT).toBeNull();
+      const read = (await Bun.file(argsFile).json()).env;
+      expect(read.LOOPSTRA_SLOT).toBeNull();
+      expect(read.LOOPSTRA_PORT_BASE).toBeNull();
       expect((await projectCommand(ctx, printSlot, repo.path)).lastLine).toBe("slot=0");
+      const printTemp = `bun -e "console.log('tmp=' + process.env.TMPDIR + ' ports=' + process.env.LOOPSTRA_PORT_BASE)"`;
+      expect((await projectCommand(ctx, printTemp, repo.path)).lastLine).toBe(`tmp=${join(repo.path, ".loopstra", "tmp", ctx.slug)} ports=${built.LOOPSTRA_PORT_BASE}`);
     } finally {
       release(ctx.slug);
     }

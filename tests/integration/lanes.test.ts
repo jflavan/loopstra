@@ -10,7 +10,7 @@ import { PROBE_AFTER, tick } from "../../src/scheduler";
 import { requestStop, resetStop } from "../../src/stop";
 import { Trace } from "../../src/trace";
 import { fixture, TEMPLATES, tempDir, withEnv } from "../helpers";
-import { lanesRepo, statusOf, inTrace, expirePause, payloadOf, numbered, phaseEndId, mergeOrder, holdSession, traceShows, statusShows } from "./lanes-helpers";
+import { lanesRepo, resolveFixture, statusOf, inTrace, expirePause, payloadOf, numbered, phaseEndId, mergeOrder, holdSession, traceShows, statusShows } from "./lanes-helpers";
 
 afterEach(() => resetStop());
 
@@ -70,11 +70,11 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 120_000);
 
-  test("two builds running at once get different slots, so their commands can pick their own ports", async () => {
+  test("two builds running at once get different slots, ports and temp folders", async () => {
     const out = tempDir("loopstra-slots-");
     const script = join(out.path, "slot.ts").replaceAll("\\", "/");
     const log = join(out.path, "slots.log").replaceAll("\\", "/");
-    writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2]!, process.env.LOOPSTRA_SLUG + " " + process.env.LOOPSTRA_SLOT + "\\n");\n`);
+    writeFileSync(script, `import { appendFileSync } from "node:fs";\nappendFileSync(process.argv[2]!, [process.env.LOOPSTRA_SLUG, process.env.LOOPSTRA_SLOT, process.env.LOOPSTRA_PORT_BASE, process.env.TMPDIR].join("\\t") + "\\n");\n`);
     const r = await lanesRepo(2, [{ slug: "alpha", status: "plan-approved" }, { slug: "beta", status: "plan-approved" }],
       `stages:\n  build:\n    before:\n      - 'bun "${script}" "${log}"'\n`);
     // alpha's step holds at its verifier until beta's build has started: the two run at once.
@@ -87,8 +87,12 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       expect(await statusOf(r.path, "alpha")).toBe("reviewing");
       expect(await statusOf(r.path, "beta")).toBe("reviewing");
     });
-    const slots = (await Bun.file(log).text()).trim().split("\n").map((l) => l.split(" ")[1]).sort();
-    expect(slots).toEqual(["0", "1"]);
+    const lines = (await Bun.file(log).text()).trim().split("\n").map((l) => l.split("\t"));
+    expect(lines.map((l) => l[1]).sort()).toEqual(["0", "1"]);
+    // Ten ports each, no overlap, and each its own temp folder.
+    const ports = lines.map((l) => Number(l[2])).sort((a, b) => a - b);
+    expect(ports[1]! - ports[0]!).toBeGreaterThanOrEqual(10);
+    expect(new Set(lines.map((l) => l[3])).size).toBe(2);
     r.cleanup();
     out.cleanup();
   }, 120_000);
@@ -322,12 +326,38 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
     r.cleanup();
   }, 180_000);
 
-  test("two changes that clash: the first merges, the second is blocked as out of date, and main keeps only the first", async () => {
+  test("two changes that clash: the first merges, and the second's conflict is resolved, tested and reviewed before it merges too", async () => {
+    // As below, beta's plan lists no files: the same-file wait would otherwise keep the two apart.
+    const r = await lanesRepo(2, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) }, planFiles: null },
+    ], "", { "src/shared.ts": numbered() });
+    // Whichever merges second resolves line 1 to keep both.
+    for (const slug of ["alpha", "beta"]) resolveFixture(r.fixtures, slug, { "src/shared.ts": numbered({ 1: "alpha and beta" }) });
+    await withEnv(r.env, async () => {
+      for (let i = 0; i < 4 && ((await statusOf(r.path, "alpha")) !== "merged" || (await statusOf(r.path, "beta")) !== "merged"); i++) await tick(r.path);
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      expect(await statusOf(r.path, "beta")).toBe("merged");
+      expect((await new Git(r.path).run(["show", "main:src/shared.ts"])).out).toBe(numbered({ 1: "alpha and beta" }));
+      inTrace(r.path, (trace) => {
+        const [, second] = mergeOrder(trace, ["alpha", "beta"]) as [string, string];
+        const names = trace.phases(second).map((p) => p.name);
+        // Resolved, then tested, then reviewed again, all before it merged.
+        expect(names.indexOf("resolve")).toBeGreaterThan(-1);
+        expect(names.indexOf("merge-test-1")).toBeGreaterThan(names.indexOf("resolve"));
+        expect(names.lastIndexOf("review-2")).toBeGreaterThan(names.indexOf("merge-test-1"));
+      });
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("two changes that clash and cannot be resolved: the first merges, the second is blocked as out of date, and main keeps only the first", async () => {
     // As above, beta's plan lists no files: the same-file wait would otherwise keep the two apart.
     const r = await lanesRepo(2, [
       { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
       { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) }, planFiles: null },
     ], "", { "src/shared.ts": numbered() });
+    for (const slug of ["alpha", "beta"]) resolveFixture(r.fixtures, slug, {}, false);
     await withEnv(r.env, async () => {
       await tick(r.path);
       await tick(r.path);
@@ -338,7 +368,35 @@ describe("more than one change at a time (speed.max_parallel_changes)", () => {
       expect((await readIntent(r.path, second)).file.frontmatter.note).toMatch(/^The change overlaps with other recent changes/);
       const git = new Git(r.path);
       expect((await git.run(["show", "main:src/shared.ts"])).out).toBe(numbered({ 1: first }));
+      expect((await git.run(["show", `main:intent/${second}/conflict.md`])).out).toContain("the two changes want different things");
       expect((await git.run(["status", "--porcelain"])).out.trim()).toMatch(/^(M intent\/queue\.md)?$/);
+    });
+    r.cleanup();
+  }, 180_000);
+
+  test("without a remote, a change waiting for a person that another change's merge conflicts with is brought up to date and reviewed again", async () => {
+    const r = await lanesRepo(2, [
+      { slug: "alpha", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "alpha" }) } },
+      { slug: "beta", status: "plan-approved", writes: { "src/shared.ts": numbered({ 1: "beta" }) }, planFiles: null },
+    ], "gates:\n  merge:\n    human: status\n", { "src/shared.ts": numbered() });
+    for (const slug of ["alpha", "beta"]) resolveFixture(r.fixtures, slug, { "src/shared.ts": numbered({ 1: "alpha and beta" }) });
+    await withEnv(r.env, async () => {
+      await tick(r.path); // both build
+      await tick(r.path); // both are reviewed and wait for a person
+      expect(await statusOf(r.path, "alpha")).toBe("merge-review");
+      expect(await statusOf(r.path, "beta")).toBe("merge-review");
+      // A person lets alpha in.
+      const alpha = await readIntent(r.path, "alpha");
+      await Bun.write(join(alpha.dir, "intent.md"), (await Bun.file(join(alpha.dir, "intent.md")).text()).replace("status: merge-review", "status: merge-approved"));
+      await new Git(r.path).commitAll("person: merge-approved");
+      await tick(r.path); // alpha merges
+      expect(await statusOf(r.path, "alpha")).toBe("merged");
+      await tick(r.path); // beta no longer merges cleanly: resolved, tested, back to review
+      expect(await statusOf(r.path, "beta")).toBe("reviewing");
+      expect((await readIntent(r.path, "beta")).file.frontmatter.note).toMatch(/^Other work merged into main meanwhile conflicted/);
+      await tick(r.path); // reviewed again, and back with the person
+      expect(await statusOf(r.path, "beta")).toBe("merge-review");
+      expect((await new Git(r.path).run(["show", "intent/beta:src/shared.ts"])).out).toBe(numbered({ 1: "alpha and beta" }));
     });
     r.cleanup();
   }, 180_000);

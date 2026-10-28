@@ -19,6 +19,54 @@ import { SLUG, BRANCH, PLAN, remoteSetup, intentOf, elsewhere, headOn, onRemoteM
 afterEach(() => resetStop());
 
 describe("the loop with a GitHub remote", () => {
+  test("a pull request waiting for approval that main conflicts with is resolved, reviewed and pushed again, and only a newer approval merges it", async () => {
+    const s = await remoteSetup("gates:\n  merge:\n    human: pr\n");
+    const fixtures = tempDir("loopstra-fixtures-");
+    const resolved = "// added on main by a person\nexport const ZERO = 0;\nexport function add(a: number, b: number): number {\n  return a + b;\n}\n";
+    writeFileSync(join(fixtures.path, "resolve.jsonl"), [
+      { type: "system", subtype: "init", session_id: "fake-resolve", cwd: "/", tools: [], model: "fake" },
+      { type: "fake_action", write: { path: "src/add.ts", content: resolved } },
+      { type: "result", subtype: "success", is_error: false, session_id: "fake-resolve", total_cost_usd: 0.1, usage: {}, result: "ok", structured_output: { status: "success", summary: "done", resolved: true, reason: "", summary_markdown: "Kept both." } },
+    ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+    try {
+      await withEnv({ ...s.env, LOOPSTRA_FAKE_FIXTURE_DIR: fixtures.path }, async () => {
+        await tick(s.repo); // build
+        await tick(s.repo); // review, merge checks, pull request
+        expect((await intentOf(s.repo)).status).toBe("merge-review");
+        const firstHead = await headOn(s.remote);
+        // A person approved it already, and someone else adds src/add.ts on GitHub's main meanwhile.
+        const approvedBefore = { author: { login: "ann" }, authorAssociation: "MEMBER", state: "APPROVED", submittedAt: new Date(Date.now() - 60_000).toISOString() };
+        await s.setPr({ checks: "pass" });
+        const other = await elsewhere(s.remote);
+        await Bun.write(join(other.path, "src", "add.ts"), "// added on main by a person\nexport const ZERO = 0;\n");
+        await run(["git", "add", "-A"], other.path);
+        await run(["git", "commit", "-q", "-m", "a person adds src/add.ts"], other.path);
+        await run(["git", "push", "-q", "origin", "main"], other.path);
+        other.cleanup();
+        await tick(s.repo); // waiting for approval: it no longer merges cleanly, so it is resolved and tested
+        expect((await intentOf(s.repo)).status).toBe("reviewing");
+        await tick(s.repo); // reviewed again, pushed to the same pull request
+        expect((await intentOf(s.repo)).status).toBe("merge-review");
+        expect(await headOn(s.remote)).not.toBe(firstHead);
+        expect((await run(["git", "show", `${BRANCH}:src/add.ts`], s.remote)).out).toBe(resolved);
+        // The approval from before the resolution does not cover it.
+        const raw = await Bun.file(s.env.LOOPSTRA_FAKE_GH_STATE).json();
+        Object.assign(raw.prs[BRANCH], { reviewDecision: "APPROVED", latestReviews: [approvedBefore], checks: "pass" });
+        await Bun.write(s.env.LOOPSTRA_FAKE_GH_STATE, JSON.stringify(raw));
+        await tick(s.repo);
+        expect((await intentOf(s.repo)).status).toBe("merge-review");
+        // A newer one does.
+        await s.setPr({ latestReviews: [{ ...approvedBefore, submittedAt: new Date(Date.now() + 1000).toISOString() }] } as never);
+        await tick(s.repo);
+        expect((await intentOf(s.repo)).status).toBe("merged");
+        expect(await onRemoteMain(s.remote, "src/add.ts")).toBe(true);
+        expect((await run(["git", "show", "main:src/add.ts"], s.remote)).out).toBe(resolved);
+      });
+    } finally {
+      fixtures.cleanup(); s.cleanup();
+    }
+  }, 120_000);
+
   test("merge approved on GitHub: opens a pull request, waits for checks and approval, merges through gh, and syncs main", async () => {
     const s = await remoteSetup("gates:\n  merge:\n    human: pr\n");
     await withEnv(s.env, async () => {

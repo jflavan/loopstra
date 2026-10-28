@@ -29,7 +29,23 @@ describe("loadConfig", () => {
     expect(cfg.signals.main_health.every_minutes).toBe(30);
     // Judges overlap by default; project commands share folders in some projects, so they do not.
     // One change at a time unless the owner says the project's commands can run side by side.
-    expect(cfg.speed).toEqual({ parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off", think_ahead: true, max_parallel_changes: 1 });
+    // Each running change gets ten ports checked free; caches are shared unless the project says otherwise.
+    expect(cfg.speed).toEqual({
+      parallel_checks: false, overlap_judges: true, plan_ahead: true, cheap_judges: "off", think_ahead: true, max_parallel_changes: 1,
+      ports_per_change: 10, ports_from: 20000, own_caches: false,
+    });
+    t.cleanup();
+  });
+
+  test("speed.ports_per_change takes 0 to 100 and ports_from 1024 to 65535, in plain words otherwise", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nspeed:\n  ports_per_change: 0\n  ports_from: 30000\n  own_caches: true\n");
+    const speed = (await loadConfig(t.path)).speed;
+    expect([speed.ports_per_change, speed.ports_from, speed.own_caches]).toEqual([0, 30000, true]);
+    for (const [line, error] of [["ports_per_change: -1", "must be 0 or more"], ["ports_per_change: 101", "must be 100 or less"], ["ports_from: 80", "must be 1024 or more"], ["ports_per_change: 2.5", "must be a whole number"]]) {
+      await writeConfig(t.path, `version: 1\ncommands:\n  test: x\nspeed:\n  ${line}\n`);
+      await expect(loadConfig(t.path)).rejects.toThrow(error);
+    }
     t.cleanup();
   });
 

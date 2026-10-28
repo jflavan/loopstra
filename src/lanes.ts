@@ -199,11 +199,30 @@ export function slotEnv(slug: string): { LOOPSTRA_SLOT?: string } {
   return { LOOPSTRA_SLOT: String(slot) };
 }
 
+/** What else is let go of when a change is released (see onRelease). */
+const releaseHooks: Array<(slug: string) => void> = [];
+
+/**
+ * Runs `fn` whenever a change is released, after its claim is gone: the module that hands out more
+ * per-change resources (src/resources.ts) lets go of them, while this one imports nothing of it.
+ */
+export function onRelease(fn: (slug: string) => void): void {
+  releaseHooks.push(fn);
+}
+
 /** Releases a change's claim once its step has ended. */
 export function release(slug: string): void {
   claimed.delete(slug);
   noCommands.delete(slug);
   slots.delete(slug);
+  for (const fn of releaseHooks) {
+    try { fn(slug); } catch { /* best effort: a temp folder that cannot be removed now is swept at a later tick's start */ }
+  }
+}
+
+/** True while a change is claimed (its step runs). */
+export function isClaimed(slug: string): boolean {
+  return claimed.has(slug);
 }
 
 /** How many claimed changes there are besides this one. */

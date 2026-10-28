@@ -11,6 +11,7 @@ import { errorText } from "../shell";
 import { markHealthPending } from "../signals";
 import { endsStepQuietly, notTheStepsFault } from "../stop";
 import { testLoop } from "./build";
+import { catchUp, outOfDate, RESOLVED_AT, roundsAllowed } from "./catch-up";
 import { REVIEW_PASSED, runReviewRounds } from "./review";
 import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
@@ -88,11 +89,11 @@ async function checkMerge(ctx: StepContext): Promise<MergeVerdict> {
       name: "up-to-date",
       run: async () => {
         if (await ctx.git.isAncestor(main, ctx.branch)) return { result: "pass", evidence: "branch contains main" };
-        if (await wt.rebaseOnto(main)) return { result: "pass", evidence: "rebased onto main" };
-        return {
-          result: "fail", evidence: "rebase onto main hit conflicts",
-          payload: { ok: false, note: UPDATE_FAILED_NOTE, detail: `rebase of ${ctx.branch} onto ${main} hit conflicts and was aborted` },
-        };
+        // A conflict is resolved (see catchUp): the tests run on it next, and a review round sees it before it merges.
+        const up = await catchUp(ctx);
+        if (!up.ok) return { result: "fail", evidence: `bringing the branch up to date with main failed: ${up.detail}`, payload: up };
+        if (up.outcome === "resolved") return { result: "pass", evidence: `resolved conflicts with main in ${up.files.join(", ")}`, payload: { ok: true, changed: true } };
+        return { result: "pass", evidence: "rebased onto main" };
       },
     },
     {
@@ -369,8 +370,9 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
   }
 
   const status = ctx.intent.file.frontmatter.status;
-  // A person decides on the status line and has not yet: only a merge or close on GitHub counts.
-  if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return { ok: true, waiting: true };
+  // A person decides on the status line and has not yet: only a merge or close on GitHub counts,
+  // and the change is kept mergeable meanwhile.
+  if (ctx.cfg.gates.merge.human === "status" && status !== "merge-approved") return keepCurrentWhileWatching(ctx);
   // A draft: GitHub refuses to merge it until a person marks it ready for review, so it is not
   // approved yet, whatever its checks say (traced once).
   if (pr.draft) {
@@ -387,10 +389,12 @@ async function watchPullRequest(ctx: StepContext, gh: GitHub, unanswered: (error
     clearMarker(ctx, REMOTE_AHEAD);
     return block(ctx, PR_CHECKS_FAILED_NOTE, { detail: { pr: pr.number, url: pr.url }, retryFrom: mergeRetry(ctx) });
   }
-  // merge.human pr: approved on GitHub, or a person set merge-approved on the status line.
-  if (ctx.cfg.gates.merge.human === "pr" && !pr.approved && status !== "merge-approved") return { ok: true, waiting: true };
+  // merge.human pr: approved on GitHub, or a person set merge-approved on the status line. An
+  // approval from before a conflict resolution approved other code (see freshApproval).
+  const approved = pr.approved && freshApproval(ctx, pr);
+  if (ctx.cfg.gates.merge.human === "pr" && !approved && status !== "merge-approved") return keepCurrentWhileWatching(ctx);
   ctx.trace.gate(ctx.slug, "merge", "pr-checks", "pass", checks === "none" ? `${where} (no checks reported)` : where);
-  if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", pr.approved ? "approved on GitHub" : "merge-approved on the status line");
+  if (ctx.cfg.gates.merge.human === "pr") ctx.trace.gate(ctx.slug, "merge", "pr-approved", "pass", approved ? "approved on GitHub" : "merge-approved on the status line");
   // At every speed.max_parallel_changes: the watcher runs beside the lanes even at one, so another
   // pull request may merge while this one waits, and it is then out of date.
   return mergeWhenUpToDate(ctx, gh, pr, waits);
@@ -493,8 +497,8 @@ async function upToDate(ctx: StepContext): Promise<Freshness | Failure> {
     took = true;
   }
   if (!(await ctx.git.isAncestor(ctx.branch, pushed))) return "not pushed";
-  if (await outOfDate(ctx, main, pushed)) return "main ahead";
-  if (await outOfDate(ctx, `${remote}/${main}`, pushed)) return "remote ahead";
+  if (await outOfDate(ctx.git, main, pushed)) return "main ahead";
+  if (await outOfDate(ctx.git, `${remote}/${main}`, pushed)) return "remote ahead";
   return took ? "taken" : "up to date";
 }
 
@@ -515,17 +519,6 @@ async function takePersonCommits(ctx: StepContext, sha: string): Promise<{ ok: t
   writeMarker(ctx, PR_PUSHED, new Date().toISOString());
   ctx.trace.event(ctx.slug, "command", { command: "take pull request commits", note: "Commits someone added to the pull request on GitHub were taken into the branch here.", head: sha });
   return { ok: true };
-}
-
-/**
- * True when `ref` has code (outside intent/) that `branch` lacks: it changed files since they
- * parted. A comparison git cannot make (no common history) counts as out of date.
- */
-async function outOfDate(ctx: StepContext, ref: string, branch: string): Promise<boolean> {
-  if (await ctx.git.isAncestor(ref, branch)) return false;
-  const gained = await ctx.git.run(["diff", "--name-only", "-z", `${branch}...${ref}`], true);
-  if (gained.code !== 0) return true;
-  return gained.out.split("\0").some((f) => f && !f.startsWith("intent/"));
 }
 
 /** GitHub may not have registered the workflow runs of a pull request opened, or pushed to (by Loopstra or a person), moments ago. */
@@ -643,6 +636,68 @@ function withReason(text: string, synced: SyncOutcome | null): string {
   return synced?.behind ? `${text} ${synced.text}` : text;
 }
 
+/** The note of a change sent back to review after it was brought up to date while it waited for a person. */
+export const CAUGHT_UP_NOTE = "Other work merged into main meanwhile conflicted with this change, so it was brought up to date. It is tested and reviewed again before it comes back to you.";
+
+/**
+ * Whether a change waiting at the merge gate no longer merges cleanly into main: main gained code
+ * since it parted, and git finds a conflict merging the two. False when it merges cleanly (even if
+ * it is behind), and when git cannot say (before git 2.38): the merge checks resolve it later.
+ */
+export async function conflictsWhileWaiting(git: Git, main: string, branch: string): Promise<boolean> {
+  if (!(await git.branchExists(branch)) || !(await outOfDate(git, main, branch))) return false;
+  return (await git.mergesCleanly(main, branch)) === false;
+}
+
+/**
+ * Keeps a change that waits for a person at the merge gate mergeable (see conflictsWhileWaiting):
+ * one that no longer merges cleanly is brought up to date (see catchUp), tested, and sent back to
+ * reviewing for one more round, so the person approves code that will merge. Null when there was
+ * nothing to do.
+ */
+async function keepCurrent(ctx: StepContext): Promise<StepResult | null> {
+  if (!(await conflictsWhileWaiting(ctx.git, ctx.cfg.main_branch, ctx.branch))) return null;
+  const open = await openBranchWorktree(ctx);
+  if (!open.ok) return block(ctx, open.note, open);
+  const wt = new Git(ctx.worktreeDir);
+  if (await wt.isDirty()) {
+    // As the merge checks do: edits nobody reviewed are kept on the branch, so the next review sees them.
+    const kept = await saveWork(ctx, wt, KEEP_UNFINISHED);
+    if (!kept.ok) return block(ctx, kept.note, kept);
+  }
+  const up = await catchUp(ctx);
+  if (!up.ok) return block(ctx, up.note, up);
+  if (up.outcome === "resolved") {
+    const tested = await testLoop(ctx, "resolve-test");
+    if (!tested.ok) return block(ctx, tested.note, tested);
+  }
+  const again = await anotherRound(ctx);
+  if (again !== REVIEW_AGAIN) return again;
+  await setStatus(ctx, "reviewing", CAUGHT_UP_NOTE);
+  return { ok: true };
+}
+
+/**
+ * keepCurrent for a pull request the watcher looks at while it waits for a person. It may run tests
+ * and sessions, so only while no more than speed.max_parallel_changes changes run a step that may
+ * run commands, counting this one (as mergeWhenUpToDate); otherwise a later look does it.
+ */
+async function keepCurrentWhileWatching(ctx: StepContext): Promise<StepResult> {
+  if (othersRunningCommands(ctx.slug) >= ctx.cfg.speed.max_parallel_changes) return { ok: true, waiting: true };
+  return (await keepCurrent(ctx)) ?? { ok: true, waiting: true };
+}
+
+/**
+ * True when an approval on GitHub covers the code as it is: there was no conflict resolution in this
+ * build, or a person approved after the latest one (RESOLVED_AT). GitHub keeps an approval through a
+ * push unless the repository dismisses stale ones, and the resolution is code they have not seen.
+ */
+function freshApproval(ctx: StepContext, pr: PrInfo): boolean {
+  const resolved = Date.parse(readMarker(ctx, RESOLVED_AT) ?? "");
+  if (!Number.isFinite(resolved)) return true;
+  return pr.approvedAt !== null && Date.parse(pr.approvedAt) > resolved;
+}
+
 /** The merge gate sent the change back for one more review round (the round marker names it). */
 const REVIEW_AGAIN = "review-again";
 
@@ -711,7 +766,7 @@ function oneMergeAtATime<T>(ctx: StepContext, fn: () => Promise<T>): Promise<T> 
  */
 async function anotherRound(ctx: StepContext): Promise<StepResult | typeof REVIEW_AGAIN> {
   const round = readRound(ctx) ?? 1;
-  if (round > ctx.cfg.stages.review.max_rounds) {
+  if (round > roundsAllowed(ctx)) {
     clearMarker(ctx, REVIEW_ROUND);
     return block(ctx, REVIEWS_USED_UP, { detail: { rounds: round, reason: "fixes were committed after the last review" } });
   }
@@ -740,7 +795,9 @@ export async function runMergeStep(ctx: StepContext): Promise<StepResult> {
     }
   }
   if ((await ctx.git.remoteName()) !== null) return runRemoteMerge(ctx);
-  if (status === "merge-review" && ctx.cfg.gates.merge.human !== "none") return { ok: true };
+  // A person decides and has not yet: the change is kept mergeable meanwhile (the scheduler runs
+  // this step only when it no longer merges cleanly; see conflictsWhileWaiting).
+  if (status === "merge-review" && ctx.cfg.gates.merge.human !== "none") return (await keepCurrent(ctx)) ?? { ok: true };
 
   // A person may have set merge-approved (or edited the change's other files) without committing:
   // record the change's own folder first, so their edit is part of main before the checks run.

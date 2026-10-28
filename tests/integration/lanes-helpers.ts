@@ -53,6 +53,21 @@ export async function writeChange(path: string, fixtures: string, c: Change): Pr
   writeFileSync(join(fixtures, c.slug, "plan.jsonl"), planFixture(c));
 }
 
+/**
+ * The change's resolve session, as a fake fixture: it writes `writes` (path → content) in the
+ * worktree, and says whether it `resolved` the conflicts.
+ */
+export function resolveFixture(fixtures: string, slug: string, writes: Record<string, string>, resolved = true): void {
+  const lines: unknown[] = [{ type: "system", subtype: "init", session_id: `fake-resolve-${slug}`, cwd: "/", tools: [], model: "fake" }];
+  for (const [path, content] of Object.entries(writes)) lines.push({ type: "fake_action", write: { path, content } });
+  lines.push({
+    type: "result", subtype: "success", is_error: false, session_id: `fake-resolve-${slug}`, total_cost_usd: 0.1, usage: {}, result: "ok",
+    structured_output: { status: "success", summary: "done", resolved, reason: resolved ? "" : "the two changes want different things", summary_markdown: "Kept both." },
+  });
+  mkdirSync(join(fixtures, slug), { recursive: true });
+  writeFileSync(join(fixtures, slug, "resolve.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+}
+
 /** The change's plan session, as a fake fixture: it writes planFor(c), so changes planned in a test list their own files. */
 function planFixture(c: Change): string {
   return fixture("plan").split("\n").filter((l) => l.trim()).map((l) => {
