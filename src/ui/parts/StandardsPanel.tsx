@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { ChangeDetail, ChangeStandardsView, ChangeSummary, StandardsView } from "../../console/types";
 import { act, beforeOf, bodyFor, sendScope, unsentText } from "../requests";
-import { addChoices, approveLabel, panelRows, removeChoices, scopeDialog, scopeProblem, type PanelRow } from "../standards";
+import { addChoices, approveLabel, panelRows, removeChoices, scopeCanSend, scopeChoice, scopeDialog, scopeProblem, type PanelRow } from "../standards";
 import { getJson, toast } from "../store";
 import { Markdown } from "./Markdown";
 
@@ -53,14 +53,17 @@ function WaitingException({ w, change }: { w: Waiting; change: ChangeSummary }) 
 
 /** The add / remove dialog: names the standard, asks for a note, sends it and shows the loop's answer. */
 function ScopeDialog({ action, status, slug, choices, onClose }: { action: "add" | "remove"; status: string; slug: string; choices: { name: string; title: string }[]; onClose: () => void }) {
-  const [name, setName] = useState(choices[0]?.name ?? "");
+  const [picked, setName] = useState(choices[0]?.name ?? "");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
+  // The choices change when the change's standards do: a standard no longer offered is not sent.
+  const name = scopeChoice(picked, choices);
   const words = scopeDialog(action, status);
   const problem = scopeProblem(action, note);
+  const done = said?.ok === true;
   const send = async () => {
-    if (problem || !name) return;
+    if (!scopeCanSend({ busy, said, problem, name })) return;
     setBusy(true);
     setSaid(null);
     const r = await sendScope({ slug, action, name, note: note.trim() }, (d) => { setSaid(d); setBusy(false); });
@@ -68,16 +71,16 @@ function ScopeDialog({ action, status, slug, choices, onClose }: { action: "add"
   };
   return (
     <form class="control-form" aria-label={action === "add" ? "Add a standard" : "Remove a standard"} onSubmit={(e) => { e.preventDefault(); void send(); }}>
-      {choices.length === 0 ? <span class="muted">{action === "add" ? "Every standard already applies." : "No standard applies."}</span> : (
+      {done ? null : choices.length === 0 ? <span class="muted">{action === "add" ? "Every standard already applies." : "No standard applies."}</span> : (
         <>
           <label>Standard <select value={name} onChange={(e) => setName(e.currentTarget.value)}>{choices.map((c) => <option key={c.name} value={c.name}>{c.title || c.name}</option>)}</select></label>
           {words.notice && <p class="muted">{words.notice}</p>}
           <textarea value={note} placeholder={words.ask} aria-label={words.ask} maxLength={2000} onInput={(e) => setNote(e.currentTarget.value)} />
-          <button class="btn primary" type="submit" disabled={busy || problem !== null}>{action === "add" ? "Add it" : "Remove it"}</button>
+          <button class="btn primary" type="submit" disabled={!scopeCanSend({ busy, said, problem, name })}>{action === "add" ? "Add it" : "Remove it"}</button>
         </>
       )}
       <button class="btn" type="button" onClick={onClose}>{said ? "Close" : "Cancel"}</button>
-      {problem && note.length > 0 && <span class="muted">{problem}</span>}
+      {!done && problem && note.length > 0 && <span class="muted">{problem}</span>}
       {said && <span class={`badge${said.ok ? "" : " bad"}`} role="status">{said.text}</span>}
     </form>
   );

@@ -89,7 +89,7 @@ export const Envelopes = {
     /** One item per Done when criterion. needs-person: it cannot be judged from the repository. */
     evidence: z.array(z.object({ criterion: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })),
     outcome_markdown: z.string(),
-    /** One item per rule of the standards that apply, but those under an approved exception. Absent: none. */
+    /** One item per rule of the standards that apply, but those under an approved exception. Absent: every rule that applied is listed as not judged (needs a person). */
     standards: z.array(z.object({ label: z.string(), result: z.enum(["met", "unmet", "needs-person"]), evidence: z.string() })).optional(),
   }),
   lessons: base.extend({

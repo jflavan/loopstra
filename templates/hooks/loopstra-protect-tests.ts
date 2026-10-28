@@ -6,6 +6,7 @@
 // - no session may edit loopstra/standards/, which only a person changes on main (resolve gets that rule alone).
 // Input: JSON on stdin with tool_name and tool_input. Exit 2 blocks the action and sends stderr to Claude.
 import { appendFileSync } from "node:fs";
+import { posix } from "node:path";
 // The test rules, from the installed package beside this hook.
 import { isAcceptancePath, isTestPath } from "../../src/test-paths";
 const input = JSON.parse(await Bun.stdin.text()) as { tool_name?: string; tool_input?: { file_path?: string; path?: string } };
@@ -15,7 +16,11 @@ const GUARDED = new Set(["acceptance", "build", "fix", "reconcile", "revise", "r
 // The phases that change the code, and so may not change the tests written from Done when.
 const EDITS_CODE = new Set(["build", "fix", "reconcile", "revise"]);
 if (!GUARDED.has(phase)) process.exit(0);
-const slashes = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+// Forward slashes, and `.` and `..` segments resolved, so `src/../loopstra/standards/x.md` is the file it names.
+const slashes = (p: string) => {
+  const forward = p.replace(/\\/g, "/");
+  return (forward ? posix.normalize(forward) : forward).replace(/\/+$/, "");
+};
 // The path is judged inside the project, so a project that itself sits under a tests/ folder is not all tests.
 // Claude Code sets CLAUDE_PROJECT_DIR; without it the hook runs in the project, so the working folder stands in.
 const root = slashes(process.env.CLAUDE_PROJECT_DIR || process.cwd());

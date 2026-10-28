@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Git } from "../../src/git";
 import {
-  applying, checkStandardsSection, formToMarkdown, parseStandard, parseStandards, problemText, readAppliedMarker, readOutcomeStandards, readStandards, readStandardsSection,
+  applying, checkStandardsSection, formToMarkdown, globProblem, parseStandard, parseStandards, problemText, readAppliedMarker, readOutcomeStandards, readStandards, readStandardsSection,
   renderStandards, STANDARD_NAME, STANDARDS_DIR, standardsBytes, standardToForm, type Applying, type Rule, type Standard,
 } from "../../src/standards";
 import { tempGitRepo } from "../helpers";
@@ -143,6 +143,22 @@ test("problemText gives the spec's sentence for a missing label", () => {
   }
   expect(problemText({ path: "loopstra/standards/soc2.md", line: 14, text: "the rule on line 14 has no rule label (write it as `- LABEL: text`)" }))
     .toBe("loopstra/standards/soc2.md cannot be read: the rule on line 14 has no rule label (write it as `- LABEL: text`).");
+});
+
+test("a rule with a label but no text has its own sentence", () => {
+  for (const bullet of ["- A-1:", "- A-1:   "]) {
+    expect(problemsOf(`# T\n\n## Rules\n- A-0: ok\n${bullet}\n`).map((p) => p.text)).toEqual(["the rule on line 5 has a label but no text (write it as `- A-1: text`)"]);
+  }
+});
+
+test("globProblem: a [ inside a class is literal; an unclosed one is still caught", () => {
+  expect(globProblem("src/[[]x.ts")).toBeNull();
+  expect(globProblem("a/[[]/**")).toBeNull();
+  expect(globProblem("src/[a")).toBe("an unclosed bracket");
+  expect(globProblem("src/[[a")).toBe("an unclosed bracket");
+  expect(globProblem("{a,b")).toBe("an unclosed bracket");
+  expect(globProblem("src/**/*.ts")).toBeNull();
+  expect(globProblem("src/[{]x")).toBeNull();
 });
 
 describe("formToMarkdown", () => {

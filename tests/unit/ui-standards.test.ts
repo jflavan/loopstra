@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChangeStandardsView, DraftCheck, ExceptionRow, StandardForm } from "../../src/console/types";
 import { parseRoute, routePath } from "../../src/ui/router";
-import { addChoices, approveLabel, canSave, EXAMPLES, fieldProblems, filterExceptions, isStandardName, opensAsMarkdown, panelRows, panelShown, removeChoices, removeText, scopeDialog, scopeProblem, saveNotice, scopeLine, takenNames } from "../../src/ui/standards";
+import { addChoices, approveLabel, canSave, EXAMPLES, fieldProblems, filterExceptions, isStandardName, opensAsMarkdown, panelRows, panelShown, removeChoices, removeText, scopeCanSend, scopeChoice, scopeDialog, scopeProblem, saveNotice, scopeLine, takenNames } from "../../src/ui/standards";
 import { formToMarkdown, parseStandard, RULE_LABEL, STANDARD_NAME } from "../../src/standards";
 
 const form = (over: Partial<StandardForm> = {}): StandardForm => ({
@@ -204,6 +204,25 @@ describe("the change page's Standards panel", () => {
     expect(scopeDialog("add", "building").ask).toMatch(/note/i);
     expect(scopeDialog("remove", "building").required).toBe(true);
     expect(scopeDialog("add", "building").required).toBe(false);
+  });
+
+  test("the dialog sends once: not while sending, and never again once the loop said yes", () => {
+    const ready = { busy: false, said: null, problem: null, name: "style" };
+    expect(scopeCanSend(ready)).toBe(true);
+    expect(scopeCanSend({ ...ready, busy: true })).toBe(false);
+    expect(scopeCanSend({ ...ready, said: { ok: true } })).toBe(false);
+    // A refusal can be corrected and sent again.
+    expect(scopeCanSend({ ...ready, said: { ok: false } })).toBe(true);
+    expect(scopeCanSend({ ...ready, problem: "Say why." })).toBe(false);
+    expect(scopeCanSend({ ...ready, name: "" })).toBe(false);
+  });
+
+  test("the chosen standard is kept while the choices have it, and is the first one otherwise", () => {
+    const choices = [{ name: "a" }, { name: "b" }];
+    expect(scopeChoice("b", choices)).toBe("b");
+    expect(scopeChoice("gone", choices)).toBe("a");
+    expect(scopeChoice("", choices)).toBe("a");
+    expect(scopeChoice("a", [])).toBe("");
   });
 
   test("Add at or after plan-approved says the plan does not cover it", () => {

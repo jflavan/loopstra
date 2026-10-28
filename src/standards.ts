@@ -58,8 +58,9 @@ export function globProblem(pattern: string): string | null {
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i];
     if (c === "\\") i++;
-    else if (c === "[") square++;
-    else if (c === "]" && square > 0) square--;
+    // Inside a class every character but `]` is itself (`[[]` is a class of one `[`).
+    else if (square > 0) { if (c === "]") square = 0; }
+    else if (c === "[") square = 1;
     else if (c === "{") curly++;
     else if (c === "}" && curly > 0) curly--;
   }
@@ -128,6 +129,8 @@ export function parseStandard(name: string, text: string): { ok: true; standard:
       const line = offset + i + 1;
       if (l.startsWith("- ")) {
         open = null;
+        const bare = /^- (\S+?):\s*$/.exec(l);
+        if (bare && RULE_LABEL.test(bare[1] ?? "")) { problem(line, `the rule on line ${line} has a label but no text (write it as \`- ${bare[1] ?? ""}: text\`)`); continue; }
         const m = RULE_BULLET.exec(l);
         if (!m) { problem(line, `the rule on line ${line} has no rule label (write it as \`- LABEL: text\`)`); continue; }
         const label = m[1] ?? "";

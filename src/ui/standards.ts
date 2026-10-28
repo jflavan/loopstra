@@ -155,6 +155,16 @@ export function scopeDialog(action: "add" | "remove", status: string): { ask: st
   };
 }
 
+/** Whether the add / remove dialog may send: not while it is sending, not once the loop said yes (a second send would ask again), and only with a standard chosen and nothing wrong. */
+export function scopeCanSend(o: { busy: boolean; said: { ok: boolean } | null; problem: string | null; name: string }): boolean {
+  return !o.busy && o.said?.ok !== true && o.problem === null && o.name !== "";
+}
+
+/** The standard the dialog is on: the one chosen while the choices still have it, else the first ("" with none). */
+export function scopeChoice(name: string, choices: readonly { name: string }[]): string {
+  return choices.some((c) => c.name === name) ? name : choices[0]?.name ?? "";
+}
+
 /** Why the dialog cannot be sent yet; null when it can. */
 export function scopeProblem(action: "add" | "remove", note: string): string | null {
   return action === "remove" && !note.trim() ? "Say why this standard does not apply to this change." : null;

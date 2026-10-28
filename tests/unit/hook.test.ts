@@ -194,6 +194,16 @@ describe("protect-tests hook", () => {
     } finally { t.cleanup(); }
   });
 
+  test("a path with . or .. segments is judged as the file it names", async () => {
+    const env = { LOOPSTRA_PHASE: "build", CLAUDE_PROJECT_DIR: "/repo" };
+    for (const file_path of ["./loopstra/standards/x.md", "src/../loopstra/standards/x.md", "/repo/src/../loopstra/./standards/x.md", "loopstra//standards/x.md"]) {
+      const r = await runHook({ tool_name: "Edit", tool_input: { file_path } }, env);
+      expect({ file_path, code: r.code }).toEqual({ file_path, code: 2 });
+      expect(r.err).toContain("(loopstra/standards/x.md)");
+    }
+    expect((await runHook({ tool_name: "Edit", tool_input: { file_path: "loopstra/standards/../src/x.ts" } }, env)).code).toBe(0);
+  });
+
   test("the standards folder is matched through backslashes, and its case only where the file system ignores case", async () => {
     const caseless = process.platform === "win32" || process.platform === "darwin";
     const windows = await runHook({ tool_name: "Edit", tool_input: { file_path: "C:\\repo\\loopstra\\standards\\x.md" } }, { LOOPSTRA_PHASE: "fix", CLAUDE_PROJECT_DIR: "C:\\repo" });
