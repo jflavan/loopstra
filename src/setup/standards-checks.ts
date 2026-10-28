@@ -3,14 +3,14 @@ import { Git } from "../git";
 import { errorText } from "../shell";
 import { problemText, readStandards, standardsSizeWarning } from "../standards";
 import { baseAware, checkOnMain } from "../standards-check";
-import type { Check, Section, SetupContext } from "./types";
+import type { Check } from "./types";
 
 /**
  * The standards' checks, as setup lists them: every standard reads from main's last commit, the
  * standards are not over 40 KB, and each tool `check` is tried on main. Nothing when main has no
  * commit or no standards.
  */
-async function standardsChecks(root: string, cfg: Config): Promise<Check[]> {
+export async function standardsChecks(root: string, cfg: Config): Promise<Check[]> {
   const git = new Git(root);
   const main = await git.commitOf(cfg.main_branch).catch(() => null);
   if (!main) return [];
@@ -37,12 +37,3 @@ async function tryCheck(root: string, cfg: Config, title: string, command: strin
     return { level: "warn", text: `The check of ${title} could not run on ${cfg.main_branch}: ${errorText(e)}` };
   }
 }
-
-/** The standards' checks as a section of their own, so the runner times and lists them like the others; it asks nothing and is never chosen by name. */
-export const standardsSection: Section = {
-  name: "standards",
-  title: "Standards",
-  covers: [],
-  async ask(_ctx: SetupContext) { /* the standards are files, edited by people */ },
-  check: (ctx, cfg) => standardsChecks(ctx.root, cfg),
-};

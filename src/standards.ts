@@ -50,7 +50,7 @@ const TITLE = /^# +(.*\S)\s*$/;
 const RULES_HEADING = /^## Rules\s*$/;
 
 /** What is wrong with a glob pattern, or null. Bun.Glob reads any text, so an unclosed `[` or `{` is caught here. */
-function globProblem(pattern: string): string | null {
+export function globProblem(pattern: string): string | null {
   if (!pattern.trim()) return "an empty pattern";
   try { new Bun.Glob(pattern); } catch { return "not a valid pattern"; }
   let square = 0;

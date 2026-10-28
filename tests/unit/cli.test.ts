@@ -97,8 +97,8 @@ describe("the command line outside a set-up repo", () => {
       for (const flag of ["--help", "-h"]) {
         const r = await run([process.execPath, CLI, "setup", flag], t.path);
         expect({ flag, code: r.code }).toEqual({ flag, code: 0 });
-        expect(r.out).toStartWith("Usage: loopstra setup [section] [--defaults | --check]\n\nSections:\n  budgets   Budgets\n");
-        expect(r.out).toContain("  models    Models\n");
+        expect(r.out).toStartWith("Usage: loopstra setup [section] [--defaults | --check]\n\nSections:\n  budgets    Budgets\n");
+        expect(r.out).toContain("  models     Models\n");
       }
       expect(readdirSync(t.path)).toEqual([]);
     } finally {

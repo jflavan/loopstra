@@ -399,7 +399,7 @@ describe("the setup command line", () => {
   test("the help is the usage line and one line per section, with its title", () => {
     const help = setupHelp([fake({ name: "one" }), fake({ name: "three" })]);
     expect(help).toBe(`${SETUP_USAGE}\n\nSections:\n  one    The one section\n  three  The three section\n`);
-    expect(setupHelp()).toContain("  github    GitHub and merging\n");
+    expect(setupHelp()).toContain("  github     GitHub and merging\n");
   });
 });
 
