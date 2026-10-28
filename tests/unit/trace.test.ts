@@ -382,3 +382,78 @@ describe("two connections at once", () => {
     } finally { t.cleanup(); }
   });
 });
+
+describe("reads since a time, for loopstra retro", () => {
+  /** Sets the time of every row of `table` by its id (rowid for phases), oldest given first. */
+  function stampAll(root: string, table: "events" | "gates" | "phases", times: string[]): void {
+    const db = new Database(join(root, ".loopstra", "trace.db"));
+    try {
+      const key = table === "phases" ? "rowid" : "id";
+      const column = table === "phases" ? "started" : "ts";
+      times.forEach((ts, i) => db.run(`UPDATE ${table} SET ${column} = ? WHERE ${key} = ?`, [ts, i + 1]));
+    } finally { db.close(); }
+  }
+
+  const DAY1 = "2026-10-01T10:00:00.000Z";
+  const DAY2 = "2026-10-02T10:00:00.000Z";
+  const DAY3 = "2026-10-03T10:00:00.000Z";
+
+  test("status changes since a time: every change but chat, oldest first, with the payload read", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.statusChange("a-b", "accepted", "designing");
+      trace.statusChange("c-d", "building", "blocked", "The tests kept failing.", { retry: "plan-approved" });
+      trace.statusChange("_chat", "x", "y");
+      trace.statusChange("a-b", "designing", "spec-review", "Read spec.md.");
+      trace.event("a-b", "status_change", "not an object");
+      trace.event("a-b", "tick", {});
+      stampAll(t.path, "events", [DAY1, DAY2, DAY2, DAY3, DAY3, DAY3]);
+      expect(trace.statusChangesSince(DAY2)).toEqual([
+        { slug: "c-d", ts: DAY2, from: "building", to: "blocked", note: "The tests kept failing." },
+        { slug: "a-b", ts: DAY3, from: "designing", to: "spec-review", note: "Read spec.md." },
+      ]);
+      expect(trace.statusChangesSince(DAY1)).toHaveLength(3);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("events of one type since a time, oldest first", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.event("a-b", "question", { question: "old" });
+      trace.event("a-b", "tick", {});
+      trace.event("c-d", "question", { question: "new" });
+      stampAll(t.path, "events", [DAY1, DAY2, DAY3]);
+      expect(trace.eventsOfTypeSince("question", DAY2).map((e) => [e.slug, e.payload])).toEqual([["c-d", '{"question":"new"}']]);
+      expect(trace.eventsOfTypeSince("question", DAY1)).toHaveLength(2);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("gate rows since a time, oldest first", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.gate("a-b", "spec", "spec-check", "fail", "two findings");
+      trace.gate("a-b", "spec", "spec-check", "pass", "ok");
+      trace.gate("c-d", "merge", "pr-checks", "waiting", "running");
+      stampAll(t.path, "gates", [DAY1, DAY2, DAY3]);
+      expect(trace.gatesSince(DAY2)).toEqual([
+        { slug: "a-b", gate: "spec", check: "spec-check", result: "pass", ts: DAY2 },
+        { slug: "c-d", gate: "merge", check: "pr-checks", result: "waiting", ts: DAY3 },
+      ]);
+    } finally { trace.close(); t.cleanup(); }
+  });
+
+  test("phases started at or after a time, in the order they started, chat's too", () => {
+    const t = tempDir();
+    const trace = Trace.open(t.path);
+    try {
+      trace.phaseStart("a-b", "design", "agent");
+      trace.phaseStart("_chat", "chat", "agent");
+      trace.phaseStart("a-b", "spec-check", "agent");
+      stampAll(t.path, "phases", [DAY1, DAY3, DAY2]);
+      expect(trace.phasesSince(DAY2).map((p) => [p.slug, p.name])).toEqual([["a-b", "spec-check"], ["_chat", "chat"]]);
+    } finally { trace.close(); t.cleanup(); }
+  });
+});
