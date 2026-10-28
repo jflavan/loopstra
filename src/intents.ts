@@ -155,7 +155,7 @@ export interface Intent {
   artifacts: Set<string>;
 }
 
-export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
+export const ARTIFACTS = ["intent.md", "spec.md", "plan.md", "acceptance.md", "review.md", "outcome.md", "lessons.md", "conversation.md"] as const;
 
 export function intentRoot(root: string): string {
   return join(root, "intent");
