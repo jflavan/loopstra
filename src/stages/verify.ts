@@ -1,16 +1,20 @@
 import { join } from "node:path";
-import { block, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
+import { block, readArtifact, setStatus, writeArtifact, type Failure, type StepContext, type StepResult } from "../context";
 import type { Envelope } from "../envelopes";
 import { passOn, withDetachedWorktree } from "../git";
 import { loopstraDir } from "../paths";
-import { agentPhase, alongside, mayOverlap, projectCommand } from "../phases";
+import { agentPhase, alongside, mayOverlap, phasePrompt, projectCommand, type AgentPhaseSpec } from "../phases";
 import { besideWork, EARLY } from "../trace";
+import { coveredByTests, NONE_WRITTEN } from "./acceptance";
 import { artifacts, bullets, humanNote, runHookCommands } from "./shared";
 import { errorText } from "../shell";
 
 const JUDGE_FAILED = "The final check could not be completed; an engineer should look.";
 export const NEEDS_PERSON_DONE_NOTE = "Done. A few results need a person to confirm; see outcome.md.";
 const UNMET_NOTE = "The change merged, but the final check found Done when criteria that are not met. The details are in outcome.md. Decide whether to open a follow-up change, then set this one to done or closed.";
+
+/** What the done-check is told about the acceptance tests when its prompt has no {{acceptance}} (a repository's older done-check.md). */
+const ACCEPTANCE_RULE = "These acceptance tests were written from the owner's Done when before the build. A criterion covered by an acceptance test that passes in this copy of main is met, with the test as its evidence:";
 
 const NO_CHECK_OUTCOME = "# Outcome\n\n## Outcome\nThe change is merged.\n\n## Evidence\nNo automatic check of the Done when criteria is configured. A person may want to confirm them.\n";
 
@@ -85,11 +89,14 @@ function line(i: Item): string {
 
 /**
  * The done-check judge, run in a throwaway detached worktree of main so nothing it builds or runs
- * touches the owner's checkout. Pass means no unmet items; needs-person items never block.
+ * touches the owner's checkout. It is given the acceptance tests written from Done when, if any.
+ * Pass means no unmet items; needs-person items never block.
  */
 async function doneCheck(ctx: StepContext, a: { spec: string; review: string }): Promise<{ ok: true; items: Item[]; outcome: string } | Failure> {
   if (!ctx.cfg.gates.done.agent) return { ok: true, items: [], outcome: "" };
   const dir = join(loopstraDir(ctx.root), "verify", ctx.slug);
+  // The tests written from Done when before the build (see writeAcceptance); main has them merged.
+  const covered = coveredByTests(await readArtifact(ctx, "acceptance.md"));
   let r: Awaited<ReturnType<typeof agentPhase<"done-check">>>;
   try {
     r = await withDetachedWorktree(ctx.git, dir, ctx.cfg.main_branch, async (cwd) => {
@@ -99,11 +106,13 @@ async function doneCheck(ctx: StepContext, a: { spec: string; review: string }):
         const i = await projectCommand(ctx, install, cwd, { where: "done-check copy of main" });
         if (i.code !== 0) throw new Error(`install failed: ${i.lastLine || `exit ${i.code}`}`);
       }
-      return agentPhase(ctx, {
+      const phase: AgentPhaseSpec & { name: "done-check" } = {
         name: "done-check", permissionMode: "default", tools: "read+commands", cwd,
-        vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review },
+        vars: { done_when: ctx.intent.file.sections["Done when"] ?? "", spec: a.spec, review: a.review, acceptance: covered || NONE_WRITTEN },
         skills: ctx.cfg.stages.verify.skills,
-      });
+      };
+      // The tests reach the judge even through an older done-check.md without {{acceptance}}.
+      return agentPhase(ctx, phase, () => phasePrompt(ctx, phase, { variable: "acceptance", note: covered, text: `${ACCEPTANCE_RULE}\n\n${covered}` }));
     }, (e) => ctx.trace.event(ctx.slug, "error", { where: "done-check", what: "removing the copy of main", error: errorText(e) }));
   } catch (e) {
     passOn(e);

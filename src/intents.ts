@@ -119,7 +119,8 @@ export function parseIntentFile(rawText: string): IntentFile {
   return { frontmatter: fm.data, title, body, sections: parseSections(body) };
 }
 
-function parseSections(body: string): Record<string, string> {
+/** A Markdown document's `## ` sections, by heading, each trimmed; text before the first heading is left out. */
+export function parseSections(body: string): Record<string, string> {
   const sections: Record<string, string> = {};
   const lines = body.split(/\r?\n/);
   let current: string | null = null;

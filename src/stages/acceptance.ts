@@ -2,16 +2,22 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { ACCEPTANCE, writeArtifact, writeMarker, type Failure, type StepContext } from "../context";
 import type { Envelope } from "../envelopes";
+import { parseSections } from "../intents";
 import { passOn, type Git } from "../git";
 import { agentPhase } from "../phases";
 import { errorText } from "../shell";
 import { bullets, KEEP_UNFINISHED, saveWork, type Artifacts } from "./shared";
 
 /** What acceptance.md and the done-check say when the change has no acceptance tests. */
-const NONE_WRITTEN = "No acceptance tests were written for this change.";
+export const NONE_WRITTEN = "No acceptance tests were written for this change.";
 
 /** The heading of acceptance.md's list of tests, which the done-check reads. */
 const COVERED = "Covered by tests";
+
+/** acceptance.md's list of tests (see acceptanceRecord), or "" when it has none or there is no acceptance.md. */
+export function coveredByTests(acceptanceMd: string | null): string {
+  return acceptanceMd === null ? "" : (parseSections(acceptanceMd)[COVERED] ?? "");
+}
 
 /**
  * The acceptance step (stages.build.acceptance_tests), run before the build session: a fresh session
