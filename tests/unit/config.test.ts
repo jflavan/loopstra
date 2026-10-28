@@ -64,6 +64,17 @@ describe("loadConfig", () => {
     t.cleanup();
   });
 
+  test("stages.build.acceptance_tests is off unless set, so an upgraded repo is unchanged, and takes only true or false", async () => {
+    const t = tempDir();
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\n");
+    expect((await loadConfig(t.path)).stages.build.acceptance_tests).toBe(false);
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nstages:\n  build:\n    acceptance_tests: true\n");
+    expect((await loadConfig(t.path)).stages.build.acceptance_tests).toBe(true);
+    await writeConfig(t.path, "version: 1\ncommands:\n  test: x\nstages:\n  build:\n    acceptance_tests: sometimes\n");
+    await expect(loadConfig(t.path)).rejects.toThrow("stages.build.acceptance_tests: must be true or false");
+    t.cleanup();
+  });
+
   test("rejects a pull request as the done gate's surface, in plain words", async () => {
     const t = tempDir();
     await writeConfig(t.path, "version: 1\ncommands:\n  test: x\ngates:\n  done:\n    human: pr\n");

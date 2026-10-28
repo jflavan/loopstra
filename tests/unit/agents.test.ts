@@ -3,8 +3,9 @@ import { BUILTIN_AGENTS, CONTINUES_BUILD, inlineName, type Team, type TeamWay, C
 import { validateConfig } from "../../src/config";
 
 test("the step sets", () => {
-  expect([...READ_ONLY_STEPS].some((k) => ["build", "reconcile", "fix", "revise"].includes(k))).toBe(false);
+  expect([...READ_ONLY_STEPS].some((k) => ["acceptance", "build", "reconcile", "fix", "revise"].includes(k))).toBe(false);
   expect(READ_ONLY_STEPS.has("review")).toBe(true);
+  // The acceptance step writes tests in a session of its own, before the build: never as the build's agent.
   expect([...CONTINUES_BUILD]).toEqual(["fix", "reconcile", "revise"]);
   expect([...CHAT_STEPS]).toEqual(["orchestrator", "write-intent"]);
 });

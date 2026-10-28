@@ -212,7 +212,12 @@ export const ConfigSchema = z.object({
   stages: z.object({
     design: stage("design").extend({ model: modelRef.default("strong") }).prefault({}),
     plan: stage("plan").extend({ model: modelRef.default("strong") }).prefault({}),
-    build: stage("build").extend({ model: modelRef.default("default"), max_fix_loops: z.number().int().min(1).default(3) }).prefault({}),
+    build: stage("build").extend({
+      model: modelRef.default("default"),
+      max_fix_loops: z.number().int().min(1).default(3),
+      /** A session writes tests from the owner's Done when list before each build, and the build may not change them. Off unless set, so an upgraded repo is unchanged; `loopstra init` turns it on. */
+      acceptance_tests: z.boolean({ error: "must be true or false" }).default(false),
+    }).prefault({}),
     review: stage("review").extend({ model: modelRef.default("strong"), max_rounds: z.number().int().min(1).default(2) }).prefault({}),
     verify: stage("verify").extend({ model: modelRef.default("default") }).prefault({}),
   }).strict().prefault({}),

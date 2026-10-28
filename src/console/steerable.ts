@@ -4,7 +4,7 @@
  */
 
 /** The work sessions a person may message or redirect (any session may be stopped). Shared by the loop and the page. */
-const STEERABLE_PHASES = ["intake", "design", "plan", "build", "fix", "reconcile", "revise", "lessons"] as const;
+const STEERABLE_PHASES = ["intake", "design", "plan", "acceptance", "build", "fix", "reconcile", "revise", "lessons"] as const;
 
 /**
  * A phase row's name as the phase it runs: "fix-2" → fix, "early-lessons" → lessons, "design-retry" → design,

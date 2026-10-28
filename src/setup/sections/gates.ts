@@ -12,7 +12,7 @@ const GATES = [
 export const gates: Section = {
   name: "gates",
   title: "Gates",
-  covers: ["gates.spec", "gates.plan", "gates.done"],
+  covers: ["gates.spec", "gates.plan", "gates.done", "stages.build.acceptance_tests"],
 
   async ask(ctx) {
     ctx.ask.say("A person always accepts a change (draft to accepted). After that, each step can wait for a person or go on by itself. The merge gate is under github.");
@@ -24,6 +24,11 @@ export const gates: Section = {
       const agent = await ctx.ask.yesNo(`Does an independent agent review ${what}?`, (ctx.doc.get(["gates", gate, "agent"]) ?? fallback.agent) !== false);
       ctx.doc.put(["gates", gate, "agent"], agent, fallback.agent);
     }
+    // Suggested yes where the file does not say: the schema's default (off) only keeps upgraded repos as they were.
+    const path = ["stages", "build", "acceptance_tests"];
+    const own = ctx.doc.get(path);
+    const accept = await ctx.ask.yesNo("Write tests from Done when before each build?", typeof own === "boolean" ? own : true);
+    ctx.doc.put(path, accept, DEFAULTS.stages.build.acceptance_tests);
   },
 
   async check() {

@@ -5,7 +5,7 @@ describe("envelopes", () => {
   test("every phase has a schema with the base fields", () => {
     const names: PhaseName[] = [
       "intake", "design", "spec-check", "plan", "plan-challenge", "build", "fix",
-      "reconcile", "verify", "review", "revise", "done-check", "lessons",
+      "reconcile", "verify", "review", "revise", "done-check", "lessons", "acceptance",
     ];
     for (const name of names) {
       const schema = Envelopes[name];
@@ -25,6 +25,18 @@ describe("envelopes", () => {
     expect(jsonSchemaFor("design").properties).not.toHaveProperty("concerns");
     // plan-challenge keeps its own concerns: they are the verdict.
     expect(jsonSchemaFor("plan-challenge").properties).toHaveProperty("concerns");
+  });
+
+  test("acceptance names each test by its criterion, file and name, and what it could not test; it never asks", () => {
+    const r = Envelopes.acceptance.parse({
+      status: "success", summary: "one test, one criterion for a person", commit_message: "test: acceptance tests for counting words",
+      tests: [{ criterion: "Counting the words in \"hello world\" gives 2", file: "tests/count.test.ts", test: "counts two words" }],
+      not_testable: [{ criterion: "People find the new page easy to read", why: "needs a person" }],
+    });
+    expect(r.tests[0]?.file).toBe("tests/count.test.ts");
+    expect(r.not_testable[0]?.why).toBe("needs a person");
+    expect(jsonSchemaFor("acceptance").required).toEqual(expect.arrayContaining(["tests", "not_testable", "commit_message"]));
+    expect(jsonSchemaFor("acceptance").properties).not.toHaveProperty("question");
   });
 
   test("intake accepts a priority and question; missing sections are the consistency check's, before intake", () => {
