@@ -108,7 +108,7 @@ export async function runBuildStep(ctx: StepContext): Promise<StepResult> {
     const again = await verifyChange(ctx, a.spec, plan, "verify-2");
     if (!again.ok) return block(ctx, again.note, again);
     if (!again.passed) {
-      return block(ctx, `The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.`, { detail: { observations: again.observations } });
+      return block(ctx, VERIFY_STILL_FAILED_NOTE, { detail: { observations: again.observations } });
     }
   }
 
@@ -136,6 +136,13 @@ async function reviewsAhead(ctx: StepContext, wt: Git): Promise<boolean> {
     return false;
   }
 }
+
+/** The owner's notes when the checks still fail after every fix allowed (see testLoop): the tests, or a command that kept running past its limit. */
+export const TESTS_KEPT_FAILING_NOTE = "The tests kept failing after several attempts to fix them. An engineer needs to look at the change.";
+export const CHECKS_KEPT_TIMING_OUT_NOTE = "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it.";
+
+/** The owner's note when the verifier still finds the change does not work after its round of fixes. */
+export const VERIFY_STILL_FAILED_NOTE = "The finished change still did not work as the spec describes after one round of fixes. An engineer needs to look at it.";
 
 /** What fix is told after a verify failure: the checks passed, so it must not read as a failed check. */
 const VERIFY_FAILED = "The checks pass; the verifier found the change does not do what the spec says:";
@@ -185,9 +192,7 @@ export async function testLoop(ctx: StepContext, prefix: string): Promise<{ ok: 
       return { ok: true };
     }
     if (i > max) {
-      const note = failure.timedOut
-        ? "A project command kept running past its time limit, even after attempts to fix the change. An engineer needs to look at it."
-        : "The tests kept failing after several attempts to fix them. An engineer needs to look at the change.";
+      const note = failure.timedOut ? CHECKS_KEPT_TIMING_OUT_NOTE : TESTS_KEPT_FAILING_NOTE;
       return { ok: false, note, detail: `${failure.command} still failing after ${max} fix attempts: ${failure.lastLine}` };
     }
     const fix = await buildSession(ctx, {

@@ -11,10 +11,10 @@ const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
 const NOT_SET_UP = "This folder is not set up for Loopstra. Run loopstra init first.";
 
 describe("the command line outside a set-up repo", () => {
-  test("status, tail, ui, judges, upgrade, and customize say the folder is not set up, and create nothing", async () => {
+  test("status, tail, ui, judges, retro, upgrade, and customize say the folder is not set up, and create nothing", async () => {
     const t = tempDir();
     try {
-      for (const cmd of ["status", "tail", "ui", "judges", "upgrade", "customize"]) {
+      for (const cmd of ["status", "tail", "ui", "judges", "retro", "upgrade", "customize"]) {
         const r = await run([process.execPath, CLI, cmd], t.path);
         expect({ cmd, code: r.code, said: (r.out + r.err).trim() }).toEqual({ cmd, code: 1, said: NOT_SET_UP });
       }
@@ -24,10 +24,12 @@ describe("the command line outside a set-up repo", () => {
     }
   });
 
-  test("help lists judges", async () => {
+  test("help lists judges and retro", async () => {
     const t = tempDir();
     try {
-      expect((await run([process.execPath, CLI, "help"], t.path)).out).toContain("\n  judges    how often the cheaper judges agreed with the strong ones\n");
+      const out = (await run([process.execPath, CLI, "help"], t.path)).out;
+      expect(out).toContain("\n  judges    how often the cheaper judges agreed with the strong ones\n");
+      expect(out).toContain("\n  retro     how the loop did lately, and what to change (--days <n>, default 7)\n");
     } finally {
       t.cleanup();
     }
@@ -119,6 +121,10 @@ describe("the command line outside a set-up repo", () => {
         [["tail", "one", "two"], "Usage: loopstra tail [slug]"],
         [["tail", "--follow"], "Usage: loopstra tail [slug]"],
         [["judges", "--all"], "Usage: loopstra judges"],
+        [["retro", "--days", "0"], "Usage: loopstra retro [--days <number>]"],
+        [["retro", "--days", "a week"], "Usage: loopstra retro [--days <number>]"],
+        [["retro", "--days"], "Usage: loopstra retro [--days <number>]"],
+        [["retro", "7"], "Usage: loopstra retro [--days <number>]"],
         [["upgrade", "--force"], "Usage: loopstra upgrade [--check] [--repo]"],
         [["customize", "--list"], "Usage: loopstra customize [prompt]"],
         [["apply-lessons", "one", "--dry"], "Usage: loopstra apply-lessons <slug>"],
@@ -149,6 +155,21 @@ describe("the command line outside a set-up repo", () => {
   });
 });
 
+describe("loopstra retro in a set-up repo", () => {
+  test("prints the report for the days asked, and exits 0 on a brand-new trace", async () => {
+    const t = tempDir();
+    try {
+      mkdirSync(join(t.path, "loopstra"), { recursive: true });
+      writeFileSync(join(t.path, "loopstra", "config.yaml"), "version: 1\ncommands:\n  test: echo ok\n");
+      const r = await run([process.execPath, CLI, "retro", "--days", "3"], t.path);
+      expect({ code: r.code, err: r.err }).toEqual({ code: 0, err: "" });
+      expect(r.out).toStartWith("Nothing happened in the last 3 days.\n");
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
 describe("the update notice", () => {
   test("status in a repository set up before the stamp says to upgrade, even from a development checkout; with a stamp it says nothing", async () => {
     const repo = await tempGitRepo();
@@ -172,10 +193,10 @@ describe("parseArgs", () => {
   const ui = { usage: "Usage: loopstra ui [--port <number>] [--no-chat]", flags: ["--no-chat"], port: true } as const;
 
   test("the flags a command takes, in either order, with or without a port", () => {
-    expect(parseArgs([], ui)).toEqual({ flags: new Set(), port: null, names: [] });
-    expect(parseArgs(["--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: null, names: [] });
-    expect(parseArgs(["--port", "5000", "--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, names: [] });
-    expect(parseArgs(["--no-chat", "--port=5000"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, names: [] });
+    expect(parseArgs([], ui)).toEqual({ flags: new Set(), port: null, days: null, names: [] });
+    expect(parseArgs(["--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: null, days: null, names: [] });
+    expect(parseArgs(["--port", "5000", "--no-chat"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, days: null, names: [] });
+    expect(parseArgs(["--no-chat", "--port=5000"], ui)).toEqual({ flags: new Set(["--no-chat"]), port: 5000, days: null, names: [] });
     expect(parseArgs(["--port=0"], ui)!.port).toBe(0);
     expect(parseArgs(["--port", "65535"], ui)!.port).toBe(65535);
   });
@@ -187,8 +208,20 @@ describe("parseArgs", () => {
     expect(parseArgs(["--port", "5000"], { usage: "u" })).toBeNull();
   });
 
+  test("days: a whole number from 1 to 3650, given once, only to a command that takes it", () => {
+    const retro = { usage: "Usage: loopstra retro [--days <number>]", days: true } as const;
+    expect(parseArgs([], retro)).toEqual({ flags: new Set(), port: null, days: null, names: [] });
+    expect(parseArgs(["--days", "30"], retro)!.days).toBe(30);
+    expect(parseArgs(["--days=1"], retro)!.days).toBe(1);
+    expect(parseArgs(["--days", "3650"], retro)!.days).toBe(3650);
+    for (const bad of [["--days"], ["--days", "0"], ["--days", "-1"], ["--days", "1.5"], ["--days", "x"], ["--days=7d"], ["--days", "3651"], ["--days", "3", "--days", "4"], ["3"]]) {
+      expect({ bad, parsed: parseArgs(bad, retro) }).toEqual({ bad, parsed: null });
+    }
+    expect(parseArgs(["--days", "3"], { usage: "u" })).toBeNull();
+  });
+
   test("names: as many as the command takes", () => {
-    expect(parseArgs(["one"], { usage: "u", names: 1 })).toEqual({ flags: new Set(), port: null, names: ["one"] });
+    expect(parseArgs(["one"], { usage: "u", names: 1 })).toEqual({ flags: new Set(), port: null, days: null, names: ["one"] });
     expect(parseArgs(["one", "two"], { usage: "u", names: 1 })).toBeNull();
     expect(parseArgs(["--check", "--repo"], { usage: "u", flags: ["--check", "--repo"] })!.flags).toEqual(new Set(["--check", "--repo"]));
   });

@@ -15,12 +15,12 @@ import { REVIEW_PASSED, runReviewRounds } from "./review";
 import { alreadyTested, KEEP_UNFINISHED, MERGE_WAIT_NOTE, MERGING, openBranchWorktree, PR_APPROVE_NOTE, PR_CHECKS_NOTE, PR_LEASE, PR_MERGED_ELSEWHERE, PR_NUMBER, PR_PUSHING, PR_WAIT, readRound, REMOTE_AHEAD, REVIEW_ROUND, saveWork, writeRound } from "./shared";
 
 export const DIRTY_ROOT_NOTE = "The main checkout has unsaved changes or is on another branch; an engineer needs to tidy it up before this can merge. Then set status to merge-approved.";
-const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
-const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
+export const UPDATE_FAILED_NOTE = "The change overlaps with other recent changes and could not be brought up to date automatically. Nothing was merged. An engineer needs to look at it.";
+export const REVIEWS_USED_UP = "The change needed more fixes after it was reviewed, and it has already been reviewed as many times as allowed. An engineer needs to look at the change.";
 
 /** Notes for the pull request path (a remote exists). */
-const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
-const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
+export const PR_CLOSED_NOTE = "The pull request was closed without merging. Set status to closed, or to plan-approved to rebuild.";
+export const PR_CHECKS_FAILED_NOTE = "The automatic checks on GitHub failed. An engineer should look at the pull request.";
 const PR_BRANCH_MOVED_NOTE = "Someone added commits to the pull request's branch on GitHub, and the branch here changed too, so Loopstra overwrote neither. An engineer needs to bring the two together.";
 const PERSON_COMMITS_NOT_TAKEN_NOTE = "Someone added commits to the pull request's branch on GitHub, and they could not be taken into the workspace here, so nothing was merged. An engineer needs to look at the change's workspace (for example unsaved edits to the same files).";
 const PR_MERGED_WITHOUT_FIXES_NOTE = "The pull request was merged on GitHub before this change's latest fixes were made, so main does not have them; they are still on the change's branch. An engineer needs to look at the branch. Then set status to closed, or to plan-approved to rebuild.";

@@ -162,11 +162,14 @@ export function disallowedFor(set: ToolSet): string[] {
 /** Failures that block the change; an unavailable assistant pauses the loop instead (see unavailable). */
 type BlockingReason = Exclude<FailureReason, "environment" | "not-started">;
 
+/** The owner's note when a session hit its spending limit. */
+export const SESSION_LIMIT_NOTE = "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
+
 /** One plain sentence per failure reason, for the owner. The raw detail goes to the trace. */
 export function ownerNote(reason: BlockingReason): string {
   switch (reason) {
     case "timeout": return `${TIMEOUT_NOTE} An engineer can allow longer with claude.timeout_minutes in loopstra/config.yaml.`;
-    case "budget": return "This step hit its spending limit (claude.max_budget_usd). An engineer can raise or remove it with `loopstra setup budgets`.";
+    case "budget": return SESSION_LIMIT_NOTE;
     case "crash": return CRASH_NOTE;
     case "no-session": return "The assistant could not pick up its earlier work.";
     case "model": return "Claude Code did not accept this step's model. Change it in Settings or `loopstra setup models`, then retry.";

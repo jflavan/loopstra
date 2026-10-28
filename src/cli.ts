@@ -21,6 +21,7 @@ const HELP = `loopstra <command>
   status    show intents, phases, and blocks
   tail      stream events (tail <slug> for one change)
   judges    how often the cheaper judges agreed with the strong ones
+  retro     how the loop did lately, and what to change (--days <n>, default 7)
   ui        the console: live agents, inbox, changes and chat (--port <n>, default 4646; --no-chat)
   chat      talk to the orchestrator: updates, and new changes written up
             as intents (--no-terminal to run only the Slack/Discord bots)
@@ -33,12 +34,13 @@ const HELP = `loopstra <command>
 `;
 
 /** The words each command takes (see parseArgs); the usage line is said when they do not fit. */
-const ARGS: Record<"init" | "status" | "start" | "tail" | "judges" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
+const ARGS: Record<"init" | "status" | "start" | "tail" | "judges" | "retro" | "ui" | "chat" | "apply-lessons" | "upgrade" | "customize", ArgSpec> = {
   init: { usage: "Usage: loopstra init" },
   status: { usage: "Usage: loopstra status" },
   start: { usage: "Usage: loopstra start [--once]", flags: ["--once"] },
   tail: { usage: "Usage: loopstra tail [slug]", names: 1 },
   judges: { usage: "Usage: loopstra judges" },
+  retro: { usage: "Usage: loopstra retro [--days <number>]", days: true },
   ui: { usage: "Usage: loopstra ui [--port <number>] [--no-chat]", flags: ["--no-chat"], port: true },
   chat: { usage: "Usage: loopstra chat [--no-terminal]", flags: ["--no-terminal"] },
   "apply-lessons": { usage: "Usage: loopstra apply-lessons <slug>", names: 1 },
@@ -53,7 +55,7 @@ function args(command: keyof typeof ARGS): Args | null {
   return parsed;
 }
 
-/** status, tail, judges, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
+/** status, tail, judges, retro, ui, chat, upgrade, and customize read a set-up repo; elsewhere they say so and create nothing. */
 function setUp(): boolean {
   if (existsSync(configPath(root))) return true;
   console.error(NOT_SET_UP);
@@ -161,6 +163,15 @@ async function main(): Promise<number> {
       const { renderJudges } = await import("./commands/judges");
       try {
         process.stdout.write(await renderJudges(root));
+        return 0;
+      } catch (e) { console.error(errorText(e)); return 1; }
+    }
+    case "retro": {
+      const a = args("retro");
+      if (!a || !setUp()) return 1;
+      const { DEFAULT_DAYS, renderRetro } = await import("./commands/retro");
+      try {
+        process.stdout.write(await renderRetro(root, a.days ?? DEFAULT_DAYS));
         return 0;
       } catch (e) { console.error(errorText(e)); return 1; }
     }
