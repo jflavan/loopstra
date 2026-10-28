@@ -66,7 +66,7 @@ export function nextPoll(asked: number): number | null {
 interface Done { state: "done"; ok: boolean; text: string; status: string | null }
 
 /** Posts JSON to the console; gives the reply, or the plain words of why it failed. */
-async function post(url: string, body: unknown): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
+export async function post(url: string, body: unknown): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const data = await r.json().catch(() => ({})) as Record<string, unknown>;

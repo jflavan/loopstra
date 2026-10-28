@@ -159,8 +159,8 @@ export interface DraftCheck {
 /** The answer of `POST /api/standards/check`: the draft both ways, so the page toggles form and Markdown through the server. */
 export type DraftChecked = DraftCheck & { text: string; form: StandardForm | null };
 
-/** A tool check tried on main (`POST /api/standards/try`). */
-export type TriedCheck = CheckOnMain;
+/** A tool check tried on main (`POST /api/standards/try`). `baseAware`: for a known scanner that fails on main, its form that looks only at what a change adds. */
+export type TriedCheck = CheckOnMain & { baseAware: string | null };
 
 /** An exception a person approved at a change's spec or plan. `title` and `standard` are the rule's standard (empty when main no longer has it); `change` is the change's title. */
 export interface ExceptionRow { label: string; title: string; standard: string; change: string; slug: string; reason: string; by: string; via: string; date: string; gate: "spec" | "plan" }
@@ -369,13 +369,15 @@ export interface AgentsView {
  * `base` is the version the page read of the agent file or SKILL.md it changes (LibraryItemView.base,
  * or "absent" when the repository has none): an edit and a remove always name it, a replacement does
  * too (a fetch by item name). It is refused as stale when the file is no longer that version.
+ * `standard` writes `loopstra/standards/<name>.md` (its text, or null to remove it) over the version read.
  */
 export type AgentFilesOp =
   | ({ op: "copy"; kind: "agent" | "skill"; name: string; from: "personal" | "plugin" } & Replacing<string>)
   | ({ op: "fetch"; url: string; names: string[]; kind: "agent" | "skill" } & Replacing<Record<string, string>>)
   | { op: "new"; name: string; description: string; prompt: string; tools: string[]; model: string | null }
   | { op: "edit"; name: string; text: string; base: string }
-  | { op: "remove"; kind: "agent" | "skill"; name: string; base: string };
+  | { op: "remove"; kind: "agent" | "skill"; name: string; base: string }
+  | { op: "standard"; name: string; text: string | null; base: string };
 
 /** An add that replaces what the repository has names the version it read; one that does not, none. */
 type Replacing<B> = { replace?: false; base?: undefined } | { replace: true; base: B };

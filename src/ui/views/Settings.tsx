@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { AgentsView, SettingsView } from "../../console/types";
+import type { AgentsView, SettingsView, StandardsView } from "../../console/types";
 import { cancelSetting, sendSetting } from "../requests";
 import { lastRanText, pendingText, pickerChoices, nameProblem } from "../settings";
 import { getJson, now, toast } from "../store";
 import { AgentSettings, type Submit } from "./AgentSettings";
+import { StandardSettings } from "./StandardSettings";
 
 /** The change waiting for the loop: where its note shows (a setting's path, or an agents file key), and what the loop's state says about it. */
 interface Pending { id: string; key: string; loop: string }
@@ -13,6 +14,8 @@ export function Settings() {
   const [failed, setFailed] = useState(false);
   const [agents, setAgents] = useState<AgentsView | null>(null);
   const [agentsFailed, setAgentsFailed] = useState(false);
+  const [standards, setStandards] = useState<StandardsView | null>(null);
+  const [standardsFailed, setStandardsFailed] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   // Counts the reads; a picker or input keyed by it is drawn again, so a refused change shows what the file holds.
   const [rev, setRev] = useState(0);
@@ -20,17 +23,20 @@ export function Settings() {
   // Set at once on a send: a second one (Enter, then the blur it causes) must not follow before the page redraws.
   const busy = useRef(false);
 
-  /** Reads the models and the agents again, together: after any change both carry the file's new version. */
+  /** Reads the models, the agents and the standards again, together: after any change each carries its file's new version. */
   const load = async (): Promise<void> => {
-    const [x, a] = await Promise.all([
+    const [x, a, st] = await Promise.all([
       getJson<SettingsView>("/api/settings").catch(() => null),
       getJson<AgentsView>("/api/agents").catch(() => null),
+      getJson<StandardsView>("/api/standards").catch(() => null),
     ]);
     if (!alive.current) return;
     if (x) setV(x);
     setFailed(!x);
     if (a) setAgents(a);
     setAgentsFailed(!a);
+    if (st) setStandards(st);
+    setStandardsFailed(!st);
     setRev((n) => n + 1);
   };
   useEffect(() => {
@@ -142,6 +148,7 @@ export function Settings() {
             </div>
           ))}
           <AgentSettings view={agents} failed={agentsFailed} rev={rev} locked={locked} wait={wait} submit={submit} />
+          <StandardSettings view={standards} failed={standardsFailed} locked={locked} wait={wait} submit={submit} />
         </>
       )}
     </section>

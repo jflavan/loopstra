@@ -272,6 +272,32 @@ describe("agent file operations", () => {
     });
   }, 30_000);
 
+  test("standard: a standard file is written or removed with the version the page read, and the loop commits it", async () => {
+    await withAgentsConsole(async (base, root) => {
+      const path = "loopstra/standards/architecture.md";
+      const text = "# Architecture\n\n## Rules\n- ARCH-1: Services talk over HTTP.\n";
+      for (const bad of [{ op: "standard", name: "Arch", text, base: "absent" }, { op: "standard", name: "a/b", text, base: "absent" }, { op: "standard", name: "architecture", text }, { op: "standard", name: "architecture", text: 3, base: "absent" }]) {
+        expect({ bad, status: (await post(base, bad)).status }).toEqual({ bad, status: 400 });
+      }
+      // A file the repository does not have cannot be removed; a new one names "absent".
+      expect((await post(base, { op: "standard", name: "architecture", text: null, base: "absent" })).status).toBe(404);
+      expect((await post(base, { op: "standard", name: "architecture", text, base: fileVersion("other") })).status).toBe(409);
+      expect((await post(base, { op: "standard", name: "architecture", text, base: "absent" })).status).toBe(202);
+      expect(filesRequests(root)[0]).toMatchObject({ what: `edit ${path}`, writes: [{ path, content: text }], base: { [path]: "absent" } });
+      await applyAll(root);
+      expect(await lastCommit(root)).toContain("loopstra(_settings): standards: edit architecture.md by ");
+      expect(readFileSync(join(root, path), "utf8")).toBe(text);
+
+      // Removing names the version read; the loop takes the file out.
+      expect((await post(base, { op: "standard", name: "architecture", text: null, base: "absent" })).status).toBe(409);
+      expect((await post(base, { op: "standard", name: "architecture", text: null, base: fileVersion(text) })).status).toBe(202);
+      expect(filesRequests(root)[0]).toMatchObject({ what: `remove ${path}`, writes: [{ path, content: null }], base: { [path]: fileVersion(text) } });
+      await applyAll(root);
+      expect(await lastCommit(root)).toContain("standards: remove architecture.md by ");
+      expect(existsSync(join(root, path))).toBe(false);
+    });
+  }, 30_000);
+
   test("GET /api/agents/source lists what a file:// repository holds and leaves no temp folder", async () => {
     const src = await sourceRepo();
     const tmp = tempDir("loopstra-tmp-");

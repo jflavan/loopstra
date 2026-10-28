@@ -54,7 +54,7 @@ export function serveConsole(root: string, port = 4646, opts: { chat?: Dashboard
     development: false,
     // Bun drops the connection of a request whose body is bigger, before reading it into memory.
     maxRequestBodySize: MAX_BODY_BYTES,
-    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/settings": page, "/c/*": page, "/s/*": page },
+    routes: { "/": page, "/inbox": page, "/changes": page, "/activity": page, "/agents": page, "/spend": page, "/settings": page, "/settings/exceptions": page, "/c/*": page, "/s/*": page },
     async fetch(req, server) {
       const url = new URL(req.url);
       if (!LOCAL_HOSTS.has(url.hostname)) return plain("Forbidden", 403);

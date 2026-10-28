@@ -176,6 +176,11 @@ describe("the standards routes", () => {
       const r = await (await post(base, "/api/standards/try", { name: "security", text })).json() as TriedCheck;
       expect(r).toMatchObject({ ok: false, code: 3, timedOut: false, lastLines: "broken" });
       expect(r.failsOnMain).toContain("fails on main already");
+      expect(r.baseAware).toBeNull();
+      // A known scanner's failure on main comes with the form that looks only at what a change adds.
+      const scanner = await (await post(base, "/api/standards/try", { name: "security", text: SECURITY("echo gitleaks found leaks; exit 1") })).json() as TriedCheck;
+      expect(scanner.failsOnMain).toContain("fails on main already");
+      expect(scanner.baseAware).toBe('gitleaks git --no-banner --log-opts="$LOOPSTRA_BASE..HEAD"');
     });
   });
 

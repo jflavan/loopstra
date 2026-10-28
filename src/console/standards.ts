@@ -15,13 +15,13 @@ import {
   STANDARD_NAME, STANDARDS_DIR, type Applying, type Scope, type Standard,
 } from "../standards";
 import { programsIn } from "../shell";
-import { checkOnMain } from "../standards-check";
+import { baseAware, checkOnMain } from "../standards-check";
 import { exceptionsToApprove, parseRecord, scopeOf, STANDARDS_RECORD } from "../standards-record";
 import type { Trace } from "../trace";
 import { loopNow } from "./model";
 import { json, refuse } from "./routes";
 import { readConfig } from "./settings";
-import type { ChangeStandardsView, DraftCheck, StandardForm, StandardsProblem, DraftChecked, ExceptionRow, ScopeRow, StandardRow, StandardsView } from "./types";
+import type { ChangeStandardsView, DraftCheck, StandardForm, StandardsProblem, DraftChecked, ExceptionRow, ScopeRow, StandardRow, StandardsView, TriedCheck } from "./types";
 
 /*
  * The standards routes' server side: Settings › Standards (`/api/standards`), a draft checked
@@ -222,7 +222,9 @@ export async function tryCheck(root: string, body: Record<string, unknown>): Pro
   }
   if (!standard.check) return refuse(`${standard.title} has no check to try.`, 400);
   try {
-    return json(await checkOnMain(root, m.cfg, standard.check, standard.title));
+    const r = await checkOnMain(root, m.cfg, standard.check, standard.title);
+    const tried: TriedCheck = { ...r, baseAware: r.failsOnMain ? baseAware(standard.check) : null };
+    return json(tried);
   } catch (e) {
     return refuse(e instanceof Error ? e.message : String(e));
   }
