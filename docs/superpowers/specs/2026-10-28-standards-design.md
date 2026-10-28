@@ -189,7 +189,7 @@ A failure takes the existing path: one rewrite with the findings, then blocked w
 
 A spec or plan can say a rule cannot be kept for this change: `- ARCH-1: exception: billing keeps reading the legacy orders table until it is migrated (ADR-12)`. No agent can grant it. The user's choice: inline in the spec or plan, approved by a person at that gate, rather than a separate file of standing waivers.
 
-- **Who decides.** When a spec or plan passes its checks and has an exception not already approved for this change, its gate waits for a person, even when nobody is on that gate in the config. The runtime writes `spec_gate: status` or `plan_gate: status` in the intent's front matter, in the record that moves the status to `spec-review` or `plan-review`. It works as `merge_gate` does for a risky change: runtime-managed, left out when blank, and read through `changeGates` in `src/intents.ts` beside `merge_gate`, so the scheduler, `status`, the console and chat treat the change as waiting for a person. A person who deletes the line takes the change back to the config's gate.
+- **Who decides.** When a spec or plan passes its checks and has an exception not already approved for this change, its gate waits for a person, even when nobody is on that gate in the config. The runtime writes `spec_gate: status` or `plan_gate: status` in the intent's front matter, in the record that moves the status to `spec-review` or `plan-review`. It works as `merge_gate` does for a risky change: runtime-managed, left out when blank, and read through `changeGates` in `src/intents.ts` beside `merge_gate`, so the scheduler, `status`, the console and chat treat the change as waiting for a person. Unlike `merge_gate`, deleting the line by hand does not approve anything: no agent may grant an exception, so the change is settled again (its checks run again) and waits again.
 - **The note.** "The plan asks for an exception to ARCH-1 (Service architecture): billing keeps reading the legacy orders table until it is migrated. Read plan.md. To allow it, set status to plan-approved; to have the plan written again without it, send it back with a note." With more than one exception, it names them all.
 - **Who approves.** Whoever can approve the spec or plan today: a status edit, the console, or a chat acceptor. The user's choice: no separate list of approvers; the record says who approved and from where.
 - **What counts as approved.** A person moving the status to `spec-approved` or `plan-approved` approves every exception in that artifact. The runtime writes the approval into the change's `standards.md` record (see below) in the same record as the status move: the rule, the reason, the gate, who, from where, and the date. Who is the request's person when the approval came as a request (the console, chat), and "a status edit" when it was made by hand. The trace has it too, as a gate row: `exception`, `pass`, with the labels. An exception approved at the spec and repeated in the plan for the same rule needs no second approval. An exception that is new in the plan, or a rule whose exception the plan's wording changes, does.
@@ -492,3 +492,21 @@ The agent never writes a standard the engineer has not seen and agreed to, and n
 - **An export for auditors.** `loopstra export <since>` would write each change's records and its trace rows (gates, approvals, who did what, when) into one folder or archive, since `.loopstra/` is local and not kept.
 - **Standing waivers.** A file of exceptions people approved once for a set of files, with a reason and an end date, which a spec or plan could cite instead of asking each time. Worth it only if the same exception keeps coming back.
 - **`loopstra retro`** could report which rules most often fail at which gate, and which exceptions are asked for most. That is the signal that a rule is unclear, or that a design keeps fighting it.
+
+## Changed while building
+
+The code differs from this spec in these places; `docs/decisions.md`, under "Standards (2026-10-28)", says why for each.
+
+- Deleting `spec_gate` or `plan_gate` does not take the change back to the config's gate: it is settled again and waits again (corrected above).
+- `loopstra start` runs no tool checks and does not warn about one that fails on main. The console shows that warning with Try it on main's result, not as a problem at the top of Standards.
+- The done step judges by the standards the merge gate recorded (the run-folder marker `standards.applied`), or the plan's Files that change, not the merge commit's diff.
+- The shipped prompts are unchanged: the standards and each phase's instructions are appended from `src/standards-prompt.ts` only when the change has standards to show. The spec gate's `standards` check runs only then too.
+- When standards with a `check` apply, the merge checks run the tests again even on a commit the build tested. With `speed.parallel_checks`, tool checks start alongside test, lint and build.
+- `standards-untouched` is the first merge check, in `checkMerge`, and has a row only when main has standards or the diff touches the folder.
+- `review.md` gets a runtime-written "Findings against the standards" section; a finding that names a rule is not forced to `important`.
+- The acceptance session gets no standards. Build sessions see `LOOPSTRA_BASE` as main's branch name; the merge checks give a tool check the merge base.
+- The scope dialog has no "Send the change back to planning"; it says that review, the merge checks and the final check cover a standard added after the plan. Re-adding a removed standard writes an Added line, and adding without a note writes "no note".
+- `loopstra setup standards` asks "Rules to remove" before "Add a rule".
+- The console has a `POST /api/standards/scope` route, and `/api/agents/files` takes an operation `standard`.
+- A standard file to be saved is checked together with main's other standards, in the console and in the loop.
+- The done-check's `standards` field is optional rather than defaulting to `[]`. `exceptionsToApprove` is in `src/standards-record.ts`, and the other functions sit where `docs/architecture.md` lists them.
