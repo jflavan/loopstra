@@ -2,6 +2,9 @@ import type { AttentionItem } from "../attention";
 import type { JudgesView } from "../commands/judges";
 import type { LoopStatus } from "../heartbeat";
 import type { ModelRef, StepGroup, StepKey } from "../models";
+import type { SectionBullet, StandardForm, StandardsProblem } from "../standards";
+import type { CheckOnMain } from "../standards-check";
+import type { ChangeStandards } from "../standards-record";
 
 /*
  * What the console's server sends and its page reads. Only types, plain constants and small pure
@@ -129,6 +132,50 @@ export interface ChangeDetail extends ChangeSummary {
   documents: Array<{ name: string; url: string }>;
   phases: PhaseView[];
   gates: Array<{ gate: string; check: string; result: string; evidence: string; ts: string }>;
+  /** What the change is held to; absent when the repository has no standards. */
+  standards?: ChangeStandardsView;
+}
+
+/** One standard on main, as Settings › Standards shows it. `matches`: files on main its patterns match; null when it applies to every change. */
+export interface StandardRow {
+  name: string; path: string; title: string; scope: string; matches: number | null; needsPerson: boolean; check: string | null;
+  rules: { label: string; text: string }[];
+  /** Open changes it applies to now. */
+  inProgress: string[];
+  /** The file as committed, and its version (what a save names as the one the page read). */
+  text: string; version: string;
+}
+
+export interface StandardsView { standards: StandardRow[]; problems: string[]; ignored: string[]; uncommitted: string[] }
+
+/** A draft checked against main's other standards, with how many files each pattern matches. */
+export interface DraftCheck {
+  problems: StandardsProblem[];
+  matches: { pattern: string; count: number; sample: string[] }[];
+}
+
+/** The answer of `POST /api/standards/check`: the draft both ways, so the page toggles form and Markdown through the server. */
+export type DraftChecked = DraftCheck & { text: string; form: StandardForm | null };
+
+/** A tool check tried on main (`POST /api/standards/try`). */
+export type TriedCheck = CheckOnMain;
+
+/** An exception a person approved at a change's spec or plan. `title` is the change's. */
+export interface ExceptionRow { label: string; title: string; slug: string; reason: string; by: string; via: string; date: string; gate: "spec" | "plan" }
+
+/** A standard added to a change or removed from it. */
+export interface ScopeRow { name: string; slug: string; action: "added" | "removed"; note: string; by: string; via: string; date: string }
+
+/** The change page's standards panel. */
+export interface ChangeStandardsView {
+  applying: {
+    name: string; title: string; why: string;
+    rules: { label: string; text: string; spec?: string; plan?: string; findings: string[]; result?: string }[];
+    check?: string;
+  }[];
+  /** Exceptions asked for in the spec or plan that nobody has approved yet. */
+  waiting: SectionBullet[];
+  record: ChangeStandards;
 }
 
 export type TranscriptItem = (
