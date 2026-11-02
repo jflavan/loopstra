@@ -41,7 +41,7 @@ if (phase === "acceptance") {
   console.error(`Loopstra: the acceptance step writes only tests and test fixtures (${path}).`);
   process.exit(2);
 }
-if (acceptanceTests().some((f) => same(f) === same(path))) refuse(`Loopstra: this is an acceptance test written from Done when; fix the code, not the test (${path}).`);
+if (EDITS_CODE.has(phase) && acceptanceTests().some((f) => same(f) === same(path))) refuse(`Loopstra: this is an acceptance test written from Done when; fix the code, not the test (${path}).`);
 if (phase === "fix" && isTest && !changedOnBranch().some((f) => same(f) === same(path))) {
   refuse(`Loopstra: test files are protected during a fix phase. Fix the code, not the test (${path}).`);
 }

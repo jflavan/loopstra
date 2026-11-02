@@ -1029,3 +1029,7 @@ The design is `docs/superpowers/specs/2026-10-28-standards-design.md`, and the b
 - **A rule label written decorated still reads in a spec or plan** (`- **ARCH-1**: …`, `` - `ARCH-1`: … ``, `- ARCH-1 — …`), compared exactly, case kept. A standard file saved with CRLF line endings reads as with LF.
 - **Applicability reads names as git has them** (`-z`, both names of a rename), as `scoreRisk` does, so paths with spaces or other alphabets match.
 - **`needs_person` goes through `scoreRisk`,** as extra patterns with the standard each came from (its `applies_to`, or `**` without one), so the rule that a person is brought in only when nobody is on the merge gate is the one risk already keeps.
+
+## minimatch 11 for the linters (2026-11-02)
+
+Scorecard's Vulnerabilities check flagged minimatch 10.2.6 (GHSA-g3hv-75wg-m249: a crafted glob grows without bound before it is matched). It came in only through the linters (eslint, `@eslint/config-array`, typescript-eslint's `typescript-estree`), which ask for `^10`, and the fix is in 11.0.1 alone. `package.json` overrides it to `^11.0.4`. The three only build a `Minimatch` and call `match` (or call `minimatch()`), which 11 keeps; what 11 removed (`makeRe`, `regexp`, the `AST` class, `debug`) none of them use. Drop the override once they ask for 11 themselves.
